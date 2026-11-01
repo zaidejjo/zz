@@ -325,22 +325,47 @@ impl Lowerer {
         } else {
             RUNTIME_C.to_string()
         };
-        let header = format!(
-            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- module globals (extern) ----\n{glob_ext}\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}",
-            runtime_h = RUNTIME_H,
-        );
-
-        // Assemble units: owned global defs + bodies + closures + init fn.
-        let mut units: Vec<CodeUnit> = Vec::new();
         // Every namespace with code gets a unit even without inits, so no
         // reachable body is dropped (init fns only for namespaces in
         // init_order — empty init is still emitted for link uniformity).
+        // Computed here (before the header) so every unit's shared header can
+        // forward-declare all cross-unit `zz_init_<ns>()` symbols.
         let mut all_ns: Vec<String> = order.clone();
         for ns in &init_order {
             if !all_ns.contains(ns) {
                 all_ns.push(ns.clone());
             }
         }
+
+        // Init forward declarations so every TU can call `zz_init_<ns>()` for
+        // namespaces whose init body lives in another unit. Redundant
+        // identical declarations are valid C.
+        let init_fwd: String = all_ns
+            .iter()
+            .map(|ns| format!("void zz_init_{}(void);\n", mangle(ns)))
+            .collect();
+
+        // Process-global arenas used by unit code (e.g. collection array
+        // initializers, per-function scratch). In single-TU mode they're
+        // declared `static` in `globals_decl`/`emit_function`; in unit mode
+        // every TU sees the shared header, so declare them `extern` here and
+        // define each once in the entry unit.
+        //
+        // Both arenas are initialized via a constructor: it runs before any
+        // file-scope initializer that may bump-allocate (e.g. collection
+        // modules calling `zz_array_new_arena_sized(&_func_arena, ...)`) and
+        // before `zz_main` drives the per-module init bodies. Single-TU mode
+        // initializes them at the top of `zz_main`; unit mode cannot, because
+        // the arenas are process-global here and init bodies in every unit
+        // reference them. A zeroed arena makes the first allocation take the
+        // overflow path with `cap == 0`, overrunning the heap.
+        let header = format!(
+            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- module globals (extern) ----\n{glob_ext}extern zz_arena _static_arena;\nextern zz_arena _func_arena;\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}{init_fwd}",
+            runtime_h = RUNTIME_H,
+        );
+
+        // Assemble units: owned global defs + bodies + closures + init fn.
+        let mut units: Vec<CodeUnit> = Vec::new();
         for ns in &all_ns {
             let mut code = String::new();
             for (zz_name, cid, ctype, _) in &self.global_list {
@@ -408,7 +433,10 @@ impl Lowerer {
         };
         // with_main first: zz_call_main calls it (single-TU path splices
         // it before zz_call_main the same way).
-        let entry_code = with_main + &entry_glue;
+        let entry_code = format!(
+            "zz_arena _static_arena;\nzz_arena _func_arena;\n__attribute__((constructor)) static void zz_init_process_arenas(void) {{\n    zz_arena_init(&_static_arena, 65536);\n    zz_arena_init(&_func_arena, 65536);\n}}\n{}{}",
+            with_main, entry_glue
+        );
         match units.iter_mut().find(|u| u.ns == entry_ns) {
             Some(u) => {
                 u.code.push_str(&entry_code);

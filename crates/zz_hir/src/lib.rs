@@ -153,6 +153,47 @@ pub fn build_source(
     ))
 }
 
+/// Merge multiple [`TypedProgram`]s into one without re-type-checking.
+///
+/// Used to combine pre-compiled stdlib [`TypedProgram`]s (cached via
+/// [`zz_stdlib::zz_stdlib_programs`]) with a user [`TypedProgram`] so the
+/// checker does not re-process stdlib bodies on every build. Statements are
+/// concatenated (stdlib first, mirroring VM load order) and signature maps
+/// are merged with later programs taking precedence on key collisions.
+/// Span keys never collide across modules because every file restarts span
+/// offsets at 0 and `SpanKey` includes the qualifying name.
+pub fn merge_typed_programs(programs: Vec<TypedProgram>) -> TypedProgram {
+    let mut stmts: Vec<Stmt> = Vec::new();
+    let mut types: HashMap<SpanKey, Type> = HashMap::new();
+    let mut bindings: HashMap<String, Type> = HashMap::new();
+    let mut funcs: HashMap<String, FuncSig> = HashMap::new();
+    let mut structs: HashMap<String, StructSig> = HashMap::new();
+    let mut enums: HashMap<String, EnumSig> = HashMap::new();
+    let mut try_converts: HashMap<Span, Option<String>> = HashMap::new();
+    let mut span: Span = Span::new(0, 0);
+    for tp in programs {
+        stmts.extend(tp.program.stmts);
+        types.extend(tp.types);
+        bindings.extend(tp.bindings);
+        funcs.extend(tp.funcs);
+        structs.extend(tp.structs);
+        enums.extend(tp.enums);
+        try_converts.extend(tp.try_converts);
+        if tp.program.span.end > span.end {
+            span = tp.program.span;
+        }
+    }
+    TypedProgram {
+        program: Program { stmts, span },
+        types,
+        bindings,
+        funcs,
+        structs,
+        enums,
+        try_converts,
+    }
+}
+
 /// Does the resolved type require the dynamic (`zz_value`) codegen fallback?
 /// True for types that cannot lower to a static C type: unions, opaque
 /// handles (json/http/server/streams), dictionaries, and functions.

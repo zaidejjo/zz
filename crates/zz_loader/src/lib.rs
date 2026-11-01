@@ -18,7 +18,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use zz_checker::{
-    check_program_with_module_ns, AliasSig, CheckResult, EnumSig, FuncSig, StructSig, Type,
+    check_program_with_module_ns_typed, AliasSig, CheckResult, EnumSig, FuncSig, SpanKey,
+    StructSig, Type,
 };
 use zz_frontend::ast::{Block, Expr, ImportItem, Program, Stmt, Ty, TyKind};
 use zz_frontend::diag::{error_at, warning_at, RawDiag};
@@ -104,6 +105,11 @@ pub struct LoadResult {
     pub stdlib_selectives: StdlibSelectives,
     /// Wildcard imports replayed for bare-name natives on scoped runs.
     pub stdlib_wildcards: Vec<String>,
+    /// Per-module check results (own-only maps + span types + parsed AST),
+    /// populated when the check cache is used. AOT builds can reconstruct
+    /// [`TypedProgram`]s from these without re-running the checker.
+    #[allow(dead_code)]
+    pub per_module_results: Vec<(PathBuf, Program, CheckResult, HashMap<SpanKey, Type>)>,
 }
 
 /// One discovered member of a `[collect.<name>]` registry.
@@ -168,6 +174,10 @@ struct Loader {
     /// Only the `zz check` entry point enables it: `run`/`build` need
     /// span types and codegen inputs the cache does not store.
     use_cache: bool,
+    /// Per-module check results collected during `finish`: parsed AST +
+    /// own-only check result + span types. Used by AOT builds to skip
+    /// re-type-checking via `build_program`.
+    per_module_results: Vec<(PathBuf, Program, CheckResult, HashMap<SpanKey, Type>)>,
     /// Project manifests cached per project root (`None` = no `zz.toml`
     /// or unloadable manifest): backs implicit package mapping
     /// (`import app.x` → `<root>/src/x.zz`, issue #288) without
@@ -382,6 +392,7 @@ fn load_program_impl(
         feature_selection: features,
         feature_cache: HashMap::new(),
         dep_feature_requests: HashMap::new(),
+        per_module_results: Vec::new(),
     };
     // Merge plugin manifest function signatures into the checker's function table.
     for (name, sig) in plugin_funcs {
@@ -3161,7 +3172,11 @@ impl Loader {
             // Own namespace for the module-namespace shadow lint (#376,
             // #361). Cloned up front: the check calls below take `&mut self`.
             let module_ns: String = self.ns_of.get(path).cloned().unwrap_or_default();
-            let (mut checked, pending_key): (CheckResult, Option<String>) = if self.use_cache {
+            let (mut checked, pending_key, span_types): (
+                CheckResult,
+                Option<String>,
+                Option<HashMap<SpanKey, Type>>,
+            ) = if self.use_cache {
                 // Dep-aware hit: the precomputed key covers source + true
                 // transitive deps. Absent key (unresolvable) misses.
                 let pending = module_keys.get(path).cloned();
@@ -3186,7 +3201,7 @@ impl Loader {
                                     aliases,
                                     enums,
                                     try_resolutions: HashMap::new(),
-                                    try_converts: HashMap::new(),
+                                    try_converts: cached.try_converts.into_owned(),
                                     link_libs: Vec::new(),
                                     const_bindings: HashMap::new(),
                                     pub_bindings: cached.pub_bindings.into_owned(),
@@ -3196,30 +3211,12 @@ impl Loader {
                                     pub_enums: cached.pub_enums.into_owned(),
                                 },
                                 None,
+                                Some(cached.types.into_owned()),
                             )
                         }
                         None => {
                             self.cache_misses += 1;
-                            (
-                                check_program_with_module_ns(
-                                    &program,
-                                    self.bindings.clone(),
-                                    std::mem::take(&mut self.funcs),
-                                    std::mem::take(&mut self.structs),
-                                    std::mem::take(&mut self.aliases),
-                                    std::mem::take(&mut self.enums),
-                                    &module_ns,
-                                ),
-                                Some(key),
-                            )
-                        }
-                    },
-                    // Unresolvable key (missing source, cycle): check without
-                    // storing (nothing to key the entry by).
-                    None => {
-                        self.cache_misses += 1;
-                        (
-                            check_program_with_module_ns(
+                            let (checked, st) = check_program_with_module_ns_typed(
                                 &program,
                                 self.bindings.clone(),
                                 std::mem::take(&mut self.funcs),
@@ -3227,25 +3224,38 @@ impl Loader {
                                 std::mem::take(&mut self.aliases),
                                 std::mem::take(&mut self.enums),
                                 &module_ns,
-                            ),
-                            None,
-                        )
+                            );
+                            (checked, Some(key), Some(st))
+                        }
+                    },
+                    // Unresolvable key (missing source, cycle): check without
+                    // storing (nothing to key the entry by).
+                    None => {
+                        self.cache_misses += 1;
+                        let (checked, st) = check_program_with_module_ns_typed(
+                            &program,
+                            self.bindings.clone(),
+                            std::mem::take(&mut self.funcs),
+                            std::mem::take(&mut self.structs),
+                            std::mem::take(&mut self.aliases),
+                            std::mem::take(&mut self.enums),
+                            &module_ns,
+                        );
+                        (checked, None, Some(st))
                     }
                 }
             } else {
                 self.cache_misses += 1;
-                (
-                    check_program_with_module_ns(
-                        &program,
-                        self.bindings.clone(),
-                        std::mem::take(&mut self.funcs),
-                        std::mem::take(&mut self.structs),
-                        std::mem::take(&mut self.aliases),
-                        std::mem::take(&mut self.enums),
-                        &module_ns,
-                    ),
-                    None,
-                )
+                let (checked, st) = check_program_with_module_ns_typed(
+                    &program,
+                    self.bindings.clone(),
+                    std::mem::take(&mut self.funcs),
+                    std::mem::take(&mut self.structs),
+                    std::mem::take(&mut self.aliases),
+                    std::mem::take(&mut self.enums),
+                    &module_ns,
+                );
+                (checked, None, Some(st))
             };
             let has_errors = checked
                 .errors
@@ -3301,8 +3311,39 @@ impl Loader {
                         bindings: std::borrow::Cow::Borrowed(&checked.bindings),
                         pub_bindings: std::borrow::Cow::Borrowed(&checked.pub_bindings),
                         diags: checked.errors.clone(),
+                        types: std::borrow::Cow::Borrowed(
+                            span_types.as_ref().unwrap_or(&HashMap::new()),
+                        ),
+                        try_converts: std::borrow::Cow::Borrowed(&checked.try_converts),
                     },
                 );
+            }
+            // Collect per-module result for AOT builds: parsed AST +
+            // own-only check result + span types. AOT builds can reconstruct
+            // TypedPrograms from these without re-running the checker.
+            if let Some(prog) = self.programs.get(path) {
+                self.per_module_results.push((
+                    path.clone(),
+                    prog.clone(),
+                    CheckResult {
+                        errors: checked.errors.clone(),
+                        bindings: checked.bindings.clone(),
+                        funcs: own_funcs.clone(),
+                        structs: own_structs.clone(),
+                        aliases: own_aliases.clone(),
+                        enums: own_enums.clone(),
+                        try_resolutions: HashMap::new(),
+                        try_converts: checked.try_converts.clone(),
+                        link_libs: Vec::new(),
+                        const_bindings: HashMap::new(),
+                        pub_bindings: checked.pub_bindings.clone(),
+                        pub_funcs: checked.pub_funcs.clone(),
+                        pub_structs: checked.pub_structs.clone(),
+                        pub_aliases: checked.pub_aliases.clone(),
+                        pub_enums: checked.pub_enums.clone(),
+                    },
+                    span_types.unwrap_or_default(),
+                ));
             }
             let mut diags = checked.errors;
 
@@ -3588,6 +3629,7 @@ impl Loader {
             },
             stdlib_selectives: self.stdlib_selectives,
             stdlib_wildcards: self.stdlib_wildcards,
+            per_module_results: self.per_module_results,
         }
     }
 }

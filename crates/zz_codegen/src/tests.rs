@@ -372,6 +372,53 @@ fn generated_source_contains_expected_sections() {
     );
 }
 
+#[test]
+fn units_header_declares_all_init_functions() {
+    // Regression: each unit is compiled as a separate TU, but `zz_main`
+    // (in the entry unit) calls `zz_init_<ns>()` for every namespace, so
+    // the shared header must forward-declare every init symbol — otherwise
+    // cross-unit calls like `zz_init__prelude()` fail with an implicit
+    // function declaration error.
+    let src = "x := 41\nfunc util.helper() { 1 }\ny := 42\nfunc main() { util.helper() + x + y }\n";
+    let (pruned, reach) = build_reachable(src);
+    let lowerer = crate::Lowerer::new(
+        reach.funcs.clone(),
+        reach.natives.clone(),
+        "main".into(),
+        pruned.clone(),
+    );
+    let units = lowerer.lower_units("main");
+    assert!(
+        units.header.contains("void zz_init__prelude(void);"),
+        "header must declare prelude init:\n--- header ---\n{}\n--- end ---",
+        units.header
+    );
+    assert!(
+        units.header.contains("void zz_init_util(void);"),
+        "header must declare util init:\n--- header ---\n{}\n--- end ---",
+        units.header
+    );
+    // Both units exist and define their inits.
+    let prelude = units
+        .units
+        .iter()
+        .find(|u| u.ns == "_prelude")
+        .expect("_prelude unit present");
+    let util = units
+        .units
+        .iter()
+        .find(|u| u.ns == "util")
+        .expect("util unit present");
+    assert!(
+        prelude.code.contains("void zz_init__prelude(void)"),
+        "_prelude unit defines its init"
+    );
+    assert!(
+        util.code.contains("void zz_init_util(void)"),
+        "util unit defines its init"
+    );
+}
+
 /// Lower `src` to C (no clang involved).
 fn lower_c(src: &str) -> String {
     let (pruned, reach) = build_reachable(src);

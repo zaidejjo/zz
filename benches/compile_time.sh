@@ -62,7 +62,7 @@ echo "| fixture | mode      | best ms | last ms |"
 echo "|---------|-----------|---------|---------|"
 
 fail=0
-for f in small loops big; do
+for f in small loops big medium huge big_loops; do
 	fix="$FIXTURES_DIR/$f.zz"
 	[ -f "$fix" ] || {
 		echo "| $f      | check     | missing fixture | - |"
