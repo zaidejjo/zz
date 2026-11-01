@@ -348,6 +348,18 @@ impl<'a> Lexer<'a> {
                 '`' => self.lex_string(),
                 c if c.is_ascii_digit() => self.lex_number(),
                 c if is_ident_start(c) => self.lex_ident(),
+                ';' => {
+                    // `;` is no longer valid syntax. Report an error with a
+                    // safe fix-it to delete it so `zz check --fix` / `zz fix`
+                    // can auto-remove it.
+                    let start = self.pos;
+                    self.bump_char();
+                    let span = Span::new(start as u32, self.pos as u32);
+                    self.errors.push(
+                        error_at(format!("unexpected character `{c}`"), span)
+                            .with_fixit(FixIt::safe(span, "", format!("remove this `{c}`"))),
+                    );
+                }
                 _ => {
                     let start = self.pos;
                     self.bump_char();
