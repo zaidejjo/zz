@@ -181,9 +181,16 @@ pub fn cas_entry(hash: &str) -> PathBuf {
 
 /// `(entries, bytes)` under `dir`, best effort: unreadable subtrees count
 /// as empty. Cache and clean-size calculations share this.
+///
+/// Hardlinked files (the build cache aliases its probe entry, #629) are
+/// counted once: on unix each `(device, inode)` contributes its size a
+/// single time, so `zz cache clean` / `zz doctor` never inflate the total
+/// by the number of aliases.
 pub fn dir_usage(dir: &std::path::Path) -> (usize, u64) {
     let mut entries = 0usize;
     let mut bytes = 0u64;
+    #[cfg(unix)]
+    let mut seen: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(cur) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&cur) else {
@@ -195,7 +202,19 @@ pub fn dir_usage(dir: &std::path::Path) -> (usize, u64) {
                 stack.push(path);
             } else {
                 entries += 1;
-                bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    // `nlink > 1` covers hardlinks inside the tree; the set
+                    // also collapses links shared with files outside it.
+                    if meta.nlink() > 1 && !seen.insert((meta.dev(), meta.ino())) {
+                        continue;
+                    }
+                }
+                bytes += meta.len();
             }
         }
     }
@@ -273,6 +292,20 @@ mod tests {
         std::fs::write(tmp.join("sub").join("b"), "12").unwrap();
         assert_eq!(dir_usage(&tmp), (2, 6));
         assert_eq!(dir_usage(&tmp.join("missing")), (0, 0));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dir_usage_counts_hardlinks_once() {
+        // Build-cache aliases are hardlinks (#629): the same inode must not
+        // inflate the reported size, while the entry count stays honest.
+        let tmp = std::env::temp_dir().join("zz_paths_test_dusage_link");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("a"), "12345678").unwrap();
+        std::fs::hard_link(tmp.join("a"), tmp.join("b")).unwrap();
+        assert_eq!(dir_usage(&tmp), (2, 8));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
