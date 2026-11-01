@@ -263,7 +263,14 @@ impl BuildTarget {
         let shown = entry_canon
             .strip_prefix(root)
             .unwrap_or(entry_canon.as_path());
-        Some(shown.display().to_string())
+        // User-facing path uses forward slashes on every host so the header
+        // wording is stable across platforms (Windows natively uses '\').
+        let shown = shown
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        Some(shown)
     }
 
     /// True for a project build (used for header wording decisions).
