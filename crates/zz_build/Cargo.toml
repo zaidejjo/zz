@@ -16,4 +16,3 @@ zz_pm = { path = "../zz_pm" }
 zz_runtime = { path = "../zz_runtime" }
 zz_stdlib = { path = "../zz_stdlib" }
 toml = "0.8"
-rayon = { workspace = true }

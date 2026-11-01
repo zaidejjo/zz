@@ -20,9 +20,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rayon::prelude::*;
 use zz_codegen::{build_options_fingerprint_with, BuildOptions, ClangProvider};
-use zz_frontend::ast::{Program, Stmt};
+use zz_frontend::ast::Stmt;
 use zz_frontend::span::Span;
 use zz_hir::{merge_typed_programs, TypedProgram};
 use zz_loader::{
