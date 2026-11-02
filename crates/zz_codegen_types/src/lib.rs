@@ -21,6 +21,15 @@ pub struct BuildOptions {
     pub sqlite_link: bool,
     pub allow_static_downgrade: bool,
     pub full_lto: bool,
+    /// Host-native codegen: `-march=native` (AVX2/AVX-512/BMI2, etc.) for
+    /// builds that run on the same machine they compile on. Only honored
+    /// when there is no `--target` (cross builds keep portable codegen).
+    pub native_cpu: bool,
+    /// Path to an LLVM profdata file for PGO use (`-fprofile-use=<path>`).
+    /// When set with `pgo == PgoMode::Use`, the build links against this
+    /// profile instead of the default `./default.profdata`. Opt-in via
+    /// `ZZ_PGO_PROFILE`; default behavior unchanged.
+    pub profile_path: Option<PathBuf>,
     pub plugin_artifacts: Vec<PathBuf>,
     pub plugin_link_args: Vec<String>,
     pub embed_assets: Vec<EmbedAsset>,
@@ -47,6 +56,8 @@ impl BuildOptions {
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
             verbose: false,
+            native_cpu: false,
+            profile_path: None,
         }
     }
 
@@ -69,6 +80,8 @@ impl BuildOptions {
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
             verbose: false,
+            native_cpu: false,
+            profile_path: None,
         }
     }
 
@@ -91,6 +104,8 @@ impl BuildOptions {
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
             verbose: false,
+            native_cpu: false,
+            profile_path: None,
         }
     }
 
@@ -113,6 +128,8 @@ impl BuildOptions {
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
             verbose: false,
+            native_cpu: false,
+            profile_path: None,
         }
     }
 
@@ -135,6 +152,8 @@ impl BuildOptions {
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
             verbose: false,
+            native_cpu: false,
+            profile_path: None,
         }
     }
 
@@ -157,6 +176,8 @@ impl BuildOptions {
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
             verbose: false,
+            native_cpu: false,
+            profile_path: None,
         }
     }
 
@@ -179,6 +200,8 @@ impl BuildOptions {
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
             verbose: false,
+            native_cpu: false,
+            profile_path: None,
         }
     }
 }

@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use zz_codegen::{build_options_fingerprint_with, BuildOptions, ClangProvider};
+use zz_codegen::{build_options_fingerprint_with, BuildOptions, ClangProvider, PgoMode};
 use zz_frontend::ast::Stmt;
 use zz_frontend::span::Span;
 use zz_hir::{merge_typed_programs, TypedProgram};
@@ -1679,6 +1679,29 @@ pub fn build_release(
     let mut opts = opts_for(mode);
     opts.allow_static_downgrade = rel.allow_static_downgrade;
     opts.verbose = rel.verbose;
+    // Host-native codegen (`ZZ_NATIVE_CPU=1`): `-march=native` for builds
+    // that run on the same machine they compile on. Honored only when
+    // there is no `--target` (cross builds stay portable).
+    opts.native_cpu = matches!(
+        std::env::var("ZZ_NATIVE_CPU")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    );
+    // PGO profile reuse (`ZZ_PGO_PROFILE=<profdata>`): ship a
+    // profile-optimized binary without re-instrumenting. Opt-in via env;
+    // default behavior unchanged. For `--full` builds keep full LTO and
+    // just add profile-use; for other optimized modes use thin LTO + use.
+    if let Some(p) = std::env::var_os("ZZ_PGO_PROFILE")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+    {
+        opts.profile_path = Some(p);
+        if mode != BuildMode::Pgo {
+            opts.pgo = PgoMode::Use;
+        }
+    }
     let target = rel.target_opt();
     // Default-static fallback for macOS (static linking is rejected
     // there): downgrade to dynamic with a note instead of failing the

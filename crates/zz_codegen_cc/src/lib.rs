@@ -577,6 +577,13 @@ pub fn clang_flags_with(
         // Loop/codegen tuning (FP-safe only: no -ffast-math, see above).
         flags.push("-funroll-loops".to_string());
         flags.push("-fomit-frame-pointer".to_string());
+        // Host-native codegen: `-march=native` emits AVX2/AVX-512/BMI2, etc.
+        // for the CPU this build runs on. Only for host builds (no
+        // `--target`) so cross-compiled/redistributed binaries stay portable
+        // and never hit illegal-instruction errors on other CPUs.
+        if opts.native_cpu && target.is_none() {
+            flags.push("-march=native".to_string());
+        }
     } else {
         flags.push("-O0".to_string());
         flags.push("-g".to_string());
@@ -599,7 +606,13 @@ pub fn clang_flags_with(
             flags.push("-fprofile-generate".to_string());
         }
         PgoMode::Use => {
-            flags.push("-fprofile-use".to_string());
+            // Use a specific profdata file when one was provided (ZZ_PGO_PROFILE);
+            // otherwise clang defaults to ./default.profdata next to the CWD.
+            if let Some(path) = &opts.profile_path {
+                flags.push(format!("-fprofile-use={}", path.display()));
+            } else {
+                flags.push("-fprofile-use".to_string());
+            }
             flags.push("-fno-peel-loops".to_string());
         }
         PgoMode::None => {}
@@ -981,6 +994,17 @@ pub fn build_options_fingerprint_with(
     opts.sqlite_link.hash(&mut h);
     opts.allow_static_downgrade.hash(&mut h);
     opts.full_lto.hash(&mut h);
+    // `-march=native` changes clang codegen output, so flipping it must
+    // bust the per-unit object cache (a `-march=native` object is not
+    // interchangeable with a portable one). PGO profile path likewise.
+    opts.native_cpu.hash(&mut h);
+    match &opts.profile_path {
+        Some(p) => {
+            1u8.hash(&mut h);
+            p.to_string_lossy().hash(&mut h);
+        }
+        None => 0u8.hash(&mut h),
+    }
     // The build identity, not just the flags: AOT objects are this
     // compiler's output, so a rebuilt `zz` (dirty codegen, new C
     // template) must never reuse them. Same class as the sanitizer
@@ -1050,6 +1074,32 @@ pub fn compile_units(
     compile_units_with_sink(header, units, output_path, opts, target, clang, &NoopSink)
 }
 
+/// Estimate how many clang `-c` jobs can run concurrently without OOM.
+///
+/// clang `-O3` translation units are memory-heavy (~1-2 GB each). We read
+/// `MemTotal` from `/proc/meminfo` (Linux) and divide by a per-job budget,
+/// clamped to a sane minimum so small boxes still get at least one job and
+/// huge boxes don't spawn more than cores can usefully run. Returns 1 when
+/// memory can't be probed.
+fn estimated_mem_for_clang_jobs() -> usize {
+    const BYTES_PER_JOB: u64 = 1_500_000_000; // ~1.5 GB per clang -O3 TU
+    let mem_total_kb: u64 = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|line| line.strip_prefix("MemTotal:"))
+                .and_then(|v| v.split_whitespace().next())
+                .and_then(|v| v.parse::<u64>().ok())
+        })
+        .unwrap_or(0);
+    if mem_total_kb == 0 {
+        return 1;
+    }
+    let mem_bytes = mem_total_kb * 1024;
+    let jobs = mem_bytes / BYTES_PER_JOB;
+    jobs.clamp(1, 256) as usize
+}
+
 /// [`compile_units`] with progress notifications (#629): the caller learns
 /// the unit total, how many objects came from the cache, each finished
 /// unit, and the compile → link boundary.
@@ -1106,10 +1156,22 @@ pub fn compile_units_with_sink(
         }
         staged.push((src_path, tmpdir.join(format!("{stem}.o")), Some(cached)));
     }
-    // Bounded pool: clang -O3 TUs are memory-heavy; uncapped rayon on big
-    // CI machines would OOM. 8 caps parallelism while keeping all
-    // mainstream machines saturated.
-    let jobs = std::cmp::min(staged.len(), 8);
+    // Parallel unit compilation. clang -O3 TUs are memory-heavy (~1-2 GB
+    // each), so we cap jobs by both core count and an estimated per-job
+    // memory budget, then never exceed the number of staged units. The
+    // fixed cap of 8 left 16-64 core machines under-utilized; this lets
+    // cold builds saturate the host while OOM risk stays bounded. Override
+    // with ZZ_CODEGEN_JOBS (e.g. ZZ_CODEGEN_JOBS=4).
+    let env_jobs = std::env::var("ZZ_CODEGEN_JOBS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&v| v > 0);
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let mem_jobs = estimated_mem_for_clang_jobs();
+    let jobs = env_jobs
+        .unwrap_or_else(|| std::cmp::min(staged.len(), std::cmp::min(cores, mem_jobs).max(1)));
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(jobs.max(1))
         .thread_name(|i| format!("zz-cc-{i}"))
