@@ -3,13 +3,13 @@
 // Struct field access over arrays (struct_access) — target ≤ 0.009s.
 //
 // Workload:
-//   * Build N Pt{ x, y } unboxed structs in an array.
+//   * Build N Pt{ x, y } unboxed structs in a typed flat array.
 //   * Iterate the array, accumulate pt.x.
-//   * Reads only (no push/append/index_set) — the hot path.
+//   * Reads only (no push/append/index_set after build) — the hot path.
 //
-// NOTE: Pt must stay unboxed (all-scalar fields) so the AOT backend can
-// lower the array to a flat C array of zz_struct_Pt and emit direct
-// `arr[i].x` access instead of zz_index_get + zz_object_get_field.
+// NOTE: `arr: [Pt] = []` with Pt all-scalar lowers to a flat C buffer of
+// zz_struct_Pt, so `arr[k].x` emits direct `arr[k].x` (no zz_index_get
+// bounds-check/clone, no linear zz_object_get_field strcmp).
 // =====================================================================
 
 import std.time
@@ -18,7 +18,7 @@ struct Pt { x: int, y: int }
 
 func main() {
     const N = 1_000_000
-    arr := []
+    arr: [Pt] = []
     i := 0
     while i < N {
         arr.push(Pt{ x: i, y: i * 2 })

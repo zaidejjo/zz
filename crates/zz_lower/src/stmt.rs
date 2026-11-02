@@ -199,6 +199,42 @@ impl Lowerer {
                     names.checker_types.insert(name.name.clone(), ct.clone());
                 }
 
+                // ---- Flat arrays of unboxed structs ---------------------------
+                // `arr: [Pt] = []` where Pt is all-scalar lowers to a contiguous
+                // C buffer (`zz_struct_Pt *arr` + `arr_len` + `arr_cap`) instead
+                // of a boxed `zz_value` container. Element reads/writes, length,
+                // and field access then become direct C operations — this is the
+                // struct_access hot path. Untyped `arr := []` stays boxed
+                // (zz_value), so existing code is unaffected.
+                let flat_struct_name = match &checker_ty {
+                    Some(zz_checker::Type::Array(inner)) => match inner.as_ref() {
+                        zz_checker::Type::Struct(sname, _) if self.is_unboxed_struct(sname) => {
+                            Some(sname.clone())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(sname) = flat_struct_name {
+                    let elem = self.struct_c_type(&sname);
+                    let ptr_ty = format!("{elem} *");
+                    let cid = names.enter_with_type(&name.name, &ptr_ty);
+                    let len_cid = format!("{}_len", name.name);
+                    let cap_cid = format!("{}_cap", name.name);
+                    names.enter_with_type(&len_cid, "int64_t");
+                    names.enter_with_type(&cap_cid, "int64_t");
+                    // `[]` → NULL buffer; non-empty literals fall through to the
+                    // boxed path below (they are rare in the hot path).
+                    let rhs = match value {
+                        Expr::Array { elems, .. } if elems.is_empty() => "NULL".to_string(),
+                        _ => self.emit_expr(value, names, out),
+                    };
+                    out.push_str(&format!("    {ptr_ty} {cid} = {rhs};\n"));
+                    out.push_str(&format!("    int64_t {len_cid} = 0;\n"));
+                    out.push_str(&format!("    int64_t {cap_cid} = 0;\n"));
+                    return;
+                }
+
                 // Loop-carried string accumulator hoisting: `s = s + rhs`
                 // inside a loop builds a persistent mutable builder before
                 // the loop, appends per iteration, and freezes after. Avoids

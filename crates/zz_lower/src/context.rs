@@ -1356,6 +1356,52 @@ impl Lowerer {
         format!("zz_struct_{}", mangle(name))
     }
 
+    /// If `ty` is `Array(Struct(name))` where `name` is an unboxed (all-scalar)
+    /// struct, return the flat C element type (`zz_struct_X`) so arrays of
+    /// such structs can lower to contiguous C storage instead of boxed
+    /// `zz_value` containers. Returns `None` for boxed structs, non-struct
+    /// elements, and non-array types.
+    pub(crate) fn flat_array_elem_type(&self, ty: &zz_checker::Type) -> Option<String> {
+        match ty {
+            zz_checker::Type::Array(inner) => match inner.as_ref() {
+                zz_checker::Type::Struct(name, _) if self.is_unboxed_struct(name) => {
+                    Some(self.struct_c_type(name))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// If `ctype` is a flat array pointer (`zz_struct_X *`) produced by the
+    // flat-array lowering for arrays of unboxed structs, return the struct
+    /// name `X`. Returns `None` for boxed `zz_value`s and plain struct values.
+    pub(crate) fn flat_array_from_ptr(&self, ctype: &str) -> Option<String> {
+        ctype
+            .strip_prefix("zz_struct_")?
+            .strip_suffix(" *")
+            .map(|s| s.to_string())
+    }
+
+    /// Emit a raw `int64_t` index expression for flat-array indexing.
+    /// Boxed-int loop variables (e.g. the `k` in `for k in 0..n`) lower to
+    /// `zz_value` locals, so extract `.i`; plain int64_t locals and literals
+    /// are emitted as-is.
+    pub(crate) fn flat_index_expr(
+        &self,
+        index: &zz_frontend::ast::Expr,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        let emitted = self.emit_expr(index, names, out);
+        if let zz_frontend::ast::Expr::Ident { name, .. } = index {
+            if names.lookup_type(name) == Some("zz_value") {
+                return format!("({emitted}).i");
+            }
+        }
+        emitted
+    }
+
     /// Check if a type string is a struct type.
     pub(crate) fn is_struct_type_str(&self, type_str: &str) -> bool {
         type_str.starts_with("zz_struct_")
