@@ -574,7 +574,8 @@ pub fn clang_flags_with(
             // ThinLTO unconditionally otherwise: Clang is the only backend.
             flags.push("-flto=thin".to_string());
         }
-        // Loop/codegen tuning (FP-safe only: no -ffast-math, see above).
+        // Loop/codegen tuning (FP-safe only by default: no -ffast-math,
+        // see above; opt-in via relaxed_float / ZZ_RELAXED_FLOAT).
         flags.push("-funroll-loops".to_string());
         flags.push("-fomit-frame-pointer".to_string());
         // Host-native codegen: `-march=native` emits AVX2/AVX-512/BMI2, etc.
@@ -583,6 +584,15 @@ pub fn clang_flags_with(
         // and never hit illegal-instruction errors on other CPUs.
         if opts.native_cpu && target.is_none() {
             flags.push("-march=native".to_string());
+        }
+        // Relaxed float semantics: `-ffast-math` folds NaN guards and
+        // reassociates floats — breaks the specified float contract, so it
+        // is off by default. Only honored on host builds (no `--target`);
+        // cross builds keep strict IEEE so results are portable and
+        // bit-identical across toolchains/CPUs.
+        if opts.relaxed_float && target.is_none() {
+            flags.push("-ffast-math".to_string());
+            flags.push("-fno-trapping-math".to_string());
         }
     } else {
         flags.push("-O0".to_string());
@@ -1005,6 +1015,7 @@ pub fn build_options_fingerprint_with(
         }
         None => 0u8.hash(&mut h),
     }
+    opts.relaxed_float.hash(&mut h);
     // The build identity, not just the flags: AOT objects are this
     // compiler's output, so a rebuilt `zz` (dirty codegen, new C
     // template) must never reuse them. Same class as the sanitizer

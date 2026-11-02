@@ -80,6 +80,36 @@ typedef enum {
     ZZ_MUTABLE_STR,  // mutable string: always exclusively owned, in-place append
 } zz_tag;
 
+// ---- relaxed ARC: single-threaded non-atomic fast path ---------------
+// `ZZ_ARC_RELAXED=1` makes retain/release use plain (non-atomic)
+// increments/decrements. Atomics are pure overhead when no thread
+// contends, but they are required for `spawn`/`chan`/`task`/channels.
+// Opt-in and UNSAFE for multi-threaded programs: only set it for
+// single-threaded `zz_main` programs (nothing reachable uses spawn,
+// channels, or tasks). Arrays/dicts/funcs/bytes still go through the
+// atomic helpers in memory.c/collections.c; strings/ranges/objects/vboxes
+// (the inline paths below) are covered here.
+static __thread int zz_arc_relaxed = -1;  // -1 = unprobed
+
+static inline int zz_arc_relaxed_enabled(void) {
+    if (zz_arc_relaxed < 0) {
+        const char *v = getenv("ZZ_ARC_RELAXED");
+        zz_arc_relaxed =
+            v && (v[0] == '1' || v[0] == 't' || v[0] == 'T' ||
+                  v[0] == 'y' || v[0] == 'Y');
+    }
+    return zz_arc_relaxed;
+}
+
+// Non-atomic retain on a plain refcount pointer.
+static inline void zz_arc_retain_relaxed(int64_t *refs) {
+    if (refs) (*refs)++;
+}
+// Non-atomic release; returns nonzero when the count reaches zero.
+static inline int zz_arc_release_relaxed(int64_t *refs) {
+    return refs && --(*refs) == 0;
+}
+
 typedef struct zz_value zz_value;
 typedef struct zz_weak zz_weak;  // defined below, after zz_value
 
@@ -606,7 +636,8 @@ void zz_vbox_release(zz_value *payload);
 // `zz_release_object`: clones share ownership, so every clone must bump).
 static inline void zz_retain_object(zz_object *o) {
     if (o) {
-        __atomic_add_fetch(&o->refs, 1, __ATOMIC_RELAXED);
+        if (zz_arc_relaxed_enabled()) o->refs += 1;
+        else __atomic_add_fetch(&o->refs, 1, __ATOMIC_RELAXED);
     }
 }
 
@@ -653,7 +684,9 @@ static inline zz_value *zz_vbox_new(zz_value inner) {
 
 static inline void zz_vbox_retain(zz_value *payload) {
     if (payload) {
-        __atomic_add_fetch(&zz_vbox_of(payload)->refs, 1, __ATOMIC_RELAXED);
+        zz_vbox *b = zz_vbox_of(payload);
+        if (zz_arc_relaxed_enabled()) b->refs += 1;
+        else __atomic_add_fetch(&b->refs, 1, __ATOMIC_RELAXED);
     }
 }
 
@@ -667,7 +700,8 @@ static inline void zz_retain(zz_value *v) {
     switch (v->tag) {
     case ZZ_STR:
         if (v->s && !v->s->interned && v->s->refs > 0) {
-            __atomic_add_fetch(&v->s->refs, 1, __ATOMIC_RELAXED);
+            if (zz_arc_relaxed_enabled()) v->s->refs += 1;
+            else __atomic_add_fetch(&v->s->refs, 1, __ATOMIC_RELAXED);
         }
         break;
     case ZZ_ARRAY:
@@ -684,7 +718,8 @@ static inline void zz_retain(zz_value *v) {
         break;
     case ZZ_RANGE:
         if (v->range) {
-            __atomic_add_fetch(&v->range->refs, 1, __ATOMIC_RELAXED);
+            if (zz_arc_relaxed_enabled()) v->range->refs += 1;
+            else __atomic_add_fetch(&v->range->refs, 1, __ATOMIC_RELAXED);
         }
         break;
     case ZZ_OBJECT:
@@ -712,7 +747,10 @@ static inline void zz_release(zz_value *v) {
             if (v->s->refs == 0) {
                 return;
             }
-            if (__atomic_sub_fetch(&v->s->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+            int last = zz_arc_relaxed_enabled()
+                ? (--v->s->refs == 0)
+                : (__atomic_sub_fetch(&v->s->refs, 1, __ATOMIC_ACQ_REL) == 0);
+            if (last) {
                 // SSO strings (cap==0) have no separate heap buffer.
                 // Heap strings (cap>0) store data in a separate malloc'd buffer.
                 if (v->s->cap > 0) free(v->s->heap);
@@ -740,9 +778,10 @@ static inline void zz_release(zz_value *v) {
         break;
     case ZZ_RANGE:
         if (v->range) {
-            if (__atomic_sub_fetch(&v->range->refs, 1, __ATOMIC_ACQ_REL) == 0) {
-                free(v->range);
-            }
+            int last = zz_arc_relaxed_enabled()
+                ? (--v->range->refs == 0)
+                : (__atomic_sub_fetch(&v->range->refs, 1, __ATOMIC_ACQ_REL) == 0);
+            if (last) free(v->range);
         }
         break;
     case ZZ_OBJECT:
@@ -760,8 +799,10 @@ static inline void zz_release(zz_value *v) {
         break;
     case ZZ_WEAK:
         if (v->weak) {
-            size_t w = __atomic_sub_fetch(&v->weak->weak, 1, __ATOMIC_ACQ_REL);
-            if (w == 0) {
+            int last = zz_arc_relaxed_enabled()
+                ? (--v->weak->weak == 0)
+                : (__atomic_sub_fetch(&v->weak->weak, 1, __ATOMIC_ACQ_REL) == 0);
+            if (last) {
                 zz_release(&v->weak->value);
                 free(v->weak);
                 v->weak = NULL;
@@ -842,7 +883,8 @@ static inline zz_value zz_clone(zz_value v) {
         // The refs>0 guard matters: arena strings (refs==0 sentinel) must
         // never be promoted to heap ownership by a bare bump.
         if (v.s && !v.s->interned && v.s->refs > 0) {
-            __atomic_add_fetch(&v.s->refs, 1, __ATOMIC_RELAXED);
+            if (zz_arc_relaxed_enabled()) v.s->refs += 1;
+            else __atomic_add_fetch(&v.s->refs, 1, __ATOMIC_RELAXED);
         }
         break;
     case ZZ_MUTABLE_STR:
@@ -873,7 +915,8 @@ static inline zz_value zz_clone(zz_value v) {
         break;
     case ZZ_RANGE:
         if (v.range) {
-            __atomic_add_fetch(&v.range->refs, 1, __ATOMIC_RELAXED);
+            if (zz_arc_relaxed_enabled()) v.range->refs += 1;
+            else __atomic_add_fetch(&v.range->refs, 1, __ATOMIC_RELAXED);
         }
         break;
     case ZZ_OPTION_SOME:
@@ -887,7 +930,8 @@ static inline zz_value zz_clone(zz_value v) {
         break;
     case ZZ_WEAK:
         if (v.weak) {
-            __atomic_add_fetch(&v.weak->weak, 1, __ATOMIC_RELAXED);
+            if (zz_arc_relaxed_enabled()) v.weak->weak += 1;
+            else __atomic_add_fetch(&v.weak->weak, 1, __ATOMIC_RELAXED);
         }
         break;
     default:
@@ -904,7 +948,7 @@ static inline zz_value zz_clone(zz_value v) {
 // other helpers are above `zz_retain`.
 static inline zz_value zz_vbox_take(zz_value *payload) {
     zz_vbox *b = zz_vbox_of(payload);
-    if (__atomic_load_n(&b->refs, __ATOMIC_ACQUIRE) == 1) {
+    if (zz_arc_relaxed_enabled() ? b->refs == 1 : __atomic_load_n(&b->refs, __ATOMIC_ACQUIRE) == 1) {
         zz_value inner = b->inner;
         free(b);
         return inner;
