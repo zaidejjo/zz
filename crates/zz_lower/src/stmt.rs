@@ -174,22 +174,29 @@ impl Lowerer {
     ) {
         match stmt {
             Stmt::Decl { name, value, .. } => {
-                // Look up the type of the initializer expression
-                let (ctype, checker_ty) = if let Some(ty) = self.ty_at(names, value.span()) {
-                    (ty_to_ctype(ty), Some(ty.clone()))
-                } else {
-                    ("zz_value".to_string(), None) // fallback
-                };
-                // DB handles own a live backend connection; ordinary C
-                // locals are not released at function exit, so attach a
-                // cleanup handler that drops the last reference (and
-                // closes the connection) on every exit path. Captured and
-                // green bindings live in heap/frame cells and are skipped.
+                // Look up the type of the initializer expression.
+                // `ty_at` may return `None` for compound expressions
+                // (BinOp) that the checker doesn't type directly; fall
+                // back to the left operand's declared type so that
+                // `total := total + arr[i]` gets `int64_t` instead of
+                // `zz_value`, enabling the redeclaration-as-assignment
+                // fast path below.
+                let checker_ty = self.ty_at(names, value.span());
+                let ctype: String =
+                    checker_ty
+                        .as_ref()
+                        .map(|t| ty_to_ctype(t))
+                        .unwrap_or_else(|| {
+                            names
+                                .lookup_type(&name.name)
+                                .unwrap_or("zz_value")
+                                .to_string()
+                        });
                 let db_local = matches!(&checker_ty, Some(zz_checker::Type::Db));
                 // Store the checker type for method dispatch (e.g., to distinguish
                 // str.contains from vec.contains when the receiver is a local).
                 if let Some(ct) = checker_ty {
-                    names.checker_types.insert(name.name.clone(), ct);
+                    names.checker_types.insert(name.name.clone(), ct.clone());
                 }
 
                 // Loop-carried string accumulator hoisting: `s = s + rhs`
@@ -353,14 +360,23 @@ impl Lowerer {
                     self.emit_cell_alloc(&ptr, &ctype, &final_val, out);
                     names.enter_cell(&name.name, &ptr, &deref, &ctype, n);
                 } else {
-                    // If `name` already exists (global or local), this is a
-                    // redeclaration like `total := total + item` inside a loop
-                    // body. Emit an assignment to the existing variable
-                    // instead of shadowing it with a fresh local that is
-                    // immediately discarded. The RHS was already emitted
-                    // above while `name` still resolved to the old entry,
-                    // so it correctly reads the old value.
-                    let is_redecl = names.lookup(&name.name).is_some();
+                    // If `name` already exists in the local scope (stack) with
+                    // the same C type, this is a redeclaration like
+                    // `total := total + item` inside a loop body. Emit an
+                    // assignment to the existing variable instead of
+                    // shadowing it with a fresh local that is immediately
+                    // discarded. The RHS was already emitted above while
+                    // `name` still resolved to the old entry, so it
+                    // correctly reads the old value.
+                    //
+                    // Names only in `names.globals` (module globals not yet
+                    // declared in this scope) are not redeclarations — keep
+                    // the declaration so the global gets its C declaration.
+                    // If the C type changed (e.g. int64_t -> zz_value), also
+                    // keep the declaration: assigning across types is a
+                    // miscompile.
+                    let is_redecl = names.lookup(&name.name).is_some()
+                        && names.lookup_type(&name.name) == Some(ctype.as_str());
                     if is_redecl {
                         let cid = names.lookup(&name.name).unwrap();
                         out.push_str(&format!("    {cid} = {final_val};\n"));
