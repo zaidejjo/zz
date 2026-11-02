@@ -283,14 +283,30 @@ impl Lowerer {
             }
             Expr::Str { value, .. } => self.emit_str_literal(value),
             Expr::Fmt { parts, .. } => {
-                // Full fstring: build via runtime interp. MVP: only literal
-                // text handled; embedded exprs appended as str(values).
-                let mut acc = String::from("zz_str_static(\"\")");
+                // Full fstring: build with a pre-sized mutable string builder,
+                // then freeze to an immutable ZZ_STR. Avoids the per-part
+                // realloc+memcpy cascade of zz_binop_cat when the result
+                // grows — the common case in loops (`s = fmt"..."` reassigned
+                // each iteration). zz_str_freeze retags in place (the builder
+                // is exclusively owned), so the result is a plain immutable
+                // ZZ_STR that every consumer accepts.
+                let fvar = names.fresh("__fmt");
+                let mut est: usize = 0;
+                for part in parts {
+                    match part {
+                        FmtPart::Text(t) => est += t.len(),
+                        FmtPart::Expr(..) => est += 16,
+                    }
+                }
+                est = est.max(16);
+                out.push_str(&format!("    zz_value {fvar} = zz_str_new_mut({est});\n"));
                 for part in parts {
                     match part {
                         FmtPart::Text(t) => {
                             let lit = self.emit_str_literal(t);
-                            acc = format!("zz_binop_cat({acc}, {lit})");
+                            out.push_str(&format!(
+                                "    {{ zz_value _t = {lit}; zz_str_append_mut_str(&{fvar}, _t); zz_release(&_t); }}\n"
+                            ));
                         }
                         FmtPart::Expr(inner, spec) => {
                             let v = self.emit_expr(inner, names, out);
@@ -301,23 +317,29 @@ impl Lowerer {
                             if spec.is_none() {
                                 if let Some(sname) = self.unboxed_struct_of_expr(inner, names) {
                                     let s = self.stringify_struct_value(&sname, v, names, out);
-                                    acc = format!("zz_binop_cat_str({acc}, {s})");
+                                    out.push_str(&format!(
+                                        "    zz_str_append_mut_str(&{fvar}, {s}); zz_release(&{s});\n"
+                                    ));
                                     continue;
                                 }
                             }
                             let boxed_v = box_scalar_operand(inner, names, &v);
-                            // If format spec is present, use zz_to_str_fmt
                             if let Some(ref s) = spec {
                                 let spec_str =
                                     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
-                                acc = format!("zz_binop_cat({acc}, zz_str_owned(zz_to_str_fmt({boxed_v}, {spec_str})))");
+                                out.push_str(&format!(
+                                    "    {{ zz_value _r = zz_str_owned(zz_to_str_fmt({boxed_v}, {spec_str})); zz_str_append_mut_str(&{fvar}, _r); zz_release(&_r); }}\n"
+                                ));
                             } else {
-                                acc = format!("zz_binop_cat_str({acc}, {boxed_v})");
+                                out.push_str(&format!(
+                                    "    {{ zz_value _r = zz_to_str({boxed_v}, &(int){{0}}); zz_str_append_mut_str(&{fvar}, _r); zz_release(&_r); }}\n"
+                                ));
                             }
                         }
                     }
                 }
-                acc
+                out.push_str(&format!("    {fvar} = zz_str_freeze({fvar});\n"));
+                fvar
             }
             Expr::Ident { name, .. } => match names.lookup(name) {
                 Some(cid) => {
