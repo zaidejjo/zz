@@ -368,7 +368,11 @@ impl Lowerer {
             }
         }
 
-        let names: Vec<String> = self.tp.structs.keys().cloned().collect();
+        // Sorted roots: HashMap iteration order is randomized per process, so
+        // an unsorted walk makes the emitted preamble (and therefore every
+        // unit's object-cache key) differ between runs — uncacheable builds.
+        let mut names: Vec<String> = self.tp.structs.keys().cloned().collect();
+        names.sort();
         for name in &names {
             if self.is_unboxed_struct(name) {
                 emit_struct(

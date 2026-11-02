@@ -35,21 +35,23 @@ So steps 1 and 2 of the original sketch are not greenfield work. What is
 missing is *precision*: the cache key includes the whole-program header,
 so any user edit invalidates every stdlib object too.
 
-## Step 1 — multi-TU default: verify and lock it down
+## Step 1 — multi-TU default: verified
 
-Status: **present, needs regression coverage.**
+Status: **done (no code change needed).**
 
-- Assert in tests that the default release path uses `compile_units`
-  (per-unit) and that `ZZ_CODEGEN_UNITS=0` is the only way back to a
-  single TU.
-- Report unit/cache-hit counts through the existing progress bridge, so
-  `--verbose` shows `units=N cache_hits=M` (already emitted; add a test).
-- No behavior change for single-module programs (`fib` is one unit), but
-  the path is verified instead of assumed.
+- `zz_build` already routes release builds through
+  `build_native_units_with_sink`; `ZZ_CODEGEN_UNITS=0` is the only way
+  back to a single TU.
+- Verified end to end on this branch: a two-module program importing
+  `std.str` (struct + closure + stdlib) prints identically through the
+  unit path and through `ZZ_CODEGEN_UNITS=0`, and so do the
+  regexp/cell/clone/json native fixtures.
+- Per-unit cache hits are already reported through `CodegenSink`; step 3
+  makes them visible in `zz doctor`.
 
 ## Step 2 — per-unit headers (dependency graph for declarations)
 
-Status: **new work.**
+Status: **implemented.**
 
 Today every unit is prefixed with the *entire* header:
 
@@ -78,14 +80,24 @@ a namespace that also contains user functions is treated as program code
 (conservative). Stdlib units receive base + stdlib; user units receive
 base + stdlib + program.
 
-`compile_units` takes `(ns, header, code)` per unit; the cache slug is
-computed from the exact TU that will be compiled. Missing declarations
-are compile errors (never silent), and the e2e/parity suites cover the
-generic/stdlib surface.
+`compile_units` takes a `UnitSource { ns, header, code }` per unit and
+`CodeUnit` carries its own header; the cache slug (128-bit, two salted
+SipHash passes) is computed from the exact TU that will be compiled.
+`LoweredUnits::header` remains the entry unit's superset for dumps.
+Missing declarations are compile errors (never silent), and the
+e2e/parity suites cover the generic/stdlib surface.
+
+Also fixed while implementing: the struct preamble walked `tp.structs`
+in `HashMap` order, so identical sources could emit different bytes (and
+therefore different cache keys) between runs. Roots are now sorted.
 
 ## Step 3 — compile the stdlib once ("link packages once")
 
 Status: **new work, enabled by step 2.**
+
+Implemented regression coverage: `stdlib_unit_is_stable_across_program_edits`
+lowers two different programs and asserts the stdlib unit's header and
+body are byte-identical.
 
 With step 2, a stdlib unit's TU is a pure function of (compiler build,
 flags, toolchain, embedded stdlib source). Two consequences:
