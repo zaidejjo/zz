@@ -162,6 +162,47 @@ archive.
   Rust/Go/Zig); `--full` keeps full LTO.
 - No change to generated-code semantics or runtime performance.
 
+## Step 5 — external package unit reuse ("compile once, link everywhere")
+
+Status: **implemented.**
+
+External ZZ packages (`zz_pm` registry/git/path deps outside the project
+root) are now classified as `"pkg"` (not program) in the loader's
+`module_origins` map, threaded through `TypedProgram` into the per-unit
+Lowerer. Unit headers are split into:
+
+- **Base section** (stable): runtime, FFI, structs, debug fns, arena externs.
+- **Stdlib section** (stable per compiler build): embedded pure-ZZ stdlib prototypes.
+- **Dependency section** (stable per package set): external package
+  prototypes + package-owned globals. Shared by every unit; changes only
+  when the package set changes.
+- **Program section** (changes with user code): user prototypes, user
+  globals, entry init driver. Only project-owned namespaces.
+
+Package units receive base + stdlib + dependency (+ own closures), never
+the project section. Project units receive all four sections.
+
+Consequences:
+
+- Editing project code never invalidates a package unit's object — its TU
+  is byte-identical across unrelated project edits.
+- Two projects importing the same package set produce byte-identical
+  package units, so their objects are shared in the content-addressed
+  cache (`~/.zz/cache/objects/units/<slug>/`).
+- Adding/removing a package grows the dependency section → all units
+  rebuild once (one-time cost), then steady state resumes.
+
+Classification is conservative: any namespace without an explicit `"pkg"`
+tag is treated as project, so no unit is wrongly denied its prototypes.
+Stdlib classification still uses `stdlib_func_names()` (compiled stdlib
+ASTs), not name prefixes, so a namespace that also contains user functions
+is treated as program code.
+
+Regression test: `pkg_unit_is_reusable_across_projects` in
+`zz_lower::units::tests` lowers two programs sharing one package and
+asserts byte-identical package unit headers and bodies while project
+bodies differ.
+
 ## Validation
 
 - `cargo test -p zz_lower -p zz_codegen -p zz_codegen_cc`
@@ -171,3 +212,7 @@ archive.
 - Manual: cold `zz build --release` of `fib`, then a body edit and a
   second build; assert the stdlib units stay cached and runtime stays
   0.015 s.
+- CLI e2e: `build_release_reuses_stdlib_units_on_project_edit` in
+  `crates/zz_cli/tests/native_build.rs` builds a package-importing project
+  twice (project-only edit between builds) and asserts stdlib units are
+  cache hits on the second build.
