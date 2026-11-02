@@ -10,6 +10,7 @@
 //   bench_concurrency_stress -> 100k spawns + 1M channel messages
 //   bench_http_throughput    -> HTTP server with concurrent connections
 //   bench_memory_alloc      -> Mass allocation/destruction patterns
+//   bench_struct_access     -> struct field access over arrays (Pt{x,y})
 //
 // Select a benchmark via argv[1]:
 //   cargo run --release -- memory_leak
@@ -18,6 +19,7 @@
 //   cargo run --release -- concurrency_stress
 //   cargo run --release -- http_throughput
 //   cargo run --release -- memory_alloc
+//   cargo run --release -- struct_access
 // =====================================================================
 
 use std::env;
@@ -413,6 +415,38 @@ fn bench_memory_alloc() {
     println!("bench_memory_alloc_ok");
 }
 
+// ---------------------------------------------------------------------
+// bench_struct_access — mirror of bench_struct_access.zz
+// ---------------------------------------------------------------------
+#[derive(Clone, Copy)]
+struct Pt {
+    x: i64,
+    y: i64,
+}
+
+fn bench_struct_access() {
+    const N: i64 = 1_000_000;
+    let mut arr: Vec<Pt> = Vec::with_capacity(N as usize);
+    let mut i: i64 = 0;
+    while i < N {
+        arr.push(Pt { x: i, y: i * 2 });
+        i = i + 1;
+    }
+
+    let t0 = now_ms();
+    let mut sum: i64 = 0;
+    let n = arr.len() as i64;
+    let mut k: i64 = 0;
+    while k < n {
+        sum = sum + arr[k as usize].x;
+        k = k + 1;
+    }
+    let t1 = now_ms();
+    println("fill_1M_ms: {}", t1 - t0);
+    println("sum_x: {}", sum);
+    println("struct_access_ok");
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let which = args.get(1).map(String::as_str).unwrap_or("");
@@ -424,6 +458,7 @@ fn main() {
         "concurrency_stress" => bench_concurrency_stress(),
         "http_throughput" => bench_http_throughput(),
         "memory_alloc" => bench_memory_alloc(),
+        "struct_access" => bench_struct_access(),
         _ => {
             eprintln!(
                 "usage: {} <memory_leak|cpu_intensive|string_concats|concurrency_stress|http_throughput|memory_alloc>",

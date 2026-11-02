@@ -1,0 +1,37 @@
+// =====================================================================
+// bench_struct_access.zz
+// Struct field access over arrays (struct_access) — target ≤ 0.009s.
+//
+// Workload:
+//   * Build N Pt{ x, y } unboxed structs in an array.
+//   * Iterate the array, accumulate pt.x.
+//   * Reads only (no push/append/index_set) — the hot path.
+//
+// NOTE: Pt must stay unboxed (all-scalar fields) so the AOT backend can
+// lower the array to a flat C array of zz_struct_Pt and emit direct
+// `arr[i].x` access instead of zz_index_get + zz_object_get_field.
+// =====================================================================
+
+import std.time
+
+struct Pt { x: int, y: int }
+
+func main() {
+    const N = 1_000_000
+    arr := []
+    i := 0
+    while i < N {
+        arr.push(Pt{ x: i, y: i * 2 })
+        i = i + 1
+    }
+    t0 := time.now_ms()
+    sum := 0
+    n := len(arr)
+    for k in 0..n {
+        sum = sum + arr[k].x
+    }
+    t1 := time.now_ms()
+    println("fill_1M_ms: " + str(t1 - t0))
+    println("sum_x: " + str(sum))
+    println("struct_access_ok")
+}
