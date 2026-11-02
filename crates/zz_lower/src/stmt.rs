@@ -303,24 +303,37 @@ impl Lowerer {
                     self.emit_cell_alloc(&ptr, &ctype, &final_val, out);
                     names.enter_cell(&name.name, &ptr, &deref, &ctype, n);
                 } else {
-                    let cid = if matches!(ctype.as_str(), "int64_t" | "double" | "bool") {
-                        names.enter_with_type(&name.name, &ctype)
+                    // If `name` already exists (global or local), this is a
+                    // redeclaration like `total := total + item` inside a loop
+                    // body. Emit an assignment to the existing variable
+                    // instead of shadowing it with a fresh local that is
+                    // immediately discarded. The RHS was already emitted
+                    // above while `name` still resolved to the old entry,
+                    // so it correctly reads the old value.
+                    let is_redecl = names.lookup(&name.name).is_some();
+                    if is_redecl {
+                        let cid = names.lookup(&name.name).unwrap();
+                        out.push_str(&format!("    {cid} = {final_val};\n"));
                     } else {
-                        names.enter(&name.name)
-                    };
-                    // Update the name ctx with the correct type (covers non-scalar
-                    // types and any type not yet set).
-                    if let Some(vec) = names.stack.get_mut(&name.name) {
-                        if let Some((_, existing_ty)) = vec.last_mut() {
-                            *existing_ty = ctype.clone();
+                        let cid = if matches!(ctype.as_str(), "int64_t" | "double" | "bool") {
+                            names.enter_with_type(&name.name, &ctype)
+                        } else {
+                            names.enter(&name.name)
+                        };
+                        // Update the name ctx with the correct type (covers non-scalar
+                        // types and any type not yet set).
+                        if let Some(vec) = names.stack.get_mut(&name.name) {
+                            if let Some((_, existing_ty)) = vec.last_mut() {
+                                *existing_ty = ctype.clone();
+                            }
                         }
+                        let db_attr = if db_local {
+                            " __attribute__((cleanup(zz_db_value_cleanup)))"
+                        } else {
+                            ""
+                        };
+                        out.push_str(&format!("    {ctype} {cid}{db_attr} = {final_val};\n"));
                     }
-                    let db_attr = if db_local {
-                        " __attribute__((cleanup(zz_db_value_cleanup)))"
-                    } else {
-                        ""
-                    };
-                    out.push_str(&format!("    {ctype} {cid}{db_attr} = {final_val};\n"));
                 }
                 // Track array literals so `len(v)` can fold to the arity,
                 // and record pure-scalar literals for index forwarding
