@@ -30,6 +30,12 @@ pub struct BuildOptions {
     /// profile instead of the default `./default.profdata`. Opt-in via
     /// `ZZ_PGO_PROFILE`; default behavior unchanged.
     pub profile_path: Option<PathBuf>,
+    /// Relaxed-float codegen: `-ffast-math` (+`-fno-trapping-math`) for host
+    /// builds. Folds NaN guards and reassociates floats, so it breaks
+    /// specified float semantics — opt-in via `ZZ_RELAXED_FLOAT=1` only,
+    /// never on cross builds (`--target`) where it could change results on
+    /// other CPUs / with other toolchains.
+    pub relaxed_float: bool,
     pub plugin_artifacts: Vec<PathBuf>,
     pub plugin_link_args: Vec<String>,
     pub embed_assets: Vec<EmbedAsset>,
@@ -58,6 +64,7 @@ impl BuildOptions {
             verbose: false,
             native_cpu: false,
             profile_path: None,
+            relaxed_float: false,
         }
     }
 
@@ -82,6 +89,7 @@ impl BuildOptions {
             verbose: false,
             native_cpu: false,
             profile_path: None,
+            relaxed_float: false,
         }
     }
 
@@ -106,6 +114,7 @@ impl BuildOptions {
             verbose: false,
             native_cpu: false,
             profile_path: None,
+            relaxed_float: false,
         }
     }
 
@@ -130,6 +139,7 @@ impl BuildOptions {
             verbose: false,
             native_cpu: false,
             profile_path: None,
+            relaxed_float: false,
         }
     }
 
@@ -154,6 +164,7 @@ impl BuildOptions {
             verbose: false,
             native_cpu: false,
             profile_path: None,
+            relaxed_float: false,
         }
     }
 
@@ -178,6 +189,7 @@ impl BuildOptions {
             verbose: false,
             native_cpu: false,
             profile_path: None,
+            relaxed_float: false,
         }
     }
 
@@ -202,6 +214,7 @@ impl BuildOptions {
             verbose: false,
             native_cpu: false,
             profile_path: None,
+            relaxed_float: false,
         }
     }
 }

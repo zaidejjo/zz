@@ -909,6 +909,104 @@ fn int_fuse(
     (fused, skip)
 }
 
+/// Scan for fusable unboxed-float windows (mirrors [`int_fuse`]).
+///
+/// A straight-line window of `LoadSlot(Float)`, `PushConst(Float)`,
+/// `BinOp(Add|Sub|Mul)` and `UnOp(Neg)` terminated by `StoreSlot(Float)`
+/// compiles to raw `double` temps with direct arithmetic — no `zz_value`
+/// wrap/unwrap, no tag dispatch, no atomic retain/release per op.
+///
+/// Fail-closed: every load requires a slot proven `Float` by
+/// [`stable_slots`], so a window never forms over int or unknown slots;
+/// anything not admitted here stays boxed. Division stays boxed (no traps
+/// needed: IEEE div-by-zero yields ±inf, matching the VM's non-trapping
+/// float semantics).
+fn float_fuse(
+    f: &FuncDef,
+    consts: &[Const],
+    floats: &HashSet<u16>,
+    targets: &HashSet<u32>,
+    taken: &HashSet<usize>,
+) -> (HashMap<usize, (usize, FusedTail)>, HashSet<usize>) {
+    /// Expression-op effect on the ministack, or `None` when the op can
+    /// never be part of a float expression.
+    fn expr_effect(floats: &HashSet<u16>, consts: &[Const], op: &Op) -> Option<i32> {
+        match op {
+            Op::LoadSlot(s) if floats.contains(s) => Some(1),
+            Op::PushConst(c) => match consts.get(c.0 as usize) {
+                // Only finite constants emit as valid C doubles; inf/nan
+                // would need `INFINITY`/`nan("")` and stay boxed.
+                Some(Const::Float(k)) if k.is_finite() => Some(1),
+                _ => None,
+            },
+            Op::BinOp(zz_ir::op::BinOp::Add | zz_ir::op::BinOp::Sub | zz_ir::op::BinOp::Mul) => {
+                Some(-1)
+            }
+            Op::UnOp(zz_ir::op::UnOp::Neg) => Some(0),
+            _ => None,
+        }
+    }
+    /// True when `op` consumes ministack values.
+    fn float_needs_value(op: &Op) -> bool {
+        matches!(op, Op::BinOp(_) | Op::UnOp(zz_ir::op::UnOp::Neg))
+    }
+    let mut fused = HashMap::new();
+    let mut skip = HashSet::new();
+    let code = &f.code;
+    let mut pc = 0usize;
+    while pc < code.len() {
+        if taken.contains(&pc) {
+            pc += 1;
+            continue;
+        }
+        let mut placed: Option<(usize, FusedTail)> = None;
+        let latest = (pc + 13).min(code.len());
+        let mut t = latest;
+        while t > pc {
+            if (pc + 1..t).any(|p| targets.contains(&(p as u32)) || taken.contains(&p)) {
+                t -= 1;
+                continue;
+            }
+            let mut depth = 0i32;
+            let mut ok = true;
+            for op in &code[pc..t] {
+                match expr_effect(floats, consts, op) {
+                    Some(e) => {
+                        depth += e;
+                        if depth < 1 && float_needs_value(op) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok && depth == 1 && t < code.len() {
+                if let Op::StoreSlot(d) = &code[t] {
+                    if floats.contains(d) && !targets.contains(&(t as u32)) && !taken.contains(&t) {
+                        placed = Some((t - pc + 1, FusedTail::Store(*d)));
+                        break;
+                    }
+                }
+            }
+            t -= 1;
+        }
+        if let Some((len, tail)) = placed {
+            for p in pc + 1..pc + len {
+                skip.insert(p);
+            }
+            fused.insert(pc, (len, tail));
+            pc += len;
+        } else {
+            pc += 1;
+        }
+    }
+    (fused, skip)
+}
+
 /// True when `op` consumes ministack values (underflow-checked by the
 /// matcher): binary ops need depth ≥ 2, negation ≥ 1, producers never
 /// underflow.
@@ -2791,6 +2889,17 @@ impl<'a> Emitter<'a> {
         }
         // Int-declared slots eligible for fused windows (see `int_slots`).
         let uint = int_slots(self.module, f);
+        // Float-declared slots eligible for fused windows (see `float_fuse`).
+        let ufloat: HashSet<u16> = stable
+            .iter()
+            .filter_map(|(s, k)| {
+                if *k == SlotKind::Float {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
+            .collect();
         if nparams > 0 {
             out.push_str(&format!(
                 "    if (argc != {nparams}) {trap};\n",
@@ -2838,6 +2947,13 @@ impl<'a> Emitter<'a> {
         let (ufused, uskip) = int_fuse(f, &self.module.consts, &uint, &targets, &skip);
         let mut skip = skip;
         skip.extend(uskip);
+        // Float-fused windows (see `float_fuse`): same tie discipline.
+        let (ffused, fskip) = float_fuse(f, &self.module.consts, &ufloat, &targets, &skip);
+        skip.extend(fskip);
+        debug_assert!(
+            ffused.keys().all(|k| !skip.contains(k)),
+            "float-fused window start in skip set"
+        );
         // Fused windows emit at their start pc: a start must never be
         // skipped (that would drop the ops silently — see arraysum).
         debug_assert!(
@@ -2895,6 +3011,7 @@ impl<'a> Emitter<'a> {
                 fuse_slot: fused.get(&pc).copied(),
                 fuse_borrow: borrows.contains(&pc),
                 ufuse: ufused.get(&pc).copied(),
+                ffuse: ffused.get(&pc).copied(),
                 peel: peels.get(&pc).cloned(),
                 strapp: strapped.get(&pc).copied(),
                 idxread: idxreads.get(&pc).copied(),
@@ -3475,6 +3592,81 @@ impl<'a> Emitter<'a> {
         out.push_str("    }\n");
     }
 
+    /// Render one fused unboxed-float window at `pc` (see [`float_fuse`]):
+    /// the float expression compiles to C `double` temps, then the tail
+    /// moves the result into the slot. No stack traffic, no tag dispatch,
+    /// no retain/release per op: operands read the authoritative boxed
+    /// slot (float guard, fail-closed); the result releases the slot's old
+    /// value and stores `zz_float(result)`. Division stays boxed; the
+    /// admitted ops (`+ - *`, unary `-`) are trap-free under IEEE.
+    fn emit_fused_float_window(
+        module: &Module,
+        code: &[Op],
+        pc: usize,
+        len: usize,
+        tail: FusedTail,
+        out: &mut String,
+    ) {
+        // `Store` is the only tail float_fuse produces.
+        let _ = len;
+        let FusedTail::Store(d) = tail else { return };
+        out.push_str("    {\n");
+        // Expression prefix: straight-line float ops into window temps.
+        let mut tstack: Vec<String> = Vec::new();
+        for (tmp, op) in code[pc..].iter().take(len - 1).enumerate() {
+            let t = format!("_ft{tmp}");
+            match op {
+                Op::LoadSlot(s) => {
+                    out.push_str(&format!(
+                        "      double {t};\n      {{ zz_value _b = st[{s}]; if (_b.tag != ZZ_FLOAT) {}; {t} = _b.f; }}\n",
+                        ftrap("float slot loaded non-float value")
+                    ));
+                    tstack.push(t);
+                }
+                Op::PushConst(c) => {
+                    let k = match module.consts.get(c.0 as usize) {
+                        Some(Const::Float(k)) => *k,
+                        // Unreachable: the matcher only admits float consts.
+                        _ => return,
+                    };
+                    out.push_str(&format!("      double {t} = {k};\n"));
+                    tstack.push(t);
+                }
+                Op::BinOp(zz_ir::op::BinOp::Add) => {
+                    let b = tstack.pop().unwrap_or_default();
+                    let a = tstack.pop().unwrap_or_default();
+                    out.push_str(&format!("      double {t} = {a} + {b};\n"));
+                    tstack.push(t);
+                }
+                Op::BinOp(zz_ir::op::BinOp::Sub) => {
+                    let b = tstack.pop().unwrap_or_default();
+                    let a = tstack.pop().unwrap_or_default();
+                    out.push_str(&format!("      double {t} = {a} - {b};\n"));
+                    tstack.push(t);
+                }
+                Op::BinOp(zz_ir::op::BinOp::Mul) => {
+                    let b = tstack.pop().unwrap_or_default();
+                    let a = tstack.pop().unwrap_or_default();
+                    out.push_str(&format!("      double {t} = {a} * {b};\n"));
+                    tstack.push(t);
+                }
+                Op::UnOp(zz_ir::op::UnOp::Neg) => {
+                    let a = tstack.pop().unwrap_or_default();
+                    out.push_str(&format!("      double {t} = -{a};\n"));
+                    tstack.push(t);
+                }
+                // Unreachable: the matcher only admits the above.
+                _ => return,
+            }
+        }
+        let v = tstack.pop().unwrap_or_default();
+        // Release-then-move: the old slot value is owned (release it); the
+        // fresh `zz_float(...)` carries no refs (no clone/source release).
+        out.push_str(&format!("      zz_release(&st[{d}]);\n"));
+        out.push_str(&format!("      st[{d}] = zz_float({v});\n"));
+        out.push_str("    }\n");
+    }
+
     /// Record a referenced native impl for link-flag computation.
     fn note_native(&mut self, impl_name: &'static str, needs_rt: bool, dotted: &str) {
         if !self.used_natives.iter().any(|(n, _, _)| n == dotted) {
@@ -3590,6 +3782,10 @@ struct OpCx<'x> {
     /// See [`int_fuse`]. Window matching already consulted the int-slot
     /// set; emission re-walks the ops.
     ufuse: Option<(usize, FusedTail)>,
+    /// Fused float window starting at this pc, if any: (total length, tail).
+    /// See [`float_fuse`]. Window matching already consulted the float-slot
+    /// set; emission re-walks the ops.
+    ffuse: Option<(usize, FusedTail)>,
     /// Peeled loop starting at this pc, if any (see [`peel_scan`]).
     peel: Option<Peel>,
     /// String-append window starting at this pc, if any: (slot, literal).
@@ -3672,6 +3868,17 @@ impl<'a> Emitter<'a> {
                 .get(id.0 as usize)
                 .ok_or_else(|| ChunkError::op("func id"))?;
             Self::emit_fused_window(self.module, &f.code, pc, len, tail, &HashMap::new(), out);
+            return Ok(());
+        }
+        // Fused unboxed-float window (see `float_fuse`): single statement,
+        // no per-op emission, raw `double` traffic.
+        if let Some((len, tail)) = cx.ffuse {
+            let f = self
+                .module
+                .funcs
+                .get(id.0 as usize)
+                .ok_or_else(|| ChunkError::op("func id"))?;
+            Self::emit_fused_float_window(self.module, &f.code, pc, len, tail, out);
             return Ok(());
         }
         // Fused string append (see `strapp_scan`): in-place literal

@@ -1689,6 +1689,16 @@ pub fn build_release(
             .as_deref(),
         Some("1") | Some("true") | Some("yes") | Some("on")
     );
+    // Relaxed float codegen (`ZZ_RELAXED_FLOAT=1`): `-ffast-math` for host
+    // builds. Opt-in via env; default off so the specified float contract
+    // holds. Gated against `--target` inside clang_flags_with.
+    opts.relaxed_float = matches!(
+        std::env::var("ZZ_RELAXED_FLOAT")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    );
     // PGO profile reuse (`ZZ_PGO_PROFILE=<profdata>`): ship a
     // profile-optimized binary without re-instrumenting. Opt-in via env;
     // default behavior unchanged. For `--full` builds keep full LTO and
