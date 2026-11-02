@@ -14,16 +14,42 @@
 extern "C" {
 #endif
 
-// Initialize an arena with a pre-allocated buffer of `cap` bytes.
-// The buffer must outlive the arena (typically stack or a single malloc).
-void zz_arena_init(zz_arena *a, size_t cap);
+// Initialize an arena with a capacity of `cap` bytes.
+//
+// No heap happens here: the primary buffer is allocated lazily on first
+// use by zz_arena_alloc. Functions that never allocate from the arena
+// (e.g. pure scalar recursion like fib) pay zero heap traffic per call.
+// `zz_arena_alloc`/`zz_arena_destroy` handle a NULL buf correctly.
+static inline void zz_arena_init(zz_arena *a, size_t cap) {
+    if (cap < 1024) cap = 1024;
+    a->buf = NULL;
+    a->cap = cap;
+    for (int i = 0; i < ZZ_ARENA_NCLASSES; i++) a->offsets[i] = 0;
+    a->chunks = NULL;
+}
 
 // Bump-allocate `size` bytes with `align` alignment from the arena.
 // Returns NULL only if the arena is full (caller should fall back to ARC).
 void *zz_arena_alloc(zz_arena *a, size_t size, size_t align);
 
-// Destroy the arena, freeing its buffer.
-void zz_arena_destroy(zz_arena *a);
+// Destroy the arena, freeing its buffer. Safe to call on an arena that
+// was never allocated from (buf == NULL): a no-op.
+static inline void zz_arena_destroy(zz_arena *a) {
+    if (a->buf) {
+        free(a->buf);
+        a->buf = NULL;
+    }
+    zz_arena_chunk *chunk = a->chunks;
+    while (chunk) {
+        zz_arena_chunk *next = chunk->next;
+        free(chunk->buf);
+        free(chunk);
+        chunk = next;
+    }
+    a->chunks = NULL;
+    a->cap = 0;
+    for (int i = 0; i < ZZ_ARENA_NCLASSES; i++) a->offsets[i] = 0;
+}
 
 // ---- thread-safe ARC ---------------------------------------------------
 // Atomic reference counting for heap-objects that escape their creating

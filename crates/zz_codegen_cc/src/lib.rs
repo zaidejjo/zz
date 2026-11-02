@@ -570,8 +570,10 @@ pub fn clang_flags_with(
             // Max-opt (`--full`): whole-program LTO. Slower links, better
             // cross-TU inlining and elimination than ThinLTO.
             flags.push("-flto=full".to_string());
-        } else {
-            // ThinLTO unconditionally otherwise: Clang is the only backend.
+        } else if opts.thin_lto {
+            // ThinLTO: cross-module inlining at link time. Opt-in via --full
+            // or BuildOptions with thin_lto set; default release skips it
+            // for fast builds (matches Zig/Rust default release behavior).
             flags.push("-flto=thin".to_string());
         }
         // Loop/codegen tuning (FP-safe only by default: no -ffast-math,

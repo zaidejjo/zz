@@ -453,12 +453,7 @@ impl Lowerer {
             entry_ns: entry_ns.to_string(),
             needs_native_rt,
             needs_pg_link: zz_codegen_ffi::needs_pg_link(&expanded_natives),
-            needs_float_fmt: self.tp.types.values().any(super::type_has_float)
-                || self.tp.bindings.values().any(super::type_has_float)
-                || self.tp.funcs.values().any(|s| {
-                    s.params.iter().any(|(_, ty)| super::type_has_float(ty))
-                        || super::type_has_float(&s.ret)
-                }),
+            needs_float_fmt: super::needs_float_fmt(&self.tp, &self.reachable_funcs),
             needs_curl: zz_codegen_ffi::needs_curl_link(&expanded_natives),
             needs_sqlite: zz_codegen_ffi::needs_sqlite_link(&expanded_natives),
             unimplemented_natives: self.unimplemented_natives.borrow().clone(),
