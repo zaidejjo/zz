@@ -192,6 +192,56 @@ impl Lowerer {
                     names.checker_types.insert(name.name.clone(), ct);
                 }
 
+                // Loop-carried string accumulator hoisting: `s = s + rhs`
+                // inside a loop builds a persistent mutable builder before
+                // the loop, appends per iteration, and freezes after. Avoids
+                // the O(n^2) realloc+copy cascade of zz_binop_cat. Only fires
+                // at loop depth 1 so nested-loop bodies never leak code into
+                // an enclosing loop's pre/post code.
+                if self.loop_depth.get() >= 1 && ctype == "zz_value" {
+                    if let Expr::Binary {
+                        op: zz_frontend::ast::BinOp::Add,
+                        left,
+                        right,
+                        ..
+                    } = value
+                    {
+                        let left_is_target = match left.as_ref() {
+                            Expr::Ident {
+                                name: left_name, ..
+                            } => left_name == &name.name,
+                            Expr::Path { parts, .. } => parts.join(".") == name.name,
+                            _ => false,
+                        };
+                        if left_is_target {
+                            let cid = names
+                                .lookup(&name.name)
+                                .map(str::to_string)
+                                .unwrap_or_else(|| name.name.clone());
+                            let rhs_text = self.emit_expr(right.as_ref(), names, out);
+                            let _already = self
+                                .accumulated_names
+                                .borrow_mut()
+                                .insert(name.name.clone());
+                            // First iteration: accumulator is still an immutable
+                            // ZZ_STR (from `out := ""` before the loop); convert
+                            // it to a mutable builder in place. Later
+                            // iterations skip the conversion (tag is now
+                            // ZZ_MUTABLE_STR) and just append.
+                            out.push_str(&format!(
+                                "    if ({cid}.tag == ZZ_STR) {{ {cid} = zz_str_new_mut(64); }}\n"
+                            ));
+                            out.push_str(&format!(
+                                "    zz_str_append_mut_str(&{cid}, {rhs_text});\n"
+                            ));
+                            self.loop_post_code
+                                .borrow_mut()
+                                .push(format!("    {cid} = zz_str_freeze({cid});\n"));
+                            return;
+                        }
+                    }
+                }
+
                 // Check if this is a struct initialization
                 if let Expr::StructInit {
                     name: struct_name, ..
@@ -1039,7 +1089,9 @@ impl Lowerer {
                 span,
                 ..
             } => {
+                self.loop_depth.set(self.loop_depth.get() + 1);
                 self.emit_for(vars, iter, body, *span, names, out);
+                self.loop_depth.set(self.loop_depth.get() - 1);
             }
             Stmt::Break { .. } => out.push_str("    break;\n"),
             Stmt::Continue { .. } => out.push_str("    continue;\n"),
@@ -1609,6 +1661,11 @@ impl Lowerer {
                         "for (int64_t {cid} = {sv_unboxed}; {cid} < {ev_unboxed}; {cid}++) {{\n"
                     )
                 };
+                // Emit hoisted pre-loop code (e.g. string accumulator builder init)
+                // before the loop header.
+                for pre in self.loop_pre_code.borrow_mut().drain(..) {
+                    out.push_str(&pre);
+                }
                 out.push_str(&s);
                 // Loop-top safepoint (mirrors the VM's `Op::Safepoint`),
                 // elided for concurrency-free programs (see
@@ -1738,6 +1795,10 @@ impl Lowerer {
             out.push_str("    }\n");
             if !end_is_scalar {
                 out.push_str("    }\n}\n");
+            }
+            // Emit hoisted post-loop code (e.g. string accumulator freeze).
+            for post in self.loop_post_code.borrow_mut().drain(..) {
+                out.push_str(&post);
             }
             // Free the sub-arena's buffer once the loop completes.
             if let Some(ref name) = loop_arena {
