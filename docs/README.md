@@ -31,20 +31,31 @@ This is the developer-friendly entry point. Pick a path below.
 
 - [Stdlib overview](stdlib/overview.md) — module index and namespace rule.
 - [Built-ins](stdlib/builtins.md) — no import: `println`, `input`, `len`, `range`, `map`, `filter`, `int`, `float`.
-- [Strings and arrays](stdlib/str-vec.md) — `std.str`, `std.vec`, `std.bytes` builders.
-- [Data helpers](stdlib/data.md) — `std.map`, `std.set`, `std.dec`, `std.csv`, `std.property`.
-- [Filesystem and bytes](stdlib/fs-bytes.md) — `std.fs`, providers, `bytes` buffers.
-- [HTTP](stdlib/http.md) — server, routing, middleware, static, TLS, client, in-process tests.
-- [Networking](stdlib/net.md) — TCP, timeouts, binary-safe reads.
-- [Env and processes](stdlib/env-process.md) — `std.env`, `std.args`, `std.process`, `std.sys`, `std.log`.
-- [Math and time](stdlib/math-time.md) — `std.math`, `std.time` + calendar dates.
-- [Terminal](stdlib/terminal.md) — `std.term`, `std.colors`.
-- [Encoding and crypto](stdlib/encoding-crypto.md) — base64/hex/URL, sha/hmac, argon2/bcrypt, JWT, ed25519/RSA.
-- [Regexp](stdlib/regexp.md) — `std.regexp` handles, match/find/replace/captures.
-- [Databases](stdlib/sql-db.md) — `std.sqlz` (sqlite), postgres and mysql drivers.
-- [Concurrency](stdlib/concurrency.md) — `std.chan`, `std.task`, snapshot isolation.
-- [System slots](stdlib/cell-path-sys.md) — `cell`, `path`, `sys`, `args`, `log`, TLS/Unix.
-- [Test helpers](stdlib/testing-lib.md) — asserts, `std.test`, snapshots.
+- [String](stdlib/str.md) — `std.str` manipulation, byte offsets.
+- [Vector](stdlib/vec.md) — `std.vec` array ops.
+- [Bytes](stdlib/bytes.md) — `std.bytes` buffers.
+- [Map](stdlib/map.md) / [Set](stdlib/set.md) / [Decimal](stdlib/dec.md) — data helpers.
+- [JSON](stdlib/json.md) — parse/stringify/get/as_*.
+- [CSV](stdlib/csv.md) — RFC4180 subset.
+- [Property](stdlib/property.md) — seeded generators + shrinking.
+- [Colors](stdlib/colors.md) — ANSI styling.
+- [Crypto](stdlib/crypto.md) — digests, HMAC, passwords, signatures, JWT.
+- [Encoding](stdlib/encoding.md) — base64, hex, URL codecs.
+- [UUID](stdlib/uuid.md) — v4/v7 generation, parse, validate.
+- [Log](stdlib/log.md) / [Sys](stdlib/sys.md) / [Term](stdlib/term.md) — OS/terminal.
+- [Args](stdlib/args.md) / [Env](stdlib/env.md) / [Process](stdlib/process.md) — env/CLI/process.
+- [FS](stdlib/fs.md) / [Path](stdlib/path.md) — filesystem + lexical paths.
+- [HTTP](stdlib/http.md) — server, routing, middleware, static, TLS, client.
+- [Net](stdlib/net.md) — TCP, timeouts, binary-safe reads, TLS, Unix.
+- [Cell](stdlib/cell.md) — shared-mutable slots.
+- [Regexp](stdlib/regexp.md) — compiled patterns.
+- [SQL](stdlib/sqlz.md) — SQLite, postgres, mysql, transactions.
+- [Chan](stdlib/chan.md) / [Task](stdlib/task.md) — concurrency.
+- [Test](stdlib/test.md) — asserts, temp dirs, snapshots.
+- [Math](stdlib/math.md) / [Time](stdlib/time.md) — numerics, clocks, dates.
+- [Built-ins](stdlib/builtins.md) — no import: `println`, `input`, `len`, `range`, `map`, `filter`, `int`, `float`.
+- [Stdlib reference](stdlib/reference.md) — generated entries with signatures.
+- Exhaustive API tables: [stdlib.md](stdlib.md).
 - [Stdlib reference](stdlib/reference.md) — generated 691 entries with signatures across 42 groups.
 - Exhaustive API tables: [stdlib.md](stdlib.md).
 

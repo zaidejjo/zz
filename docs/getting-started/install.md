@@ -5,7 +5,7 @@
 ```bash
 curl -fsSL https://zz-lang.pages.dev/install.sh | sh
 zz --version
-zz setup    # PATH + completions for bash/zsh/fish, run once
+zz setup    # PATH + completions for bash/zsh/fish/powershell (run once)
 ```
 
 Windows:
@@ -13,6 +13,11 @@ Windows:
 ```powershell
 irm https://zz-lang.pages.dev/install.ps1 | iex
 ```
+
+> **Windows native builds:** `zz build` / `zz run --native` / `zz test --engine native`
+> are **not supported on Windows yet** — the AOT runtime still needs its Win32
+> threads/sockets ported (`<pthread.h>`, `fcntl`, `poll`). VM mode (`zz run`,
+> `zz check`, `zz test`), the REPL, `zz-lsp`, and `zz pm` all work on Windows.
 
 ## From source
 
@@ -25,15 +30,10 @@ cargo install --path crates/zz_cli
 zz --version
 ```
 
-VM-only work (`zz run`, `zz check`, `zz test`) needs no C toolchain.
+VM-only work (`zz run`, `zz check`, `zz test`) needs **no** C toolchain.
 `zz build` / `zz run --native` / `zz test --engine native` need one.
 
-AOT currently ships on Linux and macOS. The Windows backend still needs
-its runtime ported to Win32 threads/sockets (`<pthread.h>`, `fcntl`,
-`poll`), so `zz build` there reports that native builds are unsupported;
-VM mode, the REPL, `zz-lsp` and `zz pm` work on Windows.
-
-## No toolchain? Use the managed Zig backend
+## No C toolchain? Use the managed Zig backend (optional, AOT only)
 
 ```bash
 zz toolchain install
@@ -46,9 +46,9 @@ Pin per project with `[native]`, relocate with `ZZ_TOOLCHAIN_ROOT` for hermetic 
 ## Health check
 
 ```bash
-zz doctor          # binary, clang, shell, git, registry
-zz doctor --fix
-zz upgrade         # self-update
+zz doctor          # audit binary, clang, shell, git, registry
+zz doctor --fix    # auto-fix what it can
+zz upgrade         # self-update zz + zz-lsp from GitHub releases
 zz cache clean     # reclaim ~/.zz/cache when disk is low
 ```
 

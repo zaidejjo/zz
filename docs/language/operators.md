@@ -46,20 +46,28 @@ Bitwise chain reads: `flags & mask == expected` is `(flags & mask) == expected`;
 ## Pitfalls with fixes
 
 ```zz
-// WRONG: precedence surprise
-ok := flags & 7 == 7   // (flags & 7) == 7 — correct here, but parenthesize intent
-ok2 := (flags & mask) == expected
+// WRONG: precedence surprise — `==` binds tighter than `&`
+// flags & 7 == 7   // reads as (flags & 7) == 7 — parenthesize intent
+flags := 7
+mask := 7
+ok := (flags & mask) == 7   // fixed: parenthesize intent
 
-// WRONG: float equality
-// if x == 0.1 + 0.2 { }  — prefer assert_approx_eq / epsilon compare
+// WRONG: float equality — prefer epsilon comparison
+// if x == 0.1 + 0.2 { }   // unreliable on floats
+x := 1.0
+if x > 0.9 && x < 1.1 { }   // epsilon-style comparison
 
-// WRONG: chaining assignment
-// x += y += z  — split into two statements
+// WRONG: chaining assignment — not allowed
+// x += y += z   // error: cannot chain compound assignment
 
-// WRONG: ? across lines without care
+// WRONG: `?` across lines — joins with next line
 // val := int(s)
-// ?  — joins with next line; use match for multi-line branching
-val := int(s)?
+// ?           // error: `?` binds to the next line
+s := "42"
+func f() -> Option<int> {
+    val := int(s)?   // fine: `?` on the same line, inside a function
+    return .some(val)
+}
 ```
 
 Integer guarantees (both engines): wrapping `+ - *`, `INT64_MIN / -1` errors,

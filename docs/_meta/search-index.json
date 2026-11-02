@@ -188,40 +188,146 @@
       "excerpt": "println(\"hello\")"
     },
     {
-      "path": "stdlib/str-vec.md",
-      "title": "Strings and arrays",
+      "path": "stdlib/str.md",
+      "title": "String",
       "keywords": [
         "str",
-        "vec",
-        "bytes",
-        "builder"
+        "trim",
+        "split",
+        "find",
+        "ord",
+        "chr"
       ],
       "excerpt": "import std.str"
     },
     {
-      "path": "stdlib/data.md",
-      "title": "Data helpers",
+      "path": "stdlib/vec.md",
+      "title": "Vector",
       "keywords": [
-        "map",
-        "set",
-        "dec",
-        "json",
-        "csv",
-        "property"
+        "vec",
+        "push",
+        "sort",
+        "reverse",
+        "join",
+        "contains"
       ],
-      "excerpt": "Dicts are `{K: V}`, insertion-ordered, O(n) lookup. API is stable so a hashed"
+      "excerpt": "import std.vec"
     },
     {
-      "path": "stdlib/fs-bytes.md",
-      "title": "Filesystem and bytes",
+      "path": "stdlib/bytes.md",
+      "title": "Bytes",
+      "keywords": [
+        "bytes",
+        "buffer",
+        "builder",
+        "push_byte",
+        "finish"
+      ],
+      "excerpt": "import std.bytes"
+    },
+    {
+      "path": "stdlib/map.md",
+      "title": "Map",
+      "keywords": [
+        "map",
+        "dict",
+        "get_or",
+        "has",
+        "merge",
+        "keys"
+      ],
+      "excerpt": "import std.map"
+    },
+    {
+      "path": "stdlib/set.md",
+      "title": "Set",
+      "keywords": [
+        "set",
+        "union",
+        "intersect",
+        "diff",
+        "insert",
+        "has"
+      ],
+      "excerpt": "import std.set"
+    },
+    {
+      "path": "stdlib/dec.md",
+      "title": "Decimal",
+      "keywords": [
+        "dec",
+        "add",
+        "sub",
+        "mul",
+        "format",
+        "exact"
+      ],
+      "excerpt": "import std.dec"
+    },
+    {
+      "path": "stdlib/json.md",
+      "title": "JSON",
+      "keywords": [
+        "json",
+        "parse",
+        "stringify",
+        "get",
+        "as_str",
+        "as_int"
+      ],
+      "excerpt": "import std.json"
+    },
+    {
+      "path": "stdlib/csv.md",
+      "title": "CSV",
+      "keywords": [
+        "csv",
+        "parse",
+        "stringify",
+        "header",
+        "get_cell"
+      ],
+      "excerpt": "import std.csv"
+    },
+    {
+      "path": "stdlib/property.md",
+      "title": "Property",
+      "keywords": [
+        "property",
+        "check",
+        "for_all_int",
+        "shrink",
+        "seed",
+        "int_in"
+      ],
+      "excerpt": "import std.property"
+    },
+    {
+      "path": "stdlib/fs.md",
+      "title": "FS",
       "keywords": [
         "fs",
+        "read",
+        "write",
         "memfs",
         "tarfs",
         "embedfs",
-        "bytes"
+        "providers"
       ],
       "excerpt": "import std.fs"
+    },
+    {
+      "path": "stdlib/path.md",
+      "title": "Path",
+      "keywords": [
+        "path",
+        "join",
+        "normalize",
+        "basename",
+        "dirname",
+        "extension"
+      ],
+      "excerpt": "import std.path"
     },
     {
       "path": "stdlib/http.md",
@@ -246,49 +352,162 @@
       "excerpt": "import std.net"
     },
     {
-      "path": "stdlib/env-process.md",
-      "title": "Env and processes",
+      "path": "stdlib/env.md",
+      "title": "Env",
       "keywords": [
         "env",
-        "args",
-        "process",
-        "log"
+        "get",
+        "set",
+        "cwd",
+        "os",
+        "arch",
+        "args"
       ],
       "excerpt": "import std.env"
     },
     {
-      "path": "stdlib/math-time.md",
-      "title": "Math and time",
+      "path": "stdlib/args.md",
+      "title": "Args",
+      "keywords": [
+        "args",
+        "flag",
+        "str_flag",
+        "int_flag",
+        "bool_flag",
+        "parse"
+      ],
+      "excerpt": "import std.args"
+    },
+    {
+      "path": "stdlib/process.md",
+      "title": "Process",
+      "keywords": [
+        "process",
+        "run",
+        "spawn",
+        "wait",
+        "exit",
+        "pid"
+      ],
+      "excerpt": "import std.process"
+    },
+    {
+      "path": "stdlib/sys.md",
+      "title": "Sys",
+      "keywords": [
+        "sys",
+        "os",
+        "arch",
+        "cpu_count",
+        "hostname",
+        "mem"
+      ],
+      "excerpt": "import std.sys"
+    },
+    {
+      "path": "stdlib/log.md",
+      "title": "Log",
+      "keywords": [
+        "log",
+        "trace",
+        "debug",
+        "info",
+        "warn",
+        "error",
+        "span"
+      ],
+      "excerpt": "import std.log"
+    },
+    {
+      "path": "stdlib/math.md",
+      "title": "Math",
       "keywords": [
         "math",
-        "random",
-        "date",
-        "rfc3339"
+        "sin",
+        "cos",
+        "sqrt",
+        "pow",
+        "PI",
+        "random"
       ],
       "excerpt": "import std.math"
     },
     {
-      "path": "stdlib/terminal.md",
-      "title": "Terminal",
+      "path": "stdlib/time.md",
+      "title": "Time",
+      "keywords": [
+        "time",
+        "now_ms",
+        "sleep_ms",
+        "parse_rfc3339",
+        "format_rfc3339",
+        "add_days"
+      ],
+      "excerpt": "import std.time"
+    },
+    {
+      "path": "stdlib/term.md",
+      "title": "Term",
       "keywords": [
         "term",
         "raw",
-        "colors",
-        "ANSI"
+        "read_key",
+        "poll",
+        "get_size",
+        "is_tty"
       ],
       "excerpt": "import std.term"
     },
     {
-      "path": "stdlib/encoding-crypto.md",
-      "title": "Encoding and crypto",
+      "path": "stdlib/colors.md",
+      "title": "Colors",
       "keywords": [
-        "base64",
-        "sha",
+        "colors",
+        "red",
+        "rgb",
+        "hex",
+        "bold",
+        "ansi"
+      ],
+      "excerpt": "import std.colors"
+    },
+    {
+      "path": "stdlib/crypto.md",
+      "title": "Crypto",
+      "keywords": [
+        "crypto",
+        "sha256",
+        "hmac",
         "argon2",
+        "bcrypt",
         "jwt",
-        "uuid"
+        "ed25519"
+      ],
+      "excerpt": "import std.crypto"
+    },
+    {
+      "path": "stdlib/encoding.md",
+      "title": "Encoding",
+      "keywords": [
+        "encoding",
+        "base64",
+        "hex",
+        "url_encode",
+        "url_decode"
       ],
       "excerpt": "import std.encoding"
+    },
+    {
+      "path": "stdlib/uuid.md",
+      "title": "UUID",
+      "keywords": [
+        "uuid",
+        "v4",
+        "v7",
+        "parse",
+        "is_valid"
+      ],
+      "excerpt": "import std.uuid"
     },
     {
       "path": "stdlib/regexp.md",
@@ -301,49 +520,67 @@
       "excerpt": "Compiled patterns are opaque `\"regexp\"` handles, so method syntax works."
     },
     {
-      "path": "stdlib/sql-db.md",
-      "title": "Databases",
+      "path": "stdlib/sqlz.md",
+      "title": "SQL",
       "keywords": [
-        "sqlite",
+        "sqlz",
+        "open",
+        "exec",
+        "query",
         "postgres",
         "mysql",
-        "sqlz"
+        "transaction"
       ],
       "excerpt": "Canonical module is `std.sqlz`."
     },
     {
-      "path": "stdlib/concurrency.md",
-      "title": "Concurrency",
+      "path": "stdlib/chan.md",
+      "title": "Chan",
       "keywords": [
         "chan",
+        "send",
+        "recv",
+        "try_recv",
+        "channel"
+      ],
+      "excerpt": "import std.chan"
+    },
+    {
+      "path": "stdlib/task.md",
+      "title": "Task",
+      "keywords": [
         "task",
-        "cell",
-        "spawn"
+        "spawn",
+        "join",
+        "try_join",
+        "green thread"
       ],
-      "excerpt": "Green threads: `task.spawn` builds a task in microseconds; the executor (one"
+      "excerpt": "import std.task"
     },
     {
-      "path": "stdlib/cell-path-sys.md",
-      "title": "System slots",
+      "path": "stdlib/cell.md",
+      "title": "Cell",
       "keywords": [
         "cell",
-        "path",
-        "sys",
-        "args",
-        "tls",
-        "toml"
+        "new",
+        "get",
+        "set",
+        "drop"
       ],
-      "excerpt": "Small modules that glue ZZ to the OS. All fallible ops are `Result<_, str>`."
+      "excerpt": "import std.cell"
     },
     {
-      "path": "stdlib/testing-lib.md",
-      "title": "Test helpers",
+      "path": "stdlib/test.md",
+      "title": "Test",
       "keywords": [
+        "test",
         "assert",
         "snapshot",
+        "temp_dir",
+        "free_port",
         "doctest"
       ],
-      "excerpt": "`@test` needs no import. All asserts work bare and as `std.test.*`."
+      "excerpt": "import std.test"
     },
     {
       "path": "tooling/cli.md",

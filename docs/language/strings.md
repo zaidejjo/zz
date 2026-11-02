@@ -26,6 +26,7 @@ stays literal, so JSON needs no escaping:
 
 ```zz
 println("{{name}}")      // {name}
+name := "Ada"
 println("{{{name}}}")    // {Ada}
 println("{\"a\": {}}")  // {"a": {}}
 ```
@@ -64,14 +65,14 @@ Dedents to the least-indented line. Interpolation and doubling rules match `"...
 ```zz
 import std.str
 
-"  hi  ".trim()                 // "hi"
-"hello".to_upper()              // "HELLO"
-str.contains("hello", "ell")    // true
-str.split("a,b,c", ",")         // ["a", "b", "c"]
-str.replace("foo bar", "bar", "baz")
+println("  hi  ".trim())                 // "hi"
+println("hello".to_upper())              // "HELLO"
+println(str.contains("hello", "ell"))    // true
+println(str.split("a,b,c", ","))         // ["a", "b", "c"]
+println(str.replace("foo bar", "bar", "baz"))
 ```
 
 Offsets (`find`, `rfind`, `*_at`, `*_in`, `trim_span`) are byte offsets, O(1) each.
 `length`/slicing stay char-oriented — convert explicitly when mixing.
 
-See [Strings and arrays](../stdlib/str-vec.md) for the full table.
+See [String](../stdlib/str.md) for the full table.

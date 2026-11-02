@@ -46,13 +46,15 @@ Start with letter or `_`, then letters/digits/`_`: `name`, `_private`, `x1`.
 
 Comments are trivia (preserved by the lossless lexer for `zz fmt`); they never
 nest and never affect semantics. Doc fences `/// ```zz` run as doctests —
-see [Test helpers](../stdlib/testing-lib.md).
+see [Test](../stdlib/test.md).
 
 ## Terminators
 
 Newline at bracket depth 0, or `;`:
 
 ```zz
+func add(a: int, b: int) -> int { return a + b }
+
 x := 1
 y := 2
 x := 1; y := 2  // same

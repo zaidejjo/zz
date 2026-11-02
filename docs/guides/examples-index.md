@@ -11,10 +11,10 @@ updates. Use this map; do not browse blind.
 
 - `rust-fnv/` → tracked hermetic Rust plugin, no scripts or `build.rs` ([guide §5](../plugin-author-guide.md#5-hermetic-rust-crate-nativebuild-rust))
 - `server.zz`, `users-web.zz`, `v2-users-web.zz`, `http_static.zz`, `static_serve.zz` → [HTTP](../stdlib/http.md)
-- `parallel_worker_pool.zz` → [Concurrency](../stdlib/concurrency.md)
+- `parallel_worker_pool.zz` → [Chan](../stdlib/chan.md)
 - `regexp_email_demo/extract_emails.zz` → [Regexp](../stdlib/regexp.md)
-- `sqlz_test.zz`, `sqlz_universal.zz` → [Databases](../stdlib/sql-db.md)
-- `test_framework_showcase/` → [Test helpers](../stdlib/testing-lib.md)
+- `sqlz_test.zz`, `sqlz_universal.zz` → [SQL](../stdlib/sqlz.md)
+- `test_framework_showcase/` → [Test](../stdlib/test.md)
 - `structs.zz`, `family.zz`, `impl-test.zz` → [Structs](../language/structs-enums.md)
 - `str_advanced_example.zz`, `test-fstrings.zz`, `multi_string.zz` → [Strings](../language/strings.md)
 - `projects/todo-app/main.zz` → full app (routes + JSON + static)

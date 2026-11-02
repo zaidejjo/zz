@@ -8,11 +8,14 @@ Handlers take `http.request` and return `str` (200 text), `http.response`
 (explicit status/headers), or dict/array (auto-JSON).
 
 ```zz
+import std.http
+
 server := http.server()
     |> http.route("GET", "/", |req: http.request| "Hello, World!")
     |> http.route("GET", "/users/:id", |req| "user-{http.param(req, "id") ?? "?"}")
     |> http.route("POST", "/echo", |req| req.body)
 
+println("Server running on :8080")
 http.listen(server, 8080)
 ```
 
@@ -111,8 +114,14 @@ Traversal-proof (`..`, `%2e%2e`, symlink escapes → 403), ETag/304, single Rang
 longest prefix wins.
 
 ```zz
-s = http.serve_dir(s, "./public")
-s = http.serve_dir_at(s, "/assets", "./dist")
+import std.http
+
+func main() -> Result<int, str> {
+    s := http.server()
+    s = http.serve_dir(s, "./public")
+    s = http.serve_dir_at(s, "/assets", "./dist")
+    return .ok(0)
+}
 ```
 
 ## TLS and WebSockets
@@ -122,8 +131,15 @@ s = http.serve_dir_at(s, "/assets", "./dist")
 ```
 
 ```zz
-http.listen_tls(s, 8443, "cert.pem", "key.pem")
-http.listen_tls_cfg(s, 8443, "cert.pem", "key.pem", {"max_body_bytes": 10000000})
+import std.http
+
+func main() -> Result<int, str> {
+    s := http.server()
+    s = s.route("GET", "/", |req| "secure")
+    http.listen_tls(s, 8443, "cert.pem", "key.pem")
+    http.listen_tls_cfg(s, 8443, "cert.pem", "key.pem", {"max_body_bytes": 10000000})
+    return .ok(0)
+}
 ```
 
 `hijack(server, path, handler(req, stream))` upgrades to raw `tcp.stream`
@@ -162,6 +178,8 @@ func main() -> Result<int, str> {
 ## Testing without sockets
 
 ```zz
+import std.http
+
 server := http.server()
     |> http.route("GET", "/", |req| "Hello!")
 

@@ -15,7 +15,7 @@
 | `enumerate` | `(arr)` | Index+value pairs. Also `vec.enumerate`. |
 | `zip` | `(a, b)` | Pair elements. |
 | `clone` | `(v: T) -> T` | Pin an independent deep copy. |
-| asserts | `assert`, `assert_eq`, `assert_ne`, ... | Bare and `std.test.*`. See [Test helpers](testing-lib.md). |
+| asserts | `assert`, `assert_eq`, `assert_ne`, ... | Bare and `std.test.*`. See [Test](test.md). |
 
 ```zz
 println("hello")

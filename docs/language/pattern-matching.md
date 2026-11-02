@@ -26,6 +26,7 @@ match .ok(5) {
 ## Guards
 
 ```zz
+x := .some(3)
 match x {
     .some(n) if n > 0 => println("pos"),
     .some(n) => println("non-pos"),
@@ -40,9 +41,11 @@ vars and helper calls into the arm body.
 For user enums the same shape holds:
 
 ```zz
+enum T { Eof, Num(int) }
+t := T.Num(5)
 match t {
-    .Eof if verbose => println("eof!"),
     .Eof => println("eof"),
+    .Num(n) if n > 0 => println("positive: {n}"),
     _    => println("other"),
 }
 ```
@@ -71,6 +74,7 @@ Arms accept statements (`=`, `:=`, `return`, `defer`) as if braced:
 
 ```zz
 y := 0
+x := .some(5)
 match x {
     .some(v) => y = v,
     .none    => y = 0 - 1,
@@ -84,6 +88,9 @@ match x {
 `Result` / `Option` as a bare statement warns (value discarded):
 
 ```zz
+import std.fs
+path := "f.txt"
+data := "hi"
 fs.write(path, data)   // warning: unused Result
 match fs.write(path, data) {
     .ok(_)  => println("ok"),
