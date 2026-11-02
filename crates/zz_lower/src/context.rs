@@ -497,6 +497,22 @@ pub struct Lowerer {
     /// native calls (e.g. str_cast_arena) inside loops. Forced to `None`
     /// inside green closures (stack arenas cannot survive a suspend).
     pub(crate) current_loop_arena: std::cell::RefCell<Option<String>>,
+    /// Nesting depth of the loop currently being lowered. Hoisting
+    /// optimizations (closure hoisting, string-accumulator hoisting) only
+    /// fire at depth 1 so code accumulated in a nested loop body never
+    /// leaks into an enclosing loop's pre/post code.
+    pub(crate) loop_depth: std::cell::Cell<usize>,
+    /// C code to emit before the next `for(...)` loop header, accumulated
+    /// by hoisting optimizations during body lowering. Consumed by
+    /// `emit_for`.
+    pub(crate) loop_pre_code: std::cell::RefCell<Vec<String>>,
+    /// C code to emit after the next `for(...)` loop closing braces,
+    /// accumulated by hoisting optimizations during body lowering.
+    /// Consumed by `emit_for`.
+    pub(crate) loop_post_code: std::cell::RefCell<Vec<String>>,
+    /// Names of string accumulators already hoisted into a pre-loop builder,
+    /// so we don't emit duplicate builder inits for the same accumulator.
+    pub(crate) accumulated_names: std::cell::RefCell<std::collections::HashSet<String>>,
     /// True for the single outermost `emit_expr` of a statement-level
     /// value (Decl/Assign RHS, Expr statement). Lets the call lowerer
     /// recognize a suspendable call in direct yield position for the
@@ -594,6 +610,10 @@ impl Lowerer {
             readonly_params,
             unit_mode: std::cell::Cell::new(false),
             unimplemented_natives: std::cell::RefCell::new(Vec::new()),
+            loop_depth: std::cell::Cell::new(0),
+            loop_pre_code: std::cell::RefCell::new(Vec::new()),
+            loop_post_code: std::cell::RefCell::new(Vec::new()),
+            accumulated_names: std::cell::RefCell::new(std::collections::HashSet::new()),
         };
         lowerer.specialized = lowerer.compute_specialized();
         lowerer.global_list = lowerer.collect_globals();

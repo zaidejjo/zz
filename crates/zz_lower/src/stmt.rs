@@ -174,22 +174,79 @@ impl Lowerer {
     ) {
         match stmt {
             Stmt::Decl { name, value, .. } => {
-                // Look up the type of the initializer expression
-                let (ctype, checker_ty) = if let Some(ty) = self.ty_at(names, value.span()) {
-                    (ty_to_ctype(ty), Some(ty.clone()))
-                } else {
-                    ("zz_value".to_string(), None) // fallback
-                };
-                // DB handles own a live backend connection; ordinary C
-                // locals are not released at function exit, so attach a
-                // cleanup handler that drops the last reference (and
-                // closes the connection) on every exit path. Captured and
-                // green bindings live in heap/frame cells and are skipped.
+                // Look up the type of the initializer expression.
+                // `ty_at` may return `None` for compound expressions
+                // (BinOp) that the checker doesn't type directly; fall
+                // back to the left operand's declared type so that
+                // `total := total + arr[i]` gets `int64_t` instead of
+                // `zz_value`, enabling the redeclaration-as-assignment
+                // fast path below.
+                let checker_ty = self.ty_at(names, value.span());
+                let ctype: String =
+                    checker_ty
+                        .as_ref()
+                        .map(|t| ty_to_ctype(t))
+                        .unwrap_or_else(|| {
+                            names
+                                .lookup_type(&name.name)
+                                .unwrap_or("zz_value")
+                                .to_string()
+                        });
                 let db_local = matches!(&checker_ty, Some(zz_checker::Type::Db));
                 // Store the checker type for method dispatch (e.g., to distinguish
                 // str.contains from vec.contains when the receiver is a local).
                 if let Some(ct) = checker_ty {
-                    names.checker_types.insert(name.name.clone(), ct);
+                    names.checker_types.insert(name.name.clone(), ct.clone());
+                }
+
+                // Loop-carried string accumulator hoisting: `s = s + rhs`
+                // inside a loop builds a persistent mutable builder before
+                // the loop, appends per iteration, and freezes after. Avoids
+                // the O(n^2) realloc+copy cascade of zz_binop_cat. Only fires
+                // at loop depth 1 so nested-loop bodies never leak code into
+                // an enclosing loop's pre/post code.
+                if self.loop_depth.get() >= 1 && ctype == "zz_value" {
+                    if let Expr::Binary {
+                        op: zz_frontend::ast::BinOp::Add,
+                        left,
+                        right,
+                        ..
+                    } = value
+                    {
+                        let left_is_target = match left.as_ref() {
+                            Expr::Ident {
+                                name: left_name, ..
+                            } => left_name == &name.name,
+                            Expr::Path { parts, .. } => parts.join(".") == name.name,
+                            _ => false,
+                        };
+                        if left_is_target {
+                            let cid = names
+                                .lookup(&name.name)
+                                .map(str::to_string)
+                                .unwrap_or_else(|| name.name.clone());
+                            let rhs_text = self.emit_expr(right.as_ref(), names, out);
+                            let _already = self
+                                .accumulated_names
+                                .borrow_mut()
+                                .insert(name.name.clone());
+                            // First iteration: accumulator is still an immutable
+                            // ZZ_STR (from `out := ""` before the loop); convert
+                            // it to a mutable builder in place. Later
+                            // iterations skip the conversion (tag is now
+                            // ZZ_MUTABLE_STR) and just append.
+                            out.push_str(&format!(
+                                "    if ({cid}.tag == ZZ_STR) {{ {cid} = zz_str_new_mut(64); }}\n"
+                            ));
+                            out.push_str(&format!(
+                                "    zz_str_append_mut_str(&{cid}, {rhs_text});\n"
+                            ));
+                            self.loop_post_code
+                                .borrow_mut()
+                                .push(format!("    {cid} = zz_str_freeze({cid});\n"));
+                            return;
+                        }
+                    }
                 }
 
                 // Check if this is a struct initialization
@@ -303,24 +360,46 @@ impl Lowerer {
                     self.emit_cell_alloc(&ptr, &ctype, &final_val, out);
                     names.enter_cell(&name.name, &ptr, &deref, &ctype, n);
                 } else {
-                    let cid = if matches!(ctype.as_str(), "int64_t" | "double" | "bool") {
-                        names.enter_with_type(&name.name, &ctype)
+                    // If `name` already exists in the local scope (stack) with
+                    // the same C type, this is a redeclaration like
+                    // `total := total + item` inside a loop body. Emit an
+                    // assignment to the existing variable instead of
+                    // shadowing it with a fresh local that is immediately
+                    // discarded. The RHS was already emitted above while
+                    // `name` still resolved to the old entry, so it
+                    // correctly reads the old value.
+                    //
+                    // Names only in `names.globals` (module globals not yet
+                    // declared in this scope) are not redeclarations — keep
+                    // the declaration so the global gets its C declaration.
+                    // If the C type changed (e.g. int64_t -> zz_value), also
+                    // keep the declaration: assigning across types is a
+                    // miscompile.
+                    let is_redecl = names.lookup(&name.name).is_some()
+                        && names.lookup_type(&name.name) == Some(ctype.as_str());
+                    if is_redecl {
+                        let cid = names.lookup(&name.name).unwrap();
+                        out.push_str(&format!("    {cid} = {final_val};\n"));
                     } else {
-                        names.enter(&name.name)
-                    };
-                    // Update the name ctx with the correct type (covers non-scalar
-                    // types and any type not yet set).
-                    if let Some(vec) = names.stack.get_mut(&name.name) {
-                        if let Some((_, existing_ty)) = vec.last_mut() {
-                            *existing_ty = ctype.clone();
+                        let cid = if matches!(ctype.as_str(), "int64_t" | "double" | "bool") {
+                            names.enter_with_type(&name.name, &ctype)
+                        } else {
+                            names.enter(&name.name)
+                        };
+                        // Update the name ctx with the correct type (covers non-scalar
+                        // types and any type not yet set).
+                        if let Some(vec) = names.stack.get_mut(&name.name) {
+                            if let Some((_, existing_ty)) = vec.last_mut() {
+                                *existing_ty = ctype.clone();
+                            }
                         }
+                        let db_attr = if db_local {
+                            " __attribute__((cleanup(zz_db_value_cleanup)))"
+                        } else {
+                            ""
+                        };
+                        out.push_str(&format!("    {ctype} {cid}{db_attr} = {final_val};\n"));
                     }
-                    let db_attr = if db_local {
-                        " __attribute__((cleanup(zz_db_value_cleanup)))"
-                    } else {
-                        ""
-                    };
-                    out.push_str(&format!("    {ctype} {cid}{db_attr} = {final_val};\n"));
                 }
                 // Track array literals so `len(v)` can fold to the arity,
                 // and record pure-scalar literals for index forwarding
@@ -1026,7 +1105,9 @@ impl Lowerer {
                 span,
                 ..
             } => {
+                self.loop_depth.set(self.loop_depth.get() + 1);
                 self.emit_for(vars, iter, body, *span, names, out);
+                self.loop_depth.set(self.loop_depth.get() - 1);
             }
             Stmt::Break { .. } => out.push_str("    break;\n"),
             Stmt::Continue { .. } => out.push_str("    continue;\n"),
@@ -1596,6 +1677,11 @@ impl Lowerer {
                         "for (int64_t {cid} = {sv_unboxed}; {cid} < {ev_unboxed}; {cid}++) {{\n"
                     )
                 };
+                // Emit hoisted pre-loop code (e.g. string accumulator builder init)
+                // before the loop header.
+                for pre in self.loop_pre_code.borrow_mut().drain(..) {
+                    out.push_str(&pre);
+                }
                 out.push_str(&s);
                 // Loop-top safepoint (mirrors the VM's `Op::Safepoint`),
                 // elided for concurrency-free programs (see
@@ -1725,6 +1811,10 @@ impl Lowerer {
             out.push_str("    }\n");
             if !end_is_scalar {
                 out.push_str("    }\n}\n");
+            }
+            // Emit hoisted post-loop code (e.g. string accumulator freeze).
+            for post in self.loop_post_code.borrow_mut().drain(..) {
+                out.push_str(&post);
             }
             // Free the sub-arena's buffer once the loop completes.
             if let Some(ref name) = loop_arena {
