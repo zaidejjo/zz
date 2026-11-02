@@ -269,16 +269,30 @@ pub fn run(args: &[String]) -> Result<(), String> {
         ));
     }
 
-    // 6. Cache size.
+    // 6. Cache size. Unit objects are content-addressed by the exact
+    // translation unit, so they are shared between projects (and survive
+    // user-code edits) — report them separately to make reuse auditable.
     let cache = zz_pm::paths::cache_objects_dir();
     let (entries, bytes) = zz_pm::paths::dir_usage(&cache);
-    checks.push(pass(
-        "Cache",
-        format!(
-            "build cache: {entries} entries ({})",
-            ui::human_bytes(bytes)
-        ),
-    ));
+    let (unit_objects, unit_bytes) = zz_pm::paths::dir_usage(&cache.join("units"));
+    if unit_objects == 0 {
+        checks.push(pass(
+            "Cache",
+            format!(
+                "build cache: {entries} entries ({})",
+                ui::human_bytes(bytes)
+            ),
+        ));
+    } else {
+        checks.push(pass(
+            "Cache",
+            format!(
+                "build cache: {entries} entries ({}), {unit_objects} unit objects ({}) reusable across projects",
+                ui::human_bytes(bytes),
+                ui::human_bytes(unit_bytes),
+            ),
+        ));
+    }
 
     // Report.
     let mut failed = 0u32;

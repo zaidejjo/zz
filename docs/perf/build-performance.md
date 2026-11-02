@@ -93,11 +93,17 @@ therefore different cache keys) between runs. Roots are now sorted.
 
 ## Step 3 — compile the stdlib once ("link packages once")
 
-Status: **new work, enabled by step 2.**
+Status: **implemented.**
 
-Implemented regression coverage: `stdlib_unit_is_stable_across_program_edits`
-lowers two different programs and asserts the stdlib unit's header and
-body are byte-identical.
+- `stdlib_unit_is_stable_across_program_edits` lowers two different
+  programs and asserts the stdlib unit's header and body are
+  byte-identical, so they hash to the same object slug.
+- `zz doctor` reports unit objects separately from the rest of the build
+  cache, making reuse auditable (`N unit objects … reusable across
+  projects`).
+- `--verbose` already prints `zz: timing units_cache=<hits>/<total>`; a
+  second build of a different program that imports the same stdlib
+  modules reports the stdlib unit as a hit.
 
 With step 2, a stdlib unit's TU is a pure function of (compiler build,
 flags, toolchain, embedded stdlib source). Two consequences:
@@ -111,10 +117,11 @@ flags, toolchain, embedded stdlib source). Two consequences:
 This is Go's "compiled package" model without a separate archive format:
 the object cache is the package store, deduplicated by content. We will:
 
-- Expose cache statistics (`zz doctor`, `--verbose`) so reuse is visible.
-- Add a test that builds two different programs importing the same stdlib
-  module and asserts the second build reports > 0 cache hits for the
-  stdlib unit.
+- Cache statistics in `zz doctor` and `--verbose` (done above).
+- Regression test at the lowering layer (done above). Driving a second
+  clang build in a unit test would need a private `ZZ_HOME` and a full
+  link; the byte-identity test is the actual invariant that guarantees
+  the hit.
 
 ## Step 4 — cold start: cache the Rust native runtime archive
 
