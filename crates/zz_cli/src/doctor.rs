@@ -156,6 +156,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     for (release, source, lib, strategy) in &rt_sources {
         let kind = match source {
             RtSource::Cargo => "cargo-built",
+            RtSource::Cached => "cached",
             RtSource::Prebuilt => "prebuilt",
         };
         let profile = if *release { "release" } else { "debug" };
@@ -194,6 +195,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
             Some(RtSource::Prebuilt) => checks.push(pass(
                 "Cargo",
                 "cargo not found (optional — prebuilt native runtime ships with release)",
+            )),
+            Some(RtSource::Cached) => checks.push(pass(
+                "Cargo",
+                "cargo not found (optional — native runtime archive is cached)",
             )),
         },
     }

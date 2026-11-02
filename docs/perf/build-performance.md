@@ -125,19 +125,36 @@ the object cache is the package store, deduplicated by content. We will:
 
 ## Step 4 — cold start: cache the Rust native runtime archive
 
-Status: **new work.**
+Status: **implemented.**
 
 Programs that genuinely need regex/crypto/TLS/sql must link
 `libzz_native_rt.a`. In a source checkout the archive is built in
-`target/<profile>`; a second checkout or a cleaned tree rebuilds it
-(minutes). Release installs already ship a prebuilt archive.
+`target/<profile>`; a second checkout or a cleaned tree used to rebuild
+it (minutes). Release installs already ship a prebuilt archive.
 
-Plan: content-address the archive in the user cache
-(`~/.zz/cache/native-rt/<stamp>/libzz_native_rt.a`), keyed by the
-`zz_native_rt` source tree + crate graph + profile + compiler build
-stamp, with an atomic publish and a lock. `resolve_staticlib` consults it
-before invoking cargo, and a build failure never poisons a partial
-archive. `zz cache clean` removes it with the rest of the tree.
+The archive is now content-addressed in the user cache:
+
+```
+~/.zz/cache/native-rt/v1-<128-bit>/libzz_native_rt.a
+```
+
+The key covers every byte under `crates/zz_native_rt`, the workspace
+`Cargo.toml` (profile), `Cargo.lock` (dependency graph), `.cargo/config*`
+and `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS`, plus the profile. A source
+change therefore produces a different key (never a stale link), and the
+same sources on the same machine hit without invoking cargo.
+
+Publishing is a temp copy followed by one atomic `rename`; entries are
+validated by the `ar` magic (`!<arch>\n`) before reuse, so a truncated or
+corrupted file is rebuilt instead of linked. Superseded keys are pruned
+after a 24 h grace window, keeping the newest three. `zz doctor` reports
+the archive as `cached (content-addressed cache)`, and `zz cache clean`
+removes it with the rest of the build cache.
+
+Measured: with `CARGO_TARGET_DIR` pointed at an empty directory (no
+`target/<profile>` archive at all), a multi-module native build links in
+~1.7 s and creates no cargo target tree — the cache hit supplies the
+archive.
 
 ## Non-goals
 

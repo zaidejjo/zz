@@ -595,17 +595,24 @@ pub fn native_rt_resolution(release: bool) -> Result<(PathBuf, RtSource, &'stati
     let (lib, source) = resolve_staticlib(release)?;
     let strategy = match source {
         RtSource::Cargo => "cargo build from workspace sources",
+        RtSource::Cached => "content-addressed cache",
         RtSource::Prebuilt => "shipped prebuilt archive",
     };
     Ok((lib, source, strategy))
 }
 
 /// How [`ensure_staticlib`] found the archive: workspace sources get a
-/// (cached, incremental) cargo build; release installs use the shipped
-/// archive directly — no cargo, no sources, no Rust toolchain.
+/// (cached, incremental) cargo build (or a hit in the content-addressed
+/// user cache); release installs use the shipped archive directly — no
+/// cargo, no sources, no Rust toolchain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RtSource {
+    /// Built now (or reused from `target/<profile>`) by cargo.
     Cargo,
+    /// Reused from `~/.zz/cache/native-rt/<key>/` (same source tree, same
+    /// profile, same rustflags — no cargo invoked).
+    Cached,
+    /// Shipped next to the compiler binary.
     Prebuilt,
 }
 
@@ -614,7 +621,7 @@ fn resolve_staticlib(release: bool) -> Result<(PathBuf, RtSource), FfiError> {
     // archive → use directly. Anything else is a loud misconfiguration.
     if let Some(dir) = std::env::var_os("ZZ_NATIVE_RT_DIR").map(PathBuf::from) {
         if dir.join("Cargo.toml").is_file() {
-            return Ok((build_staticlib(&dir, release)?, RtSource::Cargo));
+            return build_staticlib(&dir, release);
         }
         let prebuilt = dir.join(lib_file_name());
         if prebuilt.is_file() {
@@ -629,7 +636,7 @@ fn resolve_staticlib(release: bool) -> Result<(PathBuf, RtSource), FfiError> {
     }
     // 2. Dev checkout (compile-time baked layout).
     if let Some(root) = checkout_root() {
-        return Ok((build_staticlib(&root, release)?, RtSource::Cargo));
+        return build_staticlib(&root, release);
     }
     // 3. Runtime workspace-root fallback: walk up from CWD and the exe
     // directory looking for a Cargo.toml whose tree contains
@@ -637,7 +644,7 @@ fn resolve_staticlib(release: bool) -> Result<(PathBuf, RtSource), FfiError> {
     // checkout_root() path is stale, so no ZZ_NATIVE_RT_DIR is required
     // when building from a source checkout on any machine.
     if let Some(root) = runtime_checkout_root() {
-        return Ok((build_staticlib(&root, release)?, RtSource::Cargo));
+        return build_staticlib(&root, release);
     }
     // 4. Release install: archive shipped next to the binaries.
     if let Some(dir) = find_bundled_libdir() {
@@ -853,7 +860,18 @@ fn find_shipped_libstd(libdir: &std::path::Path, os: TargetOs) -> Option<String>
     found.pop()
 }
 
-fn build_staticlib(root: &std::path::Path, release: bool) -> Result<PathBuf, FfiError> {
+/// Build or reuse the native runtime archive: returns the path to link and
+/// how it was obtained (content-addressed cache hit vs cargo build).
+fn build_staticlib(root: &std::path::Path, release: bool) -> Result<(PathBuf, RtSource), FfiError> {
+    // Content-addressed user cache first: survives `cargo clean`, crate
+    // re-clones and separate checkouts of the same source. The key covers
+    // the whole runtime tree, the workspace manifest/lockfile and
+    // rustflags, so a hit is byte-equivalent to rebuilding.
+    let cache_base = zz_paths::paths::build_cache_dir();
+    if let Some(hit) = cached_native_rt(&cache_base, root, release) {
+        return Ok((hit, RtSource::Cached));
+    }
+
     let lib = target_dir(root)
         .join(if release { "release" } else { "debug" })
         .join(lib_file_name());
@@ -863,7 +881,11 @@ fn build_staticlib(root: &std::path::Path, release: bool) -> Result<PathBuf, Ffi
         if let Some(lib_mtime) = file_mtime(&lib) {
             let src_dir = root.join("crates").join("zz_native_rt").join("src");
             if !src_dir_mtime_newer_than(&src_dir, lib_mtime) {
-                return snapshot_staticlib(&lib, release);
+                let snap = snapshot_staticlib(&lib, release)?;
+                return Ok(match publish_native_rt(&cache_base, root, release, &snap) {
+                    Some(path) => (path, RtSource::Cached),
+                    None => (snap, RtSource::Cargo),
+                });
             }
         }
     }
@@ -907,7 +929,204 @@ fn build_staticlib(root: &std::path::Path, release: bool) -> Result<PathBuf, Ffi
     // final binaries are stripped anyway (`-s`), so debug info is pure
     // link cost: `snapshot_staticlib` strips the copy it publishes and
     // never mutates the cargo output (a linker may be reading it).
-    snapshot_staticlib(&lib, release)
+    let snap = snapshot_staticlib(&lib, release)?;
+    Ok(match publish_native_rt(&cache_base, root, release, &snap) {
+        Some(path) => (path, RtSource::Cached),
+        None => (snap, RtSource::Cargo),
+    })
+}
+
+/// Bump when the key inputs or the on-disk layout change; old entries then
+/// stop matching (and are pruned by age/count).
+const NATIVE_RT_CACHE_VERSION: &str = "v1";
+
+/// Content key for a workspace-built `zz_native_rt` archive.
+///
+/// Covers every byte under `crates/zz_native_rt`, the workspace manifest
+/// and lockfile (dependency graph + `[profile.*]`), Cargo config and
+/// rustflags (they change codegen), and the profile. Returns `None` when
+/// `root` is not the workspace layout — an explicit `ZZ_NATIVE_RT_DIR`
+/// points at an arbitrary crate tree whose inputs cannot be enumerated
+/// safely, so those builds are never cached.
+fn native_rt_cache_key(root: &std::path::Path, release: bool) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+
+    let crate_dir = root.join("crates").join("zz_native_rt");
+    if !crate_dir.join("Cargo.toml").is_file() {
+        return None;
+    }
+
+    // Read the tree once. Symlinks are skipped: they can point outside the
+    // checkout, and following them would make the key depend on unrelated
+    // machine state.
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    collect_key_files(&crate_dir, &crate_dir, &mut files).ok()?;
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let manifest = std::fs::read(root.join("Cargo.toml")).ok()?;
+    let lock = std::fs::read(root.join("Cargo.lock")).unwrap_or_default();
+    let cargo_config = ["config.toml", "config"]
+        .iter()
+        .find_map(|name| std::fs::read(root.join(".cargo").join(name)).ok())
+        .unwrap_or_default();
+    let rustflags = std::env::var_os("CARGO_ENCODED_RUSTFLAGS")
+        .or_else(|| std::env::var_os("RUSTFLAGS"))
+        .map(|v| v.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let feed = |h: &mut std::collections::hash_map::DefaultHasher| {
+        NATIVE_RT_CACHE_VERSION.hash(h);
+        release.hash(h);
+        manifest.hash(h);
+        lock.hash(h);
+        cargo_config.hash(h);
+        rustflags.hash(h);
+        for (rel, bytes) in &files {
+            rel.hash(h);
+            bytes.hash(h);
+        }
+    };
+    // Two independently salted passes: 128 bits, since a collision would
+    // link a stale archive instead of rebuilding.
+    let mut lo = std::collections::hash_map::DefaultHasher::new();
+    let mut hi = std::collections::hash_map::DefaultHasher::new();
+    0u8.hash(&mut lo);
+    1u8.hash(&mut hi);
+    feed(&mut lo);
+    feed(&mut hi);
+    Some(format!(
+        "{NATIVE_RT_CACHE_VERSION}-{:016x}{:016x}",
+        lo.finish(),
+        hi.finish()
+    ))
+}
+
+/// Append `(relative path, contents)` for every regular file under `dir`.
+fn collect_key_files(
+    dir: &std::path::Path,
+    base: &std::path::Path,
+    out: &mut Vec<(String, Vec<u8>)>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            collect_key_files(&path, base, out)?;
+        } else if kind.is_file() {
+            let rel = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push((rel, std::fs::read(&path)?));
+        }
+    }
+    Ok(())
+}
+
+/// True when `path` starts with the `ar` magic (`!<arch>\n`). Rust
+/// staticlibs are ar archives on every platform (`.a`, and MSVC `.lib`),
+/// so this rejects empty or truncated cache entries without shelling out.
+fn is_static_archive(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut magic = [0u8; 8];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .map(|_| magic == *b"!<arch>\n")
+        .unwrap_or(false)
+}
+
+/// Reusable archive for this source tree, if a complete one is cached.
+fn cached_native_rt(
+    base: &std::path::Path,
+    root: &std::path::Path,
+    release: bool,
+) -> Option<PathBuf> {
+    let key = native_rt_cache_key(root, release)?;
+    let lib = base.join("native-rt").join(key).join(lib_file_name());
+    is_static_archive(&lib).then_some(lib)
+}
+
+/// Publish `snapshot` into the user cache and return the cached path.
+///
+/// Best effort: a failure only means this build keeps linking the
+/// target-dir snapshot; it never fails the build or poisons the cache.
+/// Publishing is a temp copy followed by one atomic `rename`, so readers
+/// only ever observe a complete archive and concurrent publishers of the
+/// same key race harmlessly (identical bytes, one rename wins).
+fn publish_native_rt(
+    base: &std::path::Path,
+    root: &std::path::Path,
+    release: bool,
+    snapshot: &std::path::Path,
+) -> Option<PathBuf> {
+    let key = native_rt_cache_key(root, release)?;
+    let dir = base.join("native-rt").join(&key);
+    let dst = dir.join(lib_file_name());
+    if is_static_archive(&dst) {
+        return Some(dst);
+    }
+    if !is_static_archive(snapshot) {
+        return None;
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let tmp = dir.join(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+    copy_shared(snapshot, &tmp).ok()?;
+    // A stale invalid entry may occupy `dst`. On Windows `rename` does not
+    // replace, so drop it first; POSIX rename replaces atomically and must
+    // not open an ENOENT window for a concurrent linker.
+    #[cfg(windows)]
+    let _ = std::fs::remove_file(&dst);
+    if std::fs::rename(&tmp, &dst).is_err() {
+        // Lost the publish race: adopt the winner if it is complete.
+        let _ = std::fs::remove_file(&tmp);
+        return cached_native_rt(base, root, release);
+    }
+    prune_native_rt_cache(&base.join("native-rt"), &key);
+    Some(dst)
+}
+
+/// Bound cache growth: keep the newest [`NATIVE_RT_KEEP`] archives and
+/// delete older ones only after a grace window, so a build that resolved a
+/// key moments ago can always finish linking.
+fn prune_native_rt_cache(root: &std::path::Path, keep: &str) {
+    use std::time::{Duration, SystemTime};
+    const NATIVE_RT_KEEP: usize = 3;
+    const GRACE: Duration = Duration::from_secs(24 * 60 * 60);
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let mut dirs: Vec<(SystemTime, PathBuf, String)> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|e| {
+            let mtime = e.metadata().ok()?.modified().ok()?;
+            let name = e.file_name().to_string_lossy().into_owned();
+            Some((mtime, e.path(), name))
+        })
+        .collect();
+    if dirs.len() <= NATIVE_RT_KEEP {
+        return;
+    }
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.0));
+    let now = SystemTime::now();
+    for (mtime, path, name) in dirs.into_iter().skip(NATIVE_RT_KEEP) {
+        if name == keep {
+            continue;
+        }
+        if now.duration_since(mtime).map(|d| d < GRACE).unwrap_or(true) {
+            continue;
+        }
+        let _ = std::fs::remove_dir_all(&path);
+    }
 }
 
 /// Copy `src` to `dst` through a share-all read handle.
@@ -1854,7 +2073,10 @@ mod tests {
                     "resolved archive must exist: {}",
                     lib.display()
                 );
-                assert!(matches!(source, RtSource::Cargo | RtSource::Prebuilt));
+                assert!(matches!(
+                    source,
+                    RtSource::Cargo | RtSource::Cached | RtSource::Prebuilt
+                ));
                 assert!(!strategy.is_empty(), "strategy must be described");
             }
             Err(e) => {
@@ -1899,5 +2121,140 @@ mod tests {
             assert_eq!(name, "libzz_native_rt.a", "Unix/macOS uses .a");
         }
         assert!(!name.is_empty());
+    }
+
+    /// Throw-away workspace layout: `<dir>/Cargo.toml`, `Cargo.lock`, and a
+    /// `crates/zz_native_rt` tree. Caller removes the dir.
+    fn temp_workspace(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "zz-ffi-rt-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let crate_dir = dir.join("crates").join("zz_native_rt");
+        std::fs::create_dir_all(crate_dir.join("src")).expect("mkdir");
+        std::fs::write(dir.join("Cargo.toml"), "[workspace]\n").expect("manifest");
+        std::fs::write(dir.join("Cargo.lock"), "version = 3\n").expect("lock");
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            "[package]\nname = \"zz_native_rt\"\n",
+        )
+        .expect("crate manifest");
+        std::fs::write(crate_dir.join("src").join("lib.rs"), "pub fn a() {}\n").expect("source");
+        dir
+    }
+
+    #[test]
+    fn native_rt_cache_key_is_content_addressed() {
+        let root = temp_workspace("key");
+        let key = native_rt_cache_key(&root, true).expect("workspace key");
+        assert_eq!(key, native_rt_cache_key(&root, true).unwrap());
+        // 128-bit hex + a readable version prefix.
+        assert!(key.starts_with(NATIVE_RT_CACHE_VERSION));
+        assert_eq!(key.len(), NATIVE_RT_CACHE_VERSION.len() + 1 + 32);
+
+        // Profile, source bytes, and the locked dependency graph all feed it.
+        assert_ne!(key, native_rt_cache_key(&root, false).unwrap());
+        std::fs::write(
+            root.join("crates")
+                .join("zz_native_rt")
+                .join("src")
+                .join("lib.rs"),
+            "pub fn a() { let _ = 1; }\n",
+        )
+        .unwrap();
+        assert_ne!(key, native_rt_cache_key(&root, true).unwrap());
+        let changed = native_rt_cache_key(&root, true).unwrap();
+        std::fs::write(root.join("Cargo.lock"), "version = 4\n").unwrap();
+        assert_ne!(changed, native_rt_cache_key(&root, true).unwrap());
+
+        // A directory that is not the workspace layout is never cached.
+        let plain = root.join("elsewhere");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(native_rt_cache_key(&plain, true), None);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn native_rt_cache_publish_and_reuse() {
+        let root = temp_workspace("publish");
+        let base = root.join("cache");
+        let snapshot = root.join("snapshot.a");
+        let mut bytes = b"!<arch>\n".to_vec();
+        bytes.resize(4096, 0x7f);
+        std::fs::write(&snapshot, &bytes).unwrap();
+
+        assert_eq!(cached_native_rt(&base, &root, true), None);
+        let published = publish_native_rt(&base, &root, true, &snapshot).expect("publish");
+        assert!(published.starts_with(base.join("native-rt")));
+        assert_eq!(std::fs::read(&published).unwrap(), bytes);
+        assert_eq!(
+            cached_native_rt(&base, &root, true).as_ref(),
+            Some(&published)
+        );
+        // Empty or non-archive snapshots are never published.
+        let empty = root.join("empty.a");
+        std::fs::write(&empty, b"").unwrap();
+        assert_eq!(publish_native_rt(&base, &root, false, &empty), None);
+        let garbage = root.join("garbage.a");
+        std::fs::write(&garbage, vec![0x7fu8; 4096]).unwrap();
+        assert_eq!(publish_native_rt(&base, &root, false, &garbage), None);
+        assert_eq!(cached_native_rt(&base, &root, false), None);
+        // A corrupted cache entry (right key, wrong bytes) is not linked.
+        let key = native_rt_cache_key(&root, true).unwrap();
+        let corrupt = base.join("native-rt").join(key).join(lib_file_name());
+        std::fs::write(&corrupt, b"not an archive").unwrap();
+        assert_eq!(cached_native_rt(&base, &root, true), None);
+
+        // Moving the source bumps the key: the old entry is not reused.
+        std::fs::write(
+            root.join("crates")
+                .join("zz_native_rt")
+                .join("src")
+                .join("lib.rs"),
+            "pub fn b() {}\n",
+        )
+        .unwrap();
+        assert_eq!(cached_native_rt(&base, &root, true), None);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Bounded growth: superseded archives are deleted only after the grace
+    /// window, so a build that resolved a key moments ago still links.
+    #[cfg(unix)]
+    #[test]
+    fn native_rt_cache_prunes_old_entries() {
+        let root = temp_workspace("prune");
+        let rt = root.join("cache").join("native-rt");
+        for i in 0..5 {
+            let dir = rt.join(format!("k{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("lib.a"), b"x").unwrap();
+        }
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
+        for i in 0..4 {
+            let dir = rt.join(format!("k{i}"));
+            std::fs::File::open(&dir)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+
+        prune_native_rt_cache(&rt, "k4");
+
+        let mut left: Vec<String> = std::fs::read_dir(&rt)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left.len(), 3, "newest 3 kept: {left:?}");
+        assert!(rt.join("k4").exists(), "just-published entry survives");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
