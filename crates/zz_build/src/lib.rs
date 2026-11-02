@@ -1307,7 +1307,7 @@ fn typed_program_for_phased(
         stmts: user_stmts,
         span: user_span,
     };
-    let user_tp = zz_hir::build_program(
+    let mut user_tp = zz_hir::build_program(
         &user_program,
         HashMap::new(),
         loaded.funcs,
@@ -1315,6 +1315,10 @@ fn typed_program_for_phased(
         loaded.aliases,
         loaded.enums,
     );
+    // Tag each loaded module namespace with its origin so the codegen can
+    // split unit headers into a project section and a dependency section,
+    // letting external package units be reused across projects.
+    user_tp.program.module_origins = loaded.module_origins.clone();
     if !user_tp.diagnostics.is_empty() {
         for d in &user_tp.diagnostics {
             if d.severity == zz_frontend::diag::Severity::Error {

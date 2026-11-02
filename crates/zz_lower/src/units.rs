@@ -22,11 +22,21 @@ use super::{mangle, Lowerer};
 /// Prelude bucket for bare (dotless) names.
 pub const PRELUDE_NS: &str = "_prelude";
 
-/// One module's translation-unit body (header shared, see [`LoweredUnits`]).
+/// One module's translation unit.
+///
+/// `header` + `code` is the exact source compiled for this unit and the
+/// exact input hashed into its object-cache key, so a unit only misses the
+/// cache when something it can actually reach changed. Stdlib units omit
+/// program-only declarations (user prototypes, globals, the init driver),
+/// which is what keeps their objects reusable across unrelated edits and
+/// across projects.
 #[derive(Debug)]
 pub struct CodeUnit {
     /// Module namespace (or `_prelude`).
     pub ns: String,
+    /// Declarations this unit compiles against (runtime + the reachable
+    /// subset of program/stdlib declarations).
+    pub header: String,
     /// C code: owned global defs + function bodies + closure defs +
     /// `zz_init_<ns>()` (+ `zz_main` glue when `ns` is the entry).
     pub code: String,
@@ -35,8 +45,10 @@ pub struct CodeUnit {
 /// Partitioned lowering output.
 #[derive(Debug)]
 pub struct LoweredUnits {
-    /// Shared C header: runtime decls, struct preamble, extern globals,
-    /// extern prototypes, closure forward decls. Prepended to every unit.
+    /// Header of the entry unit: the superset (runtime, every struct,
+    /// reachable prototypes, globals, init driver and closure
+    /// declarations). Kept for dumps and structural tests; the compiler
+    /// uses each [`CodeUnit::header`] so units stay narrowly keyed.
     pub header: String,
     /// One unit per namespace with reachable code, encounter order.
     pub units: Vec<CodeUnit>,
@@ -95,10 +107,30 @@ impl Lowerer {
         let mut fns: HashMap<String, String> = HashMap::new();
         let mut inits: HashMap<String, String> = HashMap::new();
         let mut closures: HashMap<String, Vec<String>> = HashMap::new();
+        // Closure forward declarations, attributed to the unit that emitted
+        // the literal (a closure is never referenced across units).
+        let mut closures_fwd: HashMap<String, String> = HashMap::new();
         // Global name -> owning namespace (first declarer wins).
         let mut owners: HashMap<String, String> = HashMap::new();
         // Init-driver call order (namespace first appearance).
         let mut init_order: Vec<String> = Vec::new();
+        // Namespaces that contain at least one program-defined symbol.
+        // Everything else is stdlib-owned and gets the narrow header, so
+        // user edits cannot invalidate its cached object.
+        let mut program_ns: HashSet<String> = HashSet::new();
+        // `None` outside the precompiled (AOT) path: header partitioning
+        // only pays off there, and skipping the stdlib scan keeps unit
+        // lowering in unit tests free of stdlib compilation.
+        let stdlib_funcs: Option<&'static HashSet<String>> =
+            self.precompiled.then(stdlib_func_names);
+        let is_stdlib_fn = |fname: &str| stdlib_funcs.is_some_and(|s| s.contains(fname));
+        // A namespace is package-owned when the loader tagged it `"pkg"`
+        // (external ZZ dependency). Package symbols live in the dependency
+        // header section so their units stay stable across unrelated
+        // project edits and across projects sharing the same package set.
+        let is_pkg_ns =
+            |ns: &str| self.tp.module_origins.get(ns).map(|s| s.as_str()) == Some("pkg");
+        let is_pkg_fn = |fname: &str| is_pkg_ns(ns_of(fname));
 
         // Hoisted cache (same data collect_globals computes, once per Lowerer).
         let mut names = NameCtx::new();
@@ -106,12 +138,6 @@ impl Lowerer {
         self.seed_scalar_fns(&mut names);
         let mut global_init_done: HashSet<String> = HashSet::new();
         let mut current_ns = PRELUDE_NS.to_string();
-
-        // Drain newly pushed closure defs into `dst` (attribution by emitter).
-        let drain_closures = |dst: &mut Vec<String>, lowerer: &Lowerer, before: usize| {
-            let fresh: Vec<String> = lowerer.closure_defs.borrow_mut().split_off(before);
-            dst.extend(fresh);
-        };
 
         for stmt in self.tp.stmts() {
             match stmt {
@@ -127,11 +153,20 @@ impl Lowerer {
                     }
                     let ns = ns_of(&fname).to_string();
                     current_ns = ns.clone();
+                    if !is_stdlib_fn(&fname) && !is_pkg_fn(&fname) {
+                        program_ns.insert(ns.clone());
+                    }
                     let before = self.closure_defs.borrow().len();
+                    let before_fwd = self.closure_forward_decls.borrow().len();
                     let code = self.emit_function(&fname, params, b);
                     buf_for(&ns, &mut order, &mut fns).push_str(&code);
-                    let slot = closures.entry(ns).or_default();
-                    drain_closures(slot, self, before);
+                    drain_closures(
+                        closures.entry(ns.clone()).or_default(),
+                        closures_fwd.entry(ns).or_default(),
+                        self,
+                        before,
+                        before_fwd,
+                    );
                 }
                 Impl { name, methods, .. } => {
                     let tname = name.join(".");
@@ -149,22 +184,35 @@ impl Lowerer {
                             if !self.reachable_funcs.contains(&fname) {
                                 continue;
                             }
+                            if !is_stdlib_fn(&fname) && !is_pkg_fn(&fname) {
+                                program_ns.insert(ns.clone());
+                            }
                             let before = self.closure_defs.borrow().len();
+                            let before_fwd = self.closure_forward_decls.borrow().len();
                             let code = self.emit_function(&fname, params, b);
                             buf_for(&ns, &mut order, &mut fns).push_str(&code);
-                            let slot = closures.entry(ns.clone()).or_default();
-                            drain_closures(slot, self, before);
+                            drain_closures(
+                                closures.entry(ns.clone()).or_default(),
+                                closures_fwd.entry(ns.clone()).or_default(),
+                                self,
+                                before,
+                                before_fwd,
+                            );
                         }
                     }
                 }
                 Struct { .. } | TypeAlias { .. } | Enum { .. } | Import { .. } => {}
                 Decl { name, value, .. } => {
                     let ns = current_ns.clone();
+                    if !is_pkg_ns(&ns) {
+                        program_ns.insert(ns.clone());
+                    }
                     claim_owner(&mut owners, &name.name, &ns);
                     if !init_order.contains(&ns) {
                         init_order.push(ns.clone());
                     }
                     let before = self.closure_defs.borrow().len();
+                    let before_fwd = self.closure_forward_decls.borrow().len();
                     let mut out = String::new();
                     emit_top_decl(
                         self,
@@ -175,11 +223,19 @@ impl Lowerer {
                         &mut global_init_done,
                     );
                     buf_for(&ns, &mut order, &mut inits).push_str(&out);
-                    let slot = closures.entry(ns).or_default();
-                    drain_closures(slot, self, before);
+                    drain_closures(
+                        closures.entry(ns.clone()).or_default(),
+                        closures_fwd.entry(ns.clone()).or_default(),
+                        self,
+                        before,
+                        before_fwd,
+                    );
                 }
                 Destructure { pat, value, .. } => {
                     let ns = current_ns.clone();
+                    if !is_pkg_ns(&ns) {
+                        program_ns.insert(ns.clone());
+                    }
                     for n in destructure_top_names(pat) {
                         claim_owner(&mut owners, &n, &ns);
                     }
@@ -187,6 +243,7 @@ impl Lowerer {
                         init_order.push(ns.clone());
                     }
                     let before = self.closure_defs.borrow().len();
+                    let before_fwd = self.closure_forward_decls.borrow().len();
                     let mut out = String::new();
                     self.emit_destructure_global(
                         pat,
@@ -196,20 +253,34 @@ impl Lowerer {
                         &mut global_init_done,
                     );
                     buf_for(&ns, &mut order, &mut inits).push_str(&out);
-                    let slot = closures.entry(ns).or_default();
-                    drain_closures(slot, self, before);
+                    drain_closures(
+                        closures.entry(ns.clone()).or_default(),
+                        closures_fwd.entry(ns.clone()).or_default(),
+                        self,
+                        before,
+                        before_fwd,
+                    );
                 }
                 other => {
                     let ns = current_ns.clone();
+                    if !is_pkg_ns(&ns) {
+                        program_ns.insert(ns.clone());
+                    }
                     if !init_order.contains(&ns) {
                         init_order.push(ns.clone());
                     }
                     let before = self.closure_defs.borrow().len();
+                    let before_fwd = self.closure_forward_decls.borrow().len();
                     let mut out = String::new();
                     self.emit_stmt(other, &mut names, &mut out, false);
                     buf_for(&ns, &mut order, &mut inits).push_str(&out);
-                    let slot = closures.entry(ns).or_default();
-                    drain_closures(slot, self, before);
+                    drain_closures(
+                        closures.entry(ns.clone()).or_default(),
+                        closures_fwd.entry(ns.clone()).or_default(),
+                        self,
+                        before,
+                        before_fwd,
+                    );
                 }
             }
         }
@@ -231,6 +302,9 @@ impl Lowerer {
                 continue;
             }
             let ans = ns_of(alias).to_string();
+            // The forwarder is program code even when it targets a stdlib
+            // function: it exists only because this program imported it.
+            program_ns.insert(ans.clone());
             buf_for(&ans, &mut order, &mut fns).push_str(&format!(
                 "zz_value zz_fn_{}(zz_value *args, size_t argc) {{ return zz_fn_{}(args, argc); }}\n",
                 mangle(alias),
@@ -238,15 +312,34 @@ impl Lowerer {
             ));
         }
 
-        // Shared header: runtime decls + preamble + extern globals/protos.
+        // Declarations every unit needs. Struct layouts and the generated
+        // debug helpers are program-wide and layout-sensitive: keep them in
+        // the stable base so a body edit never invalidates a unit.
         let struct_preamble = self.lower_structs_preamble();
         let struct_debug_fns = self.lower_struct_debug_fns();
         let mut glob_ext = String::new();
+        let mut glob_ext_dep = String::new();
         for (zz_name, cid, ctype, _) in &self.global_list {
             let _ = zz_name;
-            glob_ext.push_str(&format!("extern {ctype} {cid};\n"));
+            let line = format!("extern {ctype} {cid};\n");
+            let owner = owners
+                .get(zz_name)
+                .map(|o| o.as_str())
+                .unwrap_or(PRELUDE_NS);
+            if self.tp.module_origins.get(owner).map(|s| s.as_str()) == Some("pkg") {
+                glob_ext_dep.push_str(&line);
+            } else {
+                glob_ext.push_str(&line);
+            }
         }
-        let mut forward_decls = String::new();
+        // Prototypes split by ownership. Stdlib prototypes are stable for
+        // a given import set, so they join the base header; package
+        // prototypes join the dependency section (shared by every unit);
+        // program prototypes change with user code and stay out of stdlib
+        // and package units.
+        let mut stdlib_decls = String::new();
+        let mut dep_decls = String::new();
+        let mut program_decls = String::new();
         let mut seen: HashSet<String> = HashSet::new();
         // Deterministic proto order: sorted (single-TU path keeps its
         // HashSet order for byte-identity; units are order-free).
@@ -265,6 +358,13 @@ impl Lowerer {
             {
                 continue;
             }
+            let decls = if is_stdlib_fn(fname) {
+                &mut stdlib_decls
+            } else if is_pkg_fn(fname) {
+                &mut dep_decls
+            } else {
+                &mut program_decls
+            };
             let first_struct_c = self
                 .tp
                 .funcs
@@ -274,11 +374,11 @@ impl Lowerer {
                 .filter(|_| self.is_impl_method(fname))
                 .map(|t| self.type_to_c(&t));
             match first_struct_c {
-                Some(sct) => forward_decls.push_str(&format!(
+                Some(sct) => decls.push_str(&format!(
                     "zz_value zz_fn_{}({sct} *self, zz_value *args, size_t argc);\n",
                     mangle(fname)
                 )),
-                None => forward_decls.push_str(&format!(
+                None => decls.push_str(&format!(
                     "zz_value zz_fn_{}(zz_value *args, size_t argc);\n",
                     mangle(fname)
                 )),
@@ -296,11 +396,10 @@ impl Lowerer {
                     } else {
                         params.join(", ")
                     };
-                    forward_decls.push_str(&format!("{ret} zz_fn_{}_u({psig});\n", mangle(fname)));
+                    decls.push_str(&format!("{ret} zz_fn_{}_u({psig});\n", mangle(fname)));
                 }
             }
         }
-        let closure_fwd = self.closure_forward_decls.borrow().join("");
         let extern_pre = self.extern_prelude();
         let extern_section = if extern_pre.is_empty() {
             String::new()
@@ -328,18 +427,19 @@ impl Lowerer {
         // Every namespace with code gets a unit even without inits, so no
         // reachable body is dropped (init fns only for namespaces in
         // init_order — empty init is still emitted for link uniformity).
-        // Computed here (before the header) so every unit's shared header can
-        // forward-declare all cross-unit `zz_init_<ns>()` symbols.
         let mut all_ns: Vec<String> = order.clone();
         for ns in &init_order {
             if !all_ns.contains(ns) {
                 all_ns.push(ns.clone());
             }
         }
+        // The entry unit always owns the `zz_main` driver (program glue),
+        // even in the degenerate case where its namespace is stdlib-named.
+        program_ns.insert(entry_ns.to_string());
 
-        // Init forward declarations so every TU can call `zz_init_<ns>()` for
-        // namespaces whose init body lives in another unit. Redundant
-        // identical declarations are valid C.
+        // Init forward declarations: only the entry unit's `zz_main` calls
+        // them, so only the entry header carries them. Non-entry units keep
+        // a smaller, more stable key.
         let init_fwd: String = all_ns
             .iter()
             .map(|ns| format!("void zz_init_{}(void);\n", mangle(ns)))
@@ -348,8 +448,7 @@ impl Lowerer {
         // Process-global arenas used by unit code (e.g. collection array
         // initializers, per-function scratch). In single-TU mode they're
         // declared `static` in `globals_decl`/`emit_function`; in unit mode
-        // every TU sees the shared header, so declare them `extern` here and
-        // define each once in the entry unit.
+        // they are `extern` here and defined once in the entry unit.
         //
         // Both arenas are initialized via a constructor: it runs before any
         // file-scope initializer that may bump-allocate (e.g. collection
@@ -359,10 +458,41 @@ impl Lowerer {
         // the arenas are process-global here and init bodies in every unit
         // reference them. A zeroed arena makes the first allocation take the
         // overflow path with `cap == 0`, overrunning the heap.
-        let header = format!(
-            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- module globals (extern) ----\n{glob_ext}extern zz_arena _static_arena;\nextern zz_arena _func_arena;\n// ---- forward declarations ----\n{forward_decls}{closure_fwd}{init_fwd}",
+        let base_header = format!(
+            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- stdlib forward declarations ----\n{stdlib_decls}// ---- dependency forward declarations ----\n{dep_decls}{glob_ext_dep}extern zz_arena _static_arena;\nextern zz_arena _func_arena;\n",
             runtime_h = RUNTIME_H,
+            runtime_c = runtime_c,
+            ffi_section = ffi_section,
+            extern_section = extern_section,
+            struct_preamble = struct_preamble,
+            struct_debug_fns = struct_debug_fns,
+            stdlib_decls = stdlib_decls,
+            dep_decls = dep_decls,
+            glob_ext_dep = glob_ext_dep,
         );
+        let program_header = format!(
+            "// ---- module globals (extern) ----\n{glob_ext}// ---- program forward declarations ----\n{program_decls}"
+        );
+        // Per-unit header: stable base + (program-only declarations for
+        // program units) + this unit's own closure declarations + the init
+        // driver for the entry. `header` + `code` is the exact TU, so a
+        // cache slug over it invalidates only what actually changed.
+        let make_header = |ns: &str| -> String {
+            let mut header = String::with_capacity(
+                base_header.len() + program_header.len() + init_fwd.len() + 256,
+            );
+            header.push_str(&base_header);
+            if program_ns.contains(ns) {
+                header.push_str(&program_header);
+            }
+            if let Some(fwd) = closures_fwd.get(ns) {
+                header.push_str(fwd);
+            }
+            if ns == entry_ns {
+                header.push_str(&init_fwd);
+            }
+            header
+        };
 
         // Assemble units: owned global defs + bodies + closures + init fn.
         let mut units: Vec<CodeUnit> = Vec::new();
@@ -389,6 +519,7 @@ impl Lowerer {
             ));
             units.push(CodeUnit {
                 ns: ns.clone(),
+                header: make_header(ns),
                 code,
             });
         }
@@ -443,9 +574,18 @@ impl Lowerer {
             }
             None => units.push(CodeUnit {
                 ns: entry_ns.to_string(),
+                header: make_header(entry_ns),
                 code: entry_code,
             }),
         }
+
+        // Public header = the entry unit's (superset) header, preserving the
+        // old "everything a unit could need" contract for dumps/tests.
+        let header = units
+            .iter()
+            .find(|u| u.ns == entry_ns)
+            .map(|u| u.header.clone())
+            .unwrap_or_else(|| make_header(entry_ns));
 
         LoweredUnits {
             header,
@@ -453,12 +593,7 @@ impl Lowerer {
             entry_ns: entry_ns.to_string(),
             needs_native_rt,
             needs_pg_link: zz_codegen_ffi::needs_pg_link(&expanded_natives),
-            needs_float_fmt: self.tp.types.values().any(super::type_has_float)
-                || self.tp.bindings.values().any(super::type_has_float)
-                || self.tp.funcs.values().any(|s| {
-                    s.params.iter().any(|(_, ty)| super::type_has_float(ty))
-                        || super::type_has_float(&s.ret)
-                }),
+            needs_float_fmt: super::needs_float_fmt(&self.tp, &self.reachable_funcs),
             needs_curl: zz_codegen_ffi::needs_curl_link(&expanded_natives),
             needs_sqlite: zz_codegen_ffi::needs_sqlite_link(&expanded_natives),
             unimplemented_natives: self.unimplemented_natives.borrow().clone(),
@@ -486,6 +621,59 @@ fn claim_owner(owners: &mut HashMap<String, String>, name: &str, ns: &str) {
     owners
         .entry(name.to_string())
         .or_insert_with(|| ns.to_string());
+}
+
+/// Move closure bodies and closure forward declarations emitted since the
+/// last drain into the unit that emitted the literal.
+///
+/// A closure is a value local to one function body, so it is never
+/// referenced from another unit; keeping its declarations in that unit's
+/// header lets unrelated units keep their object-cache keys.
+fn drain_closures(
+    defs: &mut Vec<String>,
+    fwd: &mut String,
+    lowerer: &Lowerer,
+    before_defs: usize,
+    before_fwd: usize,
+) {
+    defs.extend(lowerer.closure_defs.borrow_mut().split_off(before_defs));
+    let fresh = lowerer
+        .closure_forward_decls
+        .borrow_mut()
+        .split_off(before_fwd);
+    fwd.push_str(&fresh.concat());
+}
+
+/// Function names defined by the embedded pure-ZZ stdlib.
+///
+/// Header partitioning must never classify a user module as stdlib (that
+/// would omit a prototype its own unit needs), so ownership is derived from
+/// the compiled stdlib ASTs — including `impl` methods like
+/// `ArgsParser.parse` — instead of a name-prefix heuristic.
+fn stdlib_func_names() -> &'static HashSet<String> {
+    static NAMES: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut names = HashSet::new();
+        for program in zz_stdlib::zz_stdlib_programs().iter().flatten() {
+            for stmt in &program.program.stmts {
+                match stmt {
+                    Stmt::Func { name, .. } => {
+                        names.insert(name.join("."));
+                    }
+                    Stmt::Impl { name, methods, .. } => {
+                        let owner = name.join(".");
+                        for method in methods {
+                            if let Stmt::Func { name: mname, .. } = method {
+                                names.insert(format!("{owner}.{}", mname.join(".")));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        names
+    })
 }
 
 /// Top-level binding names in a destructure pattern.
@@ -564,5 +752,296 @@ fn emit_top_decl(
     }
     if let Expr::Array { elems, .. } = value {
         names.set_array_len(zz_name, elems.len());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zz_hir::TypedProgram;
+
+    /// Merge the embedded pure-ZZ stdlib with a user program the way the
+    /// AOT pipeline does (loader seeds stdlib signatures, HIR merge adds
+    /// stdlib bodies, DCE prunes from `main`).
+    fn lower_merged(src: &str) -> LoweredUnits {
+        let parsed = zz_frontend::parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+
+        let mut funcs = zz_stdlib::stdlib_funcs();
+        let mut structs: HashMap<String, zz_checker::StructSig> = HashMap::new();
+        let mut enums: HashMap<String, zz_checker::EnumSig> = HashMap::new();
+        let stdlib: Vec<TypedProgram> = zz_stdlib::zz_stdlib_programs()
+            .iter()
+            .filter_map(|p| p.as_ref().ok().cloned())
+            .collect();
+        for program in &stdlib {
+            for (name, sig) in &program.funcs {
+                funcs.entry(name.clone()).or_insert_with(|| sig.clone());
+            }
+            for (name, sig) in &program.structs {
+                structs.entry(name.clone()).or_insert_with(|| sig.clone());
+            }
+            for (name, sig) in &program.enums {
+                enums.entry(name.clone()).or_insert_with(|| sig.clone());
+            }
+        }
+        let user = zz_hir::build_program(
+            &parsed.program,
+            HashMap::new(),
+            funcs,
+            structs,
+            HashMap::new(),
+            enums,
+        );
+        assert!(
+            !user
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == zz_frontend::diag::Severity::Error),
+            "type errors: {:?}",
+            user.diagnostics
+        );
+        let mut programs = stdlib;
+        programs.push(user.program);
+        let merged = zz_hir::merge_typed_programs(programs);
+        let (pruned, reach) = zz_hir::dce(&merged, "main");
+        let mut lowerer = Lowerer::new(
+            reach.funcs.clone(),
+            reach.natives.clone(),
+            "main".to_string(),
+            pruned,
+        );
+        lowerer.set_precompiled(true);
+        lowerer.lower_units("main")
+    }
+
+    /// Like [`lower_merged`] but tags each namespace with an origin so the
+    /// dependency/project header split can be exercised. `origins` maps
+    /// namespace → `"pkg"` or `"project"`; absent namespaces count as
+    /// project.
+    fn lower_merged_origins(src: &str, origins: HashMap<String, String>) -> LoweredUnits {
+        let parsed = zz_frontend::parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+
+        let mut funcs = zz_stdlib::stdlib_funcs();
+        let mut structs: HashMap<String, zz_checker::StructSig> = HashMap::new();
+        let mut enums: HashMap<String, zz_checker::EnumSig> = HashMap::new();
+        let stdlib: Vec<TypedProgram> = zz_stdlib::zz_stdlib_programs()
+            .iter()
+            .filter_map(|p| p.as_ref().ok().cloned())
+            .collect();
+        for program in &stdlib {
+            for (name, sig) in &program.funcs {
+                funcs.entry(name.clone()).or_insert_with(|| sig.clone());
+            }
+            for (name, sig) in &program.structs {
+                structs.entry(name.clone()).or_insert_with(|| sig.clone());
+            }
+            for (name, sig) in &program.enums {
+                enums.entry(name.clone()).or_insert_with(|| sig.clone());
+            }
+        }
+        let user = zz_hir::build_program(
+            &parsed.program,
+            HashMap::new(),
+            funcs,
+            structs,
+            HashMap::new(),
+            enums,
+        );
+        assert!(
+            !user
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == zz_frontend::diag::Severity::Error),
+            "type errors: {:?}",
+            user.diagnostics
+        );
+        let mut programs = stdlib;
+        programs.push(user.program);
+        let mut merged = zz_hir::merge_typed_programs(programs);
+        merged.module_origins = origins;
+        let (pruned, reach) = zz_hir::dce(&merged, "main");
+        let mut lowerer = Lowerer::new(
+            reach.funcs.clone(),
+            reach.natives.clone(),
+            "main".to_string(),
+            pruned,
+        );
+        lowerer.set_precompiled(true);
+        lowerer.lower_units("main")
+    }
+
+    fn unit<'a>(units: &'a LoweredUnits, ns: &str) -> &'a CodeUnit {
+        units.units.iter().find(|u| u.ns == ns).unwrap_or_else(|| {
+            panic!(
+                "missing unit {ns}; have {:?}",
+                units.units.iter().map(|u| &u.ns).collect::<Vec<_>>()
+            )
+        })
+    }
+
+    /// The whole point of per-unit headers: editing user code must leave a
+    /// stdlib unit byte-identical, so its cached object is reusable across
+    /// builds and across projects.
+    #[test]
+    fn stdlib_unit_is_stable_across_program_edits() {
+        let a = lower_merged(r#"func main() { println(str.is_empty("")) }"#);
+        let b = lower_merged(r#"func main() { println(str.is_empty("x")); println(40 + 2) }"#);
+
+        let str_a = unit(&a, "str");
+        let str_b = unit(&b, "str");
+        assert_eq!(
+            str_a.header, str_b.header,
+            "stdlib header must not depend on user code"
+        );
+        assert_eq!(
+            str_a.code, str_b.code,
+            "stdlib body must not depend on user code"
+        );
+
+        // Program-only sections never reach the stdlib unit ...
+        assert!(!str_a.header.contains("zz_fn_main("), "{}", str_a.header);
+        assert!(!str_a
+            .header
+            .contains("// ---- module globals (extern) ----"));
+        assert!(!str_a.header.contains("zz_init__prelude"));
+        // ... while program units see every prototype they can call.
+        let prelude = unit(&a, PRELUDE_NS);
+        assert!(prelude.header.contains("zz_fn_main("), "{}", prelude.header);
+        assert!(prelude
+            .header
+            .contains("// ---- module globals (extern) ----"));
+        assert!(
+            prelude.header.contains("zz_fn_str__is_empty("),
+            "{}",
+            prelude.header
+        );
+        // The init driver is entry-only: `zz_main` lives there and is the
+        // only caller of `zz_init_*`.
+        let entry = unit(&a, "main");
+        assert!(entry.header.contains("zz_init_str"), "{}", entry.header);
+        assert!(
+            entry.header.contains("zz_init__prelude"),
+            "{}",
+            entry.header
+        );
+        assert!(!str_a.header.contains("zz_init_str"), "{}", str_a.header);
+        // `LoweredUnits::header` stays the entry-unit superset.
+        assert_eq!(a.header, entry.header);
+    }
+
+    /// Direct callers that never set `precompiled` (unit tests, embed-only
+    /// paths) keep the old whole-program header contract: no stdlib scan,
+    /// no partitioning, same generated C.
+    #[test]
+    fn non_precompiled_lowering_keeps_the_shared_header() {
+        let parsed = zz_frontend::parse("func main() { println(1) }");
+        assert!(parsed.errors.is_empty());
+        let user = zz_hir::build_program(
+            &parsed.program,
+            HashMap::new(),
+            zz_stdlib::stdlib_funcs(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let (pruned, reach) = zz_hir::dce(&user.program, "main");
+        let lowerer = Lowerer::new(
+            reach.funcs.clone(),
+            reach.natives.clone(),
+            "main".to_string(),
+            pruned,
+        );
+        let units = lowerer.lower_units("main");
+        let prelude = unit(&units, PRELUDE_NS);
+        assert!(prelude.header.contains("zz_fn_main("));
+        assert_eq!(units.header, unit(&units, "main").header);
+    }
+
+    /// A package unit carries the dependency section (its own prototypes)
+    /// but no project-only sections, so it can be cached independently of
+    /// the program that imports it.
+    #[test]
+    fn pkg_unit_carries_only_dependency_header() {
+        let origins: HashMap<String, String> = [("pkg".to_string(), "pkg".to_string())].into();
+        let units = lower_merged_origins(
+            "func pkg.add(a: int, b: int) -> int { return a + b }\nfunc main() { pkg.add(1, 2) }",
+            origins,
+        );
+        let pkg = unit(&units, "pkg");
+        assert!(
+            pkg.header.contains("zz_fn_pkg__add("),
+            "pkg header must expose its own prototype\n{}",
+            pkg.header
+        );
+        // No project-only sections reach the package unit.
+        assert!(!pkg.header.contains("zz_fn_main("), "{}", pkg.header);
+        assert!(
+            !pkg.header.contains("// ---- module globals (extern) ----"),
+            "{}",
+            pkg.header
+        );
+        assert!(!pkg.header.contains("zz_init__prelude"), "{}", pkg.header);
+        // The package unit still compiles standalone-ish: its code defines
+        // the function it declares.
+        assert!(pkg.code.contains("zz_fn_pkg__add("), "{}", pkg.code);
+    }
+
+    /// The same external package imported by two different projects yields
+    /// a byte-identical package unit (header + code), so its object is
+    /// reusable across projects. Editing project code must not touch it.
+    #[test]
+    fn pkg_unit_is_reusable_across_projects() {
+        let origins: HashMap<String, String> = [("pkg".to_string(), "pkg".to_string())].into();
+        let pkg_src = "func pkg.add(a: int, b: int) -> int { return a + b }";
+        let proj_a = format!("{pkg_src}\nfunc main() {{ pkg.add(1, 2) }}");
+        let proj_b = format!("{pkg_src}\nfunc main() {{ pkg.add(3, 4) }}");
+        let a = lower_merged_origins(&proj_a, origins.clone());
+        let b = lower_merged_origins(&proj_b, origins.clone());
+
+        let pkg_a = unit(&a, "pkg");
+        let pkg_b = unit(&b, "pkg");
+        assert_eq!(
+            pkg_a.header, pkg_b.header,
+            "pkg header must be project-independent"
+        );
+        assert_eq!(
+            pkg_a.code, pkg_b.code,
+            "pkg body must be project-independent"
+        );
+
+        // Project units reflect the project edit (code differs).
+        let pre_a = unit(&a, PRELUDE_NS);
+        let pre_b = unit(&b, PRELUDE_NS);
+        assert_ne!(pre_a.code, pre_b.code, "project body must reflect the edit");
+    }
+
+    /// When no origin tag is present, every namespace falls back to
+    /// project (the pre-step-5 behavior), so no unit is wrongly treated as
+    /// a dependency.
+    #[test]
+    fn untagged_namespaces_stay_project_owned() {
+        let units = lower_merged_origins(
+            "func main() { println(str.is_empty(\"\")) }",
+            HashMap::new(),
+        );
+        let str_unit = unit(&units, "str");
+        // `str` is stdlib (via stdlib_func_names), not project: narrow header.
+        assert!(
+            !str_unit.header.contains("zz_fn_main("),
+            "{}",
+            str_unit.header
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        assert!(prelude.header.contains("zz_fn_main("), "{}", prelude.header);
     }
 }

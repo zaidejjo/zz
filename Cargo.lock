@@ -3887,6 +3887,7 @@ version = "0.4.0"
 dependencies = [
  "zz_codegen_runtime",
  "zz_native_rt",
+ "zz_paths",
 ]
 
 [[package]]

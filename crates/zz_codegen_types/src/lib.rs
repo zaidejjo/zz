@@ -74,7 +74,7 @@ impl BuildOptions {
             strip: true,
             static_link: false,
             gc_sections: true,
-            thin_lto: true,
+            thin_lto: false,
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,

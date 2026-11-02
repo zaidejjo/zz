@@ -674,29 +674,27 @@ pub fn build_native_units_with_sink(
                 u.code.push_str(&tables);
             }
             None => {
+                let header = lowered.header.clone();
                 lowered.units.push(units::CodeUnit {
                     ns: lowered.entry_ns.clone(),
+                    header,
                     code: tables,
                 });
             }
         }
     }
-    let pairs: Vec<(String, String)> = lowered
+    let sources: Vec<compile::UnitSource<'_>> = lowered
         .units
         .iter()
-        .map(|u| (u.ns.clone(), u.code.clone()))
+        .map(|u| compile::UnitSource {
+            ns: &u.ns,
+            header: &u.header,
+            code: &u.code,
+        })
         .collect();
     sink.generated(lowered.units.len());
     let t_cc = std::time::Instant::now();
-    compile::compile_units_with_sink(
-        &lowered.header,
-        &pairs,
-        out_path,
-        &opts,
-        target,
-        clang,
-        sink,
-    )?;
+    compile::compile_units_with_sink(&sources, out_path, &opts, target, clang, sink)?;
     if verbose {
         eprintln!("zz: timing units_cc_link={}ms", t_cc.elapsed().as_millis());
     }

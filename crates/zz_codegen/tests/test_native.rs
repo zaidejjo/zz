@@ -33,25 +33,8 @@ func main() {
 }
 
 fn native_run(src: &str) -> (i32, String) {
-    use std::collections::HashMap;
-    let parsed = zz_frontend::parse(src);
-    assert!(
-        parsed.errors.is_empty(),
-        "parse errors: {:?}",
-        parsed.errors
-    );
-    let funcs = zz_stdlib::stdlib_funcs();
-    let res = zz_hir::build_program(
-        &parsed.program,
-        HashMap::new(),
-        funcs,
-        HashMap::new(),
-        HashMap::new(),
-        HashMap::new(),
-    );
-    let tp = res.program;
-    let (pruned, reach) = zz_hir::dce(&tp, "main");
     use std::sync::atomic::{AtomicU64, Ordering};
+    let (pruned, reach) = pruned(src);
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
     let tmp = std::env::temp_dir().join(format!("zz-test-bug-{}-{uniq}", std::process::id()));
@@ -69,6 +52,79 @@ fn native_run(src: &str) -> (i32, String) {
     let r = zz_codegen::compile::run_binary(&bin, &[]).unwrap();
     let _ = std::fs::remove_dir_all(&tmp);
     r
+}
+
+/// Lower without compiling: link gates are observable on the result.
+fn native_lower(src: &str) -> zz_codegen::LoweredC {
+    let (pruned, reach) = pruned(src);
+    zz_codegen::lower_only(&pruned, &reach, "main")
+}
+
+/// Parse + type-check + DCE, seeded with the full stdlib signature table
+/// (the same shape the build pipeline uses after its HIR merge).
+fn pruned(src: &str) -> (zz_hir::TypedProgram, zz_hir::ReachableSet) {
+    use std::collections::HashMap;
+    let parsed = zz_frontend::parse(src);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let funcs = zz_stdlib::stdlib_funcs();
+    let res = zz_hir::build_program(
+        &parsed.program,
+        HashMap::new(),
+        funcs,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let tp = res.program;
+    zz_hir::dce(&tp, "main")
+}
+
+/// Regression for the cold-build regression this branch fixes: an
+/// integer-only program must not pull the Rust native runtime. The
+/// checker's `tp.funcs` still carries every stdlib signature (including
+/// float natives), so a whole-map scan marks *every* program float-typed
+/// and forces `cargo build -p zz_native_rt --release` (minutes) even when
+/// the reachable code is pure `int`/`bool`.
+#[test]
+fn int_only_program_skips_rust_float_formatter() {
+    let src = r#"
+func fib(n: int) -> int {
+    return if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
+}
+func main() {
+    println(fib(10))
+}
+"#;
+    let lowered = native_lower(src);
+    assert!(
+        !lowered.needs_float_fmt,
+        "int-only program must not link zz_float_format_raw"
+    );
+    assert!(
+        !lowered.needs_native_rt,
+        "int-only program must not link libzz_native_rt.a"
+    );
+}
+
+/// The complement: float Display still links the Rust formatter (a false
+/// negative here would crash at runtime instead of printing).
+#[test]
+fn float_display_still_links_rust_formatter() {
+    let src = r#"
+func half(x: float) -> float { return x / 2.0 }
+func main() {
+    println(half(3.0))
+}
+"#;
+    let lowered = native_lower(src);
+    assert!(
+        lowered.needs_float_fmt,
+        "float Display must link zz_float_format_raw"
+    );
 }
 
 #[test]

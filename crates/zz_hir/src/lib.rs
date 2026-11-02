@@ -53,6 +53,14 @@ pub struct TypedProgram {
     /// Mirrors the checker's `try_converts`; consulted by native codegen
     /// to emit error-conversion calls on early return.
     pub try_converts: HashMap<Span, Option<String>>,
+    /// Module namespace → origin: `"project"` for first-party source the
+    /// consumer owns, `"pkg"` for an external ZZ package dependency.
+    /// Absent namespaces (stdlib bodies, bare `_prelude`) are treated as
+    /// stdlib by the codegen's stdlib scan; this map only needs to record
+    /// the package-vs-project boundary. Populated by `zz_build` from the
+    /// loader's module-origin map and propagated through
+    /// [`merge_typed_programs`].
+    pub module_origins: HashMap<String, String>,
 }
 
 /// Result of building a [`TypedProgram`]: the typed program plus any checker
@@ -102,6 +110,7 @@ pub fn build_program(
             structs,
             enums,
             try_converts,
+            module_origins: HashMap::new(),
         },
         diagnostics: diags,
     }
@@ -170,6 +179,7 @@ pub fn merge_typed_programs(programs: Vec<TypedProgram>) -> TypedProgram {
     let mut structs: HashMap<String, StructSig> = HashMap::new();
     let mut enums: HashMap<String, EnumSig> = HashMap::new();
     let mut try_converts: HashMap<Span, Option<String>> = HashMap::new();
+    let mut module_origins: HashMap<String, String> = HashMap::new();
     let mut span: Span = Span::new(0, 0);
     for tp in programs {
         stmts.extend(tp.program.stmts);
@@ -179,6 +189,7 @@ pub fn merge_typed_programs(programs: Vec<TypedProgram>) -> TypedProgram {
         structs.extend(tp.structs);
         enums.extend(tp.enums);
         try_converts.extend(tp.try_converts);
+        module_origins.extend(tp.module_origins);
         if tp.program.span.end > span.end {
             span = tp.program.span;
         }
@@ -191,6 +202,7 @@ pub fn merge_typed_programs(programs: Vec<TypedProgram>) -> TypedProgram {
         structs,
         enums,
         try_converts,
+        module_origins,
     }
 }
 

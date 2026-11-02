@@ -570,8 +570,10 @@ pub fn clang_flags_with(
             // Max-opt (`--full`): whole-program LTO. Slower links, better
             // cross-TU inlining and elimination than ThinLTO.
             flags.push("-flto=full".to_string());
-        } else {
-            // ThinLTO unconditionally otherwise: Clang is the only backend.
+        } else if opts.thin_lto {
+            // ThinLTO: cross-module inlining at link time. Opt-in via --full
+            // or BuildOptions with thin_lto set; default release skips it
+            // for fast builds (matches Zig/Rust default release behavior).
             flags.push("-flto=thin".to_string());
         }
         // Loop/codegen tuning (FP-safe only by default: no -ffast-math,
@@ -961,18 +963,25 @@ pub fn unit_file_stem(ns: &str, used: &mut std::collections::HashSet<String>) ->
     stem
 }
 
-/// Cache slug for one unit object: runtime/toolchain base + full option
-/// fingerprint + header + unit code. Same bytes in, same object out —
-/// shared across projects; any signature change alters the header and
-/// misses (correctness over hit rate, matching whole-program behavior).
-fn unit_obj_slug(rt_base: &str, flags_hash: u64, header: &str, code: &str) -> String {
+/// Cache slug for one unit object: runtime/toolchain base + option
+/// fingerprint + the exact translation-unit bytes.
+///
+/// Hash the TU (header + code) that clang actually sees, so two units share
+/// an object iff their inputs and flags are identical. Two independently
+/// salted SipHash passes give a 128-bit slug: a collision would silently
+/// reuse a wrong object, and 64 bits leaves that possibility non-zero on a
+/// multi-year cache.
+fn unit_obj_slug(rt_base: &str, flags_hash: u64, tu: &str) -> String {
     use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    rt_base.hash(&mut h);
-    flags_hash.hash(&mut h);
-    header.hash(&mut h);
-    code.hash(&mut h);
-    format!("u{:016x}", h.finish())
+    let mut lo = std::collections::hash_map::DefaultHasher::new();
+    0u8.hash(&mut lo);
+    rt_base.hash(&mut lo);
+    flags_hash.hash(&mut lo);
+    tu.hash(&mut lo);
+    let mut hi = std::collections::hash_map::DefaultHasher::new();
+    1u8.hash(&mut hi);
+    tu.hash(&mut hi);
+    format!("u{:016x}{:016x}", lo.finish(), hi.finish())
 }
 
 /// Compute a fingerprint hash of a [`BuildOptions`] for cache key generation.
@@ -1074,15 +1083,29 @@ fn store_object(cached: &Path, obj: &Path) {
     let _ = std::fs::rename(&tmp, cached);
 }
 
+/// One translation unit handed to [`compile_units`].
+///
+/// The header is per-unit (not shared) so the object-cache key covers only
+/// declarations the unit can actually reach: a user body edit leaves stdlib
+/// units byte-identical and their cached objects reusable.
+#[derive(Clone, Copy, Debug)]
+pub struct UnitSource<'a> {
+    /// Module namespace (`_prelude` for bare names).
+    pub ns: &'a str,
+    /// Declarations this unit compiles against.
+    pub header: &'a str,
+    /// Unit body (function bodies, closures, init driver).
+    pub code: &'a str,
+}
+
 pub fn compile_units(
-    header: &str,
-    units: &[(String, String)],
+    units: &[UnitSource<'_>],
     output_path: &Path,
     opts: &BuildOptions,
     target: Option<&str>,
     clang: &Clang,
 ) -> Result<Clang, BuildError> {
-    compile_units_with_sink(header, units, output_path, opts, target, clang, &NoopSink)
+    compile_units_with_sink(units, output_path, opts, target, clang, &NoopSink)
 }
 
 /// Estimate how many clang `-c` jobs can run concurrently without OOM.
@@ -1115,8 +1138,7 @@ fn estimated_mem_for_clang_jobs() -> usize {
 /// the unit total, how many objects came from the cache, each finished
 /// unit, and the compile → link boundary.
 pub fn compile_units_with_sink(
-    header: &str,
-    units: &[(String, String)],
+    units: &[UnitSource<'_>],
     output_path: &Path,
     opts: &BuildOptions,
     target: Option<&str>,
@@ -1131,12 +1153,11 @@ pub fn compile_units_with_sink(
     std::fs::create_dir_all(&tmpdir)?;
     let dump_dir = std::env::var("ZZ_DUMP_C").ok().map(PathBuf::from);
     // Per-unit object cache (`~/.zz/cache/objects/units/<slug>/`): a TU's
-    // object depends only on header + unit code + flags + toolchain, so
-    // unchanged modules skip clang entirely — shared across projects when
-    // the bytes match. Body-only edits keep the header identical, so only
-    // edited units miss; any signature/struct change alters the header and
-    // conservatively rebuilds everything (same as today's whole-program
-    // behavior, never stale). Cleared with the rest of the tree by
+    // object depends only on the exact bytes we compile (this unit's header
+    // + code) plus flags and toolchain, so unchanged modules skip clang
+    // entirely — shared across projects when the bytes match. Stdlib units
+    // never see program-only declarations, so user edits only miss the
+    // units they actually touch. Cleared with the rest of the tree by
     // `zz cache clean`.
     let obj_base = zz_paths::paths::cache_objects_dir().join("units");
     let rt_base = crate::cache::cache_key(
@@ -1151,10 +1172,11 @@ pub fn compile_units_with_sink(
     let flags_hash = build_options_fingerprint_with(opts, target);
     let mut staged: Vec<(PathBuf, PathBuf, Option<PathBuf>)> = Vec::new();
     let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (ns, code) in units {
-        let stem = unit_file_stem(ns, &mut used);
-        let tu = zz_codegen_runtime::strip_quoted_includes(&format!("{header}\n{code}"));
-        let slug = unit_obj_slug(&rt_base, flags_hash, header, code);
+    for unit in units {
+        let stem = unit_file_stem(unit.ns, &mut used);
+        let tu =
+            zz_codegen_runtime::strip_quoted_includes(&format!("{}\n{}", unit.header, unit.code));
+        let slug = unit_obj_slug(&rt_base, flags_hash, &tu);
         let cached = obj_base.join(&slug).join(format!("{stem}.o"));
         if is_usable_object(&cached) {
             staged.push((PathBuf::new(), cached, None));
@@ -1543,7 +1565,7 @@ mod tests {
 
     #[test]
     fn zig_drops_lto_only_for_macho_targets() {
-        let opts = release_opts();
+        let opts = BuildOptions::static_lto();
         // zig cc's Mach-O linker rejects LTO (`error: LTO requires using
         // LLD`), so the flag must be stripped before it reaches the
         // driver — for cross targets and for a macOS host build alike.
@@ -1711,10 +1733,20 @@ mod tests {
     }
 
     #[test]
-    fn release_is_thin_lto_with_wrap_contract() {
+    fn release_is_o3_without_lto_and_wraps() {
+        // Default release is `-O3` only: LTO costs link memory/time and is
+        // opt-in (`full`/`static_lto`), matching rustc/cargo defaults.
         let flags = clang_flags(&release_opts(), None);
         assert!(flags.contains(&"-O3".to_string()));
-        assert!(flags.contains(&"-flto=thin".to_string()));
+        assert!(
+            !flags.iter().any(|f| f.starts_with("-flto")),
+            "default release must not enable LTO: {flags:?}"
+        );
+        let full = clang_flags(&BuildOptions::full(), None);
+        assert!(
+            full.contains(&"-flto=full".to_string()),
+            "--full must enable whole-program LTO: {full:?}"
+        );
         // Wrapping + aliasing contract (both modes — checked below).
         for opts in [release_opts(), BuildOptions::dev()] {
             let flags = clang_flags(&opts, None);
@@ -1817,11 +1849,13 @@ mod tests {
 
     #[test]
     fn unit_obj_slug_is_content_keyed() {
-        let a = unit_obj_slug("rt", 7, "H", "code-a");
-        assert_eq!(a, unit_obj_slug("rt", 7, "H", "code-a"));
-        assert_ne!(a, unit_obj_slug("rt", 7, "H", "code-b"));
-        assert_ne!(a, unit_obj_slug("rt", 7, "H2", "code-a"));
-        assert_ne!(a, unit_obj_slug("rt", 8, "H", "code-a"));
+        let a = unit_obj_slug("rt", 7, "H\ncode-a");
+        assert_eq!(a, unit_obj_slug("rt", 7, "H\ncode-a"));
+        assert_ne!(a, unit_obj_slug("rt", 7, "H\ncode-b"));
+        assert_ne!(a, unit_obj_slug("rt", 7, "H2\ncode-a"));
+        assert_ne!(a, unit_obj_slug("rt", 8, "H\ncode-a"));
+        // 128-bit: `u` + two hex words.
+        assert_eq!(a.len(), 1 + 32);
     }
 
     #[test]

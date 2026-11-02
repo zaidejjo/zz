@@ -21,18 +21,6 @@
 // Each generated function sets up its own arena on entry and resets on exit.
 static __thread zz_arena zz_thread_arena = {0};
 
-void zz_arena_init(zz_arena *a, size_t cap) {
-    if (cap < 1024) cap = 1024;
-    a->buf = (char *)malloc(cap);
-    if (!a->buf) {
-        fprintf(stderr, "zz: arena out of memory\n");
-        exit(1);
-    }
-    a->cap = cap;
-    for (int i = 0; i < ZZ_ARENA_NCLASSES; i++) a->offsets[i] = 0;
-    a->chunks = NULL;
-}
-
 void *zz_arena_alloc(zz_arena *a, size_t size, size_t align) {
     // Objects larger than the largest class can't fit in a class region.
     // Allocate a dedicated block for them.
@@ -68,6 +56,17 @@ void *zz_arena_alloc(zz_arena *a, size_t size, size_t align) {
         // Reset class offsets since we're starting fresh.
         for (int i = 0; i < ZZ_ARENA_NCLASSES; i++) a->offsets[i] = 0;
         return a->buf;
+    }
+
+    // Lazily allocate the primary buffer on first use. Functions that
+    // never allocate from the arena (e.g. pure scalar recursion like fib)
+    // pay zero heap traffic per call — init only zeroes the struct.
+    if (!a->buf) {
+        a->buf = (char *)malloc(a->cap);
+        if (!a->buf) {
+            fprintf(stderr, "zz: arena out of memory\n");
+            exit(1);
+        }
     }
 
     // Size-classed allocation: round up to nearest class, bump within that
@@ -134,25 +133,6 @@ void *zz_arena_alloc(zz_arena *a, size_t size, size_t align) {
     for (int i = 0; i < ZZ_ARENA_NCLASSES; i++) a->offsets[i] = 0;
     a->offsets[cls] = class_size;
     return a->buf + new_region_start;
-}
-
-void zz_arena_destroy(zz_arena *a) {
-    // Free the current primary block.
-    if (a->buf) {
-        free(a->buf);
-        a->buf = NULL;
-    }
-    // Walk the overflow chunk list and free each adopted buffer + node.
-    zz_arena_chunk *chunk = a->chunks;
-    while (chunk) {
-        zz_arena_chunk *next = chunk->next;
-        free(chunk->buf);
-        free(chunk);
-        chunk = next;
-    }
-    a->chunks = NULL;
-    a->cap = 0;
-    for (int i = 0; i < ZZ_ARENA_NCLASSES; i++) a->offsets[i] = 0;
 }
 
 // ---- thread-safe ARC (atomic reference counting) -----------------------

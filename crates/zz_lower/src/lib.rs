@@ -103,6 +103,43 @@ fn merge_link_needs(
     opts.sqlite_link |= sqlite;
 }
 
+/// Whether the program must link the Rust-core float formatter
+/// (`zz_float_format_raw`).
+///
+/// A naive scan over [`zz_hir::TypedProgram`] is *sound* but far too
+/// broad: the merged program carries every precompiled stdlib signature
+/// and type (e.g. `std.math.PI`, `math.sum_f(arr: [float])`), so an
+/// integer-only program like `fib` would look float-typed and pay for a
+/// `libzz_native_rt.a` link (and, on a cold cache, a multi-minute
+/// `cargo build -p zz_native_rt --release`).
+///
+/// Restrict the scan to what the program can actually reach:
+/// - expression types only in scopes the program reaches (user code plus
+///   called stdlib functions) or in [`zz_checker::TOP_SCOPE`];
+/// - bindings (stdlib modules define no top-level bindings, so these are
+///   user declarations and imports);
+/// - function signatures only for reachable functions.
+///
+/// A reachable function that merely *returns* a float is kept
+/// conservative on purpose: the value may flow to a Display site that
+/// this cheap analysis does not follow. False positives cost a staticlib
+/// link; false negatives break `println(1.0)`, so we bias to safe.
+pub(crate) fn needs_float_fmt(
+    tp: &zz_hir::TypedProgram,
+    reachable_funcs: &std::collections::HashSet<String>,
+) -> bool {
+    let scope_reached =
+        |scope: &str| scope == zz_checker::TOP_SCOPE || reachable_funcs.contains(scope);
+    tp.types
+        .iter()
+        .any(|(key, ty)| scope_reached(key.func.as_ref()) && type_has_float(ty))
+        || tp.bindings.values().any(type_has_float)
+        || tp.funcs.iter().any(|(name, sig)| {
+            reachable_funcs.contains(name)
+                && (sig.params.iter().any(|(_, ty)| type_has_float(ty)) || type_has_float(&sig.ret))
+        })
+}
+
 /// True when a resolved type can carry an `f64` to a Display site.
 /// Recursive over every compound shape (no `Any` exists, so a whole-
 /// program scan of `TypedProgram` types is a sound float-format gate).
@@ -676,11 +713,7 @@ impl Lowerer {
             source,
             needs_native_rt,
             needs_pg_link: zz_codegen_ffi::needs_pg_link(&expanded_natives),
-            needs_float_fmt: self.tp.types.values().any(type_has_float)
-                || self.tp.bindings.values().any(type_has_float)
-                || self.tp.funcs.values().any(|s| {
-                    s.params.iter().any(|(_, ty)| type_has_float(ty)) || type_has_float(&s.ret)
-                }),
+            needs_float_fmt: needs_float_fmt(&self.tp, &self.reachable_funcs),
             needs_curl: zz_codegen_ffi::needs_curl_link(&expanded_natives),
             needs_sqlite: zz_codegen_ffi::needs_sqlite_link(&expanded_natives),
             unimplemented_natives: self.unimplemented_natives.borrow().clone(),
