@@ -1278,8 +1278,7 @@ impl Lowerer {
                     }
                     // Must be a known string local; unknown types bail
                     // rather than emitting a mistyped C call.
-                    let is_str = names.lookup_type(rname) == Some("string")
-                        || self.is_string_expr(term, names);
+                    let is_str = self.is_string_expr(term, names);
                     if !is_str {
                         return false;
                     }
@@ -1297,8 +1296,7 @@ impl Lowerer {
                     if rhs_scalar {
                         return false;
                     }
-                    let is_str = names.lookup_type(&joined) == Some("string")
-                        || self.is_string_expr(term, names);
+                    let is_str = self.is_string_expr(term, names);
                     if !is_str {
                         return false;
                     }

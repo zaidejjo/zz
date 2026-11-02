@@ -984,10 +984,17 @@ impl Lowerer {
     pub(crate) fn is_string_expr(&self, expr: &Expr, names: &NameCtx) -> bool {
         match expr {
             Expr::Str { .. } => true,
-            Expr::Ident { name, .. } => names.lookup_type(name) == Some("string"),
+            Expr::Ident { name, .. } => {
+                // Boxed strings carry C type `zz_value`, never `"string"`,
+                // so `lookup_type` can't detect them. Use the checker type
+                // recorded at declaration (`Type::Str`) instead — this is
+                // what makes `s = s + <string variable>` fold into the
+                // in-place `zz_str_append_str` append chain.
+                names.checker_types.get(name) == Some(&zz_checker::Type::Str)
+            }
             Expr::Path { parts, .. } => {
                 let joined = parts.join(".");
-                names.lookup_type(&joined) == Some("string")
+                names.checker_types.get(&joined) == Some(&zz_checker::Type::Str)
             }
             // A string `+` chain is only as arena-routable as its weakest
             // link: without recursing here, `s + f(x) + t` lowers its middle
