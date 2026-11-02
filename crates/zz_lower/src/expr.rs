@@ -1167,6 +1167,30 @@ impl Lowerer {
                 self.emit_struct_init(name, fields, names, out)
             }
             Expr::Field { obj, name, .. } => {
+                // Flat-array element field access: `arr[k].field` where `arr`
+                // is a contiguous buffer of unboxed structs → direct
+                // `({arr})[{k}].field`, no zz_index_get bounds-check/clone
+                // and no zz_object_get_field strcmp. This is the struct_access
+                // hot path.
+                if let Expr::Index {
+                    obj: arr_obj,
+                    index,
+                    ..
+                } = obj.as_ref()
+                {
+                    if let Expr::Ident { name: arr_name, .. } = arr_obj.as_ref() {
+                        if let Some(sname) =
+                            self.flat_array_from_ptr(names.lookup_type(arr_name).unwrap_or(""))
+                        {
+                            let arr_cid = names.lookup(arr_name).unwrap().to_string();
+                            let idx_raw = self.flat_index_expr(index, names, out);
+                            let field_ctype =
+                                self.field_type_from_struct(&self.struct_c_type(&sname), name);
+                            let raw = format!("({arr_cid})[{idx_raw}].{name}");
+                            return auto_box(&raw, field_ctype);
+                        }
+                    }
+                }
                 // Determine if the object is boxed (zz_value) or unboxed (C struct).
                 // For unboxed: emit C struct field access (e.g., "obj.field").
                 // For boxed: emit zz_object_get_field(&obj, "field").
@@ -2797,6 +2821,14 @@ impl Lowerer {
                         if let Some(n) = names.array_len(name.as_str()) {
                             return format!("zz_int({n})");
                         }
+                        // Flat array of unboxed structs: length is tracked in
+                        // `name_len`, avoiding the `zz_len` native call.
+                        if let Some(_sname) =
+                            self.flat_array_from_ptr(names.lookup_type(name).unwrap_or(""))
+                        {
+                            let len_cid = format!("{}_len", name);
+                            return format!("zz_int({len_cid})");
+                        }
                     }
                     _ => {}
                 }
@@ -3068,6 +3100,37 @@ impl Lowerer {
             } else {
                 self.emit_expr(recv, names, out)
             };
+            // Flat-array push: `arr.push(x)` where `arr` is a contiguous buffer
+            // of unboxed structs — append inline instead of the boxed
+            // `zz_vec_push` native (avoids zz_value boxing per element).
+            if borrow_recv {
+                if let Expr::Ident { name, .. } = recv {
+                    let recv_type = names.lookup_type(name).unwrap_or("");
+                    if let Some(sname) = self.flat_array_from_ptr(recv_type) {
+                        let Some(arg) = args.first() else {
+                            return "zz_unit()".to_string();
+                        };
+                        let arg_val = self.emit_expr(arg, names, out);
+                        let elem = self.struct_c_type(&sname);
+                        let len_cid = format!("{}_len", name);
+                        let cap_cid = format!("{}_cap", name);
+                        out.push_str(&format!(
+                            "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n      {name} = ({elem}*)realloc({name}, {cap} * sizeof({elem}));\n    }}\n",
+                            len = len_cid,
+                            cap = cap_cid,
+                            name = name,
+                            elem = elem,
+                        ));
+                        out.push_str(&format!(
+                            "    {name}[{len}] = {arg_val};\n    {len}++;\n",
+                            name = name,
+                            len = len_cid,
+                            arg_val = arg_val
+                        ));
+                        return "zz_unit()".to_string();
+                    }
+                }
+            }
             if recv_is_struct && self.is_impl_method(&cname) {
                 arg_items.push(recv_val);
             } else if let Some(sname) = self.struct_box_name(recv, names) {

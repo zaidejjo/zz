@@ -1,7 +1,7 @@
 //! Statement lowering: let bindings, assignments, if/else, match, loops,
 //! returns, and defer.
 
-use zz_frontend::ast::{Block, Expr, Pattern, Stmt};
+use zz_frontend::ast::{Block, Expr, Pattern, Stmt, Ty, TyKind};
 
 use super::*;
 
@@ -173,7 +173,9 @@ impl Lowerer {
         is_tail: bool,
     ) {
         match stmt {
-            Stmt::Decl { name, value, .. } => {
+            Stmt::Decl {
+                ty, name, value, ..
+            } => {
                 // Look up the type of the initializer expression.
                 // `ty_at` may return `None` for compound expressions
                 // (BinOp) that the checker doesn't type directly; fall
@@ -197,6 +199,48 @@ impl Lowerer {
                 // str.contains from vec.contains when the receiver is a local).
                 if let Some(ct) = checker_ty {
                     names.checker_types.insert(name.name.clone(), ct.clone());
+                }
+
+                // ---- Flat arrays of unboxed structs ---------------------------
+                // `arr: [Pt] = []` where Pt is all-scalar lowers to a contiguous
+                // C buffer (`zz_struct_Pt *arr` + `arr_len` + `arr_cap`) instead
+                // of a boxed `zz_value` container. Element reads/writes, length,
+                // and field access then become direct C operations — this is the
+                // struct_access hot path. Untyped `arr := []` keeps `ty == None`
+                // and stays boxed (zz_value), so existing code and index-set /
+                // index-receiver method receivers are unaffected. Non-empty
+                // literals (`[Pt{...}, ...]`) keep boxing for now.
+                let flat_struct_name = if matches!(value, Expr::Array { elems, .. } if elems.is_empty())
+                {
+                    match &ty {
+                        Some(Ty {
+                            kind: TyKind::Array(inner),
+                            ..
+                        }) => match &inner.kind {
+                            TyKind::Named(sname, _) if self.is_unboxed_struct(sname) => {
+                                Some(sname.clone())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(sname) = flat_struct_name {
+                    let elem = self.struct_c_type(&sname);
+                    let ptr_ty = format!("{elem} *");
+                    let cid = names.enter_with_type(&name.name, &ptr_ty);
+                    let len_cid = format!("{}_len", name.name);
+                    let cap_cid = format!("{}_cap", name.name);
+                    names.enter_with_type(&len_cid, "int64_t");
+                    names.enter_with_type(&cap_cid, "int64_t");
+                    // Empty literal → NULL buffer; len/cap start at 0, grow via
+                    // the inline flat-array push in Expr::Call.
+                    out.push_str(&format!("    {ptr_ty} {cid} = NULL;\n"));
+                    out.push_str(&format!("    int64_t {len_cid} = 0;\n"));
+                    out.push_str(&format!("    int64_t {cap_cid} = 0;\n"));
+                    return;
                 }
 
                 // Loop-carried string accumulator hoisting: `s = s + rhs`
