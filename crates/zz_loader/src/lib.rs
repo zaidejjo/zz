@@ -110,6 +110,12 @@ pub struct LoadResult {
     /// [`TypedProgram`]s from these without re-running the checker.
     #[allow(dead_code)]
     pub per_module_results: Vec<(PathBuf, Program, CheckResult, HashMap<SpanKey, Type>)>,
+    /// Module namespace → origin: `"project"` for first-party source the
+    /// consumer owns (under the project root, outside `vendor/`), `"pkg"`
+    /// for an external ZZ package dependency. Stdlib modules are seeded
+    /// directly into `funcs` and are not present here; the codegen's
+    /// `stdlib_func_names` scan classifies them instead.
+    pub module_origins: HashMap<String, String>,
 }
 
 /// One discovered member of a `[collect.<name>]` registry.
@@ -899,7 +905,7 @@ fn module_ns(alias: Option<&str>, path: &Path) -> String {
 /// Registry (CAS), path, and vendored deps are someone else's code —
 /// their style warnings are unactionable downstream. `None` root (bare
 /// scripts, which cannot have deps) means everything is first-party.
-fn is_first_party(root: Option<&Path>, path: &Path) -> bool {
+pub fn is_first_party(root: Option<&Path>, path: &Path) -> bool {
     match root {
         None => true,
         Some(root) => match path.strip_prefix(root) {
@@ -3700,6 +3706,21 @@ impl Loader {
         for module in collect_bare_purezz_modules(&programs, &self.funcs, &self.natives) {
             self.stdlib_modules.insert(module);
         }
+        // Module namespace → origin: first-party (project) vs external
+        // package. Stdlib modules are not in `namespaces` (seeded directly
+        // into `funcs`), so they keep their stdlib_func_names classification.
+        let module_origins: HashMap<String, String> = self
+            .namespaces
+            .iter()
+            .map(|(ns, path)| {
+                let origin = if is_first_party(self.root.as_deref(), path) {
+                    "project"
+                } else {
+                    "pkg"
+                };
+                (ns.clone(), origin.to_string())
+            })
+            .collect();
         LoadResult {
             programs,
             files,
@@ -3727,6 +3748,7 @@ impl Loader {
             stdlib_selectives: self.stdlib_selectives,
             stdlib_wildcards: self.stdlib_wildcards,
             per_module_results: self.per_module_results,
+            module_origins,
         }
     }
 }

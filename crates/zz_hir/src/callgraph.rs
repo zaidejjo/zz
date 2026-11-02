@@ -768,6 +768,7 @@ pub fn prune_program(tp: &TypedProgram, reach: &ReachableSet) -> TypedProgram {
         structs: tp.structs.clone(),
         enums: tp.enums.clone(),
         try_converts: tp.try_converts.clone(),
+        module_origins: tp.module_origins.clone(),
     }
 }
 

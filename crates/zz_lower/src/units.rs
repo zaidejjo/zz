@@ -124,6 +124,13 @@ impl Lowerer {
         let stdlib_funcs: Option<&'static HashSet<String>> =
             self.precompiled.then(stdlib_func_names);
         let is_stdlib_fn = |fname: &str| stdlib_funcs.is_some_and(|s| s.contains(fname));
+        // A namespace is package-owned when the loader tagged it `"pkg"`
+        // (external ZZ dependency). Package symbols live in the dependency
+        // header section so their units stay stable across unrelated
+        // project edits and across projects sharing the same package set.
+        let is_pkg_ns =
+            |ns: &str| self.tp.module_origins.get(ns).map(|s| s.as_str()) == Some("pkg");
+        let is_pkg_fn = |fname: &str| is_pkg_ns(ns_of(fname));
 
         // Hoisted cache (same data collect_globals computes, once per Lowerer).
         let mut names = NameCtx::new();
@@ -146,7 +153,7 @@ impl Lowerer {
                     }
                     let ns = ns_of(&fname).to_string();
                     current_ns = ns.clone();
-                    if !is_stdlib_fn(&fname) {
+                    if !is_stdlib_fn(&fname) && !is_pkg_fn(&fname) {
                         program_ns.insert(ns.clone());
                     }
                     let before = self.closure_defs.borrow().len();
@@ -177,7 +184,7 @@ impl Lowerer {
                             if !self.reachable_funcs.contains(&fname) {
                                 continue;
                             }
-                            if !is_stdlib_fn(&fname) {
+                            if !is_stdlib_fn(&fname) && !is_pkg_fn(&fname) {
                                 program_ns.insert(ns.clone());
                             }
                             let before = self.closure_defs.borrow().len();
@@ -197,7 +204,9 @@ impl Lowerer {
                 Struct { .. } | TypeAlias { .. } | Enum { .. } | Import { .. } => {}
                 Decl { name, value, .. } => {
                     let ns = current_ns.clone();
-                    program_ns.insert(ns.clone());
+                    if !is_pkg_ns(&ns) {
+                        program_ns.insert(ns.clone());
+                    }
                     claim_owner(&mut owners, &name.name, &ns);
                     if !init_order.contains(&ns) {
                         init_order.push(ns.clone());
@@ -224,7 +233,9 @@ impl Lowerer {
                 }
                 Destructure { pat, value, .. } => {
                     let ns = current_ns.clone();
-                    program_ns.insert(ns.clone());
+                    if !is_pkg_ns(&ns) {
+                        program_ns.insert(ns.clone());
+                    }
                     for n in destructure_top_names(pat) {
                         claim_owner(&mut owners, &n, &ns);
                     }
@@ -252,7 +263,9 @@ impl Lowerer {
                 }
                 other => {
                     let ns = current_ns.clone();
-                    program_ns.insert(ns.clone());
+                    if !is_pkg_ns(&ns) {
+                        program_ns.insert(ns.clone());
+                    }
                     if !init_order.contains(&ns) {
                         init_order.push(ns.clone());
                     }
@@ -305,14 +318,27 @@ impl Lowerer {
         let struct_preamble = self.lower_structs_preamble();
         let struct_debug_fns = self.lower_struct_debug_fns();
         let mut glob_ext = String::new();
+        let mut glob_ext_dep = String::new();
         for (zz_name, cid, ctype, _) in &self.global_list {
             let _ = zz_name;
-            glob_ext.push_str(&format!("extern {ctype} {cid};\n"));
+            let line = format!("extern {ctype} {cid};\n");
+            let owner = owners
+                .get(zz_name)
+                .map(|o| o.as_str())
+                .unwrap_or(PRELUDE_NS);
+            if self.tp.module_origins.get(owner).map(|s| s.as_str()) == Some("pkg") {
+                glob_ext_dep.push_str(&line);
+            } else {
+                glob_ext.push_str(&line);
+            }
         }
         // Prototypes split by ownership. Stdlib prototypes are stable for
-        // a given import set, so they join the base header; program
-        // prototypes change with user code and stay out of stdlib units.
+        // a given import set, so they join the base header; package
+        // prototypes join the dependency section (shared by every unit);
+        // program prototypes change with user code and stay out of stdlib
+        // and package units.
         let mut stdlib_decls = String::new();
+        let mut dep_decls = String::new();
         let mut program_decls = String::new();
         let mut seen: HashSet<String> = HashSet::new();
         // Deterministic proto order: sorted (single-TU path keeps its
@@ -334,6 +360,8 @@ impl Lowerer {
             }
             let decls = if is_stdlib_fn(fname) {
                 &mut stdlib_decls
+            } else if is_pkg_fn(fname) {
+                &mut dep_decls
             } else {
                 &mut program_decls
             };
@@ -431,8 +459,16 @@ impl Lowerer {
         // reference them. A zeroed arena makes the first allocation take the
         // overflow path with `cap == 0`, overrunning the heap.
         let base_header = format!(
-            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- stdlib forward declarations ----\n{stdlib_decls}extern zz_arena _static_arena;\nextern zz_arena _func_arena;\n",
+            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- stdlib forward declarations ----\n{stdlib_decls}// ---- dependency forward declarations ----\n{dep_decls}{glob_ext_dep}extern zz_arena _static_arena;\nextern zz_arena _func_arena;\n",
             runtime_h = RUNTIME_H,
+            runtime_c = runtime_c,
+            ffi_section = ffi_section,
+            extern_section = extern_section,
+            struct_preamble = struct_preamble,
+            struct_debug_fns = struct_debug_fns,
+            stdlib_decls = stdlib_decls,
+            dep_decls = dep_decls,
+            glob_ext_dep = glob_ext_dep,
         );
         let program_header = format!(
             "// ---- module globals (extern) ----\n{glob_ext}// ---- program forward declarations ----\n{program_decls}"
@@ -783,6 +819,67 @@ mod tests {
         lowerer.lower_units("main")
     }
 
+    /// Like [`lower_merged`] but tags each namespace with an origin so the
+    /// dependency/project header split can be exercised. `origins` maps
+    /// namespace → `"pkg"` or `"project"`; absent namespaces count as
+    /// project.
+    fn lower_merged_origins(src: &str, origins: HashMap<String, String>) -> LoweredUnits {
+        let parsed = zz_frontend::parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+
+        let mut funcs = zz_stdlib::stdlib_funcs();
+        let mut structs: HashMap<String, zz_checker::StructSig> = HashMap::new();
+        let mut enums: HashMap<String, zz_checker::EnumSig> = HashMap::new();
+        let stdlib: Vec<TypedProgram> = zz_stdlib::zz_stdlib_programs()
+            .iter()
+            .filter_map(|p| p.as_ref().ok().cloned())
+            .collect();
+        for program in &stdlib {
+            for (name, sig) in &program.funcs {
+                funcs.entry(name.clone()).or_insert_with(|| sig.clone());
+            }
+            for (name, sig) in &program.structs {
+                structs.entry(name.clone()).or_insert_with(|| sig.clone());
+            }
+            for (name, sig) in &program.enums {
+                enums.entry(name.clone()).or_insert_with(|| sig.clone());
+            }
+        }
+        let user = zz_hir::build_program(
+            &parsed.program,
+            HashMap::new(),
+            funcs,
+            structs,
+            HashMap::new(),
+            enums,
+        );
+        assert!(
+            !user
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == zz_frontend::diag::Severity::Error),
+            "type errors: {:?}",
+            user.diagnostics
+        );
+        let mut programs = stdlib;
+        programs.push(user.program);
+        let mut merged = zz_hir::merge_typed_programs(programs);
+        merged.module_origins = origins;
+        let (pruned, reach) = zz_hir::dce(&merged, "main");
+        let mut lowerer = Lowerer::new(
+            reach.funcs.clone(),
+            reach.natives.clone(),
+            "main".to_string(),
+            pruned,
+        );
+        lowerer.set_precompiled(true);
+        lowerer.lower_units("main")
+    }
+
     fn unit<'a>(units: &'a LoweredUnits, ns: &str) -> &'a CodeUnit {
         units.units.iter().find(|u| u.ns == ns).unwrap_or_else(|| {
             panic!(
@@ -868,5 +965,83 @@ mod tests {
         let prelude = unit(&units, PRELUDE_NS);
         assert!(prelude.header.contains("zz_fn_main("));
         assert_eq!(units.header, unit(&units, "main").header);
+    }
+
+    /// A package unit carries the dependency section (its own prototypes)
+    /// but no project-only sections, so it can be cached independently of
+    /// the program that imports it.
+    #[test]
+    fn pkg_unit_carries_only_dependency_header() {
+        let origins: HashMap<String, String> = [("pkg".to_string(), "pkg".to_string())].into();
+        let units = lower_merged_origins(
+            "func pkg.add(a: int, b: int) -> int { return a + b }\nfunc main() { pkg.add(1, 2) }",
+            origins,
+        );
+        let pkg = unit(&units, "pkg");
+        assert!(
+            pkg.header.contains("zz_fn_pkg__add("),
+            "pkg header must expose its own prototype\n{}",
+            pkg.header
+        );
+        // No project-only sections reach the package unit.
+        assert!(!pkg.header.contains("zz_fn_main("), "{}", pkg.header);
+        assert!(
+            !pkg.header.contains("// ---- module globals (extern) ----"),
+            "{}",
+            pkg.header
+        );
+        assert!(!pkg.header.contains("zz_init__prelude"), "{}", pkg.header);
+        // The package unit still compiles standalone-ish: its code defines
+        // the function it declares.
+        assert!(pkg.code.contains("zz_fn_pkg__add("), "{}", pkg.code);
+    }
+
+    /// The same external package imported by two different projects yields
+    /// a byte-identical package unit (header + code), so its object is
+    /// reusable across projects. Editing project code must not touch it.
+    #[test]
+    fn pkg_unit_is_reusable_across_projects() {
+        let origins: HashMap<String, String> = [("pkg".to_string(), "pkg".to_string())].into();
+        let pkg_src = "func pkg.add(a: int, b: int) -> int { return a + b }";
+        let proj_a = format!("{pkg_src}\nfunc main() {{ pkg.add(1, 2) }}");
+        let proj_b = format!("{pkg_src}\nfunc main() {{ pkg.add(3, 4) }}");
+        let a = lower_merged_origins(&proj_a, origins.clone());
+        let b = lower_merged_origins(&proj_b, origins.clone());
+
+        let pkg_a = unit(&a, "pkg");
+        let pkg_b = unit(&b, "pkg");
+        assert_eq!(
+            pkg_a.header, pkg_b.header,
+            "pkg header must be project-independent"
+        );
+        assert_eq!(
+            pkg_a.code, pkg_b.code,
+            "pkg body must be project-independent"
+        );
+
+        // Project units reflect the project edit (code differs).
+        let pre_a = unit(&a, PRELUDE_NS);
+        let pre_b = unit(&b, PRELUDE_NS);
+        assert_ne!(pre_a.code, pre_b.code, "project body must reflect the edit");
+    }
+
+    /// When no origin tag is present, every namespace falls back to
+    /// project (the pre-step-5 behavior), so no unit is wrongly treated as
+    /// a dependency.
+    #[test]
+    fn untagged_namespaces_stay_project_owned() {
+        let units = lower_merged_origins(
+            "func main() { println(str.is_empty(\"\")) }",
+            HashMap::new(),
+        );
+        let str_unit = unit(&units, "str");
+        // `str` is stdlib (via stdlib_func_names), not project: narrow header.
+        assert!(
+            !str_unit.header.contains("zz_fn_main("),
+            "{}",
+            str_unit.header
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        assert!(prelude.header.contains("zz_fn_main("), "{}", prelude.header);
     }
 }
