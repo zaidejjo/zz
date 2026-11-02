@@ -4558,11 +4558,11 @@ impl<'a> Emitter<'a> {
                 out.push_str("      int _e3 = 0; zz_value _r;\n");
                 out.push_str("      if (_ob.tag == ZZ_ARRAY && _ob.arr && _ob.arr->refs == 1\n");
                 out.push_str("          && _ix.tag == ZZ_INT && _ix.i >= 0\n");
-                out.push_str(&format!("          && _ix.i < (int64_t)_ob.arr->len) {{\n"));
+                out.push_str("          && _ix.i < (int64_t)_ob.arr->len) {\n");
                 out.push_str("          _r = zz_clone(_ob.arr->items[(size_t)_ix.i]);\n");
-                out.push_str("      }} else {{\n");
+                out.push_str("      } else {\n");
                 out.push_str("          _r = zz_index_get(_ob, _ix, &_e3);\n");
-                out.push_str("      }}\n");
+                out.push_str("      }\n");
                 out.push_str("      zz_release(&_ob); zz_release(&_ix);\n");
                 out.push_str("      if (_e3) ");
                 out.push_str(&format!("{};\n", ctrap("index out of bounds")));
