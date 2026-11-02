@@ -4545,8 +4545,24 @@ impl<'a> Emitter<'a> {
                 out.push_str("      st[sp++] = _a; }\n");
             }
             Op::IndexOp => {
+                // Array read fast path: when the base is a uniquely-owned
+                // array (refs==1, so no concurrent aliasing) and the index
+                // is a plain int, emit direct `items[i]` access with the
+                // bounds check inlined instead of routing through
+                // `zz_index_get` (which pays a call + tag dispatch +
+                // normalize per element). The element is cloned (retained)
+                // because the stack takes ownership, mirroring
+                // `zz_array_get`. Anything else — dicts, shared arrays,
+                // non-int indices — runs the exact checked path below.
                 out.push_str("    { zz_value _ix = st[--sp]; zz_value _ob = st[--sp];\n");
-                out.push_str("      int _e3 = 0; zz_value _r = zz_index_get(_ob, _ix, &_e3);\n");
+                out.push_str("      int _e3 = 0; zz_value _r;\n");
+                out.push_str("      if (_ob.tag == ZZ_ARRAY && _ob.arr && _ob.arr->refs == 1\n");
+                out.push_str("          && _ix.tag == ZZ_INT && _ix.i >= 0\n");
+                out.push_str(&format!("          && _ix.i < (int64_t)_ob.arr->len) {{\n"));
+                out.push_str("          _r = zz_clone(_ob.arr->items[(size_t)_ix.i]);\n");
+                out.push_str("      }} else {{\n");
+                out.push_str("          _r = zz_index_get(_ob, _ix, &_e3);\n");
+                out.push_str("      }}\n");
                 out.push_str("      zz_release(&_ob); zz_release(&_ix);\n");
                 out.push_str("      if (_e3) ");
                 out.push_str(&format!("{};\n", ctrap("index out of bounds")));
