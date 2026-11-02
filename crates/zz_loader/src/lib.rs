@@ -910,7 +910,15 @@ pub fn is_first_party(root: Option<&Path>, path: &Path) -> bool {
         None => true,
         Some(root) => match path.strip_prefix(root) {
             Ok(rel) => !rel.components().any(|c| c.as_os_str() == "vendor"),
-            Err(_) => false,
+            Err(_) => {
+                // Synthetic paths (e.g. `collect.<name>` collection modules
+                // declared in the project's zz.toml) are not real files
+                // under the root, but they are project code. Real external
+                // deps (CAS entries, vendor dirs) use absolute paths, so a
+                // relative path that fails strip_prefix is synthetic and
+                // first-party.
+                !path.is_absolute()
+            }
         },
     }
 }
