@@ -1,7 +1,7 @@
 //! Statement lowering: let bindings, assignments, if/else, match, loops,
 //! returns, and defer.
 
-use zz_frontend::ast::{Block, Expr, Pattern, Stmt};
+use zz_frontend::ast::{Block, Expr, Pattern, Stmt, Ty, TyKind};
 
 use super::*;
 
@@ -173,7 +173,9 @@ impl Lowerer {
         is_tail: bool,
     ) {
         match stmt {
-            Stmt::Decl { name, value, .. } => {
+            Stmt::Decl {
+                ty, name, value, ..
+            } => {
                 // Look up the type of the initializer expression.
                 // `ty_at` may return `None` for compound expressions
                 // (BinOp) that the checker doesn't type directly; fall
@@ -204,16 +206,26 @@ impl Lowerer {
                 // C buffer (`zz_struct_Pt *arr` + `arr_len` + `arr_cap`) instead
                 // of a boxed `zz_value` container. Element reads/writes, length,
                 // and field access then become direct C operations — this is the
-                // struct_access hot path. Untyped `arr := []` stays boxed
-                // (zz_value), so existing code is unaffected.
-                let flat_struct_name = match &checker_ty {
-                    Some(zz_checker::Type::Array(inner)) => match inner.as_ref() {
-                        zz_checker::Type::Struct(sname, _) if self.is_unboxed_struct(sname) => {
-                            Some(sname.clone())
-                        }
+                // struct_access hot path. Untyped `arr := []` keeps `ty == None`
+                // and stays boxed (zz_value), so existing code and index-set /
+                // index-receiver method receivers are unaffected. Non-empty
+                // literals (`[Pt{...}, ...]`) keep boxing for now.
+                let flat_struct_name = if matches!(value, Expr::Array { elems, .. } if elems.is_empty())
+                {
+                    match &ty {
+                        Some(Ty {
+                            kind: TyKind::Array(inner),
+                            ..
+                        }) => match &inner.kind {
+                            TyKind::Named(sname, _) if self.is_unboxed_struct(sname) => {
+                                Some(sname.clone())
+                            }
+                            _ => None,
+                        },
                         _ => None,
-                    },
-                    _ => None,
+                    }
+                } else {
+                    None
                 };
                 if let Some(sname) = flat_struct_name {
                     let elem = self.struct_c_type(&sname);
@@ -223,13 +235,9 @@ impl Lowerer {
                     let cap_cid = format!("{}_cap", name.name);
                     names.enter_with_type(&len_cid, "int64_t");
                     names.enter_with_type(&cap_cid, "int64_t");
-                    // `[]` → NULL buffer; non-empty literals fall through to the
-                    // boxed path below (they are rare in the hot path).
-                    let rhs = match value {
-                        Expr::Array { elems, .. } if elems.is_empty() => "NULL".to_string(),
-                        _ => self.emit_expr(value, names, out),
-                    };
-                    out.push_str(&format!("    {ptr_ty} {cid} = {rhs};\n"));
+                    // Empty literal → NULL buffer; len/cap start at 0, grow via
+                    // the inline flat-array push in Expr::Call.
+                    out.push_str(&format!("    {ptr_ty} {cid} = NULL;\n"));
                     out.push_str(&format!("    int64_t {len_cid} = 0;\n"));
                     out.push_str(&format!("    int64_t {cap_cid} = 0;\n"));
                     return;
