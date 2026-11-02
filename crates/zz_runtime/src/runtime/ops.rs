@@ -624,8 +624,21 @@ pub(crate) fn eval_binary(op: BinOp, l: Value, r: Value, span: Span) -> Result<V
                 span,
             )),
         },
-        (Value::Str(a), Value::Str(b)) => match op {
-            BinOp::Add => Ok(Value::Str(format!("{a}{b}").into())),
+        (Value::Str(mut a), Value::Str(b)) => match op {
+            // In-place append when `a` is uniquely owned (refs==1): amortized
+            // O(1) instead of always allocating + copying both operands
+            // (O(n^2)). `Arc::get_mut` succeeds only when `a` is not shared,
+            // so value semantics are preserved — a shared `a` is cloned below.
+            BinOp::Add => {
+                if let Some(s) = Arc::get_mut(&mut a) {
+                    s.push_str(&b);
+                    Ok(Value::Str(a))
+                } else {
+                    let mut out = (*a).clone();
+                    out.push_str(&b);
+                    Ok(Value::Str(out.into()))
+                }
+            }
             BinOp::Eq => Ok(Value::Bool(a == b)),
             BinOp::Ne => Ok(Value::Bool(a != b)),
             BinOp::Lt => Ok(Value::Bool(a < b)),

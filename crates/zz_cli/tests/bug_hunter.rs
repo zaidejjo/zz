@@ -272,6 +272,21 @@ func main() {
 }
 
 #[test]
+fn bh_string_concat_var_loop() {
+    let src = r#"
+func main() {
+    s := ""
+    chunk := "x"
+    for i in 0..200 {
+        s = s + chunk
+    }
+    println(len(s))
+}
+"#;
+    assert_parity("string_concat_var_loop", src);
+}
+
+#[test]
 fn bh_nested_struct_init_heavy() {
     let src = r#"
 struct Inner { v: int }
