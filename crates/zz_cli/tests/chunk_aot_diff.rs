@@ -518,6 +518,10 @@ const CASES: &[(&str, &str)] = &[
     ("match_enum", MATCH_ENUM),
     ("match_iflet", MATCH_IFLET),
     ("match_shadow", MATCH_SHADOW),
+    ("unboxed_int_accum", UNBOXED_INT_ACCUM),
+    ("unboxed_float_accum", UNBOXED_FLOAT_ACCUM),
+    ("unboxed_mixed_calls", UNBOXED_MIXED_CALLS),
+    ("unboxed_nested", UNBOXED_NESTED),
 ];
 
 // Module-scope bindings read and written from functions: the VM keeps
@@ -766,6 +770,73 @@ func main() {
     println(guard(.some(9)))
     println(guard(.some(2)))
     println(guard(.none))
+}
+"#;
+
+// Issue #252: whole-function unboxed int/float locals. Stable slots are
+// promoted to raw C locals for the entire body (entry unbox, no guard
+// on loads/stores, write-back at every exit). These shapes exercise
+// straight-line code between loops (`while`, not counted `for`) where
+// loop peels do not reach, plus mixed int/float and calls.
+
+const UNBOXED_INT_ACCUM: &str = r#"
+func main() {
+    s := 0
+    i := 0
+    n := 100000
+    while i < n {
+        s = s + i
+        i = i + 1
+    }
+    println(s)
+}
+"#;
+
+const UNBOXED_FLOAT_ACCUM: &str = r#"
+func main() {
+    s := 0.0
+    i := 0
+    n := 100000
+    while i < n {
+        s = s + 1.5
+        i = i + 1
+    }
+    println(s)
+}
+"#;
+
+const UNBOXED_MIXED_CALLS: &str = r#"
+func add(a: int, b: int) -> int {
+    return a + b
+}
+func main() {
+    s := 0
+    f := 0.0
+    i := 0
+    n := 100
+    while i < n {
+        s = add(s, i)
+        f = f + 0.5
+        i = i + 1
+    }
+    println(s)
+    println(f)
+}
+"#;
+
+const UNBOXED_NESTED: &str = r#"
+func main() {
+    s := 0
+    i := 0
+    while i < 50 {
+        j := 0
+        while j < 50 {
+            s = s + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    println(s)
 }
 "#;
 

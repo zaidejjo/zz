@@ -29,7 +29,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use zz_ir::{Const, ConstId, FuncDef, FuncId, IrType, Module, Op, Pattern, StrId};
+use zz_ir::{Const, ConstId, FuncDef, FuncId, IrType, Module, Op, Pattern, StrId, TypeId};
 
 use zz_codegen_types::mangle;
 
@@ -384,6 +384,139 @@ fn int_slots(module: &Module, f: &FuncDef) -> HashSet<u16> {
         }
     }
     out
+}
+
+/// Whether a frame slot holds exactly one primitive type (int or float)
+/// on every path from entry to every exit. Used to promote stable slots
+/// to whole-function C locals (issue #252).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotKind {
+    Int,
+    Float,
+}
+
+/// Forward dataflow: which slots are stable (single int/float type) at
+/// each program point. Starts from `f.locals` declared types; a slot is
+/// dropped the moment a store could write a different type or a load
+/// could read an unproven type. Calls cannot alias frame slots.
+///
+/// Conservative: uncertain slots stay boxed. Fail-closed = no
+/// miscompiles, just missed optimization.
+fn stable_slots(module: &Module, f: &FuncDef) -> HashMap<u16, SlotKind> {
+    let n = f.code.len();
+    if n == 0 {
+        return HashMap::new();
+    }
+    // in_state[pc] = stable slots known on entry to pc.
+    let mut in_state: Vec<HashMap<u16, SlotKind>> = vec![HashMap::new(); n];
+    for (i, id) in f.locals.iter().enumerate() {
+        if i > u16::MAX as usize {
+            break;
+        }
+        match module.types.get(id.0 as usize) {
+            Some(IrType::Int) => {
+                in_state[0].insert(i as u16, SlotKind::Int);
+            }
+            Some(IrType::Float) => {
+                in_state[0].insert(i as u16, SlotKind::Float);
+            }
+            _ => {}
+        }
+    }
+    // Worklist algorithm: kinds only get removed, so this converges.
+    let mut work: Vec<usize> = vec![0];
+    while let Some(pc) = work.pop() {
+        let mut state = in_state[pc].clone();
+        apply_stable_op(&f.code[pc], &f.op_result_types, module, &mut state, pc);
+        // Successors: fall-through + branch targets.
+        let succs: Vec<usize> = {
+            let mut s = Vec::new();
+            if falls(&f.code[pc]) && pc + 1 < n {
+                s.push(pc + 1);
+            }
+            for t in jump_targets(&f.code[pc]) {
+                let t = t as usize;
+                if t < n {
+                    s.push(t);
+                }
+            }
+            s
+        };
+        for succ in succs {
+            let mut merged = in_state[succ].clone();
+            // Intersect: only keep slots stable on ALL paths to `succ`.
+            merged.retain(|s, k| state.get(s) == Some(k));
+            if merged != in_state[succ] {
+                in_state[succ] = merged;
+                work.push(succ);
+            }
+        }
+    }
+    // Return the state stable at function exit (last pc, or the join of
+    // all exit points). Conservative: intersect across all exit targets.
+    let mut exit_state: Option<HashMap<u16, SlotKind>> = None;
+    for (pc, op) in f.code.iter().enumerate() {
+        if matches!(op, Op::Return) || pc == n - 1 {
+            let s = in_state[pc].clone();
+            exit_state = Some(match exit_state {
+                None => s,
+                Some(prev) => {
+                    let mut m = prev;
+                    m.retain(|s2, k| s.get(s2) == Some(k));
+                    m
+                }
+            });
+        }
+    }
+    exit_state.unwrap_or_default()
+}
+
+/// Apply one op to the stable-slot state, dropping slots that become
+/// unstable. `pc` indexes the op (used to look up the producer's result
+/// type for `StoreSlot`).
+fn apply_stable_op(
+    op: &Op,
+    op_result_types: &[Option<TypeId>],
+    module: &Module,
+    state: &mut HashMap<u16, SlotKind>,
+    pc: usize,
+) {
+    match op {
+        Op::StoreSlot(s) => {
+            // The stored value's type comes from the nearest preceding
+            // value-producing op (op_result_types of pc-1). Fail-closed:
+            // if we can't prove it matches `s`'s stable kind, drop `s`.
+            let stored_kind = pc
+                .checked_sub(1)
+                .and_then(|p| op_result_types.get(p))
+                .and_then(|t| t.as_ref())
+                .and_then(|id| match module.types.get(id.0 as usize) {
+                    Some(IrType::Int) => Some(SlotKind::Int),
+                    Some(IrType::Float) => Some(SlotKind::Float),
+                    _ => None,
+                });
+            match stored_kind {
+                Some(k) if state.get(s) == Some(&k) => {} // keep
+                _ => {
+                    state.remove(s);
+                }
+            }
+        }
+        Op::LoadSlot(_s) => {
+            // A load doesn't change stability.
+        }
+        // Calls and everything else cannot alias our frame slots. Loop
+        // variables reach slots via `StoreSlot`, handled above.
+        _ => {}
+    }
+}
+
+/// True when `op` falls through to the next pc.
+fn falls(op: &Op) -> bool {
+    !matches!(
+        op,
+        Op::Jump(_) | Op::Return | Op::Break | Op::Continue | Op::MatchError
+    )
 }
 
 /// Scan for fusable unboxed-int windows (see [`FusedTail`]). Runs after
@@ -2634,6 +2767,28 @@ impl<'a> Emitter<'a> {
         for id in &env.decls {
             out.push_str(&format!("    zz_value {id} = zz_unit();\n"));
         }
+        // Whole-function unboxed locals: slots provably holding a single
+        // int/float type on every path (issue #252). Promoted to raw C
+        // locals for the entire body, with entry unbox and exit write-back.
+        let stable = stable_slots(self.module, f);
+        let stable_local_names: HashMap<u16, (SlotKind, String)> = stable
+            .iter()
+            .map(|(s, k)| {
+                let name = match k {
+                    SlotKind::Int => format!("_ls{s}"),
+                    SlotKind::Float => format!("_lf{s}"),
+                };
+                (*s, (*k, name))
+            })
+            .collect();
+        // Declare C locals for stable slots (unboxed for the whole body).
+        for (k, cname) in stable_local_names.values() {
+            let ctype = match k {
+                SlotKind::Int => "int64_t",
+                SlotKind::Float => "double",
+            };
+            out.push_str(&format!("    {ctype} {cname} = 0;\n"));
+        }
         // Int-declared slots eligible for fused windows (see `int_slots`).
         let uint = int_slots(self.module, f);
         if nparams > 0 {
@@ -2643,6 +2798,24 @@ impl<'a> Emitter<'a> {
             ));
             for i in 0..nparams {
                 out.push_str(&format!("    st[{i}] = zz_clone(args[{i}]);\n"));
+            }
+        }
+        // Entry unbox: copy stable slots from `st` into their C locals,
+        // guarded by type tag (fail-closed: trap on wrong type).
+        for (s, (k, cname)) in &stable_local_names {
+            match k {
+                SlotKind::Int => {
+                    out.push_str(&format!(
+                        "    {{ zz_value _b = st[{s}]; if (_b.tag != ZZ_INT) {}; {cname} = _b.i; }}\n",
+                        ftrap("int slot loaded non-int value")
+                    ));
+                }
+                SlotKind::Float => {
+                    out.push_str(&format!(
+                        "    {{ zz_value _b = st[{s}]; if (_b.tag != ZZ_FLOAT) {}; {cname} = _b.f; }}\n",
+                        ftrap("float slot loaded non-float value")
+                    ));
+                }
             }
         }
         // Jump targets get labels.
@@ -2726,6 +2899,7 @@ impl<'a> Emitter<'a> {
                 strapp: strapped.get(&pc).copied(),
                 idxread: idxreads.get(&pc).copied(),
                 condfuse: condfused.get(&pc).copied(),
+                stable_locals: &stable_local_names,
             };
             self.emit_op(id, pc, op, &cx, out)?;
         }
@@ -2733,6 +2907,22 @@ impl<'a> Emitter<'a> {
         // implicit return, like the VM's ip-past-end).
         if targets.contains(&(f.code.len() as u32)) {
             out.push_str(&format!("L{}:;\n", f.code.len()));
+        }
+        // Write back stable slots to `st` before the implicit return, so
+        // any observer sees current values.
+        for (s, (k, cname)) in &stable_local_names {
+            match k {
+                SlotKind::Int => {
+                    out.push_str(&format!(
+                        "    {{ zz_release(&st[{s}]); st[{s}] = zz_int({cname}); }}\n"
+                    ));
+                }
+                SlotKind::Float => {
+                    out.push_str(&format!(
+                        "    {{ zz_release(&st[{s}]); st[{s}] = zz_float({cname}); }}\n"
+                    ));
+                }
+            }
         }
         // Implicit return of the top value (function bodies fall off).
         // Release only the live prefix below it: positions at/above sp
@@ -3410,6 +3600,10 @@ struct OpCx<'x> {
     /// Fused int-compare branch starting at this pc, if any. See
     /// [`condfuse_scan`].
     condfuse: Option<CondFuse>,
+    /// Stable-slot slot index -> (kind, C local name), for whole-function
+    /// unboxed locals (issue #252). Present only for slots that passed
+    /// [`stable_slots`]; all other slots stay boxed.
+    stable_locals: &'x HashMap<u16, (SlotKind, String)>,
 }
 
 /// One fused unboxed-int window: a straight-line int expression over
@@ -3544,15 +3738,48 @@ impl<'a> Emitter<'a> {
                 );
             }
             Op::LoadSlot(s) => {
-                out.push_str(&format!("    st[sp++] = zz_clone(st[{s}]);\n"));
+                // Whole-function unboxed local: read the C local directly
+                // (no guard, no box traffic — entry unbox already validated).
+                if let Some((k, cname)) = cx.stable_locals.get(s) {
+                    match k {
+                        SlotKind::Int => {
+                            out.push_str(&format!("    st[sp++] = zz_int({cname});\n"));
+                        }
+                        SlotKind::Float => {
+                            out.push_str(&format!("    st[sp++] = zz_float({cname});\n"));
+                        }
+                    }
+                } else {
+                    out.push_str(&format!("    st[sp++] = zz_clone(st[{s}]);\n"));
+                }
             }
             Op::StoreSlot(s) => {
                 // Move store: pop the owned value, release the slot's old
                 // value, move the popped value in. Equivalent to zz_cstore
                 // on an owned value minus the clone + source release.
-                out.push_str(&format!(
-                    "    {{ zz_value _v = st[--sp]; zz_release(&st[{s}]); st[{s}] = _v; }}\n"
-                ));
+                //
+                // Stable slots keep both the C local and `st[s]` in sync
+                // (box-back) so fused windows / index reads that observe
+                // `st[s]` see current values, while direct loads read the
+                // C local fast. Issue #252.
+                if let Some((k, cname)) = cx.stable_locals.get(s) {
+                    match k {
+                        SlotKind::Int => {
+                            out.push_str(&format!(
+                                "    {{ zz_value _v = st[--sp]; {cname} = _v.i; zz_release(&st[{s}]); st[{s}] = zz_int({cname}); zz_release(&_v); }}\n"
+                            ));
+                        }
+                        SlotKind::Float => {
+                            out.push_str(&format!(
+                                "    {{ zz_value _v = st[--sp]; {cname} = _v.f; zz_release(&st[{s}]); st[{s}] = zz_float({cname}); zz_release(&_v); }}\n"
+                            ));
+                        }
+                    }
+                } else {
+                    out.push_str(&format!(
+                        "    {{ zz_value _v = st[--sp]; zz_release(&st[{s}]); st[{s}] = _v; }}\n"
+                    ));
+                }
             }
             // A module-scope binding reads its C global and a
             // function-local env cell (`match` arm binding, captured
@@ -3836,6 +4063,22 @@ impl<'a> Emitter<'a> {
                 ));
             }
             Op::Return => {
+                // Write back stable slots to `st` before releasing the
+                // frame, so any observer sees current values.
+                for (s, (k, cname)) in cx.stable_locals.iter() {
+                    match k {
+                        SlotKind::Int => {
+                            out.push_str(&format!(
+                                "    {{ zz_release(&st[{s}]); st[{s}] = zz_int({cname}); }}\n"
+                            ));
+                        }
+                        SlotKind::Float => {
+                            out.push_str(&format!(
+                                "    {{ zz_release(&st[{s}]); st[{s}] = zz_float({cname}); }}\n"
+                            ));
+                        }
+                    }
+                }
                 // Live-prefix sweep, like the implicit return: never the
                 // whole frame (dead slots above sp hold stale aliases).
                 out.push_str(
