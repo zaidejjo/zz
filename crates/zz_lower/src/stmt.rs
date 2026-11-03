@@ -1635,12 +1635,12 @@ impl Lowerer {
             let end_is_scalar = match &end_expr {
                 Expr::Ident { name, .. } => names
                     .lookup_type(name)
-                    .map_or(false, |t| t == "int64_t" || t == "double" || t == "bool"),
+                    .is_some_and(|t| t == "int64_t" || t == "double" || t == "bool"),
                 Expr::Path { parts, .. } => {
                     let joined = parts.join(".");
                     names
                         .lookup_type(&joined)
-                        .map_or(false, |t| t == "int64_t" || t == "double" || t == "bool")
+                        .is_some_and(|t| t == "int64_t" || t == "double" || t == "bool")
                 }
                 // Literal bounds are scalar too — they lower to unboxed
                 // int64_t/float C values with no zz_value wrapping.
@@ -1837,7 +1837,7 @@ impl Lowerer {
                 // bounds (`0..1000000`) and const bounds (`0..N` where N is
                 // `const N = 1000000`).
                 let loop_n: Option<i64> = match &end_expr {
-                    Expr::Int { value, .. } => Some(*value as i64),
+                    Expr::Int { value, .. } => Some(*value),
                     Expr::Ident { name, .. } => find_const_value(self.tp.stmts(), name),
                     _ => None,
                 };
@@ -2657,7 +2657,7 @@ fn find_const_value(stmts: &[Stmt], name: &str) -> Option<i64> {
                 value: Expr::Int { value, .. },
                 is_const: true,
                 ..
-            } if decl_name.name == name => return Some(*value as i64),
+            } if decl_name.name == name => return Some(*value),
             Stmt::Func { body, .. } => {
                 if let Some(v) = find_const_in_block(body, name) {
                     return Some(v);
@@ -2678,7 +2678,7 @@ fn find_const_in_block(block: &Block, name: &str) -> Option<i64> {
                 value: Expr::Int { value, .. },
                 is_const: true,
                 ..
-            } if decl_name.name == name => return Some(*value as i64),
+            } if decl_name.name == name => return Some(*value),
             Stmt::For { body, .. } => {
                 if let Some(v) = find_const_in_block(body, name) {
                     return Some(v);
@@ -2690,13 +2690,10 @@ fn find_const_in_block(block: &Block, name: &str) -> Option<i64> {
                         return Some(v);
                     }
                     if let Some(el) = els {
-                        match &**el {
-                            Expr::Block(block) => {
-                                if let Some(v) = find_const_in_block(block, name) {
-                                    return Some(v);
-                                }
+                        if let Expr::Block(block) = &**el {
+                            if let Some(v) = find_const_in_block(block, name) {
+                                return Some(v);
                             }
-                            _ => {}
                         }
                     }
                 }

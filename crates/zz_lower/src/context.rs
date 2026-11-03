@@ -2522,7 +2522,7 @@ pub(crate) fn scalar_operand_type(e: &Expr, names: &NameCtx) -> Option<&'static 
                 _ => None,
             }
         }
-        Expr::Field { obj, name: _, .. } => {
+        Expr::Field { obj, .. } => {
             // Raw struct field read on an unboxed local (`p.x` where `p` is a
             // `zz_struct_*` raw C value). Scalar fields lower to raw C
             // arithmetic; the Binary handler's `field_read_scalar` override
