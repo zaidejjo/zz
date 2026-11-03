@@ -381,6 +381,15 @@ pub struct Checker {
     /// top-level function (or `Type.method`) whose body is being checked;
     /// empty at top level (keys then use [`TOP_SCOPE`]).
     pub scope: Vec<Arc<str>>,
+    /// Shadow cache: innermost binding per name → (scope depth, type).
+    /// Makes variable lookup O(1) amortized instead of O(depth). Entries are
+    /// inserted on `define` and evicted for the popped depth on `pop_scope`;
+    /// shadowed outer values are restored lazily by a single linear re-walk
+    /// on the next lookup, keeping correctness for shadowing.
+    pub scope_cache: std::collections::HashMap<String, (usize, Type)>,
+    /// Names defined at each scope depth, parallel to `env`; used to evict
+    /// exactly the cache entries belonging to a popped scope.
+    pub names_at_depth: Vec<Vec<String>>,
     /// Memo cache for `Ty -> Type` conversion, keyed by
     /// `(span.start, span.end, generics_hash)`. Avoids re-parsing the same
     /// type annotation repeatedly within one check run. Also deduplicates
@@ -442,6 +451,8 @@ impl Checker {
             module_aliases: HashMap::new(),
             span_types: std::collections::HashMap::new(),
             scope: Vec::new(),
+            scope_cache: std::collections::HashMap::new(),
+            names_at_depth: vec![Vec::new()],
             link_libs: Vec::new(),
             domain: DomainState::default(),
             type_annotation_cache: std::collections::HashMap::new(),

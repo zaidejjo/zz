@@ -100,6 +100,7 @@ impl ScopeOps for Checker {
         self.env.push(std::collections::HashMap::new());
         self.defined_names.push(std::collections::HashMap::new());
         self.const_env.push(std::collections::HashMap::new());
+        self.names_at_depth.push(Vec::new());
     }
 
     /// Strip the module prefix from a name for display.
@@ -152,6 +153,20 @@ impl ScopeOps for Checker {
         // Warn about unused variables in this scope (skip the global scope).
         if let Some(defined) = self.defined_names.pop() {
             let scope_index = self.defined_names.len();
+            // Evict the shadow-cache entries defined at this depth before
+            // the env is popped. Shadowed outer values are restored lazily
+            // by a linear re-walk on the next lookup, keeping correctness.
+            if let Some(names) = self.names_at_depth.pop() {
+                for name in names {
+                    if self
+                        .scope_cache
+                        .get(&name)
+                        .is_some_and(|(d, _)| *d == scope_index)
+                    {
+                        self.scope_cache.remove(&name);
+                    }
+                }
+            }
             // Sort by (span, name): HashMap iteration order is
             // per-process random, and diagnostics must be byte-identical
             // across runs (the dual-engine parity harness diffs stderr
@@ -219,11 +234,22 @@ impl ScopeOps for Checker {
     /// callee dictates the closure's arity, so a parameter cannot be
     /// removed and `_name` would only hide what the API signature says.
     fn define_binding_at(&mut self, name: &str, ty: Type, span: Span, warn_unused: bool) {
-        self.env.last_mut().unwrap().insert(name.to_string(), ty);
+        let depth = self.env.len().saturating_sub(1);
+        self.env
+            .last_mut()
+            .unwrap()
+            .insert(name.to_string(), ty.clone());
         // Record the definition span for unused-variable warnings.
         if let Some(scope) = self.defined_names.last_mut() {
             scope.insert(name.to_string(), DefinedBinding { span, warn_unused });
         }
+        // O(1) shadow cache: innermost binding wins (defines happen at the
+        // current depth, which is >= any cached depth for this name).
+        self.scope_cache.insert(name.to_string(), (depth, ty));
+        self.names_at_depth
+            .last_mut()
+            .unwrap()
+            .push(name.to_string());
     }
 
     /// Define a variable, recording its immutability when `is_const`.
@@ -516,6 +542,19 @@ impl ScopeOps for Checker {
     /// Like [`Checker::lookup`] but without the error: returns `None` when
     /// the name is not bound anywhere.
     fn lookup_opt(&mut self, name: &str) -> Option<Type> {
+        // O(1) shadow-cache lookup: innermost binding per name.
+        if let Some((depth, ty)) = self.scope_cache.get(name).cloned() {
+            self.used_names.insert(name.to_string());
+            self.used_bindings.insert((depth, name.to_string()));
+            for probe in self.shadow_probes.iter_mut() {
+                if probe.name == name && depth < probe.depth {
+                    probe.referenced = true;
+                }
+            }
+            return Some(ty);
+        }
+        // Fallback: linear scope walk (repopulates the cache after a pop
+        // evicted a shadowed outer binding).
         for (depth, scope) in self.env.iter().enumerate().rev() {
             if let Some(t) = scope.get(name) {
                 let t = t.clone();
@@ -531,6 +570,9 @@ impl ScopeOps for Checker {
                         probe.referenced = true;
                     }
                 }
+                // Repopulate the cache so subsequent lookups are O(1).
+                self.scope_cache
+                    .insert(name.to_string(), (depth, t.clone()));
                 return Some(t);
             }
         }

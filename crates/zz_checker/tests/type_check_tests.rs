@@ -4627,6 +4627,26 @@ fn type_annotation_errors_are_deduped() {
 }
 
 #[test]
+fn shadowed_lookup_restores_outer_after_inner_scope() {
+    // Outer x := 1 (int), inner block shadows x := true (bool). Inner
+    // reads see bool; after the inner scope pops, outer reads see int.
+    // This exercises the shadow cache eviction + lazy re-walk restoration.
+    let r = check_src("x := 1\n{ x := true }\nx := x + 1\n");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["x"], Type::Int);
+}
+
+#[test]
+fn nested_shadow_lookup_uses_innermost() {
+    // Deeply nested shadows: every read must resolve to the innermost
+    // binding, and popping must restore each outer layer in order.
+    let r = check_src("a := 1\n{ a := 2\n  { a := 3 }\n  b := a + 1\n }\nc := a + 10\n");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["a"], Type::Int);
+    assert_eq!(r.bindings["c"], Type::Int);
+}
+
+#[test]
 fn pub_func_with_unresolved_ret_is_excluded_and_errors() {
     // An untyped parameter is inferred to a fresh `Var`; if it is never
     // pinned by the body it stays a `Var` in the signature. `check_func_body`
