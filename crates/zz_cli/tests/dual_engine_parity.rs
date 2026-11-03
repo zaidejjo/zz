@@ -12,8 +12,56 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use zz_cli::fixture_meta;
+
+/// Tiny counting semaphore (std-only; `std::sync::Semaphore` is still
+/// unstable). `acquire` blocks until a permit is available; dropping the
+/// `Permit` returns it. Cheaply `Clone` (internally `Arc`d) so a copy can
+/// be moved into each leg thread.
+struct SemaphoreInner {
+    count: Mutex<usize>,
+    cvar: Condvar,
+}
+#[derive(Clone)]
+struct Semaphore(Arc<SemaphoreInner>);
+impl Semaphore {
+    fn new(n: usize) -> Self {
+        Self(Arc::new(SemaphoreInner {
+            count: Mutex::new(n),
+            cvar: Condvar::new(),
+        }))
+    }
+    fn acquire(&self) -> Permit {
+        let mut c = self.0.count.lock().unwrap();
+        while *c == 0 {
+            c = self.0.cvar.wait(c).unwrap();
+        }
+        *c -= 1;
+        Permit {
+            sem: self.0.clone(),
+        }
+    }
+}
+struct Permit {
+    sem: Arc<SemaphoreInner>,
+}
+impl Drop for Permit {
+    fn drop(&mut self) {
+        let mut c = self.sem.count.lock().unwrap();
+        *c += 1;
+        self.sem.cvar.notify_one();
+    }
+}
+
+/// Bounds the total number of concurrent quad legs across all fixtures so
+/// the machine isn't oversubscribed (each leg may spawn clang). Pool
+/// threads only `join()` on leg threads and never hold a permit while
+/// waiting, so there is no deadlock: at most `ZZ_QUAD_JOBS` legs run at
+/// once, but legs of the *same* fixture may run concurrently, cutting
+/// per-fixture wall time close to the slowest leg instead of the sum.
+static QUAD_SEM: OnceLock<Semaphore> = OnceLock::new();
 
 #[path = "batch_lists.rs"]
 mod batch_lists;
@@ -1435,6 +1483,10 @@ parity_strict!(parity_syntax_empty_infer, "syntax", "empty_infer.zz");
 parity_strict!(parity_syntax_functions, "syntax", "functions.zz");
 parity_strict!(parity_syntax_hof, "syntax", "hof.zz");
 parity_strict!(parity_syntax_arrays, "syntax", "arrays.zz");
+parity_strict!(parity_syntax_array_sum, "syntax", "array_sum.zz");
+parity_strict!(parity_syntax_struct_access, "syntax", "struct_access.zz");
+parity_strict!(parity_syntax_string_build, "syntax", "string_build.zz");
+parity_strict!(parity_syntax_flat_arrays, "syntax", "flat_arrays.zz");
 parity_strict!(parity_syntax_defer, "syntax", "defer.zz");
 parity_strict!(parity_syntax_dict_iteration, "syntax", "dict_iteration.zz");
 parity_strict!(parity_stdlib_vectors, "stdlib", "vectors.zz");
@@ -1863,21 +1915,52 @@ struct QuadLegs {
 
 fn run_quad(file: &Path, token: &str) -> QuadLegs {
     let debug_bin = PathBuf::from(env!("CARGO_BIN_EXE_zz"));
+    let release_bin = release_vm_bin();
     let input = stdin_for(file);
-    let vm_dbg = run_quad_leg(&debug_bin, false, false, file, &input, token);
-    let vm_rel = run_quad_leg(&release_vm_bin(), false, false, file, &input, token);
-    let (nat_dev, nat_rel) = if quad_skip_native() || vm_only() {
+    let token = token.to_string();
+    let file = file.to_path_buf();
+    // Lazily fall back to a modest default semaphore if called outside
+    // `quad_regression_and_edge_matrix` (which sets it from `ZZ_QUAD_JOBS`).
+    let sem = QUAD_SEM.get_or_init(|| Semaphore::new(4)).clone();
+
+    // Each leg is an independent process; run them concurrently so a
+    // fixture's wall time is ~max(leg) instead of sum(leg), bounded by
+    // QUAD_SEM so total CPU never exceeds ZZ_QUAD_JOBS.
+    if quad_skip_native() || vm_only() {
         eprintln!(
             "SKIP native legs for {} (fast/Windows mode)",
             file.display()
         );
-        (None, None)
-    } else {
-        (
-            Some(run_quad_leg(&debug_bin, true, true, file, &input, token)),
-            Some(run_quad_leg(&debug_bin, true, false, file, &input, token)),
-        )
+    }
+    let spawn = |driver: PathBuf, native: bool, dev: bool| {
+        let sem = sem.clone();
+        let file = file.clone();
+        let token = token.clone();
+        let input = input.clone();
+        std::thread::spawn(move || {
+            if native && (quad_skip_native() || vm_only()) {
+                return None;
+            }
+            let _permit = sem.acquire();
+            Some(run_quad_leg(&driver, native, dev, &file, &input, &token))
+        })
     };
+    let release_clone = release_bin.clone();
+    let mut handles: Vec<_> = [
+        spawn(debug_bin.clone(), false, false),
+        spawn(release_clone, false, false),
+        spawn(debug_bin.clone(), true, true),
+        spawn(debug_bin, true, false),
+    ]
+    .into_iter()
+    .map(|h| h.join().expect("quad leg thread panicked"))
+    .collect::<Vec<_>>();
+
+    let vm_dbg = handles[0].take().expect("vm_dbg leg");
+    let vm_rel = handles[1].take().expect("vm_rel leg");
+    let nat_dev = handles[2].take();
+    let nat_rel = handles[3].take();
+
     QuadLegs {
         vm_dbg,
         vm_rel,
@@ -2035,6 +2118,8 @@ fn quad_regression_and_edge_matrix() {
         .filter(|&n| n >= 1)
         .unwrap_or(4)
         .min(files.len().max(1));
+    // One semaphore bounds concurrent legs across the whole quad run.
+    let _ = QUAD_SEM.set(Semaphore::new(n_workers));
     /// Per-fixture outcome for the ordered fold below.
     enum Outcome {
         StrictOk,

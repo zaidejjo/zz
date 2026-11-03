@@ -428,6 +428,28 @@ impl Lowerer {
                         continue;
                     };
                     let mut out = String::new();
+                    // Flat array global: `arr: [int] = []` →
+                    //   zz_global_arr = NULL;
+                    //   zz_global_arr_len = 0;
+                    //   zz_global_arr_cap = 0;
+                    // Growth happens via inline flat-array push in Expr::Call
+                    // (malloc-based for globals; the buffer outlives frames).
+                    if Self::is_flat_array_ctype(&gtype)
+                        && matches!(value, Expr::Array { elems, .. } if elems.is_empty())
+                    {
+                        out.push_str(&format!("    {gid} = NULL;\n"));
+                        out.push_str(&format!(
+                            "    {} = 0;\n",
+                            Self::global_cid(&format!("{zz_name}_len"))
+                        ));
+                        out.push_str(&format!(
+                            "    {} = 0;\n",
+                            Self::global_cid(&format!("{zz_name}_cap"))
+                        ));
+                        global_init_done.insert(zz_name.clone());
+                        body.push_str(&out);
+                        continue;
+                    }
                     // Struct-init fast path mirrors emit_stmt Decl.
                     if let Expr::StructInit {
                         name: struct_name, ..

@@ -98,6 +98,14 @@ pub struct NameCtx {
     /// environment shares them (match VM by-reference capture semantics).
     /// Set once per function/closure body; never modified by push/pop.
     pub(crate) capture_set: HashSet<String>,
+    /// Locals in the current body that are safe to lower as flat (unboxed)
+    /// arrays: declared as `name: [scalar|unboxed-struct] = []` and used
+    /// only through the operations the flat layout implements (`push`,
+    /// integer index reads, `len`, `for x in arr`). Computed once per
+    /// function/closure body by `flat_array_locals`; a name that escapes
+    /// (call argument, return, capture, rebinding, slice, any other method)
+    /// is absent and keeps the boxed `zz_value` layout.
+    pub(crate) flat_locals: HashSet<String>,
     /// Stack of counter snapshots for scope tracking. `push_scope` records
     /// the current counter; `pop_scope` removes all entries whose C id was
     /// created at or after that counter value.
@@ -133,6 +141,10 @@ pub struct NameCtx {
     /// (and their nested arithmetic) without a signature change. Never
     /// cleared by push/pop_scope: it is program-global.
     pub(crate) scalar_fn_sigs: HashMap<String, (&'static str, usize)>,
+    /// Maps flat struct loop var names to (array C id, index var name) for
+    /// SROA: `p.x` in `for p in pts { sum += p.x }` rewrites to
+    /// `({pts})[_idx].x` directly, eliminating the per-iteration struct copy.
+    pub(crate) flat_struct_loop_vars: HashMap<String, (String, String, String)>,
 }
 
 impl NameCtx {
@@ -145,6 +157,7 @@ impl NameCtx {
             cap_deref: HashMap::new(),
             cap_ptrs: HashMap::new(),
             capture_set: HashSet::new(),
+            flat_locals: HashSet::new(),
             scope_markers: Vec::new(),
             array_lens: HashMap::new(),
             stack_array_elems: HashMap::new(),
@@ -152,6 +165,7 @@ impl NameCtx {
             checker_types: HashMap::new(),
             current_scope: zz_checker::TOP_SCOPE.to_string(),
             scalar_fn_sigs: HashMap::new(),
+            flat_struct_loop_vars: HashMap::new(),
         }
     }
 
@@ -213,6 +227,26 @@ impl NameCtx {
         self.globals.get(name).map(|(ident, _)| ident.as_str())
     }
 
+    /// [`lookup`] as an owned `String`, falling back to the source name when
+    /// the binding is not tracked (e.g. a synthetic `arr_len` on a path that
+    /// never registered it). Used by flat-array len/cap references, whose
+    /// declared C ids may be either fresh (`vN`) or global (`zz_global_*`).
+    pub(crate) fn lookup_or_name(&self, name: &str) -> String {
+        self.lookup(name)
+            .map(str::to_string)
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    /// True when `name` resolves to its module-level global right now (no
+    /// shadowing local/capture). Used to pick global-safe allocation
+    /// strategies (e.g. `realloc` growth for flat global arrays).
+    pub(crate) fn resolves_to_global(&self, name: &str) -> bool {
+        match (self.lookup(name), self.globals.get(name)) {
+            (Some(id), Some((gid, _))) => id == gid,
+            _ => false,
+        }
+    }
+
     /// Look up the variable's C type (same fallback chain as [`lookup`]).
     pub(crate) fn lookup_type(&self, name: &str) -> Option<&str> {
         if let Some((_, typ)) = self.stack.get(name).and_then(|vec| vec.last()) {
@@ -222,6 +256,20 @@ impl NameCtx {
             return Some(typ.as_str());
         }
         self.globals.get(name).map(|(_, typ)| typ.as_str())
+    }
+
+    /// True when `name` has a binding in the current lexical scope: a stack
+    /// entry created at or after the innermost `push_scope` marker (or at
+    /// function scope when no marker is open). Used to distinguish `:=`
+    /// shadowing (an outer binding) from same-scope redeclaration
+    /// (assignment), so `if { parts := ... }` shadows an outer `parts`
+    /// instead of reassigning it.
+    pub(crate) fn is_in_current_scope(&self, name: &str) -> bool {
+        let marker = self.scope_markers.last().copied().unwrap_or(0);
+        self.stack
+            .get(name)
+            .and_then(|vec| vec.last())
+            .is_some_and(|(cid, _)| cid_counter(cid) >= marker)
     }
 
     /// Deref expr for an owner cell pointer of C type `ctype`.
@@ -510,6 +558,9 @@ pub struct Lowerer {
     /// accumulated by hoisting optimizations during body lowering.
     /// Consumed by `emit_for`.
     pub(crate) loop_post_code: std::cell::RefCell<Vec<String>>,
+    /// When set, flat-array push skips the per-iteration grow guard
+    /// because `emit_for` pre-reserved capacity for the whole loop.
+    pub(crate) skip_flat_push_grow: std::cell::Cell<bool>,
     /// Names of string accumulators already hoisted into a pre-loop builder,
     /// so we don't emit duplicate builder inits for the same accumulator.
     pub(crate) accumulated_names: std::cell::RefCell<std::collections::HashSet<String>>,
@@ -622,6 +673,7 @@ impl Lowerer {
             loop_depth: std::cell::Cell::new(0),
             loop_pre_code: std::cell::RefCell::new(Vec::new()),
             loop_post_code: std::cell::RefCell::new(Vec::new()),
+            skip_flat_push_grow: std::cell::Cell::new(false),
             accumulated_names: std::cell::RefCell::new(std::collections::HashSet::new()),
         };
         lowerer.specialized = lowerer.compute_specialized();
@@ -692,6 +744,23 @@ impl Lowerer {
                 }
                 // Unboxed struct local field: `p.field`
                 if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+                    // SROA: if `p` is a flat struct loop var, rewrite
+                    // `p.x` to `({arr})[_idx].x` directly, avoiding the
+                    // per-iteration struct copy.
+                    if let Some((arr_cid, idx_var, elem_ctype)) =
+                        names.flat_struct_loop_vars.get(obj_name)
+                    {
+                        let idx_text = names.lookup(idx_var).unwrap_or(idx_var).to_string();
+                        if let Some(ft) = self.field_type_from_struct(elem_ctype, name) {
+                            let t = match ft {
+                                "int64_t" => "int64_t",
+                                "double" => "double",
+                                "bool" => "bool",
+                                _ => return None,
+                            };
+                            return Some((format!("({arr_cid})[{idx_text}].{name}"), t));
+                        }
+                    }
                     let ctype = names.lookup_type(obj_name).unwrap_or("");
                     if ctype.starts_with("zz_struct_") {
                         if let Some(ft) = self.field_type_from_struct(ctype, name) {
@@ -1305,6 +1374,35 @@ impl Lowerer {
         }
     }
 
+    /// C type for a *flat* array (contiguous unboxed buffer), or `None`
+    /// when the element type is not flat-representable.
+    ///
+    /// Kept separate from [`Self::type_to_c`] on purpose: `type_to_c` is
+    /// also used for struct-field and method-receiver C types, where an
+    /// array field must stay boxed (`zz_value`). Only globals proven safe
+    /// by [`crate::param_escape::flat_global_arrays`] use this helper.
+    pub(crate) fn flat_array_c_type(&self, ty: &zz_checker::Type) -> Option<String> {
+        let zz_checker::Type::Array(inner) = ty else {
+            return None;
+        };
+        match inner.as_ref() {
+            zz_checker::Type::Int => Some("int64_t *".to_string()),
+            zz_checker::Type::Float => Some("double *".to_string()),
+            zz_checker::Type::Bool => Some("bool *".to_string()),
+            zz_checker::Type::Struct(name, _) if self.is_unboxed_struct(name) => {
+                Some(format!("zz_struct_{} *", mangle(name)))
+            }
+            _ => None,
+        }
+    }
+
+    /// True when `ctype` is a flat-array pointer produced by
+    /// [`Self::flat_array_c_type`] (scalar or unboxed-struct buffer).
+    pub(crate) fn is_flat_array_ctype(ctype: &str) -> bool {
+        matches!(ctype, "int64_t *" | "double *" | "bool *")
+            || (ctype.starts_with("zz_struct_") && ctype.ends_with(" *"))
+    }
+
     /// C identifier for a module-level global: `zz_global_<mangled>`.
     pub(crate) fn global_cid(zz_name: &str) -> String {
         format!("zz_global_{}", mangle(zz_name))
@@ -1330,6 +1428,15 @@ impl Lowerer {
         body: &zz_frontend::ast::Expr,
     ) -> std::collections::HashSet<String> {
         zz_hir::captured_in_expr(params, body, &self.global_set)
+    }
+
+    /// Locals of `block` that may be lowered as flat (unboxed) arrays.
+    /// See [`crate::param_escape::flat_array_locals`] for the contract.
+    pub(crate) fn body_flat_locals(
+        &self,
+        block: &zz_frontend::ast::Block,
+    ) -> std::collections::HashSet<String> {
+        crate::param_escape::flat_array_locals(block, &|n: &str| self.is_unboxed_struct(n))
     }
 
     /// Emit a heap cell allocation + initialization for a captured binding.
@@ -1385,10 +1492,24 @@ impl Lowerer {
             }
         }
         names.sort();
-        names
-            .into_iter()
-            .map(|n| {
-                let checker_ty = self.tp.bindings.get(&n).cloned();
+        // Program-wide flat-array eligibility for module globals. Kept
+        // conservative: any unsupported mention keeps the global boxed
+        // (see `flat_global_arrays` for the contract).
+        let flat_globals = crate::param_escape::flat_global_arrays(&self.tp.program, &|n| {
+            self.is_unboxed_struct(n)
+        });
+        let mut result: Vec<(String, String, String, Option<zz_checker::Type>)> = Vec::new();
+        let declared: std::collections::HashSet<String> = names.iter().cloned().collect();
+        for n in names {
+            let checker_ty = self.tp.bindings.get(&n).cloned();
+            let flat_ctype = if flat_globals.contains(&n) {
+                checker_ty.as_ref().and_then(|t| self.flat_array_c_type(t))
+            } else {
+                None
+            };
+            let ctype = match (&flat_ctype, &checker_ty) {
+                // Flat global array: contiguous unboxed C buffer.
+                (Some(ctype), _) => ctype.clone(),
                 // Unboxed structs work for locals (conversions at every
                 // use), but globals lack the store/load conversions — a
                 // struct-typed global miscompiles (boxed value into an
@@ -1396,19 +1517,36 @@ impl Lowerer {
                 // like every other composite, but KEEP the checker type:
                 // field-store/read arms key struct layout off it while
                 // branching raw-vs-boxed on the (boxed) C type.
-                let ctype = match &checker_ty {
-                    Some(zz_checker::Type::Struct(name, _)) if self.is_unboxed_struct(name) => {
-                        "zz_value".to_string()
+                (None, Some(zz_checker::Type::Struct(name, _))) if self.is_unboxed_struct(name) => {
+                    "zz_value".to_string()
+                }
+                (None, _) => checker_ty
+                    .as_ref()
+                    .map(|t| self.type_to_c(t))
+                    .unwrap_or_else(|| "zz_value".to_string()),
+            };
+            let cid = Self::global_cid(&n);
+            result.push((n.clone(), cid, ctype, checker_ty.clone()));
+            // Flat arrays carry their length/capacity counters next to the
+            // buffer (mirrors the local layout: `arr`, `arr_len`, `arr_cap`).
+            if flat_ctype.is_some() {
+                for (suffix, ctype) in [("_len", "int64_t"), ("_cap", "int64_t")] {
+                    let synth_name = format!("{n}{suffix}");
+                    // A user-declared global with the same spelling wins (a
+                    // duplicate C definition would not compile).
+                    if declared.contains(&synth_name) {
+                        continue;
                     }
-                    _ => checker_ty
-                        .as_ref()
-                        .map(|t| self.type_to_c(t))
-                        .unwrap_or_else(|| "zz_value".to_string()),
-                };
-                let cid = Self::global_cid(&n);
-                (n, cid, ctype, checker_ty)
-            })
-            .collect()
+                    result.push((
+                        synth_name.clone(),
+                        Self::global_cid(&synth_name),
+                        ctype.to_string(),
+                        Some(zz_checker::Type::Int),
+                    ));
+                }
+            }
+        }
+        result
     }
 
     /// Seed a NameCtx with all module-level globals.
@@ -1449,6 +1587,44 @@ impl Lowerer {
             .map(|s| s.to_string())
     }
 
+    /// If `ctype` is a flat scalar array pointer (`int64_t *`, `double *`,
+    /// `bool *`) produced by the flat-array lowering for arrays of scalars,
+    /// return the element C type string. Returns `None` for boxed `zz_value`s
+    /// and non-scalar pointer types.
+    pub(crate) fn scalar_array_from_ptr(&self, ctype: &str) -> Option<&str> {
+        ctype.strip_suffix(" *").and_then(|inner| match inner {
+            "int64_t" => Some("int64_t"),
+            "double" => Some("double"),
+            "bool" => Some("bool"),
+            _ => None,
+        })
+    }
+
+    /// Resolve the receiver of a flat-array index read `obj[k]` to
+    /// `(C-id, element-ctype)`. Handles both `arr[k]` (Ident) and
+    /// `ns.arr[k]` (Path for namespaced globals). Returns `None` unless
+    /// the receiver is a known flat scalar array.
+    pub(crate) fn flat_index_receiver(
+        &self,
+        obj: &zz_frontend::ast::Expr,
+        names: &NameCtx,
+    ) -> Option<(String, String)> {
+        let (name, ctype) = match obj {
+            zz_frontend::ast::Expr::Ident { name, .. } => {
+                let ctype = names.lookup_type(name.as_str()).unwrap_or("");
+                (name.clone(), ctype.to_string())
+            }
+            zz_frontend::ast::Expr::Path { parts, .. } if parts.len() == 2 => {
+                let joined = parts.join(".");
+                let ctype = names.lookup_type(&joined).unwrap_or("");
+                (joined, ctype.to_string())
+            }
+            _ => return None,
+        };
+        let elem_ctype = self.scalar_array_from_ptr(&ctype)?;
+        Some((name, elem_ctype.to_string()))
+    }
+
     /// Emit a raw `int64_t` index expression for flat-array indexing.
     /// Boxed-int loop variables (e.g. the `k` in `for k in 0..n`) lower to
     /// `zz_value` locals, so extract `.i`; plain int64_t locals and literals
@@ -1464,6 +1640,21 @@ impl Lowerer {
             if names.lookup_type(name) == Some("zz_value") {
                 return format!("({emitted}).i");
             }
+        }
+        // Literals (and other boxed scalar expressions) emit as `zz_int(3)` /
+        // `zz_float(…)` / `zz_bool(…)`; a C subscript needs the raw value.
+        for prefix in ["zz_int(", "zz_float(", "zz_bool("] {
+            if let Some(inner) = emitted
+                .strip_prefix(prefix)
+                .and_then(|s| s.strip_suffix(')'))
+            {
+                return inner.to_string();
+            }
+        }
+        // Boxed runtime value (e.g. function call returning int) — extract .i
+        // so it can be used as a raw C array index.
+        if emitted.starts_with("zz_") {
+            return format!("({emitted}).i");
         }
         emitted
     }
@@ -2331,6 +2522,20 @@ pub(crate) fn scalar_operand_type(e: &Expr, names: &NameCtx) -> Option<&'static 
                 _ => None,
             }
         }
+        Expr::Field { obj, .. } => {
+            // Raw struct field read on an unboxed local (`p.x` where `p` is a
+            // `zz_struct_*` raw C value). Scalar fields lower to raw C
+            // arithmetic; the Binary handler's `field_read_scalar` override
+            // refines the exact field type at emission time. Returns int64_t
+            // conservatively — correct for int fields (the common case).
+            if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+                let ctype = names.lookup_type(obj_name).unwrap_or("");
+                if ctype.starts_with("zz_struct_") {
+                    return Some("int64_t");
+                }
+            }
+            None
+        }
         Expr::Unary { op, expr, .. } => {
             let inner = scalar_operand_type(expr, names)?;
             match op {
@@ -2433,6 +2638,28 @@ pub(crate) fn raw_scalar_text(
 ) -> Option<(String, &'static str)> {
     if let (Some(raw), Some(t)) = (scalar_operand_c(e, names), scalar_operand_type(e, names)) {
         return Some((raw, t));
+    }
+    // Handle `Expr::Field` reads on unboxed struct locals (`p.field` where
+    // `p` is a raw C struct, type starts with "zz_struct_"). The emitted
+    // text is already `(cid).field` (raw C), but scalar_operand_c/type
+    // lack a Field arm, so classify it here. field_read_scalar (called in
+    // the Binary handler override) refines the exact type; we default to
+    // int64_t which covers the common arithmetic case.
+    if let Expr::Field { obj, name, .. } = e {
+        if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+            // SROA: if `p` is a flat struct loop var, rewrite `p.x` to
+            // `({arr})[_idx].x` directly.
+            if let Some((arr_cid, idx_var, _elem_ctype)) = names.flat_struct_loop_vars.get(obj_name)
+            {
+                let idx_text = names.lookup(idx_var).unwrap_or(idx_var).to_string();
+                return Some((format!("({arr_cid})[{idx_text}].{name}"), "int64_t"));
+            }
+            let ctype = names.lookup_type(obj_name).unwrap_or("");
+            if ctype.starts_with("zz_struct_") {
+                let cid = names.lookup(obj_name).unwrap_or(obj_name);
+                return Some((format!("({cid}).{name}"), "int64_t"));
+            }
+        }
     }
     let ident = match e {
         Expr::Ident { name, .. } => Some(name.as_str()),
@@ -2741,6 +2968,25 @@ pub(crate) fn scalar_operand_c(e: &Expr, names: &NameCtx) -> Option<String> {
             };
             let (raw, _) = names.stack_array_elem(name, *value)?;
             Some(raw)
+        }
+        Expr::Field { obj, name, .. } => {
+            // Raw struct field read on an unboxed local (`p.x` where `p` is
+            // a `zz_struct_*` raw C value).
+            if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+                // SROA: if `p` is a flat struct loop var, rewrite directly.
+                if let Some((arr_cid, idx_var, _elem_ctype)) =
+                    names.flat_struct_loop_vars.get(obj_name)
+                {
+                    let idx_text = names.lookup(idx_var).unwrap_or(idx_var).to_string();
+                    return Some(format!("({arr_cid})[{idx_text}].{name}"));
+                }
+                let ctype = names.lookup_type(obj_name).unwrap_or("");
+                if ctype.starts_with("zz_struct_") {
+                    let cid = names.lookup(obj_name).unwrap_or(obj_name);
+                    return Some(format!("({cid}).{name}"));
+                }
+            }
+            None
         }
         _ => None,
     }

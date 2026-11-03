@@ -1093,6 +1093,513 @@ fn param_is_readonly(
     true
 }
 
+/// Compute the set of locals in `block` that may be lowered as flat
+/// (unboxed) arrays: declared as `name: [scalar|unboxed-struct] = []` and
+/// mentioned *only* in positions the flat layout implements.
+///
+/// Supported mentions (everything else disqualifies the name, which then
+/// keeps the boxed `zz_value` layout — always correct, just slower):
+/// - `arr.push(x)` (one positional argument)
+/// - `arr[i]` reads with a non-slice index (scalar elements only; a struct
+///   element has no boxed form, so `arr[i].field` is the supported read)
+/// - `len(arr)`
+/// - `for x in arr`
+///
+/// Any other mention (call argument, `return arr`, whole-variable
+/// assignment, rebinding, `arr[i] = v`, slicing, `.map`/`.pop`/…,
+/// closure/defer capture, shadowing) means the buffer would have to be
+/// boxed at that point, so the name stays boxed everywhere.
+pub(crate) fn flat_array_locals(
+    block: &Block,
+    is_unboxed_struct: &dyn Fn(&str) -> bool,
+) -> HashSet<String> {
+    use zz_frontend::ast::TyKind;
+
+    // Pass 1: candidate declarations (`name: [T] = []` with a flat element).
+    // Value = true when the element is a scalar (bare `arr[i]` reads are
+    // supported); struct elements only support `arr[i].field`.
+    let mut candidates: HashMap<String, bool> = HashMap::new();
+    fn collect(block: &Block, out: &mut HashMap<String, bool>, is_unboxed: &dyn Fn(&str) -> bool) {
+        for stmt in &block.stmts {
+            match stmt {
+                Stmt::Decl {
+                    ty, name, value, ..
+                } => {
+                    if matches!(value, Expr::Array { elems, .. } if elems.is_empty()) {
+                        if let Some(ty) = ty {
+                            if let TyKind::Array(inner) = &ty.kind {
+                                let flat = match &inner.kind {
+                                    TyKind::Int | TyKind::Float | TyKind::Bool => Some(true),
+                                    TyKind::Named(n, _) if is_unboxed(n) => Some(false),
+                                    _ => None,
+                                };
+                                if let Some(scalar) = flat {
+                                    out.insert(name.name.clone(), scalar);
+                                }
+                            }
+                        }
+                    }
+                }
+                Stmt::For { body, .. } => collect(body, out, is_unboxed),
+                Stmt::Expr(Expr::Block(b)) => collect(b, out, is_unboxed),
+                Stmt::Expr(Expr::If { then, els, .. }) => {
+                    collect(then, out, is_unboxed);
+                    if let Some(Expr::Block(b)) = els.as_deref() {
+                        collect(b, out, is_unboxed);
+                    }
+                }
+                Stmt::Expr(Expr::While { body, .. }) => collect(body, out, is_unboxed),
+                _ => {}
+            }
+        }
+    }
+    collect(block, &mut candidates, is_unboxed_struct);
+    if candidates.is_empty() {
+        return HashSet::new();
+    }
+
+    // Pass 2: disqualify any candidate with an unsupported mention.
+    let mut bad: HashSet<String> = HashSet::new();
+    {
+        let mut scan = FlatUseScan {
+            cand: &candidates,
+            bad: &mut bad,
+            escaping: false,
+        };
+        scan.block(block);
+    }
+    candidates.retain(|n, _| !bad.contains(n));
+    candidates.into_keys().collect()
+}
+
+/// Program-wide version of [`flat_array_locals`] for module-level arrays:
+/// a top-level `name: [scalar|unboxed-struct] = []` may lower to the flat
+/// layout only when *every* mention of that name in the whole program is an
+/// operation the flat layout implements (`push`, integer index reads,
+/// `len`, `for x in arr`, `arr[i].field`).
+///
+/// Globals have no flat → `zz_value` materialization at boxed boundaries
+/// (call arguments, returns, slice containers, whole rebinding, printing),
+/// so unlike locals — which fall back to boxing per mention — one
+/// unsupported mention keeps the global boxed for the entire program. That
+/// conservative direction is always correct, just slower.
+///
+/// Only bare (non-namespaced) declarations are considered: qualified
+/// `mod.arr` globals are reached through `Path` nodes whose leaf spelling
+/// can collide with a bare name, so they stay boxed.
+pub(crate) fn flat_global_arrays(
+    program: &Program,
+    is_unboxed_struct: &dyn Fn(&str) -> bool,
+) -> HashSet<String> {
+    use zz_frontend::ast::TyKind;
+
+    // Pass 1: candidate top-level declarations.
+    let mut candidates: HashMap<String, bool> = HashMap::new();
+    for stmt in &program.stmts {
+        let Stmt::Decl {
+            ty, name, value, ..
+        } = stmt
+        else {
+            continue;
+        };
+        if name.name.contains('.') {
+            continue;
+        }
+        if !matches!(value, Expr::Array { elems, .. } if elems.is_empty()) {
+            continue;
+        }
+        let Some(ty) = ty else { continue };
+        let TyKind::Array(inner) = &ty.kind else {
+            continue;
+        };
+        let flat = match &inner.kind {
+            TyKind::Int | TyKind::Float | TyKind::Bool => Some(true),
+            TyKind::Named(n, _) if is_unboxed_struct(n) => Some(false),
+            _ => None,
+        };
+        if let Some(scalar) = flat {
+            candidates.insert(name.name.clone(), scalar);
+        }
+    }
+    if candidates.is_empty() {
+        return HashSet::new();
+    }
+
+    // Pass 2: disqualify candidates used anywhere in an unsupported shape.
+    // Function/method bodies are scanned with `escaping == false` (a global
+    // is addressable from any frame, unlike a captured local); closures and
+    // nested functions inside them still raise the capture barrier.
+    let mut bad: HashSet<String> = HashSet::new();
+    {
+        let mut scan = FlatUseScan {
+            cand: &candidates,
+            bad: &mut bad,
+            escaping: false,
+        };
+        for stmt in &program.stmts {
+            match stmt {
+                Stmt::Func { body, .. } => scan.block(body),
+                Stmt::Impl { methods, .. } => {
+                    for m in methods {
+                        if let Stmt::Func { body, .. } = m {
+                            scan.block(body);
+                        }
+                    }
+                }
+                other => scan.stmt(other),
+            }
+        }
+    }
+    candidates.retain(|n, _| !bad.contains(n));
+    candidates.into_keys().collect()
+}
+
+/// Walks a body marking candidate flat arrays that appear in a position the
+/// flat layout cannot serve. `escaping` is set inside closures and `defer`
+/// bodies, where any mention (even `push`) is a capture.
+struct FlatUseScan<'a> {
+    cand: &'a HashMap<String, bool>,
+    bad: &'a mut HashSet<String>,
+    escaping: bool,
+}
+
+impl<'a> FlatUseScan<'a> {
+    fn is_cand(&self, name: &str) -> bool {
+        self.cand.contains_key(name)
+    }
+
+    /// True when the candidate's element is a scalar (bare `arr[i]` reads
+    /// are supported). Struct elements have no boxed element form here.
+    fn is_scalar_cand(&self, name: &str) -> bool {
+        self.cand.get(name).copied().unwrap_or(false)
+    }
+
+    fn mention(&mut self, name: &str) {
+        if self.is_cand(name) {
+            self.bad.insert(name.to_string());
+        }
+    }
+
+    /// Any expression mentioning a candidate disqualifies it (lvalue,
+    /// closure capture, deferred body, comprehension source, …).
+    fn poison_expr(&mut self, e: &Expr) {
+        match e {
+            Expr::Ident { name, .. } => self.mention(name),
+            Expr::Index { obj, .. } | Expr::Field { obj, .. } | Expr::Slice { obj, .. } => {
+                self.poison_expr(obj);
+            }
+            Expr::Path { parts, .. } => {
+                for p in parts {
+                    self.mention(p);
+                }
+            }
+            _ => self.expr(e),
+        }
+    }
+
+    fn poison_block(&mut self, b: &Block) {
+        let saved = self.escaping;
+        self.escaping = true;
+        self.block(b);
+        self.escaping = saved;
+    }
+
+    fn poison_pattern(&mut self, p: &Pattern) {
+        match p {
+            Pattern::Binding { name } => self.mention(&name.name),
+            Pattern::Tuple { pats, .. } | Pattern::Or { pats, .. } => {
+                for p in pats {
+                    self.poison_pattern(p);
+                }
+            }
+            Pattern::Variant { arg, .. } => {
+                if let Some(p) = arg {
+                    self.poison_pattern(p);
+                }
+            }
+            Pattern::Wildcard { .. } | Pattern::Literal { .. } => {}
+        }
+    }
+
+    fn block(&mut self, b: &Block) {
+        for stmt in &b.stmts {
+            self.stmt(stmt);
+        }
+    }
+
+    fn stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Decl { name, value, .. } => {
+                // A redeclaration shadows the candidate: its later uses are
+                // not the array, so keep the array boxed (conservative). The
+                // candidate's own `arr: [T] = []` declaration is exempt.
+                let own_flat_decl = self.is_cand(&name.name)
+                    && matches!(value, Expr::Array { elems, .. } if elems.is_empty());
+                if !own_flat_decl {
+                    self.mention(&name.name);
+                }
+                self.expr(value);
+            }
+            Stmt::For {
+                vars, iter, body, ..
+            } => {
+                // Iterating the array itself is the one supported use.
+                match iter.as_ref() {
+                    Expr::Ident { name, .. } if self.is_cand(name) && !self.escaping => {}
+                    _ => self.expr(iter),
+                }
+                for v in vars {
+                    self.mention(&v.name);
+                }
+                self.block(body);
+            }
+            Stmt::Return { value, .. } => {
+                if let Some(v) = value {
+                    self.poison_expr(v);
+                }
+            }
+            Stmt::Assign { target, value, .. } | Stmt::CompoundAssign { target, value, .. } => {
+                // Stores (including `arr[i] = v`) are not implemented on
+                // the flat layout: the target is a poison position.
+                self.poison_expr(target);
+                self.expr(value);
+            }
+            Stmt::Destructure { pat, value, .. } => {
+                self.poison_pattern(pat);
+                self.expr(value);
+            }
+            Stmt::Defer { expr, .. } => {
+                let saved = self.escaping;
+                self.escaping = true;
+                self.expr(expr);
+                self.escaping = saved;
+            }
+            Stmt::Expr(e) => self.expr(e),
+            Stmt::Func { body, .. } => self.poison_block(body),
+            Stmt::Impl { methods, .. } => {
+                for m in methods {
+                    if let Stmt::Func { body, .. } = m {
+                        self.poison_block(body);
+                    }
+                }
+            }
+            Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::Import { .. }
+            | Stmt::Struct { .. }
+            | Stmt::TypeAlias { .. }
+            | Stmt::Enum { .. }
+            | Stmt::ExternBlock { .. }
+            | Stmt::Link { .. } => {}
+        }
+    }
+
+    fn expr(&mut self, e: &Expr) {
+        match e {
+            Expr::Ident { name, .. } => self.mention(name),
+            Expr::Call {
+                callee,
+                args,
+                named,
+                ..
+            } => {
+                // `len(arr)` consumes its argument as a length read, so the
+                // generic argument scan below must skip it.
+                let mut args_consumed = false;
+                match callee.as_ref() {
+                    // `arr.push(x)` — the supported append form.
+                    Expr::Path { parts, .. }
+                        if parts.len() == 2 && self.is_cand(&parts[0]) && !self.escaping =>
+                    {
+                        if parts[1] != "push" || args.len() != 1 || !named.is_empty() {
+                            self.mention(&parts[0]);
+                        }
+                    }
+                    Expr::Field { obj, name, .. } => match obj.as_ref() {
+                        Expr::Ident { name: recv, .. } if self.is_cand(recv) && !self.escaping => {
+                            if name != "push" || args.len() != 1 || !named.is_empty() {
+                                self.mention(recv);
+                            }
+                        }
+                        _ => self.expr(obj),
+                    },
+                    // `len(arr)` — a pure read of the length counter.
+                    Expr::Ident {
+                        name: callee_name, ..
+                    } if callee_name == "len" && args.len() == 1 => match &args[0] {
+                        Expr::Ident { name, .. } if self.is_cand(name) => {
+                            args_consumed = true;
+                        }
+                        other => self.expr(other),
+                    },
+                    other => self.expr(other),
+                }
+                if !args_consumed {
+                    for a in args {
+                        self.expr(a);
+                    }
+                }
+                for (_, v) in named {
+                    self.expr(v);
+                }
+            }
+            // `arr[i]` reads only; the index expression itself is scanned.
+            // Bare struct elements have no boxed form, so only scalar
+            // element arrays may be indexed directly (struct arrays are
+            // read through `arr[i].field`, handled above).
+            Expr::Index { obj, index, .. } => {
+                match obj.as_ref() {
+                    Expr::Ident { name, .. } if self.is_scalar_cand(name) && !self.escaping => {}
+                    _ => self.expr(obj),
+                }
+                self.expr(index);
+            }
+            Expr::Slice {
+                obj, start, end, ..
+            } => {
+                self.poison_expr(obj);
+                if let Some(s) = start {
+                    self.expr(s);
+                }
+                if let Some(s) = end {
+                    self.expr(s);
+                }
+            }
+            Expr::Closure { params, body, .. } => {
+                for p in params {
+                    self.mention(&p.name.name);
+                }
+                let saved = self.escaping;
+                self.escaping = true;
+                self.expr(body);
+                self.escaping = saved;
+            }
+            Expr::Block(b) => self.block(b),
+            Expr::If {
+                cond, then, els, ..
+            } => {
+                self.expr(cond);
+                self.block(then);
+                if let Some(e) = els {
+                    self.expr(e);
+                }
+            }
+            Expr::While { cond, body, .. } => {
+                self.expr(cond);
+                self.block(body);
+            }
+            Expr::IfLet {
+                pat,
+                value,
+                then,
+                els,
+                ..
+            } => {
+                self.poison_pattern(pat);
+                self.expr(value);
+                self.block(then);
+                if let Some(e) = els {
+                    self.expr(e);
+                }
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                self.expr(scrutinee);
+                for arm in arms {
+                    self.poison_pattern(&arm.pat);
+                    if let Some(g) = &arm.guard {
+                        self.expr(g);
+                    }
+                    self.expr(&arm.body);
+                }
+            }
+            Expr::ListComp {
+                body,
+                var,
+                iter,
+                filter,
+                ..
+            } => {
+                // The comprehension iterates through the boxed protocol.
+                self.poison_expr(iter);
+                self.mention(&var.name);
+                self.expr(body);
+                if let Some(f) = filter {
+                    self.expr(f);
+                }
+            }
+            Expr::Fmt { parts, .. } => {
+                for p in parts {
+                    if let FmtPart::Expr(e, _) = p {
+                        self.expr(e);
+                    }
+                }
+            }
+            Expr::Paren { expr, .. }
+            | Expr::Unary { expr, .. }
+            | Expr::Try { expr, .. }
+            | Expr::Variant {
+                arg: Some(expr), ..
+            } => self.expr(expr),
+            Expr::Binary { left, right, .. } => {
+                self.expr(left);
+                self.expr(right);
+            }
+            Expr::Tuple { items, .. } => {
+                for i in items {
+                    self.expr(i);
+                }
+            }
+            Expr::Array { elems, .. } => {
+                for i in elems {
+                    self.expr(i);
+                }
+            }
+            Expr::Dict { entries, .. } => {
+                for (k, v) in entries {
+                    self.expr(k);
+                    self.expr(v);
+                }
+            }
+            // `arr[i].field` — a field read off a flat element (the struct
+            // fast path indexes the buffer directly).
+            Expr::Field { obj, .. } => match obj.as_ref() {
+                Expr::Index {
+                    obj: base, index, ..
+                } => match base.as_ref() {
+                    Expr::Ident { name, .. } if self.is_cand(name) && !self.escaping => {
+                        self.expr(index);
+                    }
+                    _ => self.poison_expr(obj),
+                },
+                _ => self.poison_expr(obj),
+            },
+            Expr::Range { start, end, .. } => {
+                self.expr(start);
+                self.expr(end);
+            }
+            Expr::StructInit { fields, .. } => {
+                for (_, v) in fields {
+                    self.expr(v);
+                }
+            }
+            Expr::Path { parts, .. } => {
+                for p in parts {
+                    self.mention(p);
+                }
+            }
+            Expr::Int { .. }
+            | Expr::Float { .. }
+            | Expr::Str { .. }
+            | Expr::Bool { .. }
+            | Expr::Variant { arg: None, .. }
+            | Expr::Break { .. }
+            | Expr::Continue { .. } => {}
+        }
+    }
+}
+
 /// Compute per-parameter read-only masks for every top-level function:
 /// name → one bool per signature parameter, in order.
 ///
@@ -1197,8 +1704,168 @@ mod tests {
     }
 
     fn rng() -> Type {
-        // No struct table in tests: unknown structs count as heap.
         Type::Struct("Rng".to_string(), vec![])
+    }
+
+    /// `flat_array_locals` over the parsed `main` body of `src`.
+    fn flat_names_with(src: &str, is_unboxed: &dyn Fn(&str) -> bool) -> HashSet<String> {
+        let parsed = zz_frontend::parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let body = parsed
+            .program
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                Stmt::Func { name, body, .. } if name.join(".") == "main" => Some(body),
+                _ => None,
+            })
+            .expect("main body");
+        flat_array_locals(body, is_unboxed)
+    }
+
+    fn flat_names(src: &str) -> HashSet<String> {
+        flat_names_with(src, &|_| false)
+    }
+
+    /// `flat_global_arrays` over a parsed program (bare globals only).
+    fn flat_global_names(src: &str) -> HashSet<String> {
+        let parsed = zz_frontend::parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        flat_global_arrays(&parsed.program, &|_| false)
+    }
+
+    #[test]
+    fn flat_global_supported_uses_are_eligible() {
+        let names = flat_global_names(
+            "arr: [int] = []
+             func main() {
+                for i in 0..3 { arr.push(i) }
+                total := 0
+                for x in arr { total = total + x }
+                println(total)
+                println(len(arr))
+                println(arr[1])
+             }",
+        );
+        assert_eq!(names, HashSet::from(["arr".to_string()]));
+    }
+
+    #[test]
+    fn flat_global_call_argument_disqualifies() {
+        let names = flat_global_names(
+            "arr: [int] = []
+             func main() { arr.push(1)\nprintln(arr) }",
+        );
+        assert!(names.is_empty(), "expected boxed, got {names:?}");
+    }
+
+    #[test]
+    fn flat_global_index_store_disqualifies() {
+        let names = flat_global_names(
+            "arr: [int] = []
+             func main() { arr.push(1)\narr[0] = 2 }",
+        );
+        assert!(names.is_empty(), "expected boxed, got {names:?}");
+    }
+
+    #[test]
+    fn flat_global_untyped_decl_is_not_a_candidate() {
+        let names = flat_global_names(
+            "arr := []
+             func main() { arr.push(1) }",
+        );
+        assert!(names.is_empty(), "expected boxed, got {names:?}");
+    }
+
+    #[test]
+    fn flat_array_supported_uses_are_eligible() {
+        let names = flat_names(
+            "func main() {
+                arr: [int] = []
+                for i in 0..3 { arr.push(i) }
+                total := 0
+                for x in arr { total = total + x }
+                println(total)
+                println(len(arr))
+                println(arr[1])
+            }",
+        );
+        assert!(names.contains("arr"), "expected flat, got {names:?}");
+    }
+
+    #[test]
+    fn flat_array_index_store_disqualifies() {
+        let names = flat_names("func main() { arr: [int] = []\narr.push(1)\narr[0] = 2 }");
+        assert!(names.is_empty(), "expected boxed, got {names:?}");
+    }
+
+    #[test]
+    fn flat_array_call_argument_disqualifies() {
+        let names =
+            flat_names("func main() { arr: [int] = []\narr.push(1)\nprintln(arr)\nlet_sum(arr) }");
+        assert!(names.is_empty(), "expected boxed, got {names:?}");
+    }
+
+    #[test]
+    fn flat_array_return_disqualifies() {
+        let names = flat_names("func main() { arr: [int] = []\narr.push(1)\nreturn arr }");
+        assert!(names.is_empty(), "expected boxed, got {names:?}");
+    }
+
+    #[test]
+    fn flat_array_slice_disqualifies() {
+        let names = flat_names("func main() { arr: [int] = []\narr.push(1)\nprintln(arr[0:1]) }");
+        assert!(names.is_empty(), "expected boxed, got {names:?}");
+    }
+
+    #[test]
+    fn flat_array_other_method_disqualifies() {
+        let names = flat_names("func main() { arr: [int] = []\narr.push(1)\narr.pop() }");
+        assert!(names.is_empty(), "expected boxed, got {names:?}");
+    }
+
+    #[test]
+    fn flat_array_closure_capture_disqualifies() {
+        let names = flat_names(
+            "func main() { arr: [int] = []\narr.push(1)\nf := || arr[0]\nprintln(f()) }",
+        );
+        assert!(names.is_empty(), "expected boxed, got {names:?}");
+    }
+
+    #[test]
+    fn flat_array_untyped_empty_stays_boxed() {
+        let names = flat_names("func main() { arr := []\narr.push(1)\nprintln(len(arr)) }");
+        assert!(names.is_empty(), "expected boxed, got {names:?}");
+    }
+
+    #[test]
+    fn flat_struct_array_eligible_when_element_is_unboxed() {
+        let src = "func main() {
+            pts: [Pt] = []
+            pts.push(Pt{ x: 1, y: 2 })
+            for p in pts { println(p.x) }
+            println(pts[0].x)
+        }";
+        let unboxed = flat_names_with(src, &|n| n == "Pt");
+        assert!(unboxed.contains("pts"), "expected flat, got {unboxed:?}");
+        // Boxed element type: no flat lowering.
+        assert!(flat_names(src).is_empty());
+    }
+
+    #[test]
+    fn flat_array_redeclaration_disqualifies() {
+        let names = flat_names(
+            "func main() { arr: [int] = []\narr.push(1)\nif true { arr := [1, 2]\nprintln(len(arr)) } }",
+        );
+        assert!(names.is_empty(), "expected boxed, got {names:?}");
     }
 
     #[test]

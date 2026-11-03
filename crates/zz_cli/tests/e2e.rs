@@ -289,6 +289,10 @@ e2e_success_test!(
     "brace_escapes_multiline.zz"
 );
 e2e_success_test!(e2e_syntax_arrays, "syntax", "arrays.zz");
+e2e_success_test!(e2e_syntax_array_sum, "syntax", "array_sum.zz");
+e2e_success_test!(e2e_syntax_struct_access, "syntax", "struct_access.zz");
+e2e_success_test!(e2e_syntax_string_build, "syntax", "string_build.zz");
+e2e_success_test!(e2e_syntax_flat_arrays, "syntax", "flat_arrays.zz");
 e2e_success_test!(e2e_syntax_dicts, "syntax", "dicts.zz");
 e2e_success_test!(e2e_syntax_dicts_nonstr, "syntax", "dicts_nonstr.zz");
 e2e_success_test!(

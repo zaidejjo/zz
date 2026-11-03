@@ -2106,4 +2106,18 @@ void zz_index_trap(zz_value obj, zz_value idx, const char *func) {
     exit(1);
 }
 
+// Flat-array twin of `zz_index_trap`: the buffer is a raw `T *` with a
+// tracked length, so the message is built from the operands directly.
+void zz_index_trap_flat(long long i, long long n, const char *func) {
+    fprintf(stderr, "zz error: index %lld out of bounds for length %lld in %s\n", i, n, func);
+    if (n == 0)
+        fprintf(stderr,
+                "hint: the value is empty, so no index is valid (check `len(...)` first)\n");
+    else
+        fprintf(stderr,
+                "hint: valid indices are 0..=%lld (or -1..=-%lld, counting from the end)\n",
+                n - 1, n);
+    exit(1);
+}
+
 // fs.read(path)

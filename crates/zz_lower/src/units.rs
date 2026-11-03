@@ -285,6 +285,20 @@ impl Lowerer {
             }
         }
 
+        // Synthetic `_len`/`_cap` globals belong to the same namespace as
+        // their parent flat array, so their C definitions land in the same
+        // translation unit.
+        for (zz_name, _, _, _) in &self.global_list {
+            if let Some(base) = zz_name
+                .strip_suffix("_len")
+                .or_else(|| zz_name.strip_suffix("_cap"))
+            {
+                if owners.contains_key(base) && !owners.contains_key(zz_name) {
+                    owners.insert(zz_name.clone(), owners[base].clone());
+                }
+            }
+        }
+
         // Selective-import bare aliases: forward to canonical (extern here).
         let mut alias_pairs: Vec<(&String, &String)> = self.import_fn_aliases.iter().collect();
         alias_pairs.sort();
@@ -716,6 +730,27 @@ fn emit_top_decl(
         .get(zz_name)
         .map(|(_, t)| t.clone())
         .unwrap_or_else(|| "zz_value".to_string());
+    // Flat array global: `arr: [int] = []` →
+    //   zz_global_arr = NULL;
+    //   zz_global_arr_len = 0;
+    //   zz_global_arr_cap = 0;
+    // Growth happens via inline flat-array push in Expr::Call
+    // (malloc-based for globals; the buffer outlives frames).
+    if Lowerer::is_flat_array_ctype(&gtype)
+        && matches!(value, Expr::Array { elems, .. } if elems.is_empty())
+    {
+        out.push_str(&format!("    {gid} = NULL;\n"));
+        out.push_str(&format!(
+            "    {} = 0;\n",
+            Lowerer::global_cid(&format!("{zz_name}_len"))
+        ));
+        out.push_str(&format!(
+            "    {} = 0;\n",
+            Lowerer::global_cid(&format!("{zz_name}_cap"))
+        ));
+        global_init_done.insert(zz_name.to_string());
+        return;
+    }
     if let Expr::StructInit {
         name: struct_name, ..
     } = value
@@ -887,6 +922,63 @@ mod tests {
                 units.units.iter().map(|u| &u.ns).collect::<Vec<_>>()
             )
         })
+    }
+
+    /// A module-level `arr: [int] = []` used only through the flat-array
+    /// operations lowers to a contiguous pointer plus length/capacity
+    /// counters (not a boxed `zz_value`).
+    #[test]
+    fn flat_global_array_gets_pointer_and_counters() {
+        let units = lower_merged(
+            "arr: [int] = []
+             func main() {
+                 for i in 0..3 { arr.push(i) }
+                 total := 0
+                 for x in arr { total = total + x }
+                 println(total)
+                 println(len(arr))
+             }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let all_code: String = units.units.iter().map(|u| u.code.as_str()).collect();
+        assert!(
+            all_code.contains("int64_t * zz_global_arr;"),
+            "flat buffer def missing:\n{all_code}"
+        );
+        assert!(
+            all_code.contains("int64_t zz_global_arr_len;"),
+            "length counter def missing:\n{all_code}"
+        );
+        assert!(
+            all_code.contains("int64_t zz_global_arr_cap;"),
+            "capacity counter def missing:\n{all_code}"
+        );
+        assert!(
+            prelude.header.contains("extern int64_t * zz_global_arr;"),
+            "flat buffer extern missing:\n{}",
+            prelude.header
+        );
+    }
+
+    /// An unsupported mention (printing the whole array) keeps the global
+    /// boxed: there is no flat → zz_value materialization at that boundary.
+    #[test]
+    fn escaping_global_array_stays_boxed() {
+        let units = lower_merged(
+            "arr: [int] = []
+             func main() { arr.push(1)\nprintln(arr) }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        assert!(
+            prelude.code.contains("zz_value zz_global_arr;"),
+            "expected boxed global:\n{}",
+            prelude.code
+        );
+        assert!(
+            !prelude.code.contains("zz_global_arr_len"),
+            "boxed global must not get counters:\n{}",
+            prelude.code
+        );
     }
 
     /// The whole point of per-unit headers: editing user code must leave a

@@ -1,0 +1,11 @@
+// features: for-loop, int-arith, locals, print, string-ops
+// E2E: string_build — inline string append s = s + chunk in a loop
+func main() {
+    s := ""
+    for i in 0..100 {
+        s = s + "x"
+    }
+    println(len(s))
+    println(s)
+    println("string_build_ok")
+}

@@ -1,0 +1,67 @@
+// features: arrays, for-loop, indexing, int-arith, locals, print, structs, slicing
+// E2E: flat (unboxed buffer) array lowering plus every boxed fallback.
+// The flat layout is an internal optimisation: both engines must agree.
+
+struct Pt {
+    x: int,
+    y: int,
+}
+
+func sum_of(xs: [int]) -> int {
+    total := 0
+    for x in xs {
+        total = total + x
+    }
+    return total
+}
+
+func main() {
+    // Flat fast path: typed empty literal used only through push / len /
+    // integer index reads / `for x in arr`.
+    nums:[int] = []
+    for i in 0..5 {
+        nums.push(i * 2)
+    }
+    println(len(nums))
+    println(nums[0])
+    println(nums[4])
+    total := 0
+    for n in nums {
+        total = total + n
+    }
+    println(total)
+    // Struct elements take the flat struct layout.
+    pts:[Pt] = []
+    pts.push(Pt{x: 1, y: 2})
+    pts.push(Pt{x: 3, y: 4})
+    println(len(pts))
+    println(pts[1].x)
+    acc := 0
+    for p in pts {
+        acc = acc + p.x * p.y
+    }
+    println(acc)
+    // Fallback: index store (the flat layout has no raw store path).
+    stored:[int] = []
+    stored.push(1)
+    stored.push(2)
+    stored[0] = 7
+    println(stored[0])
+    println(stored)
+    // Fallback: slicing.
+    sliced:[int] = []
+    sliced.push(3)
+    sliced.push(4)
+    sliced.push(5)
+    println(sliced[1:3])
+    // Fallback: passing the array across a call boundary.
+    passed:[int] = []
+    passed.push(10)
+    passed.push(20)
+    println(sum_of(passed))
+    // Untyped empty literal keeps the boxed layout.
+    untyped := []
+    untyped.push("a")
+    println(untyped)
+    println("flat_arrays_ok")
+}
