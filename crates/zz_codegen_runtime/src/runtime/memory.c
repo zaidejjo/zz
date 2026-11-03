@@ -26,12 +26,13 @@ void *zz_arena_alloc(zz_arena *a, size_t size, size_t align) {
     // Allocate a dedicated block for them.
     if (size > ZZ_ARENA_CLASS_SIZES[ZZ_ARENA_NCLASSES - 1]) {
         size_t chunk_cap = (size > a->cap) ? size * 2 : a->cap;
-        // Adopt current buffer if it has any class-region data.
-        int has_data = 0;
-        for (int i = 0; i < ZZ_ARENA_NCLASSES; i++) {
-            if (a->offsets[i] > 0) { has_data = 1; break; }
-        }
-        if (a->buf && has_data) {
+        // Adopt the current buffer instead of freeing it: callers may still
+        // hold pointers into it (e.g. a flat array growing in place copies
+        // from the previous buffer after the new block is allocated). The
+        // arena contract is that every live pointer stays valid until
+        // reset/destroy, so retaining the old block is required even when it
+        // holds no class-region data.
+        if (a->buf) {
             zz_arena_chunk *old = (zz_arena_chunk *)malloc(sizeof(zz_arena_chunk));
             if (old) {
                 old->buf = a->buf;
@@ -43,9 +44,6 @@ void *zz_arena_alloc(zz_arena *a, size_t size, size_t align) {
                 free(a->buf);
                 a->buf = NULL;
             }
-        } else if (a->buf) {
-            free(a->buf);
-            a->buf = NULL;
         }
         a->buf = (char *)malloc(chunk_cap);
         if (!a->buf) {
