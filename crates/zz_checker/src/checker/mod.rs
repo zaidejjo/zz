@@ -11,6 +11,7 @@ use zz_span_ast::ast::{Program, Stmt};
 use zz_span_ast::span::Span;
 
 use zz_frontend::bench_attr::is_bench_like;
+use zz_frontend::test_attr::is_test_like;
 use zz_infer::InferOps;
 use zz_sigs::funcs::FuncOps;
 use zz_structs::StructOps;
@@ -754,7 +755,7 @@ fn check_program_impl(
             // Functions annotated with @test/@bench/@setup/@teardown are
             // invoked by the harness at runtime, not by direct calls, so
             // they must not trigger unused-func warnings.
-            if decorators.iter().any(is_bench_like) {
+            if decorators.iter().any(is_bench_like) || decorators.iter().any(is_test_like) {
                 checker.test_funcs.insert(full_name);
             }
         }
