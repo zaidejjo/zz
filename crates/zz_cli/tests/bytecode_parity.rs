@@ -115,6 +115,13 @@ fn check_fixture(cat: &str, file: &str) -> Result<(), String> {
             "{cat}/{file}: exit differs (run={code}, bytecode={bcode}):\n{berr}"
         ));
     }
+    // Compile-time warnings (e.g. unused-private-function) are emitted by the
+    // frontend during `run` and may also appear during `--bytecode` (which
+    // still type-checks before emitting bytes). Their order is hash-map
+    // dependent and differs across platforms, so strip them before comparing
+    // stderr — they are not runtime behavior.
+    let err = strip_frontend_diagnostics(&err);
+    let berr = strip_frontend_diagnostics(&berr);
     if bout != out {
         return Err(format!(
             "{cat}/{file}: stdout differs:\n--- run ---\n{out}\n--- bytecode ---\n{bout}"
