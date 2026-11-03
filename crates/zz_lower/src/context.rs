@@ -98,6 +98,14 @@ pub struct NameCtx {
     /// environment shares them (match VM by-reference capture semantics).
     /// Set once per function/closure body; never modified by push/pop.
     pub(crate) capture_set: HashSet<String>,
+    /// Locals in the current body that are safe to lower as flat (unboxed)
+    /// arrays: declared as `name: [scalar|unboxed-struct] = []` and used
+    /// only through the operations the flat layout implements (`push`,
+    /// integer index reads, `len`, `for x in arr`). Computed once per
+    /// function/closure body by `flat_array_locals`; a name that escapes
+    /// (call argument, return, capture, rebinding, slice, any other method)
+    /// is absent and keeps the boxed `zz_value` layout.
+    pub(crate) flat_locals: HashSet<String>,
     /// Stack of counter snapshots for scope tracking. `push_scope` records
     /// the current counter; `pop_scope` removes all entries whose C id was
     /// created at or after that counter value.
@@ -145,6 +153,7 @@ impl NameCtx {
             cap_deref: HashMap::new(),
             cap_ptrs: HashMap::new(),
             capture_set: HashSet::new(),
+            flat_locals: HashSet::new(),
             scope_markers: Vec::new(),
             array_lens: HashMap::new(),
             stack_array_elems: HashMap::new(),
@@ -213,6 +222,16 @@ impl NameCtx {
         self.globals.get(name).map(|(ident, _)| ident.as_str())
     }
 
+    /// [`lookup`] as an owned `String`, falling back to the source name when
+    /// the binding is not tracked (e.g. a synthetic `arr_len` on a path that
+    /// never registered it). Used by flat-array len/cap references, whose
+    /// declared C ids may be either fresh (`vN`) or global (`zz_global_*`).
+    pub(crate) fn lookup_or_name(&self, name: &str) -> String {
+        self.lookup(name)
+            .map(str::to_string)
+            .unwrap_or_else(|| name.to_string())
+    }
+
     /// Look up the variable's C type (same fallback chain as [`lookup`]).
     pub(crate) fn lookup_type(&self, name: &str) -> Option<&str> {
         if let Some((_, typ)) = self.stack.get(name).and_then(|vec| vec.last()) {
@@ -222,6 +241,20 @@ impl NameCtx {
             return Some(typ.as_str());
         }
         self.globals.get(name).map(|(_, typ)| typ.as_str())
+    }
+
+    /// True when `name` has a binding in the current lexical scope: a stack
+    /// entry created at or after the innermost `push_scope` marker (or at
+    /// function scope when no marker is open). Used to distinguish `:=`
+    /// shadowing (an outer binding) from same-scope redeclaration
+    /// (assignment), so `if { parts := ... }` shadows an outer `parts`
+    /// instead of reassigning it.
+    pub(crate) fn is_in_current_scope(&self, name: &str) -> bool {
+        let marker = self.scope_markers.last().copied().unwrap_or(0);
+        self.stack
+            .get(name)
+            .and_then(|vec| vec.last())
+            .is_some_and(|(cid, _)| cid_counter(cid) >= marker)
     }
 
     /// Deref expr for an owner cell pointer of C type `ctype`.
@@ -1332,6 +1365,15 @@ impl Lowerer {
         zz_hir::captured_in_expr(params, body, &self.global_set)
     }
 
+    /// Locals of `block` that may be lowered as flat (unboxed) arrays.
+    /// See [`crate::param_escape::flat_array_locals`] for the contract.
+    pub(crate) fn body_flat_locals(
+        &self,
+        block: &zz_frontend::ast::Block,
+    ) -> std::collections::HashSet<String> {
+        crate::param_escape::flat_array_locals(block, &|n: &str| self.is_unboxed_struct(n))
+    }
+
     /// Emit a heap cell allocation + initialization for a captured binding.
     /// `init` is the already-lowered (and scalar-unboxed, if applicable)
     /// initializer value of C type `ctype`.
@@ -1449,6 +1491,19 @@ impl Lowerer {
             .map(|s| s.to_string())
     }
 
+    /// If `ctype` is a flat scalar array pointer (`int64_t *`, `double *`,
+    /// `bool *`) produced by the flat-array lowering for arrays of scalars,
+    /// return the element C type string. Returns `None` for boxed `zz_value`s
+    /// and non-scalar pointer types.
+    pub(crate) fn scalar_array_from_ptr(&self, ctype: &str) -> Option<&str> {
+        ctype.strip_suffix(" *").and_then(|inner| match inner {
+            "int64_t" => Some("int64_t"),
+            "double" => Some("double"),
+            "bool" => Some("bool"),
+            _ => None,
+        })
+    }
+
     /// Emit a raw `int64_t` index expression for flat-array indexing.
     /// Boxed-int loop variables (e.g. the `k` in `for k in 0..n`) lower to
     /// `zz_value` locals, so extract `.i`; plain int64_t locals and literals
@@ -1463,6 +1518,16 @@ impl Lowerer {
         if let zz_frontend::ast::Expr::Ident { name, .. } = index {
             if names.lookup_type(name) == Some("zz_value") {
                 return format!("({emitted}).i");
+            }
+        }
+        // Literals (and other boxed scalar expressions) emit as `zz_int(3)` /
+        // `zz_float(…)` / `zz_bool(…)`; a C subscript needs the raw value.
+        for prefix in ["zz_int(", "zz_float(", "zz_bool("] {
+            if let Some(inner) = emitted
+                .strip_prefix(prefix)
+                .and_then(|s| s.strip_suffix(')'))
+            {
+                return inner.to_string();
             }
         }
         emitted

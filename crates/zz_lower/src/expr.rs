@@ -1115,6 +1115,21 @@ impl Lowerer {
                         return format!("{ctor}({raw})");
                     }
                 }
+                // Flat scalar array index: `arr[k]` where `arr` is `[int]`/`[float]`/`[bool]`
+                // → direct `({cid})[{i}]` read, no `zz_index_get` bounds-check/clone.
+                if let Expr::Ident { name: arr_name, .. } = obj.as_ref() {
+                    if let Some(elem_ctype) =
+                        self.scalar_array_from_ptr(names.lookup_type(arr_name).unwrap_or(""))
+                    {
+                        let arr_cid = names.lookup(arr_name).unwrap().to_string();
+                        let idx_raw = self.flat_index_expr(index, names, out);
+                        let len_cid = names.lookup_or_name(&format!("{}_len", arr_name));
+                        let func = names.current_scope.clone();
+                        let raw =
+                            format!("({arr_cid})[zz_flat_index({idx_raw}, {len_cid}, \"{func}\")]");
+                        return auto_box(&raw, Some(elem_ctype));
+                    }
+                }
                 // Two fast-paths over the naive
                 // `zz_call_native2(zz_index_get, zz_clone(o), boxed_i)`:
                 //   1. Plain Ident receivers pass borrowed: zz_index_get
@@ -2844,7 +2859,15 @@ impl Lowerer {
                         if let Some(_sname) =
                             self.flat_array_from_ptr(names.lookup_type(name).unwrap_or(""))
                         {
-                            let len_cid = format!("{}_len", name);
+                            let len_cid = names.lookup_or_name(&format!("{}_len", name));
+                            return format!("zz_int({len_cid})");
+                        }
+                        // Flat array of scalars: length is tracked in
+                        // `name_len`, avoiding the `zz_len` native call.
+                        if let Some(_elem_ctype) =
+                            self.scalar_array_from_ptr(names.lookup_type(name).unwrap_or(""))
+                        {
+                            let len_cid = names.lookup_or_name(&format!("{}_len", name));
                             return format!("zz_int({len_cid})");
                         }
                     }
@@ -3138,10 +3161,10 @@ impl Lowerer {
                             .lookup(name)
                             .map(str::to_string)
                             .unwrap_or_else(|| name.to_string());
-                        let len_cid = format!("{}_len", name);
-                        let cap_cid = format!("{}_cap", name);
+                        let len_cid = names.lookup_or_name(&format!("{}_len", name));
+                        let cap_cid = names.lookup_or_name(&format!("{}_cap", name));
                         out.push_str(&format!(
-                            "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n      {cid} = ({elem}*)realloc({cid}, {cap} * sizeof({elem}));\n    }}\n",
+                            "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n      {elem} *__flat_grow = ({elem}*)zz_arena_alloc(&_func_arena, (size_t){cap} * sizeof({elem}), 8);\n      if ({len} > 0) {{ memcpy(__flat_grow, {cid}, (size_t){len} * sizeof({elem})); }}\n      {cid} = __flat_grow;\n    }}\n",
                             len = len_cid,
                             cap = cap_cid,
                             cid = cid,
@@ -3152,6 +3175,45 @@ impl Lowerer {
                             cid = cid,
                             len = len_cid,
                             arg_val = arg_val
+                        ));
+                        return "zz_unit()".to_string();
+                    }
+                    // Flat-array push for scalars: `arr.push(x)` where `arr`
+                    // is `[int]`/`[float]`/`[bool]` — append inline instead of
+                    // the boxed `zz_vec_push` native (avoids zz_value boxing
+                    // and per-element clone per push).
+                    if let Some(elem_ctype) = self.scalar_array_from_ptr(recv_type) {
+                        let Some(arg) = args.first() else {
+                            return "zz_unit()".to_string();
+                        };
+                        let arg_val = self.emit_expr(arg, names, out);
+                        // The buffer stores raw C scalars while call arguments
+                        // are boxed `zz_value`s: unbox (converting type when
+                        // needed) before the raw store.
+                        let elem_static: &'static str = match elem_ctype {
+                            "double" => "double",
+                            "bool" => "bool",
+                            _ => "int64_t",
+                        };
+                        let arg_raw = self.unbox_for_return(arg, arg_val, names, elem_static);
+                        let cid = names
+                            .lookup(name)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| name.to_string());
+                        let len_cid = names.lookup_or_name(&format!("{}_len", name));
+                        let cap_cid = names.lookup_or_name(&format!("{}_cap", name));
+                        out.push_str(&format!(
+                            "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n      {elem_ctype} *__flat_grow = ({elem_ctype}*)zz_arena_alloc(&_func_arena, (size_t){cap} * sizeof({elem_ctype}), 8);\n      if ({len} > 0) {{ memcpy(__flat_grow, {cid}, (size_t){len} * sizeof({elem_ctype})); }}\n      {cid} = __flat_grow;\n    }}\n",
+                            len = len_cid,
+                            cap = cap_cid,
+                            cid = cid,
+                            elem_ctype = elem_ctype,
+                        ));
+                        out.push_str(&format!(
+                            "    {cid}[{len}] = {arg_raw};\n    {len}++;\n",
+                            cid = cid,
+                            len = len_cid,
+                            arg_raw = arg_raw
                         ));
                         return "zz_unit()".to_string();
                     }

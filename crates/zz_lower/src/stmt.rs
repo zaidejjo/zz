@@ -210,7 +210,9 @@ impl Lowerer {
                 // and stays boxed (zz_value), so existing code and index-set /
                 // index-receiver method receivers are unaffected. Non-empty
                 // literals (`[Pt{...}, ...]`) keep boxing for now.
-                let flat_struct_name = if matches!(value, Expr::Array { elems, .. } if elems.is_empty())
+                let flat_struct_name = if !self.green_active()
+                    && names.flat_locals.contains(&name.name)
+                    && matches!(value, Expr::Array { elems, .. } if elems.is_empty())
                 {
                     match &ty {
                         Some(Ty {
@@ -231,10 +233,46 @@ impl Lowerer {
                     let elem = self.struct_c_type(&sname);
                     let ptr_ty = format!("{elem} *");
                     let cid = names.enter_with_type(&name.name, &ptr_ty);
-                    let len_cid = format!("{}_len", name.name);
-                    let cap_cid = format!("{}_cap", name.name);
-                    names.enter_with_type(&len_cid, "int64_t");
-                    names.enter_with_type(&cap_cid, "int64_t");
+                    let len_cid = names.enter_with_type(&format!("{}_len", name.name), "int64_t");
+                    let cap_cid = names.enter_with_type(&format!("{}_cap", name.name), "int64_t");
+                    // Empty literal → NULL buffer; len/cap start at 0, grow via
+                    // the inline flat-array push in Expr::Call.
+                    out.push_str(&format!("    {ptr_ty} {cid} = NULL;\n"));
+                    out.push_str(&format!("    int64_t {len_cid} = 0;\n"));
+                    out.push_str(&format!("    int64_t {cap_cid} = 0;\n"));
+                    return;
+                }
+                // ---- Flat arrays of scalars ---------------------------------
+                // `arr: [int] = []` where the element type is a scalar lowers to
+                // a contiguous C buffer (`int64_t *arr` + `arr_len` + `arr_cap`)
+                // instead of a boxed `zz_value` container. This is the array_sum
+                // hot path: push becomes a raw store, index becomes a direct
+                // `arr[k]` read, and `len(arr)` folds to `arr_len` — no
+                // `zz_vec_append`, `zz_index_get`, or `zz_vec_len` runtime calls.
+                let flat_scalar_ctype = if !self.green_active()
+                    && names.flat_locals.contains(&name.name)
+                    && matches!(value, Expr::Array { elems, .. } if elems.is_empty())
+                {
+                    match &ty {
+                        Some(Ty {
+                            kind: TyKind::Array(inner),
+                            ..
+                        }) => match &inner.kind {
+                            TyKind::Int => Some("int64_t"),
+                            TyKind::Float => Some("double"),
+                            TyKind::Bool => Some("bool"),
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(elem_ctype) = flat_scalar_ctype {
+                    let ptr_ty = format!("{elem_ctype} *");
+                    let cid = names.enter_with_type(&name.name, &ptr_ty);
+                    let len_cid = names.enter_with_type(&format!("{}_len", name.name), "int64_t");
+                    let cap_cid = names.enter_with_type(&format!("{}_cap", name.name), "int64_t");
                     // Empty literal → NULL buffer; len/cap start at 0, grow via
                     // the inline flat-array push in Expr::Call.
                     out.push_str(&format!("    {ptr_ty} {cid} = NULL;\n"));
@@ -418,9 +456,13 @@ impl Lowerer {
                     // the declaration so the global gets its C declaration.
                     // If the C type changed (e.g. int64_t -> zz_value), also
                     // keep the declaration: assigning across types is a
-                    // miscompile.
+                    // miscompile. Finally, a binding that lives only in an
+                    // outer scope must be shadowed by a fresh local (matching
+                    // the VM's block scoping), not reassigned: only a binding
+                    // in the *current* scope is a redeclaration.
                     let is_redecl = names.lookup(&name.name).is_some()
-                        && names.lookup_type(&name.name) == Some(ctype.as_str());
+                        && names.lookup_type(&name.name) == Some(ctype.as_str())
+                        && names.is_in_current_scope(&name.name);
                     if is_redecl {
                         let cid = names.lookup(&name.name).unwrap();
                         out.push_str(&format!("    {cid} = {final_val};\n"));
@@ -1905,6 +1947,108 @@ impl Lowerer {
         } else {
             // For-in over an array or dict: evaluate the iterable, then
             // dispatch based on the runtime tag.
+            // Check for flat arrays (scalar or struct) — these lower to
+            // direct C pointer indexing instead of zz_value boxed iteration.
+            // The flat fast path binds exactly one loop variable (the two-var
+            // shape is only meaningful for dicts / pair arrays, which are
+            // boxed). Anything else falls through to the boxed path.
+            let flat_iter = if vars.len() == 1 {
+                if let Expr::Ident {
+                    name: iter_name, ..
+                } = iter
+                {
+                    let iter_name_str = iter_name.to_string();
+                    if let Some(ctype) = names.lookup_type(&iter_name_str) {
+                        if let Some(elem_ctype) = self.scalar_array_from_ptr(ctype) {
+                            let arr_cid = names.lookup(&iter_name_str).unwrap().to_string();
+                            let len_key = format!("{}_len", iter_name_str);
+                            let len_cid = names
+                                .lookup(&len_key)
+                                .map(str::to_string)
+                                .unwrap_or_else(|| len_key.clone());
+                            Some(("scalar", elem_ctype.to_string(), arr_cid, len_cid))
+                        } else if let Some(sname) = self.flat_array_from_ptr(ctype) {
+                            let arr_cid = names.lookup(&iter_name_str).unwrap().to_string();
+                            let len_cid = names
+                                .lookup(&format!("{}_len", iter_name_str))
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| format!("{}_len", iter_name_str));
+                            Some(("struct", sname, arr_cid, len_cid))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some((kind, elem_ctype, arr_cid, len_cid)) = flat_iter {
+                // Flat array iteration: direct pointer indexing, no boxing
+                // of the array itself. Scalar elements are boxed to zz_value
+                // for the loop body; struct elements stay raw C structs
+                // (boxed only when a closure captures the loop variable).
+                let item_scope = self.loop_scope_begin(names);
+                let v = &vars[0].name;
+                let cid = names.enter(v);
+                let raw_elem = kind == "struct";
+                let elem_ctype_for_body = if raw_elem {
+                    self.struct_c_type(&elem_ctype)
+                } else {
+                    "zz_value".to_string()
+                };
+                if let Some(vec) = names.stack.get_mut(v) {
+                    if let Some((_, existing_ty)) = vec.last_mut() {
+                        *existing_ty = elem_ctype_for_body.clone();
+                    }
+                }
+                let idx = names.fresh("_idx");
+                let len_var = names.fresh("_len");
+                out.push_str(&format!("    int64_t {idx} = 0;\n"));
+                out.push_str(&format!("    int64_t {len_var} = {len_cid};\n"));
+                out.push_str(&format!("    for (; {idx} < {len_var}; {idx}++) {{\n"));
+                self.emit_safepoint(out, "    ");
+                let raw_access = format!("({arr_cid})[{idx}]");
+                let elem_access = if raw_elem {
+                    raw_access
+                } else {
+                    auto_box(&raw_access, Some(&elem_ctype))
+                };
+                if names.capture_set.contains(v) {
+                    let n = names.bump_counter();
+                    let ptr = format!("_cell{n}");
+                    let deref = NameCtx::owner_deref(&ptr);
+                    // Captured loop vars live in heap cells shared with the
+                    // closure; a raw struct element must be boxed first.
+                    let boxed = if raw_elem {
+                        self.box_raw_struct(&elem_ctype, &elem_access, names, out)
+                    } else {
+                        elem_access.clone()
+                    };
+                    out.push_str(&format!(
+                        "        zz_value *{ptr} = (zz_value*)malloc(sizeof(zz_value));\n"
+                    ));
+                    out.push_str(&format!("        {deref} = {boxed};\n"));
+                    names.enter_cell(v, &ptr, &deref, "zz_value", n);
+                } else {
+                    out.push_str(&format!(
+                        "        {elem_ctype_for_body} {cid} = {elem_access};\n"
+                    ));
+                }
+                names.clear_array_lens();
+                for bstmt in &body.stmts {
+                    self.emit_stmt(bstmt, names, out, false);
+                }
+                self.loop_scope_end(names, out, item_scope);
+                names.clear_array_lens();
+                out.push_str("    }\n");
+                // The flat path is self-contained; the boxed path below
+                // declares the iterable temp and the per-iteration locals.
+                return;
+            }
             let iter_val = self.emit_expr(iter, names, out);
             let green_iter = self.green_active();
             // Green: the iterable temp must survive a suspend (a resume
@@ -2184,11 +2328,18 @@ impl Lowerer {
         tail_value: bool,
     ) {
         names.clear_array_lens();
+        // Flat-array eligibility is a property of the whole body (a use
+        // outside the declaring block still disqualifies the binding), so
+        // compute it before emitting any statement of this body. Nested
+        // block/closure bodies recompute their own set; restore ours after.
+        let outer_flat = std::mem::take(&mut names.flat_locals);
+        names.flat_locals = self.body_flat_locals(block);
         let n = block.stmts.len();
         for (i, stmt) in block.stmts.iter().enumerate() {
             let is_tail = tail_value && i == n - 1;
             self.emit_stmt(stmt, names, out, is_tail);
         }
+        names.flat_locals = outer_flat;
     }
 
     /// The last statement of a function body — if it's an expression, that

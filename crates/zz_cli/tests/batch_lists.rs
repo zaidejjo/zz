@@ -72,6 +72,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("syntax", "functions.zz", false),
     ("syntax", "hof.zz", false),
     ("syntax", "arrays.zz", false),
+    ("syntax", "flat_arrays.zz", true),
     ("syntax", "defer.zz", false),
     ("syntax", "dict_iteration.zz", true),
     ("stdlib", "vectors.zz", false),

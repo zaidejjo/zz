@@ -162,6 +162,21 @@ void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err);
 // Bounds-check trap with operands and enclosing function (#251).
 void zz_index_trap(zz_value obj, zz_value idx, const char *func);
 
+// Same trap for flat (unboxed) array buffers, where the container is a raw
+// `T *` + tracked length instead of a boxed `zz_value` array. Message and
+// abort semantics mirror `zz_index_trap` so VM and native agree.
+void zz_index_trap_flat(long long i, long long n, const char *func);
+
+// Normalize a flat-array index (negatives count from the end, like the
+// VM's `normalize_index`) and trap when it is out of range. Kept inline so
+// the hot read stays two predictable branches.
+static inline int64_t zz_flat_index(int64_t i, int64_t n, const char *func) {
+    int64_t idx = i < 0 ? i + n : i;
+    if (idx < 0 || idx >= n)
+        zz_index_trap_flat((long long)i, (long long)n, func);
+    return idx;
+}
+
 // Slice expression (`obj[a:b]`): arrays (items) and strings (bytes).
 zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err);
 
