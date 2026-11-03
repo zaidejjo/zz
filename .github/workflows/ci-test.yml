@@ -90,14 +90,9 @@ jobs:
           # Remove Microsoft repo to avoid slow arm64 package downloads
           # on x86_64 runners (causes apt-get update to hang/fail)
           sudo rm -f /etc/apt/sources.list.d/*microsoft* 2>/dev/null || true
-          # apt-get update can be flaky on GitHub Actions runners; retry
-          # instead of failing the whole leg.
-          sudo apt-get update || {
-            echo "apt-get update failed, retrying in 15s..."
-            sleep 15
-            sudo rm -rf /var/lib/apt/lists/*
-            sudo apt-get update || true
-          }
+          # apt-get update can fail on GitHub Actions runners due to mirror
+          # issues; make it non-fatal so the leg can proceed.
+          sudo apt-get update || true
           if [ -n "${{ matrix.clang_pin }}" ]; then
             # The pinned sanitizer leg needs apt.llvm.org (Noble's archive
             # tops out at clang-18).
@@ -106,11 +101,7 @@ jobs:
             echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-${{
               matrix.clang_pin }} main" \
               | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
-            sudo apt-get update || {
-              echo "apt-get update after llvm repo failed, retrying..."
-              sleep 15
-              sudo apt-get update || true
-            }
+            sudo apt-get update || true
             sudo apt-get install -y "clang-${{ matrix.clang_pin }}" || {
               echo "clang-${{ matrix.clang_pin }} install failed, clang may be unavailable"
             }
