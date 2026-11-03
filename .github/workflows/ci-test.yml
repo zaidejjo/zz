@@ -87,9 +87,12 @@ jobs:
           free -m
           # Clean stale apt lists to avoid checksum/hash mismatch errors
           sudo rm -rf /var/lib/apt/lists/*
+          # Remove Microsoft repo to avoid slow arm64 package downloads
+          # on x86_64 runners (causes apt-get update to hang/fail)
+          sudo rm -f /etc/apt/sources.list.d/*microsoft* 2>/dev/null || true
           sudo apt-get update || {
-            echo "apt-get update failed, retrying without Microsoft repo..."
-            sudo rm -f /etc/apt/sources.list.d/*microsoft* 2>/dev/null || true
+            echo "apt-get update failed, retrying..."
+            sleep 10
             sudo apt-get update
           }
           if [ -n "${{ matrix.clang_pin }}" ]; then
@@ -102,6 +105,7 @@ jobs:
               | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
             sudo apt-get update || {
               echo "apt-get update after llvm repo failed, retrying..."
+              sleep 10
               sudo apt-get update
             }
             sudo apt-get install -y "clang-${{ matrix.clang_pin }}"
