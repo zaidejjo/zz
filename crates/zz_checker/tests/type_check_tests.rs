@@ -3616,6 +3616,35 @@ fn dead_mutation_of_array_param_warns() {
 }
 
 #[test]
+fn dead_mutation_of_dict_param_warns() {
+    // G11: Dict is a value type — `d[k] = v` on a `{str: int}` param is lost.
+    let r = check_src("func f(d: {str: int}) -> int {\n    d[\"k\"] = 32\n    return 0\n}");
+    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter `d`")),
+        "expected dead-mutation warning for Dict, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dead_mutation_of_bytes_param_warns() {
+    // G11: Bytes is a value type — the dead-mutation lint covers it.
+    // (`b[0] = 1` is also a separate "cannot assign to index of bytes"
+    // error; we only assert the dead-mutation warning fires.)
+    let r = check_src("func f(b: bytes) -> int {\n    b[0] = 1\n    return 0\n}");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter `b`")),
+        "expected dead-mutation warning for Bytes, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn dead_mutation_returned_param_silent() {
     // Returning (or otherwise observing) the param silences the lint.
     let r = check_src("func f(buf: [int]) -> int {\n    buf[0] = 32\n    return buf[0]\n}");
