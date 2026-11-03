@@ -2010,10 +2010,15 @@ impl Lowerer {
                 let v = &vars[0].name;
                 let cid = names.enter(v);
                 let raw_elem = kind == "struct";
+                // Flat elements are raw C values: bind scalar loop vars as
+                // raw scalars too, so `total = total + x` lowers to a plain
+                // C add instead of box → zz_binop → unbox per iteration.
+                // Any boxed use site auto-boxes the raw value through the
+                // normal `auto_box` paths.
                 let elem_ctype_for_body = if raw_elem {
                     self.struct_c_type(&elem_ctype)
                 } else {
-                    "zz_value".to_string()
+                    elem_ctype.to_string()
                 };
                 if let Some(vec) = names.stack.get_mut(v) {
                     if let Some((_, existing_ty)) = vec.last_mut() {
@@ -2027,21 +2032,19 @@ impl Lowerer {
                 out.push_str(&format!("    for (; {idx} < {len_var}; {idx}++) {{\n"));
                 self.emit_safepoint(out, "    ");
                 let raw_access = format!("({arr_cid})[{idx}]");
-                let elem_access = if raw_elem {
-                    raw_access
-                } else {
-                    auto_box(&raw_access, Some(&elem_ctype))
-                };
+                // Both flat element kinds are raw C values (scalar or
+                // unboxed struct); never box them for the body binding.
+                let elem_access = raw_access;
                 if names.capture_set.contains(v) {
                     let n = names.bump_counter();
                     let ptr = format!("_cell{n}");
                     let deref = NameCtx::owner_deref(&ptr);
                     // Captured loop vars live in heap cells shared with the
-                    // closure; a raw struct element must be boxed first.
+                    // closure; a raw element must be boxed first.
                     let boxed = if raw_elem {
                         self.box_raw_struct(&elem_ctype, &elem_access, names, out)
                     } else {
-                        elem_access.clone()
+                        auto_box(&elem_access, Some(&elem_ctype))
                     };
                     out.push_str(&format!(
                         "        zz_value *{ptr} = (zz_value*)malloc(sizeof(zz_value));\n"

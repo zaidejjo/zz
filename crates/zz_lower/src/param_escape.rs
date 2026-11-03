@@ -1172,6 +1172,88 @@ pub(crate) fn flat_array_locals(
     candidates.into_keys().collect()
 }
 
+/// Program-wide version of [`flat_array_locals`] for module-level arrays:
+/// a top-level `name: [scalar|unboxed-struct] = []` may lower to the flat
+/// layout only when *every* mention of that name in the whole program is an
+/// operation the flat layout implements (`push`, integer index reads,
+/// `len`, `for x in arr`, `arr[i].field`).
+///
+/// Globals have no flat → `zz_value` materialization at boxed boundaries
+/// (call arguments, returns, slice containers, whole rebinding, printing),
+/// so unlike locals — which fall back to boxing per mention — one
+/// unsupported mention keeps the global boxed for the entire program. That
+/// conservative direction is always correct, just slower.
+///
+/// Only bare (non-namespaced) declarations are considered: qualified
+/// `mod.arr` globals are reached through `Path` nodes whose leaf spelling
+/// can collide with a bare name, so they stay boxed.
+pub(crate) fn flat_global_arrays(
+    program: &Program,
+    is_unboxed_struct: &dyn Fn(&str) -> bool,
+) -> HashSet<String> {
+    use zz_frontend::ast::TyKind;
+
+    // Pass 1: candidate top-level declarations.
+    let mut candidates: HashMap<String, bool> = HashMap::new();
+    for stmt in &program.stmts {
+        let Stmt::Decl {
+            ty, name, value, ..
+        } = stmt
+        else {
+            continue;
+        };
+        if name.name.contains('.') {
+            continue;
+        }
+        if !matches!(value, Expr::Array { elems, .. } if elems.is_empty()) {
+            continue;
+        }
+        let Some(ty) = ty else { continue };
+        let TyKind::Array(inner) = &ty.kind else {
+            continue;
+        };
+        let flat = match &inner.kind {
+            TyKind::Int | TyKind::Float | TyKind::Bool => Some(true),
+            TyKind::Named(n, _) if is_unboxed_struct(n) => Some(false),
+            _ => None,
+        };
+        if let Some(scalar) = flat {
+            candidates.insert(name.name.clone(), scalar);
+        }
+    }
+    if candidates.is_empty() {
+        return HashSet::new();
+    }
+
+    // Pass 2: disqualify candidates used anywhere in an unsupported shape.
+    // Function/method bodies are scanned with `escaping == false` (a global
+    // is addressable from any frame, unlike a captured local); closures and
+    // nested functions inside them still raise the capture barrier.
+    let mut bad: HashSet<String> = HashSet::new();
+    {
+        let mut scan = FlatUseScan {
+            cand: &candidates,
+            bad: &mut bad,
+            escaping: false,
+        };
+        for stmt in &program.stmts {
+            match stmt {
+                Stmt::Func { body, .. } => scan.block(body),
+                Stmt::Impl { methods, .. } => {
+                    for m in methods {
+                        if let Stmt::Func { body, .. } = m {
+                            scan.block(body);
+                        }
+                    }
+                }
+                other => scan.stmt(other),
+            }
+        }
+    }
+    candidates.retain(|n, _| !bad.contains(n));
+    candidates.into_keys().collect()
+}
+
 /// Walks a body marking candidate flat arrays that appear in a position the
 /// flat layout cannot serve. `escaping` is set inside closures and `defer`
 /// bodies, where any mention (even `push`) is a capture.
@@ -1647,6 +1729,60 @@ mod tests {
 
     fn flat_names(src: &str) -> HashSet<String> {
         flat_names_with(src, &|_| false)
+    }
+
+    /// `flat_global_arrays` over a parsed program (bare globals only).
+    fn flat_global_names(src: &str) -> HashSet<String> {
+        let parsed = zz_frontend::parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        flat_global_arrays(&parsed.program, &|_| false)
+    }
+
+    #[test]
+    fn flat_global_supported_uses_are_eligible() {
+        let names = flat_global_names(
+            "arr: [int] = []
+             func main() {
+                for i in 0..3 { arr.push(i) }
+                total := 0
+                for x in arr { total = total + x }
+                println(total)
+                println(len(arr))
+                println(arr[1])
+             }",
+        );
+        assert_eq!(names, HashSet::from(["arr".to_string()]));
+    }
+
+    #[test]
+    fn flat_global_call_argument_disqualifies() {
+        let names = flat_global_names(
+            "arr: [int] = []
+             func main() { arr.push(1)\nprintln(arr) }",
+        );
+        assert!(names.is_empty(), "expected boxed, got {names:?}");
+    }
+
+    #[test]
+    fn flat_global_index_store_disqualifies() {
+        let names = flat_global_names(
+            "arr: [int] = []
+             func main() { arr.push(1)\narr[0] = 2 }",
+        );
+        assert!(names.is_empty(), "expected boxed, got {names:?}");
+    }
+
+    #[test]
+    fn flat_global_untyped_decl_is_not_a_candidate() {
+        let names = flat_global_names(
+            "arr := []
+             func main() { arr.push(1) }",
+        );
+        assert!(names.is_empty(), "expected boxed, got {names:?}");
     }
 
     #[test]

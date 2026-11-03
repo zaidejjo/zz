@@ -3201,12 +3201,31 @@ impl Lowerer {
                             .unwrap_or_else(|| recv_name.clone());
                         let len_cid = names.lookup_or_name(&format!("{}_len", recv_name));
                         let cap_cid = names.lookup_or_name(&format!("{}_cap", recv_name));
+                        // Local flat buffers live in the function arena;
+                        // module globals outlive the frame, so growth must
+                        // survive a return → malloc-family realloc.
+                        let is_global = names.resolves_to_global(&recv_name);
+                        let grow = if is_global {
+                            format!(
+                                "      {cid} = ({elem}*)realloc({cid}, (size_t){cap} * sizeof({elem}));\n",
+                                cid = cid,
+                                cap = cap_cid,
+                                elem = elem,
+                            )
+                        } else {
+                            format!(
+                                "      {elem} *__flat_grow = ({elem}*)zz_arena_alloc(&_func_arena, (size_t){cap} * sizeof({elem}), 8);\n      if ({len} > 0) {{ memcpy(__flat_grow, {cid}, (size_t){len} * sizeof({elem})); }}\n      {cid} = __flat_grow;\n",
+                                len = len_cid,
+                                cap = cap_cid,
+                                cid = cid,
+                                elem = elem,
+                            )
+                        };
                         out.push_str(&format!(
-                            "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n      {elem} *__flat_grow = ({elem}*)zz_arena_alloc(&_func_arena, (size_t){cap} * sizeof({elem}), 8);\n      if ({len} > 0) {{ memcpy(__flat_grow, {cid}, (size_t){len} * sizeof({elem})); }}\n      {cid} = __flat_grow;\n    }}\n",
+                            "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n{grow}    }}\n",
                             len = len_cid,
                             cap = cap_cid,
-                            cid = cid,
-                            elem = elem,
+                            grow = grow,
                         ));
                         out.push_str(&format!(
                             "    {cid}[{len}] = {arg_val};\n    {len}++;\n",
@@ -3234,12 +3253,28 @@ impl Lowerer {
                             .unwrap_or_else(|| recv_name.clone());
                         let len_cid = names.lookup_or_name(&format!("{}_len", recv_name));
                         let cap_cid = names.lookup_or_name(&format!("{}_cap", recv_name));
+                        let is_global = names.resolves_to_global(&recv_name);
+                        let grow = if is_global {
+                            format!(
+                                "      {cid} = ({elem_ctype}*)realloc({cid}, (size_t){cap} * sizeof({elem_ctype}));\n",
+                                cid = cid,
+                                cap = cap_cid,
+                                elem_ctype = elem_ctype,
+                            )
+                        } else {
+                            format!(
+                                "      {elem_ctype} *__flat_grow = ({elem_ctype}*)zz_arena_alloc(&_func_arena, (size_t){cap} * sizeof({elem_ctype}), 8);\n      if ({len} > 0) {{ memcpy(__flat_grow, {cid}, (size_t){len} * sizeof({elem_ctype})); }}\n      {cid} = __flat_grow;\n",
+                                len = len_cid,
+                                cap = cap_cid,
+                                cid = cid,
+                                elem_ctype = elem_ctype,
+                            )
+                        };
                         out.push_str(&format!(
-                            "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n      {elem_ctype} *__flat_grow = ({elem_ctype}*)zz_arena_alloc(&_func_arena, (size_t){cap} * sizeof({elem_ctype}), 8);\n      if ({len} > 0) {{ memcpy(__flat_grow, {cid}, (size_t){len} * sizeof({elem_ctype})); }}\n      {cid} = __flat_grow;\n    }}\n",
+                            "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n{grow}    }}\n",
                             len = len_cid,
                             cap = cap_cid,
-                            cid = cid,
-                            elem_ctype = elem_ctype,
+                            grow = grow,
                         ));
                         out.push_str(&format!(
                             "    {cid}[{len}] = {arg_raw};\n    {len}++;\n",

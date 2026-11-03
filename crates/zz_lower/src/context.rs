@@ -232,6 +232,16 @@ impl NameCtx {
             .unwrap_or_else(|| name.to_string())
     }
 
+    /// True when `name` resolves to its module-level global right now (no
+    /// shadowing local/capture). Used to pick global-safe allocation
+    /// strategies (e.g. `realloc` growth for flat global arrays).
+    pub(crate) fn resolves_to_global(&self, name: &str) -> bool {
+        match (self.lookup(name), self.globals.get(name)) {
+            (Some(id), Some((gid, _))) => id == gid,
+            _ => false,
+        }
+    }
+
     /// Look up the variable's C type (same fallback chain as [`lookup`]).
     pub(crate) fn lookup_type(&self, name: &str) -> Option<&str> {
         if let Some((_, typ)) = self.stack.get(name).and_then(|vec| vec.last()) {
@@ -1338,6 +1348,35 @@ impl Lowerer {
         }
     }
 
+    /// C type for a *flat* array (contiguous unboxed buffer), or `None`
+    /// when the element type is not flat-representable.
+    ///
+    /// Kept separate from [`Self::type_to_c`] on purpose: `type_to_c` is
+    /// also used for struct-field and method-receiver C types, where an
+    /// array field must stay boxed (`zz_value`). Only globals proven safe
+    /// by [`crate::param_escape::flat_global_arrays`] use this helper.
+    pub(crate) fn flat_array_c_type(&self, ty: &zz_checker::Type) -> Option<String> {
+        let zz_checker::Type::Array(inner) = ty else {
+            return None;
+        };
+        match inner.as_ref() {
+            zz_checker::Type::Int => Some("int64_t *".to_string()),
+            zz_checker::Type::Float => Some("double *".to_string()),
+            zz_checker::Type::Bool => Some("bool *".to_string()),
+            zz_checker::Type::Struct(name, _) if self.is_unboxed_struct(name) => {
+                Some(format!("zz_struct_{} *", mangle(name)))
+            }
+            _ => None,
+        }
+    }
+
+    /// True when `ctype` is a flat-array pointer produced by
+    /// [`Self::flat_array_c_type`] (scalar or unboxed-struct buffer).
+    pub(crate) fn is_flat_array_ctype(ctype: &str) -> bool {
+        matches!(ctype, "int64_t *" | "double *" | "bool *")
+            || (ctype.starts_with("zz_struct_") && ctype.ends_with(" *"))
+    }
+
     /// C identifier for a module-level global: `zz_global_<mangled>`.
     pub(crate) fn global_cid(zz_name: &str) -> String {
         format!("zz_global_{}", mangle(zz_name))
@@ -1427,10 +1466,24 @@ impl Lowerer {
             }
         }
         names.sort();
-        names
-            .into_iter()
-            .map(|n| {
-                let checker_ty = self.tp.bindings.get(&n).cloned();
+        // Program-wide flat-array eligibility for module globals. Kept
+        // conservative: any unsupported mention keeps the global boxed
+        // (see `flat_global_arrays` for the contract).
+        let flat_globals = crate::param_escape::flat_global_arrays(&self.tp.program, &|n| {
+            self.is_unboxed_struct(n)
+        });
+        let mut result: Vec<(String, String, String, Option<zz_checker::Type>)> = Vec::new();
+        let declared: std::collections::HashSet<String> = names.iter().cloned().collect();
+        for n in names {
+            let checker_ty = self.tp.bindings.get(&n).cloned();
+            let flat_ctype = if flat_globals.contains(&n) {
+                checker_ty.as_ref().and_then(|t| self.flat_array_c_type(t))
+            } else {
+                None
+            };
+            let ctype = match (&flat_ctype, &checker_ty) {
+                // Flat global array: contiguous unboxed C buffer.
+                (Some(ctype), _) => ctype.clone(),
                 // Unboxed structs work for locals (conversions at every
                 // use), but globals lack the store/load conversions — a
                 // struct-typed global miscompiles (boxed value into an
@@ -1438,19 +1491,36 @@ impl Lowerer {
                 // like every other composite, but KEEP the checker type:
                 // field-store/read arms key struct layout off it while
                 // branching raw-vs-boxed on the (boxed) C type.
-                let ctype = match &checker_ty {
-                    Some(zz_checker::Type::Struct(name, _)) if self.is_unboxed_struct(name) => {
-                        "zz_value".to_string()
+                (None, Some(zz_checker::Type::Struct(name, _))) if self.is_unboxed_struct(name) => {
+                    "zz_value".to_string()
+                }
+                (None, _) => checker_ty
+                    .as_ref()
+                    .map(|t| self.type_to_c(t))
+                    .unwrap_or_else(|| "zz_value".to_string()),
+            };
+            let cid = Self::global_cid(&n);
+            result.push((n.clone(), cid, ctype, checker_ty.clone()));
+            // Flat arrays carry their length/capacity counters next to the
+            // buffer (mirrors the local layout: `arr`, `arr_len`, `arr_cap`).
+            if flat_ctype.is_some() {
+                for (suffix, ctype) in [("_len", "int64_t"), ("_cap", "int64_t")] {
+                    let synth_name = format!("{n}{suffix}");
+                    // A user-declared global with the same spelling wins (a
+                    // duplicate C definition would not compile).
+                    if declared.contains(&synth_name) {
+                        continue;
                     }
-                    _ => checker_ty
-                        .as_ref()
-                        .map(|t| self.type_to_c(t))
-                        .unwrap_or_else(|| "zz_value".to_string()),
-                };
-                let cid = Self::global_cid(&n);
-                (n, cid, ctype, checker_ty)
-            })
-            .collect()
+                    result.push((
+                        synth_name.clone(),
+                        Self::global_cid(&synth_name),
+                        ctype.to_string(),
+                        Some(zz_checker::Type::Int),
+                    ));
+                }
+            }
+        }
+        result
     }
 
     /// Seed a NameCtx with all module-level globals.
