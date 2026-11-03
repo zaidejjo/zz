@@ -1,4 +1,4 @@
-// features: for-loop, int-arith, locals, print, string-ops, strings
+// features: for-loop, int-arith, locals, print, string-ops
 // E2E: string_build — inline string append s = s + chunk in a loop
 func main() {
     s := ""
