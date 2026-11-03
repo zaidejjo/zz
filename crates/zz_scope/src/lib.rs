@@ -4,7 +4,7 @@ use zz_checker_core::{Checker, DefinedBinding};
 use zz_diag_core::{error_at, warning_at, FixIt};
 use zz_span_ast::span::Span;
 use zz_structs::StructOps;
-use zz_suggest::{suggest_all, suggest_dotted};
+use zz_suggest::{suggest_all, suggest_confident, suggest_dotted, suggest_top3};
 use zz_types::Type;
 
 // Import suggestions and canonical resolution derive from the single
@@ -392,16 +392,31 @@ impl ScopeOps for Checker {
                     candidates.push(e);
                 }
                 let mut diag = error_at(format!("undefined variable `{name}`"), span);
-                let all = suggest_all(name, &candidates);
-                if let Some((suggestion, _dist)) = all.first() {
-                    diag = diag.with_note(format!("did you mean `{suggestion}`?"));
-                    let fixit = if all.len() == 1 {
-                        FixIt::safe(span, suggestion.to_string(), "replace variable")
-                    } else {
-                        let alts: Vec<String> = all.iter().map(|(s, _)| s.to_string()).collect();
-                        FixIt::ambiguous(span, suggestion.to_string(), "replace variable", alts)
-                    };
-                    diag = diag.with_fixit(fixit);
+                // Confident (never-wrong) suggestions only; up to three for
+                // ambiguous cases. A missing hint is better than a wrong one.
+                let confident = suggest_top3(name, &candidates);
+                match confident.as_slice() {
+                    [] => {}
+                    [single] => {
+                        diag = diag.with_note(format!("did you mean `{single}`?"));
+                        diag = diag.with_fixit(FixIt::safe(
+                            span,
+                            single.to_string(),
+                            "replace variable",
+                        ));
+                    }
+                    multiple => {
+                        let listed: Vec<String> =
+                            multiple.iter().map(|s| format!("`{s}`")).collect();
+                        diag = diag.with_note(format!("did you mean {}?", listed.join(" or ")));
+                        let alts: Vec<String> = multiple.iter().map(|s| s.to_string()).collect();
+                        diag = diag.with_fixit(FixIt::ambiguous(
+                            span,
+                            multiple[0].to_string(),
+                            "replace variable",
+                            alts,
+                        ));
+                    }
                 }
 
                 // If the name looks like `module.func` and matches a known
@@ -667,7 +682,7 @@ impl ScopeOps for Checker {
                         .filter(|k| k.starts_with(&prefix) && !k[prefix.len()..].contains('.'))
                         .map(|k| k.strip_prefix(&prefix).unwrap())
                         .collect();
-                    if let Some((suggestion, _)) = suggest_all(&parts[1], &members).first() {
+                    if let Some(suggestion) = suggest_confident(&parts[1], &members) {
                         diag = diag.with_note(format!(
                             "`{mod_name}` is imported; did you mean `{mod_name}.{suggestion}`?"
                         ));
@@ -702,17 +717,30 @@ impl ScopeOps for Checker {
                     return Type::Error;
                 }
             }
-            let all = suggest_all(&parts[0], &candidates);
-            if let Some((suggestion, _)) = all.first() {
-                diag = diag.with_note(format!("did you mean `{suggestion}`?"));
-                let root_span = Span::new(span.start, span.start + parts[0].len() as u32);
-                let fixit = if all.len() == 1 {
-                    FixIt::safe(root_span, suggestion.to_string(), "replace variable")
-                } else {
-                    let alts: Vec<String> = all.iter().map(|(s, _)| s.to_string()).collect();
-                    FixIt::ambiguous(root_span, suggestion.to_string(), "replace variable", alts)
-                };
-                diag = diag.with_fixit(fixit);
+            let confident = suggest_top3(&parts[0], &candidates);
+            match confident.as_slice() {
+                [] => {}
+                [single] => {
+                    diag = diag.with_note(format!("did you mean `{single}`?"));
+                    let root_span = Span::new(span.start, span.start + parts[0].len() as u32);
+                    diag = diag.with_fixit(FixIt::safe(
+                        root_span,
+                        single.to_string(),
+                        "replace variable",
+                    ));
+                }
+                multiple => {
+                    let listed: Vec<String> = multiple.iter().map(|s| format!("`{s}`")).collect();
+                    diag = diag.with_note(format!("did you mean {}?", listed.join(" or ")));
+                    let root_span = Span::new(span.start, span.start + parts[0].len() as u32);
+                    let alts: Vec<String> = multiple.iter().map(|s| s.to_string()).collect();
+                    diag = diag.with_fixit(FixIt::ambiguous(
+                        root_span,
+                        multiple[0].to_string(),
+                        "replace variable",
+                        alts,
+                    ));
+                }
             }
             self.errors.push(diag);
             self.had_undefined_var = true;

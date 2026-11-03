@@ -524,14 +524,23 @@ fn unknown_type_suggests_str_for_string() {
 
 #[test]
 fn unknown_type_levenshtein_suggests_str() {
-    // A near-miss typo of `str` should suggest `str` via Levenshtein.
-    let r = check_src("func f() -> strng { return 1 }");
+    // A single-character typo of `str` suggests `str` confidently.
+    let r = check_src("func f() -> strn { return 1 }");
     assert!(
         r.errors
             .iter()
             .any(|e| e.message.contains("did you mean `str`?")),
-        "expected `str` suggestion for `strng`, got: {:?}",
+        "expected `str` suggestion for `strn`, got: {:?}",
         r.errors
+    );
+    // Distance-2 typos are intentionally NOT hinted (never a wrong hint).
+    let r2 = check_src("func f() -> strng { return 1 }");
+    assert!(
+        r2.errors
+            .iter()
+            .all(|e| !e.message.contains("did you mean `str`?")),
+        "distance-2 typo should get no hint, got: {:?}",
+        r2.errors
     );
 }
 
@@ -2115,7 +2124,7 @@ fn typo_suggestion_variable() {
             ret: Type::Unit,
         },
     );
-    let parsed = zz_frontend::parse("prntlnn");
+    let parsed = zz_frontend::parse("prntln");
     assert!(
         parsed.errors.is_empty(),
         "parse errors: {:?}",
@@ -2136,8 +2145,8 @@ fn typo_suggestion_variable() {
         "expected undefined variable error, got: {msgs:?}"
     );
     assert!(
-        notes.iter().any(|n| n.contains("did you mean")),
-        "expected typo suggestion, got: {notes:?}"
+        notes.iter().any(|n| n.contains("did you mean `println`?")),
+        "expected confident `println` typo suggestion, got: {notes:?}"
     );
 }
 

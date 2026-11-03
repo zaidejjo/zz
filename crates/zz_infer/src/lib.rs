@@ -4,7 +4,7 @@ use zz_checker_core::{AliasSig, Checker};
 use zz_diag_core::error_at;
 use zz_span_ast::ast::Ty;
 use zz_span_ast::span::Span;
-use zz_suggest::suggest;
+use zz_suggest::suggest_confident;
 use zz_types::Type;
 use zz_unify::Unifier;
 
@@ -473,7 +473,7 @@ impl InferOps for Checker {
         for a in self.alias_asts.keys() {
             candidates.push(a.as_str());
         }
-        suggest(name, &candidates).map(|(s, _)| s.to_string())
+        suggest_confident(name, &candidates).map(|s| s.to_string())
     }
 
     fn canonical_struct_name(&self, name: &str) -> String {
