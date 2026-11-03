@@ -4829,3 +4829,54 @@ fn missing_field_chain_does_not_cascade() {
         r.errors
     );
 }
+
+#[test]
+fn generic_enum_concrete_payload_pins_generic() {
+    // A concrete payload pins the enum's generic parameter (struct-literal rule).
+    let r = check_src("enum Box<T> { V(T), E }\na := Box.V(42)\ns := Box.V(\"hi\")\n");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(
+        r.bindings["a"],
+        Type::Enum("Box".to_string(), vec![Type::Int])
+    );
+    assert_eq!(
+        r.bindings["s"],
+        Type::Enum("Box".to_string(), vec![Type::Str])
+    );
+}
+
+#[test]
+fn generic_enum_no_payload_defaults_to_unit_safely() {
+    // A unit variant of a generic enum with no annotation defaults its
+    // generic to `unit` at span-types finalization. This is conservative
+    // (mirrors `.none` → `Option<unit>`) and never silently weakens: any
+    // use that actually constrains the generic fails loudly instead.
+    let r = check_src("enum Box<T> { V(T), E }\ne := Box.E\n");
+    assert!(!has_errors(&r), "expected no errors, got: {:?}", r.errors);
+}
+
+#[test]
+fn generic_enum_untyped_payload_fails_loudly_not_silently() {
+    // `Box.V(x)` with `x` untyped leaves the generic unconstrained; any
+    // later use that constrains it fails loudly at check time rather than
+    // silently producing the wrong type.
+    let r = check_src(
+        "enum Box<T> { V(T), E }\n\
+         impl Box<T> {\n\
+            func get_or(self, d: T) -> T {\n\
+                return match self {\n\
+                    .V(v) => v\n\
+                    .E => d\n\
+                }\n\
+            }\n\
+         }\n\
+         func f(x) {\n            b := Box.V(x)\n            return b.get_or(0)\n         }\n",
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("expected") && e.message.contains("found")),
+        "expected a loud type mismatch (not silent weakening), got: {:?}",
+        r.errors
+    );
+}
