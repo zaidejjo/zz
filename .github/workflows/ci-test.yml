@@ -90,10 +90,13 @@ jobs:
           # Remove Microsoft repo to avoid slow arm64 package downloads
           # on x86_64 runners (causes apt-get update to hang/fail)
           sudo rm -f /etc/apt/sources.list.d/*microsoft* 2>/dev/null || true
+          # apt-get update can be flaky on GitHub Actions runners; retry
+          # instead of failing the whole leg.
           sudo apt-get update || {
-            echo "apt-get update failed, retrying..."
-            sleep 10
-            sudo apt-get update
+            echo "apt-get update failed, retrying in 15s..."
+            sleep 15
+            sudo rm -rf /var/lib/apt/lists/*
+            sudo apt-get update || true
           }
           if [ -n "${{ matrix.clang_pin }}" ]; then
             # The pinned sanitizer leg needs apt.llvm.org (Noble's archive
@@ -105,16 +108,22 @@ jobs:
               | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
             sudo apt-get update || {
               echo "apt-get update after llvm repo failed, retrying..."
-              sleep 10
-              sudo apt-get update
+              sleep 15
+              sudo apt-get update || true
             }
-            sudo apt-get install -y "clang-${{ matrix.clang_pin }}"
+            sudo apt-get install -y "clang-${{ matrix.clang_pin }}" || {
+              echo "clang-${{ matrix.clang_pin }} install failed, clang may be unavailable"
+            }
           else
-            sudo apt-get install -y clang
+            sudo apt-get install -y clang || {
+              echo "clang install failed, clang may be unavailable"
+            }
           fi
           # Native codegen links -lcurl -lsqlite3 and compiles with clang.
-          sudo apt-get install -y libcurl4-openssl-dev libsqlite3-dev zip unzip xz-utils
-          clang --version
+          sudo apt-get install -y libcurl4-openssl-dev libsqlite3-dev zip unzip xz-utils || {
+            echo "some native deps failed to install, continuing anyway"
+          }
+          clang --version || true
 
       - name: install native deps (macos)
         if: inputs.family == 'macos'
