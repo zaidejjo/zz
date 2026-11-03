@@ -4608,3 +4608,31 @@ fn error_cascade_index_must_be_int_suppressed() {
         r.errors
     );
 }
+
+#[test]
+fn pub_func_with_unresolved_ret_is_excluded_and_errors() {
+    // An untyped parameter is inferred to a fresh `Var`; if it is never
+    // pinned by the body it stays a `Var` in the signature. `check_func_body`
+    // early-returns at the missing-return Sherlock (line ~5065) before the
+    // fallthrough unification binds ret to `unit`, so a pub func like `f`
+    // genuinely exports a `Var(id)`. That must be excluded from pub_funcs
+    // (a bare Var(id) would collide with the importer's fresh vars) and
+    // reported as an error instead.
+    let r = check_src("pub func f(x) { }\npub func g() -> int { 1 }\n");
+    let pub_names: Vec<&str> = r.pub_funcs.keys().map(|k| k.as_str()).collect();
+    assert!(
+        pub_names.contains(&"g"),
+        "annotated pub func g should be exported, got: {pub_names:?}",
+    );
+    assert!(
+        !pub_names.contains(&"f"),
+        "unresolved pub func f should be excluded, got: {pub_names:?}",
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("cannot export `pub` item")),
+        "expected unresolved-pub error, got: {:?}",
+        r.errors
+    );
+}

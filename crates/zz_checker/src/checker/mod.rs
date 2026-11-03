@@ -816,6 +816,15 @@ fn check_program_impl(
         .filter(|(k, _)| pub_bindings_set.contains(k.as_str()))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    // A pub signature whose types still hold an inference variable after
+    // deep resolution must not be exported: a bare `Var(id)` would collide
+    // with the importer's own fresh vars and silently mis-type downstream
+    // code. Report and exclude such items instead of exporting them broken.
+    let mut unresolved_pub_items: Vec<String> = Vec::new();
+    let mark_var = |sig: &FuncSig| {
+        sig.params.iter().any(|(_, t)| zz_infer::contains_var(t))
+            || zz_infer::contains_var(&sig.ret)
+    };
     let pub_funcs: HashMap<String, FuncSig> = checker
         .funcs
         .iter()
@@ -828,8 +837,14 @@ fn check_program_impl(
                 .map(|(n, t)| (n.clone(), checker.unifier.resolve_deep(t)))
                 .collect();
             sig.ret = checker.unifier.resolve_deep(&sig.ret);
-            (k.clone(), sig)
+            let unresolved = mark_var(&sig);
+            if unresolved {
+                unresolved_pub_items.push(k.clone());
+            }
+            (k.clone(), sig, unresolved)
         })
+        .filter(|(_, _, unresolved)| !unresolved)
+        .map(|(k, sig, _)| (k, sig))
         .collect();
     let pub_structs: HashMap<String, StructSig> = checker
         .structs
@@ -842,8 +857,14 @@ fn check_program_impl(
                 .iter()
                 .map(|(n, t)| (n.clone(), checker.unifier.resolve_deep(t)))
                 .collect();
-            (k.clone(), sig)
+            let unresolved = sig.fields.iter().any(|(_, t)| zz_infer::contains_var(t));
+            if unresolved {
+                unresolved_pub_items.push(k.clone());
+            }
+            (k.clone(), sig, unresolved)
         })
+        .filter(|(_, _, unresolved)| !unresolved)
+        .map(|(k, sig, _)| (k, sig))
         .collect();
     let pub_aliases: HashMap<String, AliasSig> = checker
         .aliases
@@ -852,9 +873,23 @@ fn check_program_impl(
         .map(|(k, v)| {
             let mut sig = v.clone();
             sig.target = checker.unifier.resolve_deep(&sig.target);
-            (k.clone(), sig)
+            let unresolved = zz_infer::contains_var(&sig.target);
+            if unresolved {
+                unresolved_pub_items.push(k.clone());
+            }
+            (k.clone(), sig, unresolved)
         })
+        .filter(|(_, _, unresolved)| !unresolved)
+        .map(|(k, sig, _)| (k, sig))
         .collect();
+    for name in &unresolved_pub_items {
+        checker.errors.push(zz_diag_core::error_at(
+            format!(
+                "cannot export `pub` item `{name}`: its type still contains an unresolved inference variable; annotate parameter, field, or return types explicitly",
+            ),
+            Span::new(0, 0),
+        ));
+    }
 
     // Deep-resolve the recorded span types now that all unification is done.
     // Skip any that still contain inference variables (unresolvable at

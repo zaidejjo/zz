@@ -723,3 +723,119 @@ pub fn subst(t: &Type, subs: &std::collections::HashMap<String, Type>) -> Type {
         other => other.clone(),
     }
 }
+
+#[cfg(test)]
+mod infer_var_tests {
+    use super::*;
+
+    /// Builds one instance of every `Type` variant, nesting a `Var(7)` deep
+    /// inside each container so a correct walk finds it. Leaf/scalar
+    /// variants carry no var.
+    fn var_type() -> Type {
+        Type::Var(7)
+    }
+
+    fn container_with_var() -> Vec<Type> {
+        vec![
+            Type::Tuple(vec![var_type()]),
+            Type::Option(Box::new(var_type())),
+            Type::Result(Box::new(var_type()), Box::new(Type::Int)),
+            Type::Func(vec![var_type()], Box::new(Type::Int)),
+            Type::Array(Box::new(var_type())),
+            Type::Dict(Box::new(Type::Int), Box::new(var_type())),
+            Type::Struct("S".to_string(), vec![var_type()]),
+            Type::Enum("E".to_string(), vec![var_type()]),
+            Type::Union(vec![var_type(), Type::Int]),
+            Type::Range(Box::new(var_type())),
+            Type::Ptr {
+                mutable: false,
+                inner: Box::new(var_type()),
+            },
+        ]
+    }
+
+    /// Every non-var, non-container variant: must report no var and no max id.
+    fn leaf_types() -> Vec<Type> {
+        vec![
+            Type::Int,
+            Type::Float,
+            Type::Bool,
+            Type::Str,
+            Type::Unit,
+            Type::Void,
+            Type::Bytes,
+            Type::Json,
+            Type::Db,
+            Type::HttpServer,
+            Type::TcpStream,
+            Type::TcpListener,
+            Type::Response,
+            Type::HttpRequest,
+            Type::Opaque("tag".to_string()),
+            Type::Chan,
+            Type::TaskJoin,
+            Type::Named("T".to_string()),
+            Type::Error,
+            Type::Never,
+        ]
+    }
+
+    #[test]
+    fn contains_var_find_var_in_every_container() {
+        for t in container_with_var() {
+            assert!(
+                contains_var(&t),
+                "contains_var should find Var inside {:?}",
+                t
+            );
+        }
+        // A var directly is also a var.
+        assert!(contains_var(&var_type()));
+        // Nested container still finds it.
+        assert!(contains_var(&Type::Option(Box::new(Type::Array(
+            Box::new(var_type())
+        )))));
+    }
+
+    #[test]
+    fn contains_var_false_on_leaf_types() {
+        for t in leaf_types() {
+            assert!(!contains_var(&t), "leaf {:?} should not contain a var", t);
+        }
+        assert!(!contains_var(&Type::Tuple(vec![])));
+        assert!(!contains_var(&Type::Union(vec![])));
+    }
+
+    #[test]
+    fn max_var_id_returns_id_in_every_container() {
+        for t in container_with_var() {
+            assert_eq!(
+                max_var_id(&t),
+                Some(7),
+                "max_var_id should find Var(7) inside {:?}",
+                t
+            );
+        }
+        assert_eq!(max_var_id(&var_type()), Some(7));
+        // Two vars: returns the max.
+        let two = Type::Tuple(vec![Type::Var(3), Type::Var(9)]);
+        assert_eq!(max_var_id(&two), Some(9));
+        // Nested: deepest wins.
+        let nested = Type::Option(Box::new(Type::Array(Box::new(Type::Var(42)))));
+        assert_eq!(max_var_id(&nested), Some(42));
+    }
+
+    #[test]
+    fn max_var_id_none_on_leaf_types() {
+        for t in leaf_types() {
+            assert_eq!(
+                max_var_id(&t),
+                None,
+                "leaf {:?} should have no max var id",
+                t
+            );
+        }
+        assert_eq!(max_var_id(&Type::Tuple(vec![])), None);
+        assert_eq!(max_var_id(&Type::Union(vec![])), None);
+    }
+}
