@@ -2932,7 +2932,7 @@ fn unused_warnings_emit_in_source_order() {
     // so alphabetical order disagrees with source order. End with
     // `println` so the tail is unit and doesn't trigger the
     // implicit-return warning (#606).
-    let r = check_src("func f() {\n    zzz := 1\n    aaa := 2\n    println(\"x\")\n}");
+    let r = check_src("func _f() {\n    zzz := 1\n    aaa := 2\n    println(\"x\")\n}");
     let warns: Vec<&str> = r
         .errors
         .iter()
@@ -4922,6 +4922,109 @@ fn extern_invalid_c_identifier_errors() {
             .iter()
             .any(|e| e.message.contains("not a valid C identifier")),
         "expected invalid C identifier error, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_private_function_warns() {
+    // G10: a private function that is never called is dead code.
+    let r = check_src("func unused() -> int { 1 }\nfunc used() -> int { 2 }\nx := used()\n");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function `unused`")),
+        "expected unused warning, got: {:?}",
+        r.errors
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function `used`")),
+        "called function should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_private_function_recursive_silent() {
+    // A recursive function references itself, so it's used.
+    let r = check_src("func fact(n: int) -> int { if n == 0 { 1 } else { n * fact(n - 1) } }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function")),
+        "recursive function should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_private_function_pub_silent() {
+    // Pub functions are exported and may be used by other modules.
+    let r = check_src("pub func unused() -> int { 1 }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function")),
+        "pub function should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_private_function_extern_silent() {
+    // Extern functions are declared for the linker.
+    let r = check_src("extern \"C\" { func unused() -> int }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function")),
+        "extern function should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_private_function_method_silent() {
+    // Methods are dispatched separately, not looked up by bare name.
+    let r =
+        check_src("struct Point { x: int }\nimpl Point { func dist(self) -> int { self.x } }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function")),
+        "method should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_private_function_underscore_silent() {
+    // `_`-prefixed names are already silenced for variables.
+    let r = check_src("func _unused() -> int { 1 }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function")),
+        "underscore-prefixed function should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_private_function_used_as_value_silent() {
+    // A function used as a value (passed to another call) is referenced.
+    let r = check_src(
+        "func cb(x: int) -> int { x }\n\
+         func apply(f: func(int) -> int, v: int) -> int { f(v) }\n\
+         x := apply(cb, 5)\n",
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function `cb`")),
+        "function used as value should not warn, got: {:?}",
         r.errors
     );
 }

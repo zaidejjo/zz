@@ -806,6 +806,31 @@ fn check_program_impl(
     // is never popped, so pop_scope's check never fires for it).
     checker.emit_global_unused_warnings();
 
+    // Emit unused private-function warnings. A top-level function that is
+    // never referenced (its name never appears in `used_names`) is dead
+    // code. Skip pub functions (cross-module users), extern functions
+    // (linker users), methods (`Type.method`, dispatched separately), and
+    // `_`-prefixed names (already silenced for variables). Every call goes
+    // through `lookup`, so an unreferenced name is genuinely unused.
+    for (name, sig) in &checker.funcs {
+        if pub_funcs_set.contains(name.as_str())
+            || sig.is_extern
+            || name.contains('.')
+            || name.starts_with('_')
+            || checker.used_names.contains(name.as_str())
+        {
+            continue;
+        }
+        checker.errors.push(
+            zz_diag_core::warning(
+                format!(
+                    "unused private function `{name}`, consider prefixing with `_{name}` or removing it"
+                ),
+            )
+            .with_note("function is never called or referenced"),
+        );
+    }
+
     // Build pub-only maps for cross-module export. Signature types are
     // deep-resolved so inferred returns (e.g. `ping()` with no annotation
     // unifies its ret var to `unit` during body checking) export as
@@ -1012,8 +1037,8 @@ mod span_scope_tests {
     // the other's type; scoped keys keep both.
     #[test]
     fn same_span_different_functions_keep_types() {
-        let a = zz_frontend::parse("func f() -> int {\n    v :=  1234\n    return v\n}\n");
-        let b = zz_frontend::parse("func g() -> bool {\n    v := true\n    return v\n}\n");
+        let a = zz_frontend::parse("func _f() -> int {\n    v :=  1234\n    return v\n}\n");
+        let b = zz_frontend::parse("func _g() -> bool {\n    v := true\n    return v\n}\n");
         assert!(a.errors.is_empty(), "parse a: {:?}", a.errors);
         assert!(b.errors.is_empty(), "parse b: {:?}", b.errors);
         let mut stmts = Vec::new();
@@ -1032,9 +1057,9 @@ mod span_scope_tests {
             HashMap::new(),
         );
         assert!(res.errors.is_empty(), "check: {:?}", res.errors);
-        let key = Span::new(28, 32);
-        assert_eq!(types.get(&SpanKey::new("f", key)), Some(&Type::Int));
-        assert_eq!(types.get(&SpanKey::new("g", key)), Some(&Type::Bool));
+        let key = Span::new(29, 33);
+        assert_eq!(types.get(&SpanKey::new("_f", key)), Some(&Type::Int));
+        assert_eq!(types.get(&SpanKey::new("_g", key)), Some(&Type::Bool));
     }
 }
 
