@@ -1,0 +1,23 @@
+// features: arrays, for-loop, int-arith, locals, print, structs
+// E2E: struct_access — global flat [Pt] array, push + for-in + field access
+struct Pt {
+    x: int,
+    y: int,
+}
+
+pts:[Pt] = []
+
+func main() {
+    pts.push(Pt{x: 1, y: 2})
+    pts.push(Pt{x: 3, y: 4})
+    pts.push(Pt{x: 5, y: 6})
+    println(len(pts))
+    println(pts[0].x)
+    println(pts[2].y)
+    acc := 0
+    for p in pts {
+        acc = acc + p.x + p.y
+    }
+    println(acc)
+    println("struct_access_ok")
+}

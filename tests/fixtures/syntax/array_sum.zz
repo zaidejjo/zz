@@ -1,0 +1,18 @@
+// features: arrays, for-loop, int-arith, locals, print, ranges
+// E2E: array_sum — global flat [int] array, push + len + index + iteration
+arr:[int] = []
+
+func main() {
+    for i in 0..1000 {
+        arr.push(i)
+    }
+    println(len(arr))
+    println(arr[0])
+    println(arr[999])
+    total := 0
+    for x in arr {
+        total = total + x
+    }
+    println(total)
+    println("array_sum_ok")
+}

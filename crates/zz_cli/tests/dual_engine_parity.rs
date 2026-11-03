@@ -1483,6 +1483,9 @@ parity_strict!(parity_syntax_empty_infer, "syntax", "empty_infer.zz");
 parity_strict!(parity_syntax_functions, "syntax", "functions.zz");
 parity_strict!(parity_syntax_hof, "syntax", "hof.zz");
 parity_strict!(parity_syntax_arrays, "syntax", "arrays.zz");
+parity_strict!(parity_syntax_array_sum, "syntax", "array_sum.zz");
+parity_strict!(parity_syntax_struct_access, "syntax", "struct_access.zz");
+parity_strict!(parity_syntax_string_build, "syntax", "string_build.zz");
 parity_strict!(parity_syntax_flat_arrays, "syntax", "flat_arrays.zz");
 parity_strict!(parity_syntax_defer, "syntax", "defer.zz");
 parity_strict!(parity_syntax_dict_iteration, "syntax", "dict_iteration.zz");
@@ -1923,8 +1926,7 @@ fn run_quad(file: &Path, token: &str) -> QuadLegs {
     // Each leg is an independent process; run them concurrently so a
     // fixture's wall time is ~max(leg) instead of sum(leg), bounded by
     // QUAD_SEM so total CPU never exceeds ZZ_QUAD_JOBS.
-    let skip_native = quad_skip_native() || vm_only();
-    if skip_native {
+    if quad_skip_native() || vm_only() {
         eprintln!(
             "SKIP native legs for {} (fast/Windows mode)",
             file.display()
@@ -1935,9 +1937,8 @@ fn run_quad(file: &Path, token: &str) -> QuadLegs {
         let file = file.clone();
         let token = token.clone();
         let input = input.clone();
-        let skip_native = skip_native;
         std::thread::spawn(move || {
-            if native && skip_native {
+            if native && (quad_skip_native() || vm_only()) {
                 return None;
             }
             let _permit = sem.acquire();

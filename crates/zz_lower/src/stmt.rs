@@ -1465,12 +1465,20 @@ impl Lowerer {
         for step in plan {
             match step {
                 Term::Lit(inner) => {
+                    // Inline zz_str_append_lit: grow + memcpy + null-term,
+                    // guarded so immutable (ZZ_STR) accumulators are no-ops
+                    // outside loops (mirrors zz_str_append_mut_str's tag check).
                     out.push_str(&format!(
-                        "    zz_str_append_lit(&{cid}, {inner}, sizeof({inner}) - 1);\n"
+                        "    if ({cid}.tag == ZZ_MUTABLE_STR) {{ zz_str *_s = {cid}.s; size_t _ll = sizeof({inner}) - 1; size_t _need = _s->len + _ll; if (_s->cap < _need) {{ _s = str_grow(_s, _need); {cid}.s = _s; }} memcpy(zz_str_ptr(_s) + _s->len, {inner}, _ll); _s->len = _need; zz_str_ptr(_s)[_s->len] = '\\0'; }}\n"
                     ));
                 }
                 Term::Borrow(rcid) => {
-                    out.push_str(&format!("    zz_str_append_str(&{cid}, {rcid});\n"));
+                    // Inline zz_str_append_str: grow + memcpy + null-term,
+                    // guarded so immutable (ZZ_STR) accumulators are no-ops
+                    // outside loops (mirrors zz_str_append_mut_str's tag check).
+                    out.push_str(&format!(
+                        "    if ({cid}.tag == ZZ_MUTABLE_STR) {{ zz_str *_rs = {rcid}.s; zz_str *_s = {cid}.s; size_t _ll = _s->len, _lb = _rs->len; size_t _need = _ll + _lb; if (_s->cap < _need) {{ _s = str_grow(_s, _need); {cid}.s = _s; }} memcpy(zz_str_ptr(_s) + _ll, zz_str_ptr(_rs), _lb); _s->len = _need; zz_str_ptr(_s)[_s->len] = '\\0'; }}\n"
+                    ));
                 }
                 Term::AppendScalar(t, raw) => {
                     // `str(int)` / `str(bool)` in append position: format
@@ -1953,12 +1961,21 @@ impl Lowerer {
             // shape is only meaningful for dicts / pair arrays, which are
             // boxed). Anything else falls through to the boxed path.
             let flat_iter = if vars.len() == 1 {
-                if let Expr::Ident {
-                    name: iter_name, ..
-                } = iter
-                {
-                    let iter_name_str = iter_name.to_string();
-                    if let Some(ctype) = names.lookup_type(&iter_name_str) {
+                // Resolve the iterable name: `arr` (Ident) or `ns.arr` (Path
+                // for namespaced globals).
+                let (iter_name_str, ctype) = match iter {
+                    Expr::Ident {
+                        name: iter_name, ..
+                    } => (iter_name.to_string(), names.lookup_type(iter_name)),
+                    Expr::Path { parts, .. } if parts.len() == 2 => {
+                        let joined = parts.join(".");
+                        let ctype = names.lookup_type(&joined);
+                        (joined, ctype)
+                    }
+                    _ => (String::new(), None),
+                };
+                if !iter_name_str.is_empty() {
+                    if let Some(ctype) = ctype {
                         if let Some(elem_ctype) = self.scalar_array_from_ptr(ctype) {
                             let arr_cid = names.lookup(&iter_name_str).unwrap().to_string();
                             let len_key = format!("{}_len", iter_name_str);

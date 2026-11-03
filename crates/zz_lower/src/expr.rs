@@ -1117,18 +1117,15 @@ impl Lowerer {
                 }
                 // Flat scalar array index: `arr[k]` where `arr` is `[int]`/`[float]`/`[bool]`
                 // → direct `({cid})[{i}]` read, no `zz_index_get` bounds-check/clone.
-                if let Expr::Ident { name: arr_name, .. } = obj.as_ref() {
-                    if let Some(elem_ctype) =
-                        self.scalar_array_from_ptr(names.lookup_type(arr_name).unwrap_or(""))
-                    {
-                        let arr_cid = names.lookup(arr_name).unwrap().to_string();
-                        let idx_raw = self.flat_index_expr(index, names, out);
-                        let len_cid = names.lookup_or_name(&format!("{}_len", arr_name));
-                        let func = names.current_scope.clone();
-                        let raw =
-                            format!("({arr_cid})[zz_flat_index({idx_raw}, {len_cid}, \"{func}\")]");
-                        return auto_box(&raw, Some(elem_ctype));
-                    }
+                // Handles both `arr[k]` (Ident) and `ns.arr[k]` (Path for namespaced globals).
+                if let Some((arr_name, elem_ctype)) = self.flat_index_receiver(obj, names) {
+                    let arr_cid = names.lookup(arr_name.as_str()).unwrap().to_string();
+                    let idx_raw = self.flat_index_expr(index, names, out);
+                    let len_cid = names.lookup_or_name(&format!("{}_len", arr_name));
+                    let func = names.current_scope.clone();
+                    let raw =
+                        format!("({arr_cid})[zz_flat_index({idx_raw}, {len_cid}, \"{func}\")]");
+                    return auto_box(&raw, Some(elem_ctype.as_str()));
                 }
                 // Two fast-paths over the naive
                 // `zz_call_native2(zz_index_get, zz_clone(o), boxed_i)`:
@@ -1204,24 +1201,35 @@ impl Lowerer {
                 // is a contiguous buffer of unboxed structs → direct
                 // `({arr})[{k}].field`, no zz_index_get bounds-check/clone
                 // and no zz_object_get_field strcmp. This is the struct_access
-                // hot path.
+                // hot path. Handles both `arr[k].field` (Ident) and
+                // `ns.arr[k].field` (Path for namespaced globals).
                 if let Expr::Index {
                     obj: arr_obj,
                     index,
                     ..
                 } = obj.as_ref()
                 {
-                    if let Expr::Ident { name: arr_name, .. } = arr_obj.as_ref() {
-                        if let Some(sname) =
-                            self.flat_array_from_ptr(names.lookup_type(arr_name).unwrap_or(""))
-                        {
-                            let arr_cid = names.lookup(arr_name).unwrap().to_string();
-                            let idx_raw = self.flat_index_expr(index, names, out);
-                            let field_ctype =
-                                self.field_type_from_struct(&self.struct_c_type(&sname), name);
-                            let raw = format!("({arr_cid})[{idx_raw}].{name}");
-                            return auto_box(&raw, field_ctype);
+                    let (arr_name, sname) = match arr_obj.as_ref() {
+                        zz_frontend::ast::Expr::Ident { name, .. } => {
+                            let sname =
+                                self.flat_array_from_ptr(names.lookup_type(name).unwrap_or(""));
+                            (name.clone(), sname)
                         }
+                        zz_frontend::ast::Expr::Path { parts, .. } if parts.len() == 2 => {
+                            let joined = parts.join(".");
+                            let sname =
+                                self.flat_array_from_ptr(names.lookup_type(&joined).unwrap_or(""));
+                            (joined, sname)
+                        }
+                        _ => (String::new(), None),
+                    };
+                    if let Some(sname) = sname {
+                        let arr_cid = names.lookup(&arr_name).unwrap().to_string();
+                        let idx_raw = self.flat_index_expr(index, names, out);
+                        let field_ctype =
+                            self.field_type_from_struct(&self.struct_c_type(&sname), name);
+                        let raw = format!("({arr_cid})[{idx_raw}].{name}");
+                        return auto_box(&raw, field_ctype);
                     }
                 }
                 // Determine if the object is boxed (zz_value) or unboxed (C struct).
@@ -2871,6 +2879,26 @@ impl Lowerer {
                             return format!("zz_int({len_cid})");
                         }
                     }
+                    // `len(ns.arr)` for namespaced globals: same folds as
+                    // the Ident arm above, using the joined name.
+                    Expr::Path { parts, .. } => {
+                        let joined = parts.join(".");
+                        if let Some(n) = names.array_len(&joined) {
+                            return format!("zz_int({n})");
+                        }
+                        if let Some(_sname) =
+                            self.flat_array_from_ptr(names.lookup_type(&joined).unwrap_or(""))
+                        {
+                            let len_cid = names.lookup_or_name(&format!("{}_len", joined));
+                            return format!("zz_int({len_cid})");
+                        }
+                        if let Some(_elem_ctype) =
+                            self.scalar_array_from_ptr(names.lookup_type(&joined).unwrap_or(""))
+                        {
+                            let len_cid = names.lookup_or_name(&format!("{}_len", joined));
+                            return format!("zz_int({len_cid})");
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -3144,25 +3172,35 @@ impl Lowerer {
             // Flat-array push: `arr.push(x)` where `arr` is a contiguous buffer
             // of unboxed structs — append inline instead of the boxed
             // `zz_vec_push` native (avoids zz_value boxing per element).
+            // Handles both `arr.push(x)` (Ident receiver) and
+            // `ns.arr.push(x)` (Path receiver for namespaced globals).
             if borrow_recv {
-                if let Expr::Ident { name, .. } = recv {
-                    let recv_type = names.lookup_type(name).unwrap_or("");
-                    if let Some(sname) = self.flat_array_from_ptr(recv_type) {
+                let (recv_name, recv_type) = match recv {
+                    Expr::Ident { name, .. } => {
+                        let ctype = names.lookup_type(name.as_str()).unwrap_or("");
+                        (name.clone(), ctype.to_string())
+                    }
+                    Expr::Path { parts, .. } if parts.len() == 2 => {
+                        let joined = parts.join(".");
+                        let ctype = names.lookup_type(&joined).unwrap_or("");
+                        (joined, ctype.to_string())
+                    }
+                    _ => (String::new(), String::new()),
+                };
+                if !recv_name.is_empty() {
+                    // Struct element push
+                    if let Some(sname) = self.flat_array_from_ptr(&recv_type) {
                         let Some(arg) = args.first() else {
                             return "zz_unit()".to_string();
                         };
                         let arg_val = self.emit_expr(arg, names, out);
                         let elem = self.struct_c_type(&sname);
-                        // The pointer was declared with the fresh C id returned
-                        // by `enter_with_type` (e.g. `v1`), NOT the source name
-                        // (`arr`). Using `name` here emits `arr = realloc(arr, ...)`
-                        // which references an undeclared identifier. Use `cid`.
                         let cid = names
-                            .lookup(name)
+                            .lookup(&recv_name)
                             .map(str::to_string)
-                            .unwrap_or_else(|| name.to_string());
-                        let len_cid = names.lookup_or_name(&format!("{}_len", name));
-                        let cap_cid = names.lookup_or_name(&format!("{}_cap", name));
+                            .unwrap_or_else(|| recv_name.clone());
+                        let len_cid = names.lookup_or_name(&format!("{}_len", recv_name));
+                        let cap_cid = names.lookup_or_name(&format!("{}_cap", recv_name));
                         out.push_str(&format!(
                             "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n      {elem} *__flat_grow = ({elem}*)zz_arena_alloc(&_func_arena, (size_t){cap} * sizeof({elem}), 8);\n      if ({len} > 0) {{ memcpy(__flat_grow, {cid}, (size_t){len} * sizeof({elem})); }}\n      {cid} = __flat_grow;\n    }}\n",
                             len = len_cid,
@@ -3178,18 +3216,12 @@ impl Lowerer {
                         ));
                         return "zz_unit()".to_string();
                     }
-                    // Flat-array push for scalars: `arr.push(x)` where `arr`
-                    // is `[int]`/`[float]`/`[bool]` — append inline instead of
-                    // the boxed `zz_vec_push` native (avoids zz_value boxing
-                    // and per-element clone per push).
-                    if let Some(elem_ctype) = self.scalar_array_from_ptr(recv_type) {
+                    // Scalar element push
+                    if let Some(elem_ctype) = self.scalar_array_from_ptr(&recv_type) {
                         let Some(arg) = args.first() else {
                             return "zz_unit()".to_string();
                         };
                         let arg_val = self.emit_expr(arg, names, out);
-                        // The buffer stores raw C scalars while call arguments
-                        // are boxed `zz_value`s: unbox (converting type when
-                        // needed) before the raw store.
                         let elem_static: &'static str = match elem_ctype {
                             "double" => "double",
                             "bool" => "bool",
@@ -3197,11 +3229,11 @@ impl Lowerer {
                         };
                         let arg_raw = self.unbox_for_return(arg, arg_val, names, elem_static);
                         let cid = names
-                            .lookup(name)
+                            .lookup(&recv_name)
                             .map(str::to_string)
-                            .unwrap_or_else(|| name.to_string());
-                        let len_cid = names.lookup_or_name(&format!("{}_len", name));
-                        let cap_cid = names.lookup_or_name(&format!("{}_cap", name));
+                            .unwrap_or_else(|| recv_name.clone());
+                        let len_cid = names.lookup_or_name(&format!("{}_len", recv_name));
+                        let cap_cid = names.lookup_or_name(&format!("{}_cap", recv_name));
                         out.push_str(&format!(
                             "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n      {elem_ctype} *__flat_grow = ({elem_ctype}*)zz_arena_alloc(&_func_arena, (size_t){cap} * sizeof({elem_ctype}), 8);\n      if ({len} > 0) {{ memcpy(__flat_grow, {cid}, (size_t){len} * sizeof({elem_ctype})); }}\n      {cid} = __flat_grow;\n    }}\n",
                             len = len_cid,
