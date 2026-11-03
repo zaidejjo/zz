@@ -285,22 +285,6 @@ impl Lowerer {
             }
         }
 
-        // Register owners for synthetic _len/_cap globals: they belong to
-        // the same namespace as their parent array global, so they get C
-        // definitions in the same unit.
-        for (zz_name, _, _, _) in &self.global_list {
-            if zz_name.ends_with("_len") || zz_name.ends_with("_cap") {
-                let base = zz_name
-                    .strip_suffix("_len")
-                    .or_else(|| zz_name.strip_suffix("_cap"));
-                if let Some(base) = base {
-                    if owners.contains_key(base) && !owners.contains_key(zz_name) {
-                        owners.insert(zz_name.clone(), owners[base].clone());
-                    }
-                }
-            }
-        }
-
         // Selective-import bare aliases: forward to canonical (extern here).
         let mut alias_pairs: Vec<(&String, &String)> = self.import_fn_aliases.iter().collect();
         alias_pairs.sort();
@@ -732,20 +716,6 @@ fn emit_top_decl(
         .get(zz_name)
         .map(|(_, t)| t.clone())
         .unwrap_or_else(|| "zz_value".to_string());
-    // Flat array global: `arr: [int] = []` →
-    //   zz_global_arr = NULL;
-    //   zz_global_arr_len = 0;
-    //   zz_global_arr_cap = 0;
-    // Growth happens via inline flat-array push in Expr::Call.
-    let is_flat_array = matches!(gtype.as_str(), "int64_t *" | "double *" | "bool *")
-        || (gtype.as_str().starts_with("zz_struct_") && gtype.as_str().ends_with(" *"));
-    if is_flat_array && matches!(value, Expr::Array { elems, .. } if elems.is_empty()) {
-        out.push_str(&format!("    {gid} = NULL;\n"));
-        out.push_str(&format!("    {gid}_len = 0;\n"));
-        out.push_str(&format!("    {gid}_cap = 0;\n"));
-        global_init_done.insert(zz_name.to_string());
-        return;
-    }
     if let Expr::StructInit {
         name: struct_name, ..
     } = value

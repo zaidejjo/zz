@@ -1,13 +1,12 @@
 // features: arrays, for-loop, int-arith, locals, print, structs
-// E2E: struct_access — global flat [Pt] array, push + for-in + field access
+// E2E: struct_access — local flat [Pt] array, push + for-in + field access
 struct Pt {
     x: int,
     y: int,
 }
 
-pts:[Pt] = []
-
 func main() {
+    pts:[Pt] = []
     pts.push(Pt{x: 1, y: 2})
     pts.push(Pt{x: 3, y: 4})
     pts.push(Pt{x: 5, y: 6})

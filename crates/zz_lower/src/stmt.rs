@@ -1444,17 +1444,12 @@ impl Lowerer {
             }
         }
         // All terms admissible — emit left-to-right.
-        // Convert the accumulator to a mutable builder once so every append
-        // takes the O(1) in-place path. `s := ""` yields an interned ZZ_STR
-        // (`zz_str_static`), and appending to an interned string takes the
-        // slow fresh-alloc path on every iteration (O(n^2) overall). The
-        // mutable builder is exclusively owned, so `zz_str_append_*` hits its
-        // `mutable == 1` fast path with amortized O(1) growth. Only convert
-        // inside a loop (where the O(n^2) actually matters), mirroring the
-        // Let-path hoisting at stmt.rs:252, and freeze back to ZZ_STR after
-        // the loop so `len(s)`/`println(s)` see a proper immutable string
-        // (`zz_len` skips ZZ_MUTABLE_STR).
-        if self.loop_depth.get() >= 1 {
+        // Inside a loop, convert the accumulator to a mutable builder once
+        // and use inline grow+memcpy appends (O(1) amortized growth).
+        // Outside a loop, fall back to zz_str_append_str/lit calls so
+        // immutable ZZ_STR accumulators are handled correctly.
+        let inline = self.loop_depth.get() >= 1;
+        if inline {
             out.push_str(&format!(
                 "    if ({cid}.tag == ZZ_STR) {{ {cid} = zz_str_new_mut(64); }}\n"
             ));
@@ -1465,20 +1460,29 @@ impl Lowerer {
         for step in plan {
             match step {
                 Term::Lit(inner) => {
-                    // Inline zz_str_append_lit: grow + memcpy + null-term,
-                    // guarded so immutable (ZZ_STR) accumulators are no-ops
-                    // outside loops (mirrors zz_str_append_mut_str's tag check).
-                    out.push_str(&format!(
-                        "    if ({cid}.tag == ZZ_MUTABLE_STR) {{ zz_str *_s = {cid}.s; size_t _ll = sizeof({inner}) - 1; size_t _need = _s->len + _ll; if (_s->cap < _need) {{ _s = str_grow(_s, _need); {cid}.s = _s; }} memcpy(zz_str_ptr(_s) + _s->len, {inner}, _ll); _s->len = _need; zz_str_ptr(_s)[_s->len] = '\\0'; }}\n"
-                    ));
+                    if inline {
+                        // Inline zz_str_append_lit: grow + memcpy + null-term.
+                        // Guarded by ZZ_MUTABLE_STR tag (set by conversion
+                        // above inside loops); outside loops this branch is
+                        // never taken because inline is false.
+                        out.push_str(&format!(
+                            "    if ({cid}.tag == ZZ_MUTABLE_STR) {{ zz_str *_s = {cid}.s; size_t _ll = sizeof({inner}) - 1; size_t _need = _s->len + _ll; if (_s->cap < _need) {{ _s = str_grow(_s, _need); {cid}.s = _s; }} memcpy(zz_str_ptr(_s) + _s->len, {inner}, _ll); _s->len = _need; zz_str_ptr(_s)[_s->len] = '\\0'; }}\n"
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "    zz_str_append_lit(&{cid}, {inner}, sizeof({inner}) - 1);\n"
+                        ));
+                    }
                 }
                 Term::Borrow(rcid) => {
-                    // Inline zz_str_append_str: grow + memcpy + null-term,
-                    // guarded so immutable (ZZ_STR) accumulators are no-ops
-                    // outside loops (mirrors zz_str_append_mut_str's tag check).
-                    out.push_str(&format!(
-                        "    if ({cid}.tag == ZZ_MUTABLE_STR) {{ zz_str *_rs = {rcid}.s; zz_str *_s = {cid}.s; size_t _ll = _s->len, _lb = _rs->len; size_t _need = _ll + _lb; if (_s->cap < _need) {{ _s = str_grow(_s, _need); {cid}.s = _s; }} memcpy(zz_str_ptr(_s) + _ll, zz_str_ptr(_rs), _lb); _s->len = _need; zz_str_ptr(_s)[_s->len] = '\\0'; }}\n"
-                    ));
+                    if inline {
+                        // Inline zz_str_append_str: grow + memcpy + null-term.
+                        out.push_str(&format!(
+                            "    if ({cid}.tag == ZZ_MUTABLE_STR) {{ zz_str *_rs = {rcid}.s; zz_str *_s = {cid}.s; size_t _ll = _s->len, _lb = _rs->len; size_t _need = _ll + _lb; if (_s->cap < _need) {{ _s = str_grow(_s, _need); {cid}.s = _s; }} memcpy(zz_str_ptr(_s) + _ll, zz_str_ptr(_rs), _lb); _s->len = _need; zz_str_ptr(_s)[_s->len] = '\\0'; }}\n"
+                        ));
+                    } else {
+                        out.push_str(&format!("    zz_str_append_str(&{cid}, {rcid});\n"));
+                    }
                 }
                 Term::AppendScalar(t, raw) => {
                     // `str(int)` / `str(bool)` in append position: format
@@ -1977,19 +1981,13 @@ impl Lowerer {
                 if !iter_name_str.is_empty() {
                     if let Some(ctype) = ctype {
                         if let Some(elem_ctype) = self.scalar_array_from_ptr(ctype) {
-                            let arr_cid = names.lookup(&iter_name_str).unwrap().to_string();
+                            let arr_cid = names.lookup_or_name(&iter_name_str);
                             let len_key = format!("{}_len", iter_name_str);
-                            let len_cid = names
-                                .lookup(&len_key)
-                                .map(str::to_string)
-                                .unwrap_or_else(|| len_key.clone());
+                            let len_cid = names.lookup_or_name(&len_key);
                             Some(("scalar", elem_ctype.to_string(), arr_cid, len_cid))
                         } else if let Some(sname) = self.flat_array_from_ptr(ctype) {
-                            let arr_cid = names.lookup(&iter_name_str).unwrap().to_string();
-                            let len_cid = names
-                                .lookup(&format!("{}_len", iter_name_str))
-                                .map(|s| s.to_string())
-                                .unwrap_or_else(|| format!("{}_len", iter_name_str));
+                            let arr_cid = names.lookup_or_name(&iter_name_str);
+                            let len_cid = names.lookup_or_name(&format!("{}_len", iter_name_str));
                             Some(("struct", sname, arr_cid, len_cid))
                         } else {
                             None

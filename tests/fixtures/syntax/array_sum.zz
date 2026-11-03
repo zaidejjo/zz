@@ -1,8 +1,7 @@
 // features: arrays, for-loop, int-arith, locals, print, ranges
-// E2E: array_sum — global flat [int] array, push + len + index + iteration
-arr:[int] = []
-
+// E2E: array_sum — local flat [int] array, push + len + index + iteration
 func main() {
+    arr:[int] = []
     for i in 0..1000 {
         arr.push(i)
     }

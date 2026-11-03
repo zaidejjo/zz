@@ -1334,15 +1334,6 @@ impl Lowerer {
                     "zz_value".to_string()
                 }
             }
-            zz_checker::Type::Array(inner) => match inner.as_ref() {
-                zz_checker::Type::Int => "int64_t *".to_string(),
-                zz_checker::Type::Float => "double *".to_string(),
-                zz_checker::Type::Bool => "bool *".to_string(),
-                zz_checker::Type::Struct(name, _) if self.is_unboxed_struct(name) => {
-                    format!("zz_struct_{} *", mangle(name))
-                }
-                _ => "zz_value".to_string(),
-            },
             _ => "zz_value".to_string(),
         }
     }
@@ -1436,62 +1427,36 @@ impl Lowerer {
             }
         }
         names.sort();
-        let mut result: Vec<(String, String, String, Option<zz_checker::Type>)> = Vec::new();
-        for n in names {
-            let checker_ty = self.tp.bindings.get(&n).cloned();
-            let ctype = match &checker_ty {
-                Some(zz_checker::Type::Struct(name, _)) if self.is_unboxed_struct(name) => {
-                    "zz_value".to_string()
-                }
-                _ => checker_ty
-                    .as_ref()
-                    .map(|t| self.type_to_c(t))
-                    .unwrap_or_else(|| "zz_value".to_string()),
-            };
-            let cid = Self::global_cid(&n);
-            result.push((n.clone(), cid, ctype, checker_ty.clone()));
-            // Add _len and _cap globals for flat arrays (scalar or struct),
-            // mirroring the local flat-array layout (gid + gid_len + gid_cap).
-            if matches!(&checker_ty,
-                Some(zz_checker::Type::Array(inner))
-                if matches!(inner.as_ref(),
-                    zz_checker::Type::Int | zz_checker::Type::Float |
-                    zz_checker::Type::Bool | zz_checker::Type::Struct(_, _)
-                )
-            ) {
-                let len_name = format!("{}_len", n);
-                let cap_name = format!("{}_cap", n);
-                result.push((
-                    len_name.clone(),
-                    Self::global_cid(&len_name),
-                    "int64_t".to_string(),
-                    Some(zz_checker::Type::Int),
-                ));
-                result.push((
-                    cap_name.clone(),
-                    Self::global_cid(&cap_name),
-                    "int64_t".to_string(),
-                    Some(zz_checker::Type::Int),
-                ));
-            }
-        }
-        result
+        names
+            .into_iter()
+            .map(|n| {
+                let checker_ty = self.tp.bindings.get(&n).cloned();
+                // Unboxed structs work for locals (conversions at every
+                // use), but globals lack the store/load conversions — a
+                // struct-typed global miscompiles (boxed value into an
+                // unboxed decl, issue #215). Declare struct globals boxed
+                // like every other composite, but KEEP the checker type:
+                // field-store/read arms key struct layout off it while
+                // branching raw-vs-boxed on the (boxed) C type.
+                let ctype = match &checker_ty {
+                    Some(zz_checker::Type::Struct(name, _)) if self.is_unboxed_struct(name) => {
+                        "zz_value".to_string()
+                    }
+                    _ => checker_ty
+                        .as_ref()
+                        .map(|t| self.type_to_c(t))
+                        .unwrap_or_else(|| "zz_value".to_string()),
+                };
+                let cid = Self::global_cid(&n);
+                (n, cid, ctype, checker_ty)
+            })
+            .collect()
     }
 
     /// Seed a NameCtx with all module-level globals.
-    /// Registers each global under both its full (namespaced) name and its
-    /// simple name (last component after '.') so expression lookups like
-    /// `len(arr)` find the global even when it's stored under a namespaced
-    /// key (e.g. `debug_arr.arr`). The simple name shadows any same-named
-    /// local — which is fine because locals shadow globals in `lookup`.
     pub(crate) fn seed_globals(&self, names: &mut NameCtx) {
         for (zz_name, cid, ctype, checker_ty) in &self.global_list {
             names.insert_global(zz_name, cid, ctype, checker_ty.clone());
-            if let Some(simple) = zz_name.rsplit('.').next() {
-                if simple != zz_name {
-                    names.insert_global(simple, cid, ctype, checker_ty.clone());
-                }
-            }
         }
     }
 
@@ -1589,6 +1554,11 @@ impl Lowerer {
             {
                 return inner.to_string();
             }
+        }
+        // Boxed runtime value (e.g. function call returning int) — extract .i
+        // so it can be used as a raw C array index.
+        if emitted.starts_with("zz_") {
+            return format!("({emitted}).i");
         }
         emitted
     }

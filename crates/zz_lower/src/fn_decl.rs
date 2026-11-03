@@ -21,7 +21,9 @@ impl Lowerer {
             self.tp
                 .funcs
                 .get(fname)
-                .and_then(|sig| sig.params.first().map(|(_, t)| self.type_to_c(t)))
+                .and_then(|sig| sig.params.first().map(|(_, t)| t.clone()))
+                .filter(|t| matches!(t, zz_checker::Type::Struct(_, _)))
+                .map(|t| self.type_to_c(&t))
         } else {
             None
         };
