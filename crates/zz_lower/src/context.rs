@@ -645,6 +645,73 @@ impl Lowerer {
         out
     }
 
+    /// Check if `e` is a struct field read that yields a raw C scalar
+    /// (int64_t/double/bool). Returns (raw_c_text, c_type) if so.
+    /// Handles flat-array element fields (`arr[k].x`) and unboxed struct
+    /// local fields (`p.x`). The free-function `scalar_operant_type`/`c`
+    /// cannot handle these because they lack access to `self` (the Lowerer)
+    /// to resolve struct types from C type strings.
+    pub(crate) fn field_read_scalar(
+        &self,
+        e: &Expr,
+        names: &NameCtx,
+    ) -> Option<(String, &'static str)> {
+        match e {
+            Expr::Field { obj, name, .. } => {
+                // Flat array element field: `arr[k].field`
+                if let Expr::Index {
+                    obj: arr_obj,
+                    index,
+                    ..
+                } = obj.as_ref()
+                {
+                    if let Expr::Ident { name: arr_name, .. } = arr_obj.as_ref() {
+                        if let Some(sname) =
+                            self.flat_array_from_ptr(names.lookup_type(arr_name).unwrap_or(""))
+                        {
+                            let ctype_str = self.struct_c_type(&sname);
+                            if let Some(ft) = self.field_type_from_struct(&ctype_str, name) {
+                                let t = match ft {
+                                    "int64_t" => "int64_t",
+                                    "double" => "double",
+                                    "bool" => "bool",
+                                    _ => return None,
+                                };
+                                let idx_text = match index.as_ref() {
+                                    Expr::Ident { name: idx_name, .. } => {
+                                        names.lookup(idx_name).unwrap_or(idx_name).to_string()
+                                    }
+                                    Expr::Int { value, .. } => value.to_string(),
+                                    _ => return None,
+                                };
+                                let arr_cid = names.lookup(arr_name).unwrap().to_string();
+                                return Some((format!("({arr_cid})[{idx_text}].{name}"), t));
+                            }
+                        }
+                    }
+                }
+                // Unboxed struct local field: `p.field`
+                if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+                    let ctype = names.lookup_type(obj_name).unwrap_or("");
+                    if ctype.starts_with("zz_struct_") {
+                        if let Some(ft) = self.field_type_from_struct(ctype, name) {
+                            let t = match ft {
+                                "int64_t" => "int64_t",
+                                "double" => "double",
+                                "bool" => "bool",
+                                _ => return None,
+                            };
+                            let cid = names.lookup(obj_name).unwrap().to_string();
+                            return Some((format!("({cid}).{name}"), t));
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// Linkage keyword for emitted definitions/prototypes: `static` for
     /// the single-TU path, empty (external linkage) for per-module units.
     pub(crate) fn link_kw(&self) -> &'static str {

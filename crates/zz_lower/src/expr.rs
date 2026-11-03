@@ -707,6 +707,24 @@ impl Lowerer {
                         // through the boxing paths below.
                         let left_raw = crate::context::raw_scalar_text(left, &l, names);
                         let right_raw = crate::context::raw_scalar_text(right, &r, names);
+                        // Expr::Field reads of scalar fields (int64_t/double/bool) from
+                        // unboxed structs or flat arrays are raw C scalars, but the
+                        // free-function classifiers in context.rs lack access to `self`
+                        // (the Lowerer) to resolve struct types. Override the
+                        // classification here so arithmetic like `sum + arr[k].x` lowers
+                        // to raw C instead of boxed `zz_binop`.
+                        let mut left_raw = left_raw;
+                        let mut right_raw = right_raw;
+                        let mut left_type = left_type;
+                        let mut right_type = right_type;
+                        if let Some((raw, t)) = self.field_read_scalar(left, names) {
+                            left_raw = Some((raw, t));
+                            left_type = Some(t);
+                        }
+                        if let Some((raw, t)) = self.field_read_scalar(right, names) {
+                            right_raw = Some((raw, t));
+                            right_type = Some(t);
+                        }
 
                         // Both operands are scalars of compatible type:
                         // emit a raw C arithmetic op instead of going
@@ -847,21 +865,44 @@ impl Lowerer {
                                 format!("zz_binop({cop}, {boxed_l}, {boxed_r})")
                             }
                         } else {
-                            // Comparisons / pow / etc: use the boxed path
-                            // (result must be zz_value). Also handles
-                            // struct field accesses that emit as raw C
-                            // scalars, plus raw unboxed structs (e.g.
-                            // `Pt{...} == p`, `p == q`) which box to
-                            // runtime objects for `zz_binop`.
-                            //
+                            // Comparisons / pow / etc: use raw C for scalar-scalar
+                            // comparisons (`(bool)(a < b)`), falling back to boxed
+                            // `zz_binop` otherwise. IEEE semantics match the runtime
+                            // (`zz_binop` compares doubles the same way); strings
+                            // and structs never classify raw, so content equality
+                            // keeps the boxed path.
+                            let raw_cmp = |left_raw: &Option<(String, &'static str)>,
+                                           right_raw: &Option<(String, &'static str)>|
+                             -> Option<String> {
+                                let (Some((lc, lt)), Some((rc, rt))) = (left_raw, right_raw) else {
+                                    return None;
+                                };
+                                use zz_frontend::ast::BinOp::{Eq, Ge, Gt, Le, Lt, Ne};
+                                let c_op = match op {
+                                    Eq => "==",
+                                    Ne => "!=",
+                                    Lt => "<",
+                                    Gt => ">",
+                                    Le => "<=",
+                                    Ge => ">=",
+                                    _ => return None,
+                                };
+                                match (*lt, *rt) {
+                                    ("int64_t", "int64_t")
+                                    | ("double", "double")
+                                    | ("bool", "bool")
+                                    | ("int64_t", "double")
+                                    | ("double", "int64_t") => {
+                                        Some(format!("(bool)({lc} {c_op} {rc})"))
+                                    }
+                                    _ => None,
+                                }
+                            };
+                            if let Some(raw) = raw_cmp(&left_raw, &right_raw) {
+                                return raw;
+                            }
                             // `_u` fast path: numeric comparisons with
-                            // verifiably-raw operands emit raw C directly
-                            // (`(bool)(a < b)`). IEEE semantics match the
-                            // runtime (`zz_binop` compares doubles the
-                            // same way); strings/structs never classify
-                            // raw, so content equality keeps the boxed
-                            // path. Gated to `_u` bodies so existing
-                            // generated C stays byte-identical.
+                            // verifiably-raw operands emit raw C directly.
                             if self.unboxed_ret.borrow().is_some() {
                                 if let Some(raw) = self.emit_raw_cmp(op, left, right, &l, &r, names)
                                 {
