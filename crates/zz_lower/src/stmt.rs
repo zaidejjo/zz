@@ -1137,10 +1137,22 @@ impl Lowerer {
             }
             Stmt::Return { value, .. } => match value {
                 Some(v) => {
+                    // Copy `self` back to the caller's storage so mutations
+                    // made inside an impl method persist to the receiver
+                    // (`c.inc()` mutating `c`). Emitted before the return so
+                    // the write-back always runs, even on early returns.
+                    if let Some(ref lvalue) = self.impl_self_lvalue.borrow().as_ref() {
+                        out.push_str(&format!("    *self = {lvalue};\n"));
+                    }
                     let val = self.return_value(v, names, out);
                     out.push_str(&format!("    return {val};\n"));
                 }
-                None => out.push_str(&format!("    return {};\n", self.ret_unit())),
+                None => {
+                    if let Some(ref lvalue) = self.impl_self_lvalue.borrow().as_ref() {
+                        out.push_str(&format!("    *self = {lvalue};\n"));
+                    }
+                    out.push_str(&format!("    return {};\n", self.ret_unit()));
+                }
             },
             Stmt::For {
                 vars,

@@ -562,6 +562,14 @@ pub struct Lowerer {
     /// lets its storage outlive the call, so callers may borrow (pass
     /// the live local instead of a retained share) instead of cloning.
     pub(crate) readonly_params: std::collections::HashMap<String, Vec<bool>>,
+    /// For an impl method currently being lowered: the C lvalue that holds
+    /// the current value of `self` inside the body (the local copy `{cid}`
+    /// for a plain receiver, or the cell deref `(*_cellN)` for a captured
+    /// receiver). Used to copy `self` back to the caller's storage
+    /// (`*self = {lvalue}`) at every return and at fall-through so method
+    /// mutations on `self` persist to the receiver (`c.inc()` mutating `c`).
+    /// `None` for regular (non-impl) functions.
+    pub(crate) impl_self_lvalue: std::cell::RefCell<Option<String>>,
     /// Unit-emission mode: definitions/prototypes use external linkage so
     /// per-module translation units link together. Off = single-TU
     /// `static` (byte-identical legacy output).
@@ -609,6 +617,7 @@ impl Lowerer {
             scalar_fn_list: Vec::new(),
             readonly_params,
             unit_mode: std::cell::Cell::new(false),
+            impl_self_lvalue: std::cell::RefCell::new(None),
             unimplemented_natives: std::cell::RefCell::new(Vec::new()),
             loop_depth: std::cell::Cell::new(0),
             loop_pre_code: std::cell::RefCell::new(Vec::new()),
