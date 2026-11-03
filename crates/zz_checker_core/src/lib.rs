@@ -381,6 +381,11 @@ pub struct Checker {
     /// top-level function (or `Type.method`) whose body is being checked;
     /// empty at top level (keys then use [`TOP_SCOPE`]).
     pub scope: Vec<Arc<str>>,
+    /// Memo cache for `Ty -> Type` conversion, keyed by
+    /// `(span.start, span.end, generics_hash)`. Avoids re-parsing the same
+    /// type annotation repeatedly within one check run. Also deduplicates
+    /// the errors such conversions emit (unknown type, arity mismatch).
+    pub type_annotation_cache: std::collections::HashMap<(u64, u64), Type>,
 }
 
 impl Checker {
@@ -439,6 +444,7 @@ impl Checker {
             scope: Vec::new(),
             link_libs: Vec::new(),
             domain: DomainState::default(),
+            type_annotation_cache: std::collections::HashMap::new(),
         }
     }
 

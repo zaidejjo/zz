@@ -198,7 +198,14 @@ impl InferOps for Checker {
 
     fn ast_to_type_inner(&mut self, ty: &Ty, generics: &[String]) -> Type {
         use zz_span_ast::ast::TyKind;
-        match &ty.kind {
+        let key = (hash_ty(ty), hash_generics(generics));
+        // Cache hit: return a cheap clone, skipping re-parse and side effects
+        // (used_names marking, error emission). Re-emitting them would only
+        // duplicate diagnostics for the same annotation.
+        if let Some(cached) = self.type_annotation_cache.get(&key) {
+            return cached.clone();
+        }
+        let result = match &ty.kind {
             TyKind::Int => Type::Int,
             TyKind::Float => Type::Float,
             TyKind::Bool => Type::Bool,
@@ -409,7 +416,9 @@ impl InferOps for Checker {
                     }
                 }
             }
-        }
+        };
+        self.type_annotation_cache.insert(key, result.clone());
+        result
     }
 
     /// Suggest the closest known type name for an unknown type, or a
@@ -627,6 +636,91 @@ pub fn contains_var(t: &Type) -> bool {
         Type::Range(x) => contains_var(x),
         Type::Ptr { inner, .. } => contains_var(inner),
         _ => false,
+    }
+}
+
+/// Hash the generic parameter list for use in the type-annotation cache key.
+/// A fresh `Hasher` per call keeps this deterministic and dependency-free.
+fn hash_generics(generics: &[String]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    generics.hash(&mut h);
+    h.finish()
+}
+
+/// Hash the structural shape of a `Ty` annotation (excluding its span), so
+/// the same annotation written in different locations shares one cache key.
+fn hash_ty(ty: &Ty) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::Hasher;
+    let mut h = DefaultHasher::new();
+    hash_ty_into(ty, &mut h);
+    h.finish()
+}
+
+/// Write the structural shape of `ty` into an existing hasher, so nested
+/// types contribute their bytes to the parent's hash (not a discarded
+/// child hasher).
+fn hash_ty_into(ty: &Ty, h: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    use zz_span_ast::ast::TyKind;
+    match &ty.kind {
+        TyKind::Int => h.write_u8(0),
+        TyKind::Float => h.write_u8(1),
+        TyKind::Bool => h.write_u8(2),
+        TyKind::Str => h.write_u8(3),
+        TyKind::Unit => h.write_u8(4),
+        TyKind::Void => h.write_u8(5),
+        TyKind::Ptr { mutable, inner } => {
+            h.write_u8(6);
+            mutable.hash(h);
+            hash_ty_into(inner, h);
+        }
+        TyKind::Tuple(ts) => {
+            h.write_u8(7);
+            for t in ts {
+                hash_ty_into(t, h);
+            }
+        }
+        TyKind::Option(inner) => {
+            h.write_u8(8);
+            hash_ty_into(inner, h);
+        }
+        TyKind::Result(ok, err) => {
+            h.write_u8(9);
+            hash_ty_into(ok, h);
+            hash_ty_into(err, h);
+        }
+        TyKind::Func(ps, r) => {
+            h.write_u8(10);
+            for p in ps {
+                hash_ty_into(p, h);
+            }
+            hash_ty_into(r, h);
+        }
+        TyKind::Array(inner) => {
+            h.write_u8(11);
+            hash_ty_into(inner, h);
+        }
+        TyKind::Dict(k, v) => {
+            h.write_u8(12);
+            hash_ty_into(k, h);
+            hash_ty_into(v, h);
+        }
+        TyKind::Union(ts) => {
+            h.write_u8(13);
+            for t in ts {
+                hash_ty_into(t, h);
+            }
+        }
+        TyKind::Named(name, args) => {
+            h.write_u8(14);
+            name.hash(h);
+            for a in args {
+                hash_ty_into(a, h);
+            }
+        }
     }
 }
 

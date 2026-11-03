@@ -4610,6 +4610,23 @@ fn error_cascade_index_must_be_int_suppressed() {
 }
 
 #[test]
+fn type_annotation_errors_are_deduped() {
+    // Same unknown type used twice: the cache hits on the second use and
+    // avoids emitting a duplicate "unknown type" error.
+    let r = check_src("x: NopeType = 1\ny: NopeType = 2\n");
+    let unknown_count = r
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("unknown type `NopeType`"))
+        .count();
+    assert_eq!(
+        unknown_count, 1,
+        "expected one deduped error, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
 fn pub_func_with_unresolved_ret_is_excluded_and_errors() {
     // An untyped parameter is inferred to a fresh `Var`; if it is never
     // pinned by the body it stays a `Var` in the signature. `check_func_body`
