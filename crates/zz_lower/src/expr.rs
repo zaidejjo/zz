@@ -707,6 +707,24 @@ impl Lowerer {
                         // through the boxing paths below.
                         let left_raw = crate::context::raw_scalar_text(left, &l, names);
                         let right_raw = crate::context::raw_scalar_text(right, &r, names);
+                        // Expr::Field reads of scalar fields (int64_t/double/bool) from
+                        // unboxed structs or flat arrays are raw C scalars, but the
+                        // free-function classifiers in context.rs lack access to `self`
+                        // (the Lowerer) to resolve struct types. Override the
+                        // classification here so arithmetic like `sum + arr[k].x` lowers
+                        // to raw C instead of boxed `zz_binop`.
+                        let mut left_raw = left_raw;
+                        let mut right_raw = right_raw;
+                        let mut left_type = left_type;
+                        let mut right_type = right_type;
+                        if let Some((raw, t)) = self.field_read_scalar(left, names) {
+                            left_raw = Some((raw, t));
+                            left_type = Some(t);
+                        }
+                        if let Some((raw, t)) = self.field_read_scalar(right, names) {
+                            right_raw = Some((raw, t));
+                            right_type = Some(t);
+                        }
 
                         // Both operands are scalars of compatible type:
                         // emit a raw C arithmetic op instead of going
@@ -3112,18 +3130,26 @@ impl Lowerer {
                         };
                         let arg_val = self.emit_expr(arg, names, out);
                         let elem = self.struct_c_type(&sname);
+                        // The pointer was declared with the fresh C id returned
+                        // by `enter_with_type` (e.g. `v1`), NOT the source name
+                        // (`arr`). Using `name` here emits `arr = realloc(arr, ...)`
+                        // which references an undeclared identifier. Use `cid`.
+                        let cid = names
+                            .lookup(name)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| name.to_string());
                         let len_cid = format!("{}_len", name);
                         let cap_cid = format!("{}_cap", name);
                         out.push_str(&format!(
-                            "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n      {name} = ({elem}*)realloc({name}, {cap} * sizeof({elem}));\n    }}\n",
+                            "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n      {cid} = ({elem}*)realloc({cid}, {cap} * sizeof({elem}));\n    }}\n",
                             len = len_cid,
                             cap = cap_cid,
-                            name = name,
+                            cid = cid,
                             elem = elem,
                         ));
                         out.push_str(&format!(
-                            "    {name}[{len}] = {arg_val};\n    {len}++;\n",
-                            name = name,
+                            "    {cid}[{len}] = {arg_val};\n    {len}++;\n",
+                            cid = cid,
                             len = len_cid,
                             arg_val = arg_val
                         ));

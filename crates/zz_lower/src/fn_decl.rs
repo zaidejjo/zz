@@ -58,6 +58,9 @@ impl Lowerer {
         // Scope typed-AST lookups to this function: spans repeat across
         // modules, so lookups must pair them with the enclosing item.
         names.current_scope = fname.to_string();
+        // `self` copy-back state is per-function: reset at entry, then set
+        // below when the receiver is bound (impl methods only).
+        self.impl_self_lvalue.replace(None);
         // Module-level globals are visible inside every function.
         // Locals (params + body decls) shadow them via the stack.
         self.seed_globals(&mut names);
@@ -116,9 +119,11 @@ impl Lowerer {
                     ));
                     o.push_str(&format!("    {deref} = *self;\n"));
                     names.enter_cell(&p.name.name, &ptr, &deref, &ctype, n);
+                    self.impl_self_lvalue.replace(Some(deref));
                 } else {
                     let cid = names.enter_with_type(&p.name.name, &ctype);
                     o.push_str(&format!("    {ctype} {cid} = *self;\n"));
+                    self.impl_self_lvalue.replace(Some(cid));
                 }
             } else {
                 // Non-self params always live in the `args[]` array
@@ -182,6 +187,14 @@ impl Lowerer {
         self.emit_func_block(block, names, &mut body_out, false);
         o.push_str(&body_out);
         self.emit_defer_runner(o);
+        // Copy `self` back to the caller's storage so mutations made inside
+        // an impl method persist to the receiver (`c.inc()` mutating `c`).
+        // `self` was copied into a local at entry; this writes the final
+        // local value back through the `*self` pointer. No-op for functions
+        // that don't mutate `self` (copies the same value back).
+        if let Some(ref lvalue) = self.impl_self_lvalue.borrow().as_ref() {
+            o.push_str(&format!("    *self = {lvalue};\n"));
+        }
         // Fall-through return: named functions do not return their tail
         // expression, so anything not covered by `return` is `unit`.
         o.push_str(&format!("    return {unit_ret};\n"));

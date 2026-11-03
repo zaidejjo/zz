@@ -1137,10 +1137,22 @@ impl Lowerer {
             }
             Stmt::Return { value, .. } => match value {
                 Some(v) => {
+                    // Copy `self` back to the caller's storage so mutations
+                    // made inside an impl method persist to the receiver
+                    // (`c.inc()` mutating `c`). Emitted before the return so
+                    // the write-back always runs, even on early returns.
+                    if let Some(ref lvalue) = self.impl_self_lvalue.borrow().as_ref() {
+                        out.push_str(&format!("    *self = {lvalue};\n"));
+                    }
                     let val = self.return_value(v, names, out);
                     out.push_str(&format!("    return {val};\n"));
                 }
-                None => out.push_str(&format!("    return {};\n", self.ret_unit())),
+                None => {
+                    if let Some(ref lvalue) = self.impl_self_lvalue.borrow().as_ref() {
+                        out.push_str(&format!("    *self = {lvalue};\n"));
+                    }
+                    out.push_str(&format!("    return {};\n", self.ret_unit()));
+                }
             },
             Stmt::For {
                 vars,
@@ -1390,6 +1402,24 @@ impl Lowerer {
             }
         }
         // All terms admissible — emit left-to-right.
+        // Convert the accumulator to a mutable builder once so every append
+        // takes the O(1) in-place path. `s := ""` yields an interned ZZ_STR
+        // (`zz_str_static`), and appending to an interned string takes the
+        // slow fresh-alloc path on every iteration (O(n^2) overall). The
+        // mutable builder is exclusively owned, so `zz_str_append_*` hits its
+        // `mutable == 1` fast path with amortized O(1) growth. Only convert
+        // inside a loop (where the O(n^2) actually matters), mirroring the
+        // Let-path hoisting at stmt.rs:252, and freeze back to ZZ_STR after
+        // the loop so `len(s)`/`println(s)` see a proper immutable string
+        // (`zz_len` skips ZZ_MUTABLE_STR).
+        if self.loop_depth.get() >= 1 {
+            out.push_str(&format!(
+                "    if ({cid}.tag == ZZ_STR) {{ {cid} = zz_str_new_mut(64); }}\n"
+            ));
+            self.loop_post_code
+                .borrow_mut()
+                .push(format!("    {cid} = zz_str_freeze({cid});\n"));
+        }
         for step in plan {
             match step {
                 Term::Lit(inner) => {
