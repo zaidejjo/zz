@@ -365,7 +365,10 @@ impl StructOps for Checker {
                             diag = diag.with_fixit(fixit);
                         }
                         self.errors.push(diag);
-                        Type::Unit
+                        // Error is absorbing: accessing further fields on a
+                        // missing-field value stays silent instead of
+                        // cascading "cannot access field on unit".
+                        Type::Error
                     }
                 },
             },

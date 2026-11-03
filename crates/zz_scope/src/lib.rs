@@ -4,7 +4,7 @@ use zz_checker_core::{Checker, DefinedBinding};
 use zz_diag_core::{error_at, warning_at, FixIt};
 use zz_span_ast::span::Span;
 use zz_structs::StructOps;
-use zz_suggest::{suggest_all, suggest_dotted};
+use zz_suggest::{suggest_all, suggest_confident, suggest_dotted, suggest_top3};
 use zz_types::Type;
 
 // Import suggestions and canonical resolution derive from the single
@@ -100,6 +100,7 @@ impl ScopeOps for Checker {
         self.env.push(std::collections::HashMap::new());
         self.defined_names.push(std::collections::HashMap::new());
         self.const_env.push(std::collections::HashMap::new());
+        self.names_at_depth.push(Vec::new());
     }
 
     /// Strip the module prefix from a name for display.
@@ -152,6 +153,20 @@ impl ScopeOps for Checker {
         // Warn about unused variables in this scope (skip the global scope).
         if let Some(defined) = self.defined_names.pop() {
             let scope_index = self.defined_names.len();
+            // Evict the shadow-cache entries defined at this depth before
+            // the env is popped. Shadowed outer values are restored lazily
+            // by a linear re-walk on the next lookup, keeping correctness.
+            if let Some(names) = self.names_at_depth.pop() {
+                for name in names {
+                    if self
+                        .scope_cache
+                        .get(&name)
+                        .is_some_and(|(d, _)| *d == scope_index)
+                    {
+                        self.scope_cache.remove(&name);
+                    }
+                }
+            }
             // Sort by (span, name): HashMap iteration order is
             // per-process random, and diagnostics must be byte-identical
             // across runs (the dual-engine parity harness diffs stderr
@@ -219,11 +234,22 @@ impl ScopeOps for Checker {
     /// callee dictates the closure's arity, so a parameter cannot be
     /// removed and `_name` would only hide what the API signature says.
     fn define_binding_at(&mut self, name: &str, ty: Type, span: Span, warn_unused: bool) {
-        self.env.last_mut().unwrap().insert(name.to_string(), ty);
+        let depth = self.env.len().saturating_sub(1);
+        self.env
+            .last_mut()
+            .unwrap()
+            .insert(name.to_string(), ty.clone());
         // Record the definition span for unused-variable warnings.
         if let Some(scope) = self.defined_names.last_mut() {
             scope.insert(name.to_string(), DefinedBinding { span, warn_unused });
         }
+        // O(1) shadow cache: innermost binding wins (defines happen at the
+        // current depth, which is >= any cached depth for this name).
+        self.scope_cache.insert(name.to_string(), (depth, ty));
+        self.names_at_depth
+            .last_mut()
+            .unwrap()
+            .push(name.to_string());
     }
 
     /// Define a variable, recording its immutability when `is_const`.
@@ -366,16 +392,31 @@ impl ScopeOps for Checker {
                     candidates.push(e);
                 }
                 let mut diag = error_at(format!("undefined variable `{name}`"), span);
-                let all = suggest_all(name, &candidates);
-                if let Some((suggestion, _dist)) = all.first() {
-                    diag = diag.with_note(format!("did you mean `{suggestion}`?"));
-                    let fixit = if all.len() == 1 {
-                        FixIt::safe(span, suggestion.to_string(), "replace variable")
-                    } else {
-                        let alts: Vec<String> = all.iter().map(|(s, _)| s.to_string()).collect();
-                        FixIt::ambiguous(span, suggestion.to_string(), "replace variable", alts)
-                    };
-                    diag = diag.with_fixit(fixit);
+                // Confident (never-wrong) suggestions only; up to three for
+                // ambiguous cases. A missing hint is better than a wrong one.
+                let confident = suggest_top3(name, &candidates);
+                match confident.as_slice() {
+                    [] => {}
+                    [single] => {
+                        diag = diag.with_note(format!("did you mean `{single}`?"));
+                        diag = diag.with_fixit(FixIt::safe(
+                            span,
+                            single.to_string(),
+                            "replace variable",
+                        ));
+                    }
+                    multiple => {
+                        let listed: Vec<String> =
+                            multiple.iter().map(|s| format!("`{s}`")).collect();
+                        diag = diag.with_note(format!("did you mean {}?", listed.join(" or ")));
+                        let alts: Vec<String> = multiple.iter().map(|s| s.to_string()).collect();
+                        diag = diag.with_fixit(FixIt::ambiguous(
+                            span,
+                            multiple[0].to_string(),
+                            "replace variable",
+                            alts,
+                        ));
+                    }
                 }
 
                 // If the name looks like `module.func` and matches a known
@@ -516,6 +557,19 @@ impl ScopeOps for Checker {
     /// Like [`Checker::lookup`] but without the error: returns `None` when
     /// the name is not bound anywhere.
     fn lookup_opt(&mut self, name: &str) -> Option<Type> {
+        // O(1) shadow-cache lookup: innermost binding per name.
+        if let Some((depth, ty)) = self.scope_cache.get(name).cloned() {
+            self.used_names.insert(name.to_string());
+            self.used_bindings.insert((depth, name.to_string()));
+            for probe in self.shadow_probes.iter_mut() {
+                if probe.name == name && depth < probe.depth {
+                    probe.referenced = true;
+                }
+            }
+            return Some(ty);
+        }
+        // Fallback: linear scope walk (repopulates the cache after a pop
+        // evicted a shadowed outer binding).
         for (depth, scope) in self.env.iter().enumerate().rev() {
             if let Some(t) = scope.get(name) {
                 let t = t.clone();
@@ -531,6 +585,9 @@ impl ScopeOps for Checker {
                         probe.referenced = true;
                     }
                 }
+                // Repopulate the cache so subsequent lookups are O(1).
+                self.scope_cache
+                    .insert(name.to_string(), (depth, t.clone()));
                 return Some(t);
             }
         }
@@ -625,7 +682,7 @@ impl ScopeOps for Checker {
                         .filter(|k| k.starts_with(&prefix) && !k[prefix.len()..].contains('.'))
                         .map(|k| k.strip_prefix(&prefix).unwrap())
                         .collect();
-                    if let Some((suggestion, _)) = suggest_all(&parts[1], &members).first() {
+                    if let Some(suggestion) = suggest_confident(&parts[1], &members) {
                         diag = diag.with_note(format!(
                             "`{mod_name}` is imported; did you mean `{mod_name}.{suggestion}`?"
                         ));
@@ -660,17 +717,30 @@ impl ScopeOps for Checker {
                     return Type::Error;
                 }
             }
-            let all = suggest_all(&parts[0], &candidates);
-            if let Some((suggestion, _)) = all.first() {
-                diag = diag.with_note(format!("did you mean `{suggestion}`?"));
-                let root_span = Span::new(span.start, span.start + parts[0].len() as u32);
-                let fixit = if all.len() == 1 {
-                    FixIt::safe(root_span, suggestion.to_string(), "replace variable")
-                } else {
-                    let alts: Vec<String> = all.iter().map(|(s, _)| s.to_string()).collect();
-                    FixIt::ambiguous(root_span, suggestion.to_string(), "replace variable", alts)
-                };
-                diag = diag.with_fixit(fixit);
+            let confident = suggest_top3(&parts[0], &candidates);
+            match confident.as_slice() {
+                [] => {}
+                [single] => {
+                    diag = diag.with_note(format!("did you mean `{single}`?"));
+                    let root_span = Span::new(span.start, span.start + parts[0].len() as u32);
+                    diag = diag.with_fixit(FixIt::safe(
+                        root_span,
+                        single.to_string(),
+                        "replace variable",
+                    ));
+                }
+                multiple => {
+                    let listed: Vec<String> = multiple.iter().map(|s| format!("`{s}`")).collect();
+                    diag = diag.with_note(format!("did you mean {}?", listed.join(" or ")));
+                    let root_span = Span::new(span.start, span.start + parts[0].len() as u32);
+                    let alts: Vec<String> = multiple.iter().map(|s| s.to_string()).collect();
+                    diag = diag.with_fixit(FixIt::ambiguous(
+                        root_span,
+                        multiple[0].to_string(),
+                        "replace variable",
+                        alts,
+                    ));
+                }
             }
             self.errors.push(diag);
             self.had_undefined_var = true;

@@ -120,8 +120,8 @@ jobs:
           LEGS: |
             {
               "linux": [
-                {"name": "linux-x86_64", "runner": "ubuntu-24.04", "native": true,
-                 "tier": "pr", "timeout": 30, "clang_pin": "23", "docker_smoke": true},
+                {"name": "linux-x86_64", "runner": "ubuntu-24.04", "native": false,
+                 "tier": "pr", "timeout": 30, "clang_pin": "", "docker_smoke": true},
                 {"name": "linux-aarch64", "runner": "ubuntu-24.04-arm", "native": true,
                  "tier": "full", "timeout": 45, "clang_pin": "", "docker_smoke": false}
               ],

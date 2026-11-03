@@ -330,6 +330,14 @@ pub struct Checker {
     pub shadow_probes: Vec<ShadowProbe>,
     /// Top-level names marked `pub` — should not emit unused warnings.
     pub pub_names: std::collections::HashSet<String>,
+    /// Functions annotated with `@test`, `@bench`, `@setup`, or `@teardown`.
+    /// These are invoked by the test/bench harness at runtime, not by direct
+    /// calls in source, so they must not trigger unused-func warnings.
+    pub test_funcs: std::collections::HashSet<String>,
+    /// Functions defined in the current program (not stdlib-seeded).
+    /// Used to avoid warning on unused stdlib functions that happen to
+    /// not appear in `used_names`.
+    pub local_funcs: std::collections::HashSet<String>,
     /// Names defined in the current scope with their spans — for unused
     /// variable warnings. Each scope level has its own map.
     pub defined_names: Vec<HashMap<String, DefinedBinding>>,
@@ -375,12 +383,34 @@ pub struct Checker {
     pub span_types: std::collections::HashMap<SpanKey, Type>,
     /// Native libraries requested via `@link`, in source order, deduped.
     pub link_libs: Vec<String>,
+    /// Extern `extern "C"` symbols declared this run: C symbol → defining span.
+    /// Used to detect duplicate extern symbol declarations at check time so
+    /// they surface as `zz check` errors instead of linker errors. Full
+    /// symbol-existence verification (does the symbol actually exist in a
+    /// linked library) requires the C toolchain and is intentionally a link-
+    /// time concern, not a check-time one — emitting symbol-not-found errors
+    /// here would risk false positives in environments without the library.
+    pub extern_symbols: std::collections::HashMap<String, Span>,
     /// Per-domain state (route lints, future lints), keyed by type.
     pub domain: DomainState,
     /// Enclosing-item scope stack for [`SpanKey`] recording. Holds the
     /// top-level function (or `Type.method`) whose body is being checked;
     /// empty at top level (keys then use [`TOP_SCOPE`]).
     pub scope: Vec<Arc<str>>,
+    /// Shadow cache: innermost binding per name → (scope depth, type).
+    /// Makes variable lookup O(1) amortized instead of O(depth). Entries are
+    /// inserted on `define` and evicted for the popped depth on `pop_scope`;
+    /// shadowed outer values are restored lazily by a single linear re-walk
+    /// on the next lookup, keeping correctness for shadowing.
+    pub scope_cache: std::collections::HashMap<String, (usize, Type)>,
+    /// Names defined at each scope depth, parallel to `env`; used to evict
+    /// exactly the cache entries belonging to a popped scope.
+    pub names_at_depth: Vec<Vec<String>>,
+    /// Memo cache for `Ty -> Type` conversion, keyed by
+    /// `(span.start, span.end, generics_hash)`. Avoids re-parsing the same
+    /// type annotation repeatedly within one check run. Also deduplicates
+    /// the errors such conversions emit (unknown type, arity mismatch).
+    pub type_annotation_cache: std::collections::HashMap<(u64, u64), Type>,
 }
 
 impl Checker {
@@ -427,6 +457,8 @@ impl Checker {
             used_bindings: std::collections::HashSet::new(),
             shadow_probes: Vec::new(),
             pub_names: std::collections::HashSet::new(),
+            local_funcs: std::collections::HashSet::new(),
+            test_funcs: std::collections::HashSet::new(),
             defined_names: vec![HashMap::new()],
             had_undefined_var: false,
             tail_is_value: false,
@@ -437,8 +469,12 @@ impl Checker {
             module_aliases: HashMap::new(),
             span_types: std::collections::HashMap::new(),
             scope: Vec::new(),
+            scope_cache: std::collections::HashMap::new(),
+            names_at_depth: vec![Vec::new()],
             link_libs: Vec::new(),
+            extern_symbols: std::collections::HashMap::new(),
             domain: DomainState::default(),
+            type_annotation_cache: std::collections::HashMap::new(),
         }
     }
 

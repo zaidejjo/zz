@@ -149,6 +149,38 @@ impl FuncOps for Checker {
                 name.span,
             ));
         }
+        // Derive and validate the C symbol: explicit override when present,
+        // otherwise the ZZ name with `.` replaced by `_`. Validate it is a
+        // legal C identifier and that no other `extern "C"` function declares
+        // the same symbol — duplicate symbols surface here as check-time
+        // errors instead of linker errors. Full symbol-existence verification
+        // (does the symbol exist in a linked library) requires the C
+        // toolchain and is intentionally left to link time.
+        let c_sym = c_symbol
+            .clone()
+            .unwrap_or_else(|| full_name.replace('.', "_"));
+        if !is_valid_c_ident(&c_sym) {
+            self.errors.push(error_at(
+                format!(
+                    "extern function `{full_name}`: C symbol `{c_sym}` is not a valid C identifier"
+                ),
+                name.span,
+            ));
+        } else if let Some(prev_span) = self.extern_symbols.get(&c_sym).copied() {
+            self.errors.push(error_at(
+                format!(
+                    "duplicate extern `extern \"C\"` symbol `{c_sym}`: declared more than once",
+                ),
+                name.span,
+            ));
+            self.errors.push(error_at(
+                "previous extern symbol declaration here",
+                prev_span,
+            ));
+        } else {
+            self.extern_symbols.insert(c_sym, name.span);
+        }
+
         self.funcs.insert(
             full_name,
             FuncSig {
@@ -190,4 +222,17 @@ impl FuncOps for Checker {
 /// stay arena-allocated instead of being forced to ARC heap.
 pub(crate) fn is_readonly_decorator(d: &zz_span_ast::ast::Decorator) -> bool {
     d.path == ["readonly"] && d.args.is_empty() && d.named.is_empty()
+}
+
+/// True when `name` is usable as a C identifier (an extern symbol): starts
+/// with an alphabetic or underscore, rest alphanumeric or underscore. Mirrors
+/// [`c_ident_valid`] in `zz_lower` so the checker can validate declared
+/// extern symbols without pulling in the lowering crate.
+pub(crate) fn is_valid_c_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }

@@ -2694,6 +2694,11 @@ impl TypeCheckOps for Checker {
             _ => None,
         };
         if let Some(name) = &direct_name {
+            // Mark the callee as used so the unused-private-function warning
+            // doesn't fire on legitimately-called functions.
+            if self.funcs.contains_key(name) {
+                self.used_names.insert(name.clone());
+            }
             // Removed push spellings: `vec.append` / `std.vec.append` and the
             // bare `append` builtin are gone — `vec.push` plus the method form
             // `xs.push(x)` is the only spelling. Hard error with a hint
@@ -4967,6 +4972,15 @@ impl TypeCheckOps for Checker {
         if enum_name.contains('.') {
             self.used_names.insert(enum_name.to_string());
         }
+        // Generic parameters that are still unbound inference variables
+        // (e.g. `Box.E` with no payload, or `Box.V(x)` with `x` untyped)
+        // are left as-is here and defaulted to `unit` later at span-types
+        // finalization via `default_variant_vars`. This is conservative:
+        // it mirrors `.none` → `Option<unit>`, and any use that actually
+        // constrains the generic fails loudly at check time rather than
+        // silently weakening the type. Do NOT error here — single-pass
+        // checking cannot see later uses that would pin the generic (e.g.
+        // `Box.V(x)` followed by `b.get_or(0)`).
         Some(Type::Enum(
             enum_name.to_string(),
             gen_vars

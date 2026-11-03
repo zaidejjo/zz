@@ -524,14 +524,23 @@ fn unknown_type_suggests_str_for_string() {
 
 #[test]
 fn unknown_type_levenshtein_suggests_str() {
-    // A near-miss typo of `str` should suggest `str` via Levenshtein.
-    let r = check_src("func f() -> strng { return 1 }");
+    // A single-character typo of `str` suggests `str` confidently.
+    let r = check_src("func f() -> strn { return 1 }");
     assert!(
         r.errors
             .iter()
             .any(|e| e.message.contains("did you mean `str`?")),
-        "expected `str` suggestion for `strng`, got: {:?}",
+        "expected `str` suggestion for `strn`, got: {:?}",
         r.errors
+    );
+    // Distance-2 typos are intentionally NOT hinted (never a wrong hint).
+    let r2 = check_src("func f() -> strng { return 1 }");
+    assert!(
+        r2.errors
+            .iter()
+            .all(|e| !e.message.contains("did you mean `str`?")),
+        "distance-2 typo should get no hint, got: {:?}",
+        r2.errors
     );
 }
 
@@ -2115,7 +2124,7 @@ fn typo_suggestion_variable() {
             ret: Type::Unit,
         },
     );
-    let parsed = zz_frontend::parse("prntlnn");
+    let parsed = zz_frontend::parse("prntln");
     assert!(
         parsed.errors.is_empty(),
         "parse errors: {:?}",
@@ -2136,8 +2145,8 @@ fn typo_suggestion_variable() {
         "expected undefined variable error, got: {msgs:?}"
     );
     assert!(
-        notes.iter().any(|n| n.contains("did you mean")),
-        "expected typo suggestion, got: {notes:?}"
+        notes.iter().any(|n| n.contains("did you mean `println`?")),
+        "expected confident `println` typo suggestion, got: {notes:?}"
     );
 }
 
@@ -2923,7 +2932,7 @@ fn unused_warnings_emit_in_source_order() {
     // so alphabetical order disagrees with source order. End with
     // `println` so the tail is unit and doesn't trigger the
     // implicit-return warning (#606).
-    let r = check_src("func f() {\n    zzz := 1\n    aaa := 2\n    println(\"x\")\n}");
+    let r = check_src("func _f() {\n    zzz := 1\n    aaa := 2\n    println(\"x\")\n}");
     let warns: Vec<&str> = r
         .errors
         .iter()
@@ -3602,6 +3611,35 @@ fn dead_mutation_of_array_param_warns() {
             .iter()
             .any(|e| e.message.contains("mutating parameter `buf`")),
         "expected dead-mutation warning, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dead_mutation_of_dict_param_warns() {
+    // G11: Dict is a value type — `d[k] = v` on a `{str: int}` param is lost.
+    let r = check_src("func f(d: {str: int}) -> int {\n    d[\"k\"] = 32\n    return 0\n}");
+    assert!(!has_errors(&r), "must stay a warning: {:?}", r.errors);
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter `d`")),
+        "expected dead-mutation warning for Dict, got: {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dead_mutation_of_bytes_param_warns() {
+    // G11: Bytes is a value type — the dead-mutation lint covers it.
+    // (`b[0] = 1` is also a separate "cannot assign to index of bytes"
+    // error; we only assert the dead-mutation warning fires.)
+    let r = check_src("func f(b: bytes) -> int {\n    b[0] = 1\n    return 0\n}");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("mutating parameter `b`")),
+        "expected dead-mutation warning for Bytes, got: {:?}",
         r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
 }
@@ -4605,6 +4643,388 @@ fn error_cascade_index_must_be_int_suppressed() {
             .iter()
             .any(|e| e.message.contains("undefined variable")),
         "root errors reported, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn type_annotation_errors_are_deduped() {
+    // Same unknown type used twice: the cache hits on the second use and
+    // avoids emitting a duplicate "unknown type" error.
+    let r = check_src("x: NopeType = 1\ny: NopeType = 2\n");
+    let unknown_count = r
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("unknown type `NopeType`"))
+        .count();
+    assert_eq!(
+        unknown_count, 1,
+        "expected one deduped error, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn array_literal_merges_repeated_element_types() {
+    // Homogeneous literal collapses element type to Int, wrapped in Array.
+    let r = check_src("x := [1, 2, 3]");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["x"], Type::Array(Box::new(Type::Int)));
+}
+
+#[test]
+fn array_literal_merges_distinct_into_union() {
+    let r = check_src("x := [1, 2.5]");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(
+        r.bindings["x"],
+        Type::Array(Box::new(Type::Union(vec![Type::Int, Type::Float])))
+    );
+}
+
+#[test]
+fn large_array_literal_dedups_without_blowup() {
+    // 500 repeated Int elements must still collapse to Int (the old O(n^2)
+    // all-pairs eq_resolved would still be correct here but slower).
+    let mut src = String::from("x := [");
+    for i in 0..500 {
+        if i > 0 {
+            src.push(',');
+        }
+        src.push_str(&i.to_string());
+    }
+    src.push(']');
+    let r = check_src(&src);
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["x"], Type::Array(Box::new(Type::Int)));
+}
+
+#[test]
+fn shadowed_lookup_restores_outer_after_inner_scope() {
+    // Outer x := 1 (int), inner block shadows x := true (bool). Inner
+    // reads see bool; after the inner scope pops, outer reads see int.
+    // This exercises the shadow cache eviction + lazy re-walk restoration.
+    let r = check_src("x := 1\n{ x := true }\nx := x + 1\n");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["x"], Type::Int);
+}
+
+#[test]
+fn nested_shadow_lookup_uses_innermost() {
+    // Deeply nested shadows: every read must resolve to the innermost
+    // binding, and popping must restore each outer layer in order.
+    let r = check_src("a := 1\n{ a := 2\n  { a := 3 }\n  b := a + 1\n }\nc := a + 10\n");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["a"], Type::Int);
+    assert_eq!(r.bindings["c"], Type::Int);
+}
+
+#[test]
+fn pub_func_with_unresolved_ret_is_excluded_and_errors() {
+    // An untyped parameter is inferred to a fresh `Var`; if it is never
+    // pinned by the body it stays a `Var` in the signature. `check_func_body`
+    // early-returns at the missing-return Sherlock (line ~5065) before the
+    // fallthrough unification binds ret to `unit`, so a pub func like `f`
+    // genuinely exports a `Var(id)`. That must be excluded from pub_funcs
+    // (a bare Var(id) would collide with the importer's fresh vars) and
+    // reported as an error instead.
+    let r = check_src("pub func f(x) { }\npub func g() -> int { 1 }\n");
+    let pub_names: Vec<&str> = r.pub_funcs.keys().map(|k| k.as_str()).collect();
+    assert!(
+        pub_names.contains(&"g"),
+        "annotated pub func g should be exported, got: {pub_names:?}",
+    );
+    assert!(
+        !pub_names.contains(&"f"),
+        "unresolved pub func f should be excluded, got: {pub_names:?}",
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("cannot export `pub` item")),
+        "expected unresolved-pub error, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unknown_type_used_twice_reports_once() {
+    // Same unknown type annotation in two declarations: the annotation cache
+    // (G4) returns the cached Error on the second use, so only one "unknown
+    // type" error is emitted. The Error type is absorbing, so it also does
+    // not spawn a "type mismatch" cascade against the initializer.
+    let r = check_src("x: NopeType = 1\ny: NopeType = 2\n");
+    let unknown_count = r
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("unknown type `NopeType`"))
+        .count();
+    assert_eq!(
+        unknown_count, 1,
+        "expected one unknown-type error, got: {:?}",
+        r.errors
+    );
+    // No "type mismatch" cascade: Error absorbs the initializer mismatch.
+    assert!(
+        !r.errors.iter().any(|e| e.message.contains("type mismatch")),
+        "unexpected mismatch cascade, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn field_access_on_error_type_does_not_cascade() {
+    // `CountRow` is an unknown type, so `weeks` is `[Error]`. Indexing gives
+    // `Error`, and `.n` on `Error` is absorbed — no "cannot access field
+    // `n` on a value of type `unit`" cascade.
+    let r = check_src("weeks: [CountRow] = []\ndl_week = weeks[0].n\n");
+    let field_errors: Vec<&str> = r
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("cannot access field"))
+        .map(|e| e.message.as_str())
+        .collect();
+    assert!(
+        field_errors.is_empty(),
+        "expected no field-access cascade, got: {field_errors:?} (full: {:?})",
+        r.errors
+    );
+    // Exactly one root error: the unknown type.
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unknown type `CountRow`")),
+        "expected root unknown-type error, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn missing_field_chain_does_not_cascade() {
+    // `p.z` is a missing field → one "has no field" error, returning Error.
+    // Chaining `.w` on the result is absorbed, no second field error.
+    let r = check_src("struct Point { x: int }\np := Point{ x: 1 }\nq := p.z.w\n");
+    let field_errors: Vec<&str> = r
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("has no field"))
+        .map(|e| e.message.as_str())
+        .collect();
+    assert_eq!(
+        field_errors.len(),
+        1,
+        "expected one missing-field error, got: {field_errors:?} (full: {:?})",
+        r.errors
+    );
+    let all_field: Vec<&str> = r
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("field"))
+        .map(|e| e.message.as_str())
+        .collect();
+    assert_eq!(
+        all_field.len(),
+        1,
+        "expected exactly one field-related error total, got: {all_field:?} (full: {:?})",
+        r.errors
+    );
+}
+
+#[test]
+fn generic_enum_concrete_payload_pins_generic() {
+    // A concrete payload pins the enum's generic parameter (struct-literal rule).
+    let r = check_src("enum Box<T> { V(T), E }\na := Box.V(42)\ns := Box.V(\"hi\")\n");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(
+        r.bindings["a"],
+        Type::Enum("Box".to_string(), vec![Type::Int])
+    );
+    assert_eq!(
+        r.bindings["s"],
+        Type::Enum("Box".to_string(), vec![Type::Str])
+    );
+}
+
+#[test]
+fn generic_enum_no_payload_defaults_to_unit_safely() {
+    // A unit variant of a generic enum with no annotation defaults its
+    // generic to `unit` at span-types finalization. This is conservative
+    // (mirrors `.none` → `Option<unit>`) and never silently weakens: any
+    // use that actually constrains the generic fails loudly instead.
+    let r = check_src("enum Box<T> { V(T), E }\ne := Box.E\n");
+    assert!(!has_errors(&r), "expected no errors, got: {:?}", r.errors);
+}
+
+#[test]
+fn generic_enum_untyped_payload_fails_loudly_not_silently() {
+    // `Box.V(x)` with `x` untyped leaves the generic unconstrained; any
+    // later use that constrains it fails loudly at check time rather than
+    // silently producing the wrong type.
+    let r = check_src(
+        "enum Box<T> { V(T), E }\n\
+         impl Box<T> {\n\
+            func get_or(self, d: T) -> T {\n\
+                return match self {\n\
+                    .V(v) => v\n\
+                    .E => d\n\
+                }\n\
+            }\n\
+         }\n\
+         func f(x) {\n            b := Box.V(x)\n            return b.get_or(0)\n         }\n",
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("expected") && e.message.contains("found")),
+        "expected a loud type mismatch (not silent weakening), got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn extern_unique_symbols_ok() {
+    // Distinct `extern "C"` symbols (explicit override and derived) check
+    // cleanly.
+    let r = check_src(
+        "extern \"C\" {\n\
+            func toy.add(a: int, b: int) -> int = \"toy_add_impl\";\n\
+            func toy.scale(h: int, f: float) -> int\n\
+        }\n",
+    );
+    assert!(!has_errors(&r), "expected no errors, got: {:?}", r.errors);
+}
+
+#[test]
+fn extern_duplicate_symbol_errors() {
+    // Two `extern "C"` functions declaring the same C symbol is a link error
+    // surfaced at check time.
+    let r = check_src(
+        "extern \"C\" {\n\
+            func a.one(x: int) -> int = \"shared_impl\";\n\
+            func b.two(y: int) -> int = \"shared_impl\";\n\
+        }\n",
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("duplicate extern") && e.message.contains("shared_impl")),
+        "expected duplicate extern symbol error, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn extern_invalid_c_identifier_errors() {
+    // An explicit C symbol override that is not a valid C identifier errors.
+    let r = check_src("extern \"C\" { func bad() -> int = \"bad-symbol!\"; }\n");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("not a valid C identifier")),
+        "expected invalid C identifier error, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_private_function_warns() {
+    // G10: a private function that is never called is dead code.
+    let r = check_src("func unused() -> int { 1 }\nfunc used() -> int { 2 }\nx := used()\n");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function `unused`")),
+        "expected unused warning, got: {:?}",
+        r.errors
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function `used`")),
+        "called function should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_private_function_recursive_silent() {
+    // A recursive function references itself, so it's used.
+    let r = check_src("func fact(n: int) -> int { if n == 0 { 1 } else { n * fact(n - 1) } }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function")),
+        "recursive function should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_private_function_pub_silent() {
+    // Pub functions are exported and may be used by other modules.
+    let r = check_src("pub func unused() -> int { 1 }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function")),
+        "pub function should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_private_function_extern_silent() {
+    // Extern functions are declared for the linker.
+    let r = check_src("extern \"C\" { func unused() -> int }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function")),
+        "extern function should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_private_function_method_silent() {
+    // Methods are dispatched separately, not looked up by bare name.
+    let r =
+        check_src("struct Point { x: int }\nimpl Point { func dist(self) -> int { self.x } }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function")),
+        "method should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_private_function_underscore_silent() {
+    // `_`-prefixed names are already silenced for variables.
+    let r = check_src("func _unused() -> int { 1 }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function")),
+        "underscore-prefixed function should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_private_function_used_as_value_silent() {
+    // A function used as a value (passed to another call) is referenced.
+    let r = check_src(
+        "func cb(x: int) -> int { x }\n\
+         func apply(f: func(int) -> int, v: int) -> int { f(v) }\n\
+         x := apply(cb, 5)\n",
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function `cb`")),
+        "function used as value should not warn, got: {:?}",
         r.errors
     );
 }

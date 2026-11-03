@@ -10,6 +10,8 @@ use zz_scope::ScopeOps;
 use zz_span_ast::ast::{Program, Stmt};
 use zz_span_ast::span::Span;
 
+use zz_frontend::bench_attr::is_bench_like;
+use zz_frontend::test_attr::is_test_like;
 use zz_infer::InferOps;
 use zz_sigs::funcs::FuncOps;
 use zz_structs::StructOps;
@@ -726,7 +728,11 @@ fn check_program_impl(
     // recursion resolve.
     for stmt in &program.stmts {
         if let Stmt::Func {
-            name, span, pub_, ..
+            name,
+            decorators,
+            span,
+            pub_,
+            ..
         } = stmt
         {
             let full_name = name.join(".");
@@ -741,7 +747,16 @@ fn check_program_impl(
             }
             checker.collect_func(stmt);
             if *pub_ {
-                pub_funcs_set.insert(full_name);
+                pub_funcs_set.insert(full_name.clone());
+            }
+            // Track locally-defined functions for unused-func warnings
+            // (separate from stdlib-seeded functions in checker.funcs).
+            checker.local_funcs.insert(full_name.clone());
+            // Functions annotated with @test/@bench/@setup/@teardown are
+            // invoked by the harness at runtime, not by direct calls, so
+            // they must not trigger unused-func warnings.
+            if decorators.iter().any(is_bench_like) || decorators.iter().any(is_test_like) {
+                checker.test_funcs.insert(full_name);
             }
         }
         // Pass 1d: register `extern "C"` signatures (no bodies to check).
@@ -806,6 +821,35 @@ fn check_program_impl(
     // is never popped, so pop_scope's check never fires for it).
     checker.emit_global_unused_warnings();
 
+    // Emit unused private-function warnings. A top-level function that is
+    // never referenced (its name never appears in `used_names`) is dead
+    // code. Only check functions defined in the current program
+    // (`local_funcs`) — stdlib-seeded functions are not dead code just
+    // because a particular module doesn't call them. Skip pub functions
+    // (cross-module users), extern functions (linker users), methods
+    // (`Type.method`, dispatched separately), `_`-prefixed names (already
+    // silenced for variables), `main` (the runtime entry point), and
+    // test/bench/setup/teardown functions (invoked by the harness at
+    // runtime, not by direct calls in source).
+    for name in &checker.local_funcs {
+        if name == "main"
+            || checker.test_funcs.contains(name.as_str())
+            || pub_funcs_set.contains(name.as_str())
+            || name.starts_with('_')
+            || checker.used_names.contains(name.as_str())
+        {
+            continue;
+        }
+        checker.errors.push(
+            zz_diag_core::warning(
+                format!(
+                    "unused private function `{name}`, consider prefixing with `_{name}` or removing it"
+                ),
+            )
+            .with_note("function is never called or referenced"),
+        );
+    }
+
     // Build pub-only maps for cross-module export. Signature types are
     // deep-resolved so inferred returns (e.g. `ping()` with no annotation
     // unifies its ret var to `unit` during body checking) export as
@@ -816,6 +860,15 @@ fn check_program_impl(
         .filter(|(k, _)| pub_bindings_set.contains(k.as_str()))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    // A pub signature whose types still hold an inference variable after
+    // deep resolution must not be exported: a bare `Var(id)` would collide
+    // with the importer's own fresh vars and silently mis-type downstream
+    // code. Report and exclude such items instead of exporting them broken.
+    let mut unresolved_pub_items: Vec<String> = Vec::new();
+    let mark_var = |sig: &FuncSig| {
+        sig.params.iter().any(|(_, t)| zz_infer::contains_var(t))
+            || zz_infer::contains_var(&sig.ret)
+    };
     let pub_funcs: HashMap<String, FuncSig> = checker
         .funcs
         .iter()
@@ -828,8 +881,14 @@ fn check_program_impl(
                 .map(|(n, t)| (n.clone(), checker.unifier.resolve_deep(t)))
                 .collect();
             sig.ret = checker.unifier.resolve_deep(&sig.ret);
-            (k.clone(), sig)
+            let unresolved = mark_var(&sig);
+            if unresolved {
+                unresolved_pub_items.push(k.clone());
+            }
+            (k.clone(), sig, unresolved)
         })
+        .filter(|(_, _, unresolved)| !unresolved)
+        .map(|(k, sig, _)| (k, sig))
         .collect();
     let pub_structs: HashMap<String, StructSig> = checker
         .structs
@@ -842,8 +901,14 @@ fn check_program_impl(
                 .iter()
                 .map(|(n, t)| (n.clone(), checker.unifier.resolve_deep(t)))
                 .collect();
-            (k.clone(), sig)
+            let unresolved = sig.fields.iter().any(|(_, t)| zz_infer::contains_var(t));
+            if unresolved {
+                unresolved_pub_items.push(k.clone());
+            }
+            (k.clone(), sig, unresolved)
         })
+        .filter(|(_, _, unresolved)| !unresolved)
+        .map(|(k, sig, _)| (k, sig))
         .collect();
     let pub_aliases: HashMap<String, AliasSig> = checker
         .aliases
@@ -852,9 +917,23 @@ fn check_program_impl(
         .map(|(k, v)| {
             let mut sig = v.clone();
             sig.target = checker.unifier.resolve_deep(&sig.target);
-            (k.clone(), sig)
+            let unresolved = zz_infer::contains_var(&sig.target);
+            if unresolved {
+                unresolved_pub_items.push(k.clone());
+            }
+            (k.clone(), sig, unresolved)
         })
+        .filter(|(_, _, unresolved)| !unresolved)
+        .map(|(k, sig, _)| (k, sig))
         .collect();
+    for name in &unresolved_pub_items {
+        checker.errors.push(zz_diag_core::error_at(
+            format!(
+                "cannot export `pub` item `{name}`: its type still contains an unresolved inference variable; annotate parameter, field, or return types explicitly",
+            ),
+            Span::new(0, 0),
+        ));
+    }
 
     // Deep-resolve the recorded span types now that all unification is done.
     // Skip any that still contain inference variables (unresolvable at
@@ -925,6 +1004,18 @@ fn check_program_impl(
         .filter_map(|k| checker.enums.get(k).cloned().map(|v| (k.clone(), v)))
         .collect();
 
+    // Dedup exact-duplicate diagnostics: same message at the same span
+    // emitted more than once (defensive — the annotation cache already
+    // prevents most repeats). Same message at a *different* span is a
+    // distinct problem and is kept, so real errors are never hidden.
+    {
+        let mut seen: std::collections::HashSet<(String, Option<Span>)> =
+            std::collections::HashSet::new();
+        checker
+            .errors
+            .retain(|e| seen.insert((e.message.clone(), e.span)));
+    }
+
     CheckerOutcome {
         result: CheckResult {
             errors: checker.errors,
@@ -965,8 +1056,8 @@ mod span_scope_tests {
     // the other's type; scoped keys keep both.
     #[test]
     fn same_span_different_functions_keep_types() {
-        let a = zz_frontend::parse("func f() -> int {\n    v :=  1234\n    return v\n}\n");
-        let b = zz_frontend::parse("func g() -> bool {\n    v := true\n    return v\n}\n");
+        let a = zz_frontend::parse("func _f() -> int {\n    v :=  1234\n    return v\n}\n");
+        let b = zz_frontend::parse("func _g() -> bool {\n    v := true\n    return v\n}\n");
         assert!(a.errors.is_empty(), "parse a: {:?}", a.errors);
         assert!(b.errors.is_empty(), "parse b: {:?}", b.errors);
         let mut stmts = Vec::new();
@@ -985,9 +1076,9 @@ mod span_scope_tests {
             HashMap::new(),
         );
         assert!(res.errors.is_empty(), "check: {:?}", res.errors);
-        let key = Span::new(28, 32);
-        assert_eq!(types.get(&SpanKey::new("f", key)), Some(&Type::Int));
-        assert_eq!(types.get(&SpanKey::new("g", key)), Some(&Type::Bool));
+        let key = Span::new(29, 33);
+        assert_eq!(types.get(&SpanKey::new("_f", key)), Some(&Type::Int));
+        assert_eq!(types.get(&SpanKey::new("_g", key)), Some(&Type::Bool));
     }
 }
 

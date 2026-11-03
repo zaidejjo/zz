@@ -128,12 +128,8 @@ pub fn suggest_all<'a>(name: &str, candidates: &[&'a str]) -> Vec<(&'a str, u32)
         if dist > threshold {
             continue;
         }
-        let prefix_len = name
-            .chars()
-            .zip(cand.chars())
-            .take_while(|(a, b)| a == b)
-            .count() as u32;
-        let prefix_bonus = prefix_len / 2;
+        let prefix_len = common_prefix_len(name, cand);
+        let prefix_bonus = (prefix_len / 2) as u32;
         let effective = dist.saturating_sub(prefix_bonus);
         results.push((cand, dist, effective));
     }
@@ -149,6 +145,48 @@ pub fn suggest_all<'a>(name: &str, candidates: &[&'a str]) -> Vec<(&'a str, u32)
     results
         .into_iter()
         .map(|(cand, dist, _)| (cand, dist))
+        .collect()
+}
+
+/// Length of the shared leading-character prefix of two strings.
+pub fn common_prefix_len(a: &str, b: &str) -> usize {
+    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
+}
+
+/// A suggestion only when it is a clear, high-confidence correction: a
+/// single-edit typo that shares a leading character with the intended name,
+/// with no equally close alternative. Returns `None` (no hint) rather than
+/// risking a wrong hint — a missing hint is better than a misleading one.
+pub fn suggest_confident<'a>(name: &str, candidates: &[&'a str]) -> Option<&'a str> {
+    let all = suggest_all(name, candidates);
+    // Only single-edit typos are reliable enough for a lone hint; filter out
+    // anything farther so a farther-but-longer candidate cannot shadow a
+    // closer one.
+    let close: Vec<(&str, u32)> = all.iter().filter(|(_, d)| *d <= 1).copied().collect();
+    let (best, dist) = close.first()?;
+    // Must share at least one leading character; a distance-1 edit with no
+    // shared prefix (e.g. "abc" -> "xbc") is too likely to be wrong.
+    if common_prefix_len(name, best) == 0 {
+        return None;
+    }
+    // If a runner-up is equally close, do not pick a single winner: that
+    // would be a guess, not a confident correction.
+    if close.len() > 1 && close[1].1 == *dist {
+        return None;
+    }
+    Some(best)
+}
+
+/// Up to three confident suggestions for ambiguous "did you mean" display.
+/// Each shares a leading character and is within one edit; ties are broken
+/// by `suggest_all`'s deterministic ordering.
+pub fn suggest_top3<'a>(name: &str, candidates: &[&'a str]) -> Vec<&'a str> {
+    suggest_all(name, candidates)
+        .into_iter()
+        .filter(|(_, dist)| *dist <= 1)
+        .filter(|(cand, _)| common_prefix_len(name, cand) >= 1)
+        .take(3)
+        .map(|(cand, _)| cand)
         .collect()
 }
 
@@ -338,5 +376,43 @@ mod tests {
         let candidates = vec!["foo", "bar"];
         let all = suggest_all("xyz", &candidates);
         assert!(all.is_empty());
+    }
+
+    #[test]
+    fn suggest_confident_gives_no_wrong_hint() {
+        // Clear single-edit typos sharing a prefix are confident.
+        assert_eq!(
+            suggest_confident("printx", &["println", "print", "format"]),
+            Some("print")
+        );
+        // Distance 1 with no shared prefix: too likely wrong → no hint.
+        assert_eq!(suggest_confident("abc", &["xbc", "ayc", "abz"]), None);
+        // Distance 2+: no hint even if a candidate exists.
+        assert_eq!(suggest_confident("heigth", &["eight"]), None);
+        // Single-edit with a shared prefix is confident.
+        assert_eq!(
+            suggest_confident("heigth", &["height", "heighth"]),
+            Some("heighth")
+        );
+        // Ambiguous single-edit among multiple: no single confident hint.
+        assert_eq!(
+            suggest_confident("printn", &["println", "print", "format"]),
+            None
+        );
+        // Nothing close enough → no hint.
+        assert_eq!(suggest_confident("zzzzz", &["alpha", "bravo"]), None);
+    }
+
+    #[test]
+    fn suggest_top3_returns_confident_candidates() {
+        // "printn" → confident candidates sharing a prefix, dist 1 each.
+        let top = suggest_top3("printn", &["println", "print", "plntln", "format", "panic"]);
+        assert_eq!(top, vec!["println", "print"]);
+        // Nothing confident when all matches are far / prefix-less.
+        let empty = suggest_top3("zzzzz", &["alpha", "bravo"]);
+        assert!(empty.is_empty());
+        // Capped at three.
+        let many = suggest_top3("abc", &["abcd", "abce", "abcf", "abcg", "abch"]);
+        assert_eq!(many.len(), 3);
     }
 }

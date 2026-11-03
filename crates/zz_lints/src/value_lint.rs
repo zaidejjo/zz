@@ -27,7 +27,10 @@ use zz_types::Type;
 
 /// Value types whose in-place mutation a caller can never observe.
 fn is_value_type(ty: &zz_types::Type) -> bool {
-    matches!(ty, Type::Array(_) | Type::Tuple(_) | Type::Struct(_, _))
+    matches!(
+        ty,
+        Type::Array(_) | Type::Tuple(_) | Type::Struct(_, _) | Type::Dict(_, _) | Type::Bytes
+    )
 }
 
 struct Walk {

@@ -4,8 +4,9 @@ use zz_checker_core::{AliasSig, Checker};
 use zz_diag_core::error_at;
 use zz_span_ast::ast::Ty;
 use zz_span_ast::span::Span;
-use zz_suggest::suggest;
+use zz_suggest::suggest_confident;
 use zz_types::Type;
+use zz_unify::Unifier;
 
 pub trait InferOps {
     /// Merge element types into a single type: identical types collapse to
@@ -100,23 +101,15 @@ impl InferOps for Checker {
         if live.is_empty() {
             return Type::Never;
         }
-        let types = live;
-        let mut distinct: Vec<Type> = Vec::new();
-        for t in types {
-            // Clone-free comparison through var chains (the old
-            // `resolve(d) == resolve(t)` cloned two subtrees per pair).
-            // `existing` borrows the local vec — disjoint from the
-            // `&mut self.unifier` below, so no clone is needed at all.
-            if let Some(existing) = distinct.iter().find(|d| self.unifier.eq_resolved(d, &t)) {
-                let _ = self.unifier.unify(existing, &t);
-            } else {
-                distinct.push(t);
-            }
-        }
-        if distinct.len() == 1 {
-            distinct.pop().unwrap()
+        // When every element resolves to a concrete (var-free) type,
+        // structural hashing dedups in O(n) instead of O(n²). If any element
+        // still carries an unbound inference variable, fall back to the
+        // linear all-pairs eq_resolved so unbound-variable merging (e.g.
+        // `[.some(1), .none]`) keeps its exact original semantics.
+        if live.iter().all(|t| !contains_var(&self.unifier.resolve(t))) {
+            merge_types_hash(&mut self.unifier, live)
         } else {
-            Type::Union(distinct)
+            merge_types_linear(&mut self.unifier, live)
         }
     }
 
@@ -198,7 +191,14 @@ impl InferOps for Checker {
 
     fn ast_to_type_inner(&mut self, ty: &Ty, generics: &[String]) -> Type {
         use zz_span_ast::ast::TyKind;
-        match &ty.kind {
+        let key = (hash_ty(ty), hash_generics(generics));
+        // Cache hit: return a cheap clone, skipping re-parse and side effects
+        // (used_names marking, error emission). Re-emitting them would only
+        // duplicate diagnostics for the same annotation.
+        if let Some(cached) = self.type_annotation_cache.get(&key) {
+            return cached.clone();
+        }
+        let result = match &ty.kind {
             TyKind::Int => Type::Int,
             TyKind::Float => Type::Float,
             TyKind::Bool => Type::Bool,
@@ -405,11 +405,16 @@ impl InferOps for Checker {
                             format!("unknown type `{name}`")
                         };
                         self.errors.push(error_at(msg, ty.span));
-                        Type::Unit
+                        // Error is absorbing: unifying it with anything is
+                        // silent, so one "unknown type" error is the root and
+                        // no downstream mismatch cascades off it.
+                        Type::Error
                     }
                 }
             }
-        }
+        };
+        self.type_annotation_cache.insert(key, result.clone());
+        result
     }
 
     /// Suggest the closest known type name for an unknown type, or a
@@ -471,7 +476,7 @@ impl InferOps for Checker {
         for a in self.alias_asts.keys() {
             candidates.push(a.as_str());
         }
-        suggest(name, &candidates).map(|(s, _)| s.to_string())
+        suggest_confident(name, &candidates).map(|s| s.to_string())
     }
 
     fn canonical_struct_name(&self, name: &str) -> String {
@@ -589,6 +594,56 @@ impl InferOps for Checker {
     }
 }
 
+/// O(n) dedup for concrete element types via structural-hash buckets.
+/// Preserves first-appearance order for deterministic output.
+fn merge_types_hash(unifier: &mut Unifier, live: Vec<Type>) -> Type {
+    let mut distinct: Vec<Type> = Vec::new();
+    let mut hash_to_indices: std::collections::HashMap<u64, Vec<usize>> =
+        std::collections::HashMap::new();
+    for t in live {
+        let h = hash_type(&unifier.resolve(&t));
+        let mut placed = false;
+        if let Some(indices) = hash_to_indices.get(&h) {
+            for &idx in indices {
+                if unifier.eq_resolved(&distinct[idx], &t) {
+                    let _ = unifier.unify(&distinct[idx], &t);
+                    placed = true;
+                    break;
+                }
+            }
+        }
+        if !placed {
+            let idx = distinct.len();
+            distinct.push(t);
+            hash_to_indices.entry(h).or_default().push(idx);
+        }
+    }
+    if distinct.len() == 1 {
+        distinct.pop().unwrap()
+    } else {
+        Type::Union(distinct)
+    }
+}
+
+/// Original O(n²) all-pairs eq_resolved dedup, kept exact for cases
+/// involving unbound inference variables (which hash-consing cannot
+/// bucket soundly since an unbound var eq_resolved-matches anything).
+fn merge_types_linear(unifier: &mut Unifier, live: Vec<Type>) -> Type {
+    let mut distinct: Vec<Type> = Vec::new();
+    for t in live {
+        if let Some(existing) = distinct.iter().find(|d| unifier.eq_resolved(d, &t)) {
+            let _ = unifier.unify(existing, &t);
+        } else {
+            distinct.push(t);
+        }
+    }
+    if distinct.len() == 1 {
+        distinct.pop().unwrap()
+    } else {
+        Type::Union(distinct)
+    }
+}
+
 /// Surface name of a native module-handle type (`tls`, `file`, ...).
 /// Consulted only when no struct/enum/alias/builtin matches, so user
 /// types always win. Keep in sync with the `Opaque(..)` tags in
@@ -627,6 +682,198 @@ pub fn contains_var(t: &Type) -> bool {
         Type::Range(x) => contains_var(x),
         Type::Ptr { inner, .. } => contains_var(inner),
         _ => false,
+    }
+}
+
+/// Hash the generic parameter list for use in the type-annotation cache key.
+/// A fresh `Hasher` per call keeps this deterministic and dependency-free.
+fn hash_generics(generics: &[String]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    generics.hash(&mut h);
+    h.finish()
+}
+
+/// Hash the structural shape of a `Ty` annotation (excluding its span), so
+/// the same annotation written in different locations shares one cache key.
+fn hash_ty(ty: &Ty) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::Hasher;
+    let mut h = DefaultHasher::new();
+    hash_ty_into(ty, &mut h);
+    h.finish()
+}
+
+/// Write the structural shape of `ty` into an existing hasher, so nested
+/// types contribute their bytes to the parent's hash (not a discarded
+/// child hasher).
+fn hash_ty_into(ty: &Ty, h: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    use zz_span_ast::ast::TyKind;
+    match &ty.kind {
+        TyKind::Int => h.write_u8(0),
+        TyKind::Float => h.write_u8(1),
+        TyKind::Bool => h.write_u8(2),
+        TyKind::Str => h.write_u8(3),
+        TyKind::Unit => h.write_u8(4),
+        TyKind::Void => h.write_u8(5),
+        TyKind::Ptr { mutable, inner } => {
+            h.write_u8(6);
+            mutable.hash(h);
+            hash_ty_into(inner, h);
+        }
+        TyKind::Tuple(ts) => {
+            h.write_u8(7);
+            for t in ts {
+                hash_ty_into(t, h);
+            }
+        }
+        TyKind::Option(inner) => {
+            h.write_u8(8);
+            hash_ty_into(inner, h);
+        }
+        TyKind::Result(ok, err) => {
+            h.write_u8(9);
+            hash_ty_into(ok, h);
+            hash_ty_into(err, h);
+        }
+        TyKind::Func(ps, r) => {
+            h.write_u8(10);
+            for p in ps {
+                hash_ty_into(p, h);
+            }
+            hash_ty_into(r, h);
+        }
+        TyKind::Array(inner) => {
+            h.write_u8(11);
+            hash_ty_into(inner, h);
+        }
+        TyKind::Dict(k, v) => {
+            h.write_u8(12);
+            hash_ty_into(k, h);
+            hash_ty_into(v, h);
+        }
+        TyKind::Union(ts) => {
+            h.write_u8(13);
+            for t in ts {
+                hash_ty_into(t, h);
+            }
+        }
+        TyKind::Named(name, args) => {
+            h.write_u8(14);
+            name.hash(h);
+            for a in args {
+                hash_ty_into(a, h);
+            }
+        }
+    }
+}
+
+/// Hash the structural shape of a resolved `Type` (excluding inference
+/// variable ids beyond their identity), for bucketing in `merge_types`.
+fn hash_type(ty: &Type) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::Hasher;
+    let mut h = DefaultHasher::new();
+    hash_type_into(ty, &mut h);
+    h.finish()
+}
+
+/// Write the structural shape of `ty` into an existing hasher.
+fn hash_type_into(ty: &Type, h: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    match ty {
+        Type::Int => h.write_u8(0),
+        Type::Float => h.write_u8(1),
+        Type::Bool => h.write_u8(2),
+        Type::Str => h.write_u8(3),
+        Type::Unit => h.write_u8(4),
+        Type::Void => h.write_u8(5),
+        Type::Bytes => h.write_u8(6),
+        Type::Json => h.write_u8(7),
+        Type::Db => h.write_u8(8),
+        Type::HttpServer => h.write_u8(9),
+        Type::TcpStream => h.write_u8(10),
+        Type::TcpListener => h.write_u8(11),
+        Type::Response => h.write_u8(12),
+        Type::HttpRequest => h.write_u8(13),
+        Type::Opaque(tag) => {
+            h.write_u8(14);
+            tag.hash(h);
+        }
+        Type::Chan => h.write_u8(15),
+        Type::TaskJoin => h.write_u8(16),
+        Type::Error => h.write_u8(17),
+        Type::Never => h.write_u8(18),
+        Type::Ptr { mutable, inner } => {
+            h.write_u8(19);
+            mutable.hash(h);
+            hash_type_into(inner, h);
+        }
+        Type::Tuple(ts) => {
+            h.write_u8(20);
+            for t in ts {
+                hash_type_into(t, h);
+            }
+        }
+        Type::Option(inner) => {
+            h.write_u8(21);
+            hash_type_into(inner, h);
+        }
+        Type::Result(ok, err) => {
+            h.write_u8(22);
+            hash_type_into(ok, h);
+            hash_type_into(err, h);
+        }
+        Type::Func(ps, r) => {
+            h.write_u8(23);
+            for p in ps {
+                hash_type_into(p, h);
+            }
+            hash_type_into(r, h);
+        }
+        Type::Array(inner) => {
+            h.write_u8(24);
+            hash_type_into(inner, h);
+        }
+        Type::Dict(k, v) => {
+            h.write_u8(25);
+            hash_type_into(k, h);
+            hash_type_into(v, h);
+        }
+        Type::Union(ts) => {
+            h.write_u8(26);
+            for t in ts {
+                hash_type_into(t, h);
+            }
+        }
+        Type::Struct(name, args) => {
+            h.write_u8(27);
+            name.hash(h);
+            for a in args {
+                hash_type_into(a, h);
+            }
+        }
+        Type::Enum(name, args) => {
+            h.write_u8(28);
+            name.hash(h);
+            for a in args {
+                hash_type_into(a, h);
+            }
+        }
+        Type::Range(inner) => {
+            h.write_u8(29);
+            hash_type_into(inner, h);
+        }
+        Type::Var(id) => {
+            h.write_u8(30);
+            id.hash(h);
+        }
+        Type::Named(name) => {
+            h.write_u8(31);
+            name.hash(h);
+        }
     }
 }
 
@@ -721,5 +968,121 @@ pub fn subst(t: &Type, subs: &std::collections::HashMap<String, Type>) -> Type {
             inner: Box::new(subst(inner, subs)),
         },
         other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod infer_var_tests {
+    use super::*;
+
+    /// Builds one instance of every `Type` variant, nesting a `Var(7)` deep
+    /// inside each container so a correct walk finds it. Leaf/scalar
+    /// variants carry no var.
+    fn var_type() -> Type {
+        Type::Var(7)
+    }
+
+    fn container_with_var() -> Vec<Type> {
+        vec![
+            Type::Tuple(vec![var_type()]),
+            Type::Option(Box::new(var_type())),
+            Type::Result(Box::new(var_type()), Box::new(Type::Int)),
+            Type::Func(vec![var_type()], Box::new(Type::Int)),
+            Type::Array(Box::new(var_type())),
+            Type::Dict(Box::new(Type::Int), Box::new(var_type())),
+            Type::Struct("S".to_string(), vec![var_type()]),
+            Type::Enum("E".to_string(), vec![var_type()]),
+            Type::Union(vec![var_type(), Type::Int]),
+            Type::Range(Box::new(var_type())),
+            Type::Ptr {
+                mutable: false,
+                inner: Box::new(var_type()),
+            },
+        ]
+    }
+
+    /// Every non-var, non-container variant: must report no var and no max id.
+    fn leaf_types() -> Vec<Type> {
+        vec![
+            Type::Int,
+            Type::Float,
+            Type::Bool,
+            Type::Str,
+            Type::Unit,
+            Type::Void,
+            Type::Bytes,
+            Type::Json,
+            Type::Db,
+            Type::HttpServer,
+            Type::TcpStream,
+            Type::TcpListener,
+            Type::Response,
+            Type::HttpRequest,
+            Type::Opaque("tag".to_string()),
+            Type::Chan,
+            Type::TaskJoin,
+            Type::Named("T".to_string()),
+            Type::Error,
+            Type::Never,
+        ]
+    }
+
+    #[test]
+    fn contains_var_find_var_in_every_container() {
+        for t in container_with_var() {
+            assert!(
+                contains_var(&t),
+                "contains_var should find Var inside {:?}",
+                t
+            );
+        }
+        // A var directly is also a var.
+        assert!(contains_var(&var_type()));
+        // Nested container still finds it.
+        assert!(contains_var(&Type::Option(Box::new(Type::Array(
+            Box::new(var_type())
+        )))));
+    }
+
+    #[test]
+    fn contains_var_false_on_leaf_types() {
+        for t in leaf_types() {
+            assert!(!contains_var(&t), "leaf {:?} should not contain a var", t);
+        }
+        assert!(!contains_var(&Type::Tuple(vec![])));
+        assert!(!contains_var(&Type::Union(vec![])));
+    }
+
+    #[test]
+    fn max_var_id_returns_id_in_every_container() {
+        for t in container_with_var() {
+            assert_eq!(
+                max_var_id(&t),
+                Some(7),
+                "max_var_id should find Var(7) inside {:?}",
+                t
+            );
+        }
+        assert_eq!(max_var_id(&var_type()), Some(7));
+        // Two vars: returns the max.
+        let two = Type::Tuple(vec![Type::Var(3), Type::Var(9)]);
+        assert_eq!(max_var_id(&two), Some(9));
+        // Nested: deepest wins.
+        let nested = Type::Option(Box::new(Type::Array(Box::new(Type::Var(42)))));
+        assert_eq!(max_var_id(&nested), Some(42));
+    }
+
+    #[test]
+    fn max_var_id_none_on_leaf_types() {
+        for t in leaf_types() {
+            assert_eq!(
+                max_var_id(&t),
+                None,
+                "leaf {:?} should have no max var id",
+                t
+            );
+        }
+        assert_eq!(max_var_id(&Type::Tuple(vec![])), None);
+        assert_eq!(max_var_id(&Type::Union(vec![])), None);
     }
 }
