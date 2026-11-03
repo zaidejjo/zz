@@ -2132,6 +2132,19 @@ impl Lowerer {
                     ));
                     out.push_str(&format!("        {deref} = {boxed};\n"));
                     names.enter_cell(v, &ptr, &deref, "zz_value", n);
+                } else if raw_elem {
+                    // SROA: register the loop var so `p.x` rewrites to
+                    // `({arr})[_idx].x` directly, eliminating the per-iteration
+                    // struct copy. Still declare the struct (clang -O3 SROA's
+                    // it away if unused); the declaration is needed as a
+                    // fallback if field_read_scalar's SROA path doesn't fire.
+                    names.flat_struct_loop_vars.insert(
+                        v.clone(),
+                        (arr_cid.clone(), idx.clone(), elem_ctype_for_body.clone()),
+                    );
+                    out.push_str(&format!(
+                        "        {elem_ctype_for_body} {cid} = {elem_access};\n"
+                    ));
                 } else {
                     out.push_str(&format!(
                         "        {elem_ctype_for_body} {cid} = {elem_access};\n"
@@ -2144,6 +2157,9 @@ impl Lowerer {
                 self.loop_scope_end(names, out, item_scope);
                 names.clear_array_lens();
                 out.push_str("    }\n");
+                // Clear SROA loop-var registration so it doesn't leak into
+                // code after the loop.
+                names.flat_struct_loop_vars.remove(v);
                 // The flat path is self-contained; the boxed path below
                 // declares the iterable temp and the per-iteration locals.
                 return;

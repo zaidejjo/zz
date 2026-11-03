@@ -141,6 +141,10 @@ pub struct NameCtx {
     /// (and their nested arithmetic) without a signature change. Never
     /// cleared by push/pop_scope: it is program-global.
     pub(crate) scalar_fn_sigs: HashMap<String, (&'static str, usize)>,
+    /// Maps flat struct loop var names to (array C id, index var name) for
+    /// SROA: `p.x` in `for p in pts { sum += p.x }` rewrites to
+    /// `({pts})[_idx].x` directly, eliminating the per-iteration struct copy.
+    pub(crate) flat_struct_loop_vars: HashMap<String, (String, String, String)>,
 }
 
 impl NameCtx {
@@ -161,6 +165,7 @@ impl NameCtx {
             checker_types: HashMap::new(),
             current_scope: zz_checker::TOP_SCOPE.to_string(),
             scalar_fn_sigs: HashMap::new(),
+            flat_struct_loop_vars: HashMap::new(),
         }
     }
 
@@ -739,6 +744,23 @@ impl Lowerer {
                 }
                 // Unboxed struct local field: `p.field`
                 if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+                    // SROA: if `p` is a flat struct loop var, rewrite
+                    // `p.x` to `({arr})[_idx].x` directly, avoiding the
+                    // per-iteration struct copy.
+                    if let Some((arr_cid, idx_var, elem_ctype)) =
+                        names.flat_struct_loop_vars.get(obj_name)
+                    {
+                        let idx_text = names.lookup(idx_var).unwrap_or(idx_var).to_string();
+                        if let Some(ft) = self.field_type_from_struct(elem_ctype, name) {
+                            let t = match ft {
+                                "int64_t" => "int64_t",
+                                "double" => "double",
+                                "bool" => "bool",
+                                _ => return None,
+                            };
+                            return Some((format!("({arr_cid})[{idx_text}].{name}"), t));
+                        }
+                    }
                     let ctype = names.lookup_type(obj_name).unwrap_or("");
                     if ctype.starts_with("zz_struct_") {
                         if let Some(ft) = self.field_type_from_struct(ctype, name) {
@@ -2500,13 +2522,12 @@ pub(crate) fn scalar_operand_type(e: &Expr, names: &NameCtx) -> Option<&'static 
                 _ => None,
             }
         }
-        Expr::Field { obj, name, .. } => {
+        Expr::Field { obj, name: _, .. } => {
             // Raw struct field read on an unboxed local (`p.x` where `p` is a
             // `zz_struct_*` raw C value). Scalar fields lower to raw C
             // arithmetic; the Binary handler's `field_read_scalar` override
             // refines the exact field type at emission time. Returns int64_t
-            // conservatively — correct for int fields (the common case), and
-            // field_read_scalar guards exact types during codegen.
+            // conservatively — correct for int fields (the common case).
             if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
                 let ctype = names.lookup_type(obj_name).unwrap_or("");
                 if ctype.starts_with("zz_struct_") {
@@ -2626,6 +2647,13 @@ pub(crate) fn raw_scalar_text(
     // int64_t which covers the common arithmetic case.
     if let Expr::Field { obj, name, .. } = e {
         if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+            // SROA: if `p` is a flat struct loop var, rewrite `p.x` to
+            // `({arr})[_idx].x` directly.
+            if let Some((arr_cid, idx_var, _elem_ctype)) = names.flat_struct_loop_vars.get(obj_name)
+            {
+                let idx_text = names.lookup(idx_var).unwrap_or(idx_var).to_string();
+                return Some((format!("({arr_cid})[{idx_text}].{name}"), "int64_t"));
+            }
             let ctype = names.lookup_type(obj_name).unwrap_or("");
             if ctype.starts_with("zz_struct_") {
                 let cid = names.lookup(obj_name).unwrap_or(obj_name);
@@ -2945,6 +2973,13 @@ pub(crate) fn scalar_operand_c(e: &Expr, names: &NameCtx) -> Option<String> {
             // Raw struct field read on an unboxed local (`p.x` where `p` is
             // a `zz_struct_*` raw C value).
             if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+                // SROA: if `p` is a flat struct loop var, rewrite directly.
+                if let Some((arr_cid, idx_var, _elem_ctype)) =
+                    names.flat_struct_loop_vars.get(obj_name)
+                {
+                    let idx_text = names.lookup(idx_var).unwrap_or(idx_var).to_string();
+                    return Some(format!("({arr_cid})[{idx_text}].{name}"));
+                }
                 let ctype = names.lookup_type(obj_name).unwrap_or("");
                 if ctype.starts_with("zz_struct_") {
                     let cid = names.lookup(obj_name).unwrap_or(obj_name);

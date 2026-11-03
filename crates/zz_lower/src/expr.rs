@@ -1197,6 +1197,20 @@ impl Lowerer {
                 self.emit_struct_init(name, fields, names, out)
             }
             Expr::Field { obj, name, .. } => {
+                // SROA: if `obj` is a flat struct loop var (`p` in
+                // `for p in pts { sum += p.x }`), rewrite `p.x` to
+                // `({pts})[_idx].x` directly, eliminating the per-iteration
+                // struct copy.
+                if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+                    if let Some((arr_cid, idx_var, elem_ctype)) =
+                        names.flat_struct_loop_vars.get(obj_name)
+                    {
+                        let idx_text = names.lookup(idx_var).unwrap_or(idx_var).to_string();
+                        let field_ctype = self.field_type_from_struct(elem_ctype, name);
+                        let raw = format!("({arr_cid})[{idx_text}].{name}");
+                        return auto_box(&raw, field_ctype);
+                    }
+                }
                 // Flat-array element field access: `arr[k].field` where `arr`
                 // is a contiguous buffer of unboxed structs → direct
                 // `({arr})[{k}].field`, no zz_index_get bounds-check/clone
