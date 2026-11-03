@@ -960,6 +960,18 @@ fn check_program_impl(
         .filter_map(|k| checker.enums.get(k).cloned().map(|v| (k.clone(), v)))
         .collect();
 
+    // Dedup exact-duplicate diagnostics: same message at the same span
+    // emitted more than once (defensive — the annotation cache already
+    // prevents most repeats). Same message at a *different* span is a
+    // distinct problem and is kept, so real errors are never hidden.
+    {
+        let mut seen: std::collections::HashSet<(String, Option<Span>)> =
+            std::collections::HashSet::new();
+        checker
+            .errors
+            .retain(|e| seen.insert((e.message.clone(), e.span)));
+    }
+
     CheckerOutcome {
         result: CheckResult {
             errors: checker.errors,

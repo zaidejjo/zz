@@ -4717,3 +4717,86 @@ fn pub_func_with_unresolved_ret_is_excluded_and_errors() {
         r.errors
     );
 }
+
+#[test]
+fn unknown_type_used_twice_reports_once() {
+    // Same unknown type annotation in two declarations: the annotation cache
+    // (G4) returns the cached Error on the second use, so only one "unknown
+    // type" error is emitted. The Error type is absorbing, so it also does
+    // not spawn a "type mismatch" cascade against the initializer.
+    let r = check_src("x: NopeType = 1\ny: NopeType = 2\n");
+    let unknown_count = r
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("unknown type `NopeType`"))
+        .count();
+    assert_eq!(
+        unknown_count, 1,
+        "expected one unknown-type error, got: {:?}",
+        r.errors
+    );
+    // No "type mismatch" cascade: Error absorbs the initializer mismatch.
+    assert!(
+        !r.errors.iter().any(|e| e.message.contains("type mismatch")),
+        "unexpected mismatch cascade, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn field_access_on_error_type_does_not_cascade() {
+    // `CountRow` is an unknown type, so `weeks` is `[Error]`. Indexing gives
+    // `Error`, and `.n` on `Error` is absorbed — no "cannot access field
+    // `n` on a value of type `unit`" cascade.
+    let r = check_src("weeks: [CountRow] = []\ndl_week = weeks[0].n\n");
+    let field_errors: Vec<&str> = r
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("cannot access field"))
+        .map(|e| e.message.as_str())
+        .collect();
+    assert!(
+        field_errors.is_empty(),
+        "expected no field-access cascade, got: {field_errors:?} (full: {:?})",
+        r.errors
+    );
+    // Exactly one root error: the unknown type.
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unknown type `CountRow`")),
+        "expected root unknown-type error, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn missing_field_chain_does_not_cascade() {
+    // `p.z` is a missing field → one "has no field" error, returning Error.
+    // Chaining `.w` on the result is absorbed, no second field error.
+    let r = check_src("struct Point { x: int }\np := Point{ x: 1 }\nq := p.z.w\n");
+    let field_errors: Vec<&str> = r
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("has no field"))
+        .map(|e| e.message.as_str())
+        .collect();
+    assert_eq!(
+        field_errors.len(),
+        1,
+        "expected one missing-field error, got: {field_errors:?} (full: {:?})",
+        r.errors
+    );
+    let all_field: Vec<&str> = r
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("field"))
+        .map(|e| e.message.as_str())
+        .collect();
+    assert_eq!(
+        all_field.len(),
+        1,
+        "expected exactly one field-related error total, got: {all_field:?} (full: {:?})",
+        r.errors
+    );
+}

@@ -405,7 +405,10 @@ impl InferOps for Checker {
                             format!("unknown type `{name}`")
                         };
                         self.errors.push(error_at(msg, ty.span));
-                        Type::Unit
+                        // Error is absorbing: unifying it with anything is
+                        // silent, so one "unknown type" error is the root and
+                        // no downstream mismatch cascades off it.
+                        Type::Error
                     }
                 }
             }
