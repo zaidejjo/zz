@@ -3112,18 +3112,26 @@ impl Lowerer {
                         };
                         let arg_val = self.emit_expr(arg, names, out);
                         let elem = self.struct_c_type(&sname);
+                        // The pointer was declared with the fresh C id returned
+                        // by `enter_with_type` (e.g. `v1`), NOT the source name
+                        // (`arr`). Using `name` here emits `arr = realloc(arr, ...)`
+                        // which references an undeclared identifier. Use `cid`.
+                        let cid = names
+                            .lookup(name)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| name.to_string());
                         let len_cid = format!("{}_len", name);
                         let cap_cid = format!("{}_cap", name);
                         out.push_str(&format!(
-                            "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n      {name} = ({elem}*)realloc({name}, {cap} * sizeof({elem}));\n    }}\n",
+                            "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n      {cid} = ({elem}*)realloc({cid}, {cap} * sizeof({elem}));\n    }}\n",
                             len = len_cid,
                             cap = cap_cid,
-                            name = name,
+                            cid = cid,
                             elem = elem,
                         ));
                         out.push_str(&format!(
-                            "    {name}[{len}] = {arg_val};\n    {len}++;\n",
-                            name = name,
+                            "    {cid}[{len}] = {arg_val};\n    {len}++;\n",
+                            cid = cid,
                             len = len_cid,
                             arg_val = arg_val
                         ));

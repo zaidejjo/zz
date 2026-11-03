@@ -215,3 +215,32 @@ fn regression_bench_string_concats_completes_and_stays_under_baseline() {
         "string_concats peak RSS {peak_mb}MB exceeds baseline {BASELINE_STR_PEAK_MB}MB"
     );
 }
+
+// ----- bench_struct_access -----------------------------------------
+// Commit 3e22a46 ("flat C arrays for arrays of unboxed structs") generated
+// C that referenced an undeclared `arr` instead of the declared pointer id,
+// so `bench_struct_access.zz` failed to compile. This regression test locks
+// in that `arr: [Pt] = []` + `.push()` lowers to a contiguous buffer with
+// direct `v[k].x` field access.
+#[test]
+fn regression_bench_struct_access_compiles_and_runs() {
+    let Some(bin) = build_zz_bench("struct_access") else {
+        return;
+    };
+
+    let (stdout, _, _) = run_meas(&bin);
+    let _ = bin;
+
+    assert!(
+        stdout.contains("struct_access_ok"),
+        "struct_access missing success marker.\nstdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("fill_1M_ms:"),
+        "struct_access missing fill_1M_ms marker.\nstdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("sum_x: 499999500000"),
+        "struct_access sum_x drifted.\nstdout:\n{stdout}"
+    );
+}
