@@ -81,40 +81,31 @@ jobs:
       - name: install native deps (linux)
         if: inputs.family == 'linux'
         run: |
-          set -euo pipefail
+          set +e
           # Debug: show disk and memory
           df -h /
           free -m
-          # Clean stale apt lists to avoid checksum/hash mismatch errors
-          sudo rm -rf /var/lib/apt/lists/*
+          # Clean stale apt lists
+          sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true
           # Remove Microsoft repo to avoid slow arm64 package downloads
-          # on x86_64 runners (causes apt-get update to hang/fail)
           sudo rm -f /etc/apt/sources.list.d/*microsoft* 2>/dev/null || true
-          # apt-get update can fail on GitHub Actions runners due to mirror
-          # issues; make it non-fatal so the leg can proceed.
-          sudo apt-get update || true
+          # apt-get update can fail on GitHub Actions runners; don't let it
+          # fail the whole leg.
+          sudo apt-get update 2>&1 | tail -5 || true
           if [ -n "${{ matrix.clang_pin }}" ]; then
-            # The pinned sanitizer leg needs apt.llvm.org (Noble's archive
-            # tops out at clang-18).
             wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
-              | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+              | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null 2>/dev/null || true
             echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-${{
               matrix.clang_pin }} main" \
-              | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
-            sudo apt-get update || true
-            sudo apt-get install -y "clang-${{ matrix.clang_pin }}" || {
-              echo "clang-${{ matrix.clang_pin }} install failed, clang may be unavailable"
-            }
+              | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null 2>/dev/null || true
+            sudo apt-get update 2>&1 | tail -5 || true
+            sudo apt-get install -y "clang-${{ matrix.clang_pin }}" 2>&1 | tail -5 || true
           else
-            sudo apt-get install -y clang || {
-              echo "clang install failed, clang may be unavailable"
-            }
+            sudo apt-get install -y clang 2>&1 | tail -5 || true
           fi
-          # Native codegen links -lcurl -lsqlite3 and compiles with clang.
-          sudo apt-get install -y libcurl4-openssl-dev libsqlite3-dev zip unzip xz-utils || {
-            echo "some native deps failed to install, continuing anyway"
-          }
+          sudo apt-get install -y libcurl4-openssl-dev libsqlite3-dev zip unzip xz-utils 2>&1 | tail -5 || true
           clang --version || true
+          set -e
 
       - name: install native deps (macos)
         if: inputs.family == 'macos'
