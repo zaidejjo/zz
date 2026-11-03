@@ -6,6 +6,7 @@ use zz_span_ast::ast::Ty;
 use zz_span_ast::span::Span;
 use zz_suggest::suggest;
 use zz_types::Type;
+use zz_unify::Unifier;
 
 pub trait InferOps {
     /// Merge element types into a single type: identical types collapse to
@@ -100,23 +101,15 @@ impl InferOps for Checker {
         if live.is_empty() {
             return Type::Never;
         }
-        let types = live;
-        let mut distinct: Vec<Type> = Vec::new();
-        for t in types {
-            // Clone-free comparison through var chains (the old
-            // `resolve(d) == resolve(t)` cloned two subtrees per pair).
-            // `existing` borrows the local vec — disjoint from the
-            // `&mut self.unifier` below, so no clone is needed at all.
-            if let Some(existing) = distinct.iter().find(|d| self.unifier.eq_resolved(d, &t)) {
-                let _ = self.unifier.unify(existing, &t);
-            } else {
-                distinct.push(t);
-            }
-        }
-        if distinct.len() == 1 {
-            distinct.pop().unwrap()
+        // When every element resolves to a concrete (var-free) type,
+        // structural hashing dedups in O(n) instead of O(n²). If any element
+        // still carries an unbound inference variable, fall back to the
+        // linear all-pairs eq_resolved so unbound-variable merging (e.g.
+        // `[.some(1), .none]`) keeps its exact original semantics.
+        if live.iter().all(|t| !contains_var(&self.unifier.resolve(t))) {
+            merge_types_hash(&mut self.unifier, live)
         } else {
-            Type::Union(distinct)
+            merge_types_linear(&mut self.unifier, live)
         }
     }
 
@@ -598,6 +591,56 @@ impl InferOps for Checker {
     }
 }
 
+/// O(n) dedup for concrete element types via structural-hash buckets.
+/// Preserves first-appearance order for deterministic output.
+fn merge_types_hash(unifier: &mut Unifier, live: Vec<Type>) -> Type {
+    let mut distinct: Vec<Type> = Vec::new();
+    let mut hash_to_indices: std::collections::HashMap<u64, Vec<usize>> =
+        std::collections::HashMap::new();
+    for t in live {
+        let h = hash_type(&unifier.resolve(&t));
+        let mut placed = false;
+        if let Some(indices) = hash_to_indices.get(&h) {
+            for &idx in indices {
+                if unifier.eq_resolved(&distinct[idx], &t) {
+                    let _ = unifier.unify(&distinct[idx], &t);
+                    placed = true;
+                    break;
+                }
+            }
+        }
+        if !placed {
+            let idx = distinct.len();
+            distinct.push(t);
+            hash_to_indices.entry(h).or_default().push(idx);
+        }
+    }
+    if distinct.len() == 1 {
+        distinct.pop().unwrap()
+    } else {
+        Type::Union(distinct)
+    }
+}
+
+/// Original O(n²) all-pairs eq_resolved dedup, kept exact for cases
+/// involving unbound inference variables (which hash-consing cannot
+/// bucket soundly since an unbound var eq_resolved-matches anything).
+fn merge_types_linear(unifier: &mut Unifier, live: Vec<Type>) -> Type {
+    let mut distinct: Vec<Type> = Vec::new();
+    for t in live {
+        if let Some(existing) = distinct.iter().find(|d| unifier.eq_resolved(d, &t)) {
+            let _ = unifier.unify(existing, &t);
+        } else {
+            distinct.push(t);
+        }
+    }
+    if distinct.len() == 1 {
+        distinct.pop().unwrap()
+    } else {
+        Type::Union(distinct)
+    }
+}
+
 /// Surface name of a native module-handle type (`tls`, `file`, ...).
 /// Consulted only when no struct/enum/alias/builtin matches, so user
 /// types always win. Keep in sync with the `Opaque(..)` tags in
@@ -720,6 +763,113 @@ fn hash_ty_into(ty: &Ty, h: &mut impl std::hash::Hasher) {
             for a in args {
                 hash_ty_into(a, h);
             }
+        }
+    }
+}
+
+/// Hash the structural shape of a resolved `Type` (excluding inference
+/// variable ids beyond their identity), for bucketing in `merge_types`.
+fn hash_type(ty: &Type) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::Hasher;
+    let mut h = DefaultHasher::new();
+    hash_type_into(ty, &mut h);
+    h.finish()
+}
+
+/// Write the structural shape of `ty` into an existing hasher.
+fn hash_type_into(ty: &Type, h: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    match ty {
+        Type::Int => h.write_u8(0),
+        Type::Float => h.write_u8(1),
+        Type::Bool => h.write_u8(2),
+        Type::Str => h.write_u8(3),
+        Type::Unit => h.write_u8(4),
+        Type::Void => h.write_u8(5),
+        Type::Bytes => h.write_u8(6),
+        Type::Json => h.write_u8(7),
+        Type::Db => h.write_u8(8),
+        Type::HttpServer => h.write_u8(9),
+        Type::TcpStream => h.write_u8(10),
+        Type::TcpListener => h.write_u8(11),
+        Type::Response => h.write_u8(12),
+        Type::HttpRequest => h.write_u8(13),
+        Type::Opaque(tag) => {
+            h.write_u8(14);
+            tag.hash(h);
+        }
+        Type::Chan => h.write_u8(15),
+        Type::TaskJoin => h.write_u8(16),
+        Type::Error => h.write_u8(17),
+        Type::Never => h.write_u8(18),
+        Type::Ptr { mutable, inner } => {
+            h.write_u8(19);
+            mutable.hash(h);
+            hash_type_into(inner, h);
+        }
+        Type::Tuple(ts) => {
+            h.write_u8(20);
+            for t in ts {
+                hash_type_into(t, h);
+            }
+        }
+        Type::Option(inner) => {
+            h.write_u8(21);
+            hash_type_into(inner, h);
+        }
+        Type::Result(ok, err) => {
+            h.write_u8(22);
+            hash_type_into(ok, h);
+            hash_type_into(err, h);
+        }
+        Type::Func(ps, r) => {
+            h.write_u8(23);
+            for p in ps {
+                hash_type_into(p, h);
+            }
+            hash_type_into(r, h);
+        }
+        Type::Array(inner) => {
+            h.write_u8(24);
+            hash_type_into(inner, h);
+        }
+        Type::Dict(k, v) => {
+            h.write_u8(25);
+            hash_type_into(k, h);
+            hash_type_into(v, h);
+        }
+        Type::Union(ts) => {
+            h.write_u8(26);
+            for t in ts {
+                hash_type_into(t, h);
+            }
+        }
+        Type::Struct(name, args) => {
+            h.write_u8(27);
+            name.hash(h);
+            for a in args {
+                hash_type_into(a, h);
+            }
+        }
+        Type::Enum(name, args) => {
+            h.write_u8(28);
+            name.hash(h);
+            for a in args {
+                hash_type_into(a, h);
+            }
+        }
+        Type::Range(inner) => {
+            h.write_u8(29);
+            hash_type_into(inner, h);
+        }
+        Type::Var(id) => {
+            h.write_u8(30);
+            id.hash(h);
+        }
+        Type::Named(name) => {
+            h.write_u8(31);
+            name.hash(h);
         }
     }
 }

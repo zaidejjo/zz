@@ -4627,6 +4627,41 @@ fn type_annotation_errors_are_deduped() {
 }
 
 #[test]
+fn array_literal_merges_repeated_element_types() {
+    // Homogeneous literal collapses element type to Int, wrapped in Array.
+    let r = check_src("x := [1, 2, 3]");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["x"], Type::Array(Box::new(Type::Int)));
+}
+
+#[test]
+fn array_literal_merges_distinct_into_union() {
+    let r = check_src("x := [1, 2.5]");
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(
+        r.bindings["x"],
+        Type::Array(Box::new(Type::Union(vec![Type::Int, Type::Float])))
+    );
+}
+
+#[test]
+fn large_array_literal_dedups_without_blowup() {
+    // 500 repeated Int elements must still collapse to Int (the old O(n^2)
+    // all-pairs eq_resolved would still be correct here but slower).
+    let mut src = String::from("x := [");
+    for i in 0..500 {
+        if i > 0 {
+            src.push(',');
+        }
+        src.push_str(&i.to_string());
+    }
+    src.push(']');
+    let r = check_src(&src);
+    assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(r.bindings["x"], Type::Array(Box::new(Type::Int)));
+}
+
+#[test]
 fn shadowed_lookup_restores_outer_after_inner_scope() {
     // Outer x := 1 (int), inner block shadows x := true (bool). Inner
     // reads see bool; after the inner scope pops, outer reads see int.
