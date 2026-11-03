@@ -10,6 +10,7 @@ use zz_scope::ScopeOps;
 use zz_span_ast::ast::{Program, Stmt};
 use zz_span_ast::span::Span;
 
+use zz_frontend::bench_attr::is_bench_like;
 use zz_infer::InferOps;
 use zz_sigs::funcs::FuncOps;
 use zz_structs::StructOps;
@@ -726,7 +727,11 @@ fn check_program_impl(
     // recursion resolve.
     for stmt in &program.stmts {
         if let Stmt::Func {
-            name, span, pub_, ..
+            name,
+            decorators,
+            span,
+            pub_,
+            ..
         } = stmt
         {
             let full_name = name.join(".");
@@ -745,7 +750,13 @@ fn check_program_impl(
             }
             // Track locally-defined functions for unused-func warnings
             // (separate from stdlib-seeded functions in checker.funcs).
-            checker.local_funcs.insert(full_name);
+            checker.local_funcs.insert(full_name.clone());
+            // Functions annotated with @test/@bench/@setup/@teardown are
+            // invoked by the harness at runtime, not by direct calls, so
+            // they must not trigger unused-func warnings.
+            if decorators.iter().any(is_bench_like) {
+                checker.test_funcs.insert(full_name);
+            }
         }
         // Pass 1d: register `extern "C"` signatures (no bodies to check).
         if let Stmt::ExternBlock { items, .. } = stmt {
@@ -816,9 +827,12 @@ fn check_program_impl(
     // because a particular module doesn't call them. Skip pub functions
     // (cross-module users), extern functions (linker users), methods
     // (`Type.method`, dispatched separately), `_`-prefixed names (already
-    // silenced for variables), and `main` (the runtime entry point).
+    // silenced for variables), `main` (the runtime entry point), and
+    // test/bench/setup/teardown functions (invoked by the harness at
+    // runtime, not by direct calls in source).
     for name in &checker.local_funcs {
         if name == "main"
+            || checker.test_funcs.contains(name.as_str())
             || pub_funcs_set.contains(name.as_str())
             || name.starts_with('_')
             || checker.used_names.contains(name.as_str())

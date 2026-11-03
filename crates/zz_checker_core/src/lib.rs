@@ -330,6 +330,10 @@ pub struct Checker {
     pub shadow_probes: Vec<ShadowProbe>,
     /// Top-level names marked `pub` — should not emit unused warnings.
     pub pub_names: std::collections::HashSet<String>,
+    /// Functions annotated with `@test`, `@bench`, `@setup`, or `@teardown`.
+    /// These are invoked by the test/bench harness at runtime, not by direct
+    /// calls in source, so they must not trigger unused-func warnings.
+    pub test_funcs: std::collections::HashSet<String>,
     /// Functions defined in the current program (not stdlib-seeded).
     /// Used to avoid warning on unused stdlib functions that happen to
     /// not appear in `used_names`.
@@ -454,6 +458,7 @@ impl Checker {
             shadow_probes: Vec::new(),
             pub_names: std::collections::HashSet::new(),
             local_funcs: std::collections::HashSet::new(),
+            test_funcs: std::collections::HashSet::new(),
             defined_names: vec![HashMap::new()],
             had_undefined_var: false,
             tail_is_value: false,
