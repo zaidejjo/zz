@@ -375,6 +375,14 @@ pub struct Checker {
     pub span_types: std::collections::HashMap<SpanKey, Type>,
     /// Native libraries requested via `@link`, in source order, deduped.
     pub link_libs: Vec<String>,
+    /// Extern `extern "C"` symbols declared this run: C symbol → defining span.
+    /// Used to detect duplicate extern symbol declarations at check time so
+    /// they surface as `zz check` errors instead of linker errors. Full
+    /// symbol-existence verification (does the symbol actually exist in a
+    /// linked library) requires the C toolchain and is intentionally a link-
+    /// time concern, not a check-time one — emitting symbol-not-found errors
+    /// here would risk false positives in environments without the library.
+    pub extern_symbols: std::collections::HashMap<String, Span>,
     /// Per-domain state (route lints, future lints), keyed by type.
     pub domain: DomainState,
     /// Enclosing-item scope stack for [`SpanKey`] recording. Holds the
@@ -454,6 +462,7 @@ impl Checker {
             scope_cache: std::collections::HashMap::new(),
             names_at_depth: vec![Vec::new()],
             link_libs: Vec::new(),
+            extern_symbols: std::collections::HashMap::new(),
             domain: DomainState::default(),
             type_annotation_cache: std::collections::HashMap::new(),
         }

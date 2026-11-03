@@ -4880,3 +4880,48 @@ fn generic_enum_untyped_payload_fails_loudly_not_silently() {
         r.errors
     );
 }
+
+#[test]
+fn extern_unique_symbols_ok() {
+    // Distinct `extern "C"` symbols (explicit override and derived) check
+    // cleanly.
+    let r = check_src(
+        "extern \"C\" {\n\
+            func toy.add(a: int, b: int) -> int = \"toy_add_impl\";\n\
+            func toy.scale(h: int, f: float) -> int\n\
+        }\n",
+    );
+    assert!(!has_errors(&r), "expected no errors, got: {:?}", r.errors);
+}
+
+#[test]
+fn extern_duplicate_symbol_errors() {
+    // Two `extern "C"` functions declaring the same C symbol is a link error
+    // surfaced at check time.
+    let r = check_src(
+        "extern \"C\" {\n\
+            func a.one(x: int) -> int = \"shared_impl\";\n\
+            func b.two(y: int) -> int = \"shared_impl\";\n\
+        }\n",
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("duplicate extern") && e.message.contains("shared_impl")),
+        "expected duplicate extern symbol error, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn extern_invalid_c_identifier_errors() {
+    // An explicit C symbol override that is not a valid C identifier errors.
+    let r = check_src("extern \"C\" { func bad() -> int = \"bad-symbol!\"; }\n");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("not a valid C identifier")),
+        "expected invalid C identifier error, got: {:?}",
+        r.errors
+    );
+}
