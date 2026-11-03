@@ -3221,18 +3221,29 @@ impl Lowerer {
                                 elem = elem,
                             )
                         };
-                        out.push_str(&format!(
-                            "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n{grow}    }}\n",
-                            len = len_cid,
-                            cap = cap_cid,
-                            grow = grow,
-                        ));
-                        out.push_str(&format!(
-                            "    {cid}[{len}] = {arg_val};\n    {len}++;\n",
-                            cid = cid,
-                            len = len_cid,
-                            arg_val = arg_val
-                        ));
+                        // When emit_for pre-reserved capacity for a counted
+                        // loop, skip the per-iteration grow guard.
+                        if self.skip_flat_push_grow.get() {
+                            out.push_str(&format!(
+                                "    {cid}[{len}] = {arg_val};\n    {len}++;\n",
+                                cid = cid,
+                                len = len_cid,
+                                arg_val = arg_val
+                            ));
+                        } else {
+                            out.push_str(&format!(
+                                "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n{grow}    }}\n",
+                                len = len_cid,
+                                cap = cap_cid,
+                                grow = grow,
+                            ));
+                            out.push_str(&format!(
+                                "    {cid}[{len}] = {arg_val};\n    {len}++;\n",
+                                cid = cid,
+                                len = len_cid,
+                                arg_val = arg_val
+                            ));
+                        }
                         return "zz_unit()".to_string();
                     }
                     // Scalar element push
@@ -3270,18 +3281,29 @@ impl Lowerer {
                                 elem_ctype = elem_ctype,
                             )
                         };
-                        out.push_str(&format!(
-                            "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n{grow}    }}\n",
-                            len = len_cid,
-                            cap = cap_cid,
-                            grow = grow,
-                        ));
-                        out.push_str(&format!(
-                            "    {cid}[{len}] = {arg_raw};\n    {len}++;\n",
-                            cid = cid,
-                            len = len_cid,
-                            arg_raw = arg_raw
-                        ));
+                        // When emit_for pre-reserved capacity for a counted
+                        // loop, skip the per-iteration grow guard.
+                        if self.skip_flat_push_grow.get() {
+                            out.push_str(&format!(
+                                "    {cid}[{len}] = {arg_raw};\n    {len}++;\n",
+                                cid = cid,
+                                len = len_cid,
+                                arg_raw = arg_raw
+                            ));
+                        } else {
+                            out.push_str(&format!(
+                                "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n{grow}    }}\n",
+                                len = len_cid,
+                                cap = cap_cid,
+                                grow = grow,
+                            ));
+                            out.push_str(&format!(
+                                "    {cid}[{len}] = {arg_raw};\n    {len}++;\n",
+                                cid = cid,
+                                len = len_cid,
+                                arg_raw = arg_raw
+                            ));
+                        }
                         return "zz_unit()".to_string();
                     }
                 }

@@ -553,6 +553,9 @@ pub struct Lowerer {
     /// accumulated by hoisting optimizations during body lowering.
     /// Consumed by `emit_for`.
     pub(crate) loop_post_code: std::cell::RefCell<Vec<String>>,
+    /// When set, flat-array push skips the per-iteration grow guard
+    /// because `emit_for` pre-reserved capacity for the whole loop.
+    pub(crate) skip_flat_push_grow: std::cell::Cell<bool>,
     /// Names of string accumulators already hoisted into a pre-loop builder,
     /// so we don't emit duplicate builder inits for the same accumulator.
     pub(crate) accumulated_names: std::cell::RefCell<std::collections::HashSet<String>>,
@@ -665,6 +668,7 @@ impl Lowerer {
             loop_depth: std::cell::Cell::new(0),
             loop_pre_code: std::cell::RefCell::new(Vec::new()),
             loop_post_code: std::cell::RefCell::new(Vec::new()),
+            skip_flat_push_grow: std::cell::Cell::new(false),
             accumulated_names: std::cell::RefCell::new(std::collections::HashSet::new()),
         };
         lowerer.specialized = lowerer.compute_specialized();
@@ -2496,6 +2500,21 @@ pub(crate) fn scalar_operand_type(e: &Expr, names: &NameCtx) -> Option<&'static 
                 _ => None,
             }
         }
+        Expr::Field { obj, name, .. } => {
+            // Raw struct field read on an unboxed local (`p.x` where `p` is a
+            // `zz_struct_*` raw C value). Scalar fields lower to raw C
+            // arithmetic; the Binary handler's `field_read_scalar` override
+            // refines the exact field type at emission time. Returns int64_t
+            // conservatively — correct for int fields (the common case), and
+            // field_read_scalar guards exact types during codegen.
+            if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+                let ctype = names.lookup_type(obj_name).unwrap_or("");
+                if ctype.starts_with("zz_struct_") {
+                    return Some("int64_t");
+                }
+            }
+            None
+        }
         Expr::Unary { op, expr, .. } => {
             let inner = scalar_operand_type(expr, names)?;
             match op {
@@ -2598,6 +2617,21 @@ pub(crate) fn raw_scalar_text(
 ) -> Option<(String, &'static str)> {
     if let (Some(raw), Some(t)) = (scalar_operand_c(e, names), scalar_operand_type(e, names)) {
         return Some((raw, t));
+    }
+    // Handle `Expr::Field` reads on unboxed struct locals (`p.field` where
+    // `p` is a raw C struct, type starts with "zz_struct_"). The emitted
+    // text is already `(cid).field` (raw C), but scalar_operand_c/type
+    // lack a Field arm, so classify it here. field_read_scalar (called in
+    // the Binary handler override) refines the exact type; we default to
+    // int64_t which covers the common arithmetic case.
+    if let Expr::Field { obj, name, .. } = e {
+        if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+            let ctype = names.lookup_type(obj_name).unwrap_or("");
+            if ctype.starts_with("zz_struct_") {
+                let cid = names.lookup(obj_name).unwrap_or(obj_name);
+                return Some((format!("({cid}).{name}"), "int64_t"));
+            }
+        }
     }
     let ident = match e {
         Expr::Ident { name, .. } => Some(name.as_str()),
@@ -2906,6 +2940,18 @@ pub(crate) fn scalar_operand_c(e: &Expr, names: &NameCtx) -> Option<String> {
             };
             let (raw, _) = names.stack_array_elem(name, *value)?;
             Some(raw)
+        }
+        Expr::Field { obj, name, .. } => {
+            // Raw struct field read on an unboxed local (`p.x` where `p` is
+            // a `zz_struct_*` raw C value).
+            if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+                let ctype = names.lookup_type(obj_name).unwrap_or("");
+                if ctype.starts_with("zz_struct_") {
+                    let cid = names.lookup(obj_name).unwrap_or(obj_name);
+                    return Some(format!("({cid}).{name}"));
+                }
+            }
+            None
         }
         _ => None,
     }

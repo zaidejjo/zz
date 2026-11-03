@@ -1160,7 +1160,12 @@ impl Lowerer {
                     }
                     let val = self.emit_expr(e, names, out);
                     *self.void_context.borrow_mut() = false;
-                    out.push_str(&format!("    (void)({val});\n"));
+                    // Flat push in a pre-reserved counted loop: push code
+                    // already emitted inline (no grow guard) by emit_expr;
+                    // skip the `(void)(zz_unit())` wrapper.
+                    if !self.skip_flat_push_grow.get() {
+                        out.push_str(&format!("    (void)({val});\n"));
+                    }
                 } else if !is_leaf_expr(e) {
                     // Statement-position `if/else` discards its temp:
                     // lower it void so arm pushes take the in-place path
@@ -1627,16 +1632,21 @@ impl Lowerer {
                     None
                 };
             // Check if end is an unboxed scalar variable (for fast path)
-            let end_name_opt: Option<String> = match &end_expr {
-                Expr::Ident { name, .. } => Some(name.clone()),
-                Expr::Path { parts, .. } => Some(parts.join(".")),
-                _ => None,
+            let end_is_scalar = match &end_expr {
+                Expr::Ident { name, .. } => names
+                    .lookup_type(name)
+                    .map_or(false, |t| t == "int64_t" || t == "double" || t == "bool"),
+                Expr::Path { parts, .. } => {
+                    let joined = parts.join(".");
+                    names
+                        .lookup_type(&joined)
+                        .map_or(false, |t| t == "int64_t" || t == "double" || t == "bool")
+                }
+                // Literal bounds are scalar too — they lower to unboxed
+                // int64_t/float C values with no zz_value wrapping.
+                Expr::Int { .. } | Expr::Float { .. } => true,
+                _ => false,
             };
-            let end_is_scalar = end_name_opt
-                .as_ref()
-                .and_then(|n| names.lookup_type(n))
-                .map(|t| t == "int64_t" || t == "double" || t == "bool")
-                .unwrap_or(false);
 
             let sv = self.emit_expr(&start_expr, names, out);
             let ev = self.emit_expr(&end_expr, names, out);
@@ -1781,6 +1791,11 @@ impl Lowerer {
                             }
                         })
                         .unwrap_or_else(|| {
+                            let end_name_opt: Option<String> = match &end_expr {
+                                Expr::Ident { name, .. } => Some(name.clone()),
+                                Expr::Path { parts, .. } => Some(parts.join(".")),
+                                _ => None,
+                            };
                             let end_ctype: String = end_name_opt
                                 .as_ref()
                                 .and_then(|n| names.lookup_type(n))
@@ -1814,6 +1829,69 @@ impl Lowerer {
                 // `needs_safepoint`): the call barrier blocks clang from
                 // folding tight scalar loops to closed form.
                 self.emit_safepoint(out, "    ");
+
+                // Pre-reserve capacity for counted flat push loops:
+                // `for i in 0..N { arr.push(i) }` grows `arr` to capacity N
+                // once before the loop, removing the per-iteration grow
+                // guard (the main optimization barrier). Works for literal
+                // bounds (`0..1000000`) and const bounds (`0..N` where N is
+                // `const N = 1000000`).
+                let loop_n: Option<i64> = match &end_expr {
+                    Expr::Int { value, .. } => Some(*value as i64),
+                    Expr::Ident { name, .. } => find_const_value(self.tp.stmts(), name),
+                    _ => None,
+                };
+                if let Some(n) = loop_n {
+                    if n > 0 && vars.len() == 1 {
+                        let loop_var = &vars[0].name;
+                        if let Some(Stmt::Expr(call)) = body.stmts.first() {
+                            if body.stmts.len() == 1 {
+                                if let Expr::Call { callee, args, .. } = call {
+                                    if let Some((arr_name, arr_ctype)) =
+                                        flat_push_receiver(callee, args, loop_var, names, self)
+                                    {
+                                        let len_cid =
+                                            names.lookup_or_name(&format!("{}_len", arr_name));
+                                        let cap_cid =
+                                            names.lookup_or_name(&format!("{}_cap", arr_name));
+                                        let cid = names
+                                            .lookup(&arr_name)
+                                            .map(str::to_string)
+                                            .unwrap_or_else(|| arr_name.clone());
+                                        let is_global = names.resolves_to_global(&arr_name);
+                                        // arr_ctype is the pointer type (e.g.
+                                        // "int64_t *" or "zz_struct_Pt *").
+                                        // Strip the trailing " *" to get the
+                                        // element C type for sizeof/cast.
+                                        let elem_ctype =
+                                            arr_ctype.strip_suffix(" *").unwrap_or(&arr_ctype);
+                                        let pre_reserve = if is_global {
+                                            format!(
+                                                "    if ({cap} < {n}) {{ {cap} = {n}; {cid} = ({elem_ctype}*)realloc({cid}, (size_t){n} * sizeof({elem_ctype})); }}\n",
+                                                cap = cap_cid,
+                                                n = n,
+                                                cid = cid,
+                                                elem_ctype = elem_ctype
+                                            )
+                                        } else {
+                                            format!(
+                                                "    if ({cap} < {n}) {{ {cap} = {n}; {ctype} __flat_pre = ({elem_ctype}*)zz_arena_alloc(&_func_arena, (size_t){n} * sizeof({elem_ctype}), 8);\n      if ({len} > 0) {{ memcpy(__flat_pre, {cid}, (size_t){len} * sizeof({elem_ctype})); }}\n      {cid} = __flat_pre; }}\n",
+                                                cap = cap_cid,
+                                                n = n,
+                                                len = len_cid,
+                                                cid = cid,
+                                                ctype = arr_ctype,
+                                                elem_ctype = elem_ctype
+                                            )
+                                        };
+                                        out.push_str(&pre_reserve);
+                                        self.skip_flat_push_grow.set(true);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             } else {
                 // Slow path: both bounds are general expressions, use boxed loop
                 // (start must be boxed exactly like the end bound: a bare
@@ -1938,6 +2016,9 @@ impl Lowerer {
             if !end_is_scalar {
                 out.push_str("    }\n}\n");
             }
+            // Clear the pre-reserve flag so later push calls outside this
+            // loop regain the grow guard.
+            self.skip_flat_push_grow.set(false);
             // Emit hoisted post-loop code (e.g. string accumulator freeze).
             for post in self.loop_post_code.borrow_mut().drain(..) {
                 out.push_str(&post);
@@ -2506,4 +2587,112 @@ fn mutating_method_target(e: &Expr, names: &NameCtx) -> Option<(String, String)>
         },
         _ => None,
     }
+}
+
+/// Detect `arr.push(loop_var)` where `arr` is a flat (unboxed) array and
+/// `loop_var` is the loop variable. Returns `(array_name, element_ctype)`.
+fn flat_push_receiver(
+    callee: &Expr,
+    args: &[Expr],
+    loop_var: &str,
+    names: &NameCtx,
+    lowerer: &Lowerer,
+) -> Option<(String, String)> {
+    // Only single-argument `push`.
+    let [arg] = args else {
+        return None;
+    };
+    // Argument must be the loop variable.
+    if !matches!(arg, Expr::Ident { name, .. } if name == loop_var) {
+        return None;
+    }
+    // Receiver must be a flat array: resolve its C type and check.
+    let (recv_name, recv_ctype) = match callee {
+        // `arr.push(x)` parsed as a two-part path where the head is a local.
+        Expr::Path { parts, .. } if parts.len() == 2 => {
+            let name = &parts[0];
+            let ctype = names.lookup_type(name).unwrap_or("");
+            (name.clone(), ctype.to_string())
+        }
+        // `arr.push(x)` parsed as a field access on an identifier.
+        Expr::Field { obj, name, .. } if name == "push" => match obj.as_ref() {
+            Expr::Ident { name: obj_name, .. } => {
+                let ctype = names.lookup_type(obj_name).unwrap_or("");
+                (obj_name.clone(), ctype.to_string())
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let is_flat = lowerer.scalar_array_from_ptr(&recv_ctype).is_some()
+        || lowerer.flat_array_from_ptr(&recv_ctype).is_some();
+    is_flat.then_some((recv_name, recv_ctype))
+}
+
+/// Find the integer value of a `const name = <literal>` binding.
+/// Searches top-level declarations and the bodies of top-level functions
+/// (including nested blocks) since `const` inside `main` lives there.
+fn find_const_value(stmts: &[Stmt], name: &str) -> Option<i64> {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Decl {
+                ty: None,
+                name: decl_name,
+                value: Expr::Int { value, .. },
+                is_const: true,
+                ..
+            } if decl_name.name == name => return Some(*value as i64),
+            Stmt::Func { body, .. } => {
+                if let Some(v) = find_const_in_block(body, name) {
+                    return Some(v);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_const_in_block(block: &Block, name: &str) -> Option<i64> {
+    for stmt in &block.stmts {
+        match stmt {
+            Stmt::Decl {
+                ty: None,
+                name: decl_name,
+                value: Expr::Int { value, .. },
+                is_const: true,
+                ..
+            } if decl_name.name == name => return Some(*value as i64),
+            Stmt::For { body, .. } => {
+                if let Some(v) = find_const_in_block(body, name) {
+                    return Some(v);
+                }
+            }
+            Stmt::Expr(e) => match e {
+                Expr::If { then, els, .. } => {
+                    if let Some(v) = find_const_in_block(then, name) {
+                        return Some(v);
+                    }
+                    if let Some(el) = els {
+                        match &**el {
+                            Expr::Block(block) => {
+                                if let Some(v) = find_const_in_block(block, name) {
+                                    return Some(v);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Expr::Block(block) => {
+                    if let Some(v) = find_const_in_block(block, name) {
+                        return Some(v);
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    None
 }
