@@ -2694,6 +2694,11 @@ impl TypeCheckOps for Checker {
             _ => None,
         };
         if let Some(name) = &direct_name {
+            // Mark the callee as used so the unused-private-function warning
+            // doesn't fire on legitimately-called functions.
+            if self.funcs.contains_key(name) {
+                self.used_names.insert(name.clone());
+            }
             // Removed push spellings: `vec.append` / `std.vec.append` and the
             // bare `append` builtin are gone — `vec.push` plus the method form
             // `xs.push(x)` is the only spelling. Hard error with a hint

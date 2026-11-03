@@ -330,6 +330,10 @@ pub struct Checker {
     pub shadow_probes: Vec<ShadowProbe>,
     /// Top-level names marked `pub` — should not emit unused warnings.
     pub pub_names: std::collections::HashSet<String>,
+    /// Functions defined in the current program (not stdlib-seeded).
+    /// Used to avoid warning on unused stdlib functions that happen to
+    /// not appear in `used_names`.
+    pub local_funcs: std::collections::HashSet<String>,
     /// Names defined in the current scope with their spans — for unused
     /// variable warnings. Each scope level has its own map.
     pub defined_names: Vec<HashMap<String, DefinedBinding>>,
@@ -449,6 +453,7 @@ impl Checker {
             used_bindings: std::collections::HashSet::new(),
             shadow_probes: Vec::new(),
             pub_names: std::collections::HashSet::new(),
+            local_funcs: std::collections::HashSet::new(),
             defined_names: vec![HashMap::new()],
             had_undefined_var: false,
             tail_is_value: false,

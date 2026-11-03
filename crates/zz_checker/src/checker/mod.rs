@@ -741,8 +741,11 @@ fn check_program_impl(
             }
             checker.collect_func(stmt);
             if *pub_ {
-                pub_funcs_set.insert(full_name);
+                pub_funcs_set.insert(full_name.clone());
             }
+            // Track locally-defined functions for unused-func warnings
+            // (separate from stdlib-seeded functions in checker.funcs).
+            checker.local_funcs.insert(full_name);
         }
         // Pass 1d: register `extern "C"` signatures (no bodies to check).
         if let Stmt::ExternBlock { items, .. } = stmt {
@@ -808,14 +811,15 @@ fn check_program_impl(
 
     // Emit unused private-function warnings. A top-level function that is
     // never referenced (its name never appears in `used_names`) is dead
-    // code. Skip pub functions (cross-module users), extern functions
-    // (linker users), methods (`Type.method`, dispatched separately), and
-    // `_`-prefixed names (already silenced for variables). Every call goes
-    // through `lookup`, so an unreferenced name is genuinely unused.
-    for (name, sig) in &checker.funcs {
-        if pub_funcs_set.contains(name.as_str())
-            || sig.is_extern
-            || name.contains('.')
+    // code. Only check functions defined in the current program
+    // (`local_funcs`) — stdlib-seeded functions are not dead code just
+    // because a particular module doesn't call them. Skip pub functions
+    // (cross-module users), extern functions (linker users), methods
+    // (`Type.method`, dispatched separately), `_`-prefixed names (already
+    // silenced for variables), and `main` (the runtime entry point).
+    for name in &checker.local_funcs {
+        if name == "main"
+            || pub_funcs_set.contains(name.as_str())
             || name.starts_with('_')
             || checker.used_names.contains(name.as_str())
         {
