@@ -239,6 +239,11 @@ static inline zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
     (void)err;
     if (arr.tag != ZZ_ARRAY) return zz_unit();
     zz_array *a = arr.arr;
+    // Copy-on-write: only mutate in place when uniquely owned (refs == 1).
+    // Shared or arena arrays must be dup'd first (not done here — caller
+    // must hold exclusive ownership; this is used internally where arr is
+    // freshly created with refs == 1).
+    if (a->refs != 1) return zz_unit();
     if (a->len >= a->cap) {
         size_t new_cap = a->cap ? a->cap * 2 : 8;
         if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_STACK_MAGIC

@@ -1005,14 +1005,33 @@ impl Lowerer {
                     ..
                 } = cond.as_ref()
                 {
-                    if let Expr::Ident { name, .. } = left.as_ref() {
-                        // Emit the bound expression into a scratch buffer
-                        // (side effects are harmless — the actual condition
-                        // emission below re-emits it, but for simple idents
-                        // this is just a variable reference).
-                        let mut scratch = String::new();
-                        let limit_text = self.emit_expr(right, names, &mut scratch);
-                        names.loop_bounds.insert(name.clone(), limit_text);
+                    // `while j < n` → `j < n` bound for bounds elimination.
+                    // `while i * i < n` → `i < n` bound (i*i < n implies i < n
+                    // for i >= 0, which holds since i starts at 0 and grows).
+                    let (bound_var, limit_text) = match left.as_ref() {
+                        Expr::Ident { name, .. } => {
+                            let mut scratch = String::new();
+                            let limit = self.emit_expr(right, names, &mut scratch);
+                            (name.clone(), limit)
+                        }
+                        Expr::Binary {
+                            op: zz_frontend::ast::BinOp::Mul,
+                            left: l,
+                            right: _r,
+                            ..
+                        } if matches!(l.as_ref(), Expr::Ident { .. }) => {
+                            if let Expr::Ident { name, .. } = l.as_ref() {
+                                let mut scratch = String::new();
+                                let limit = self.emit_expr(right, names, &mut scratch);
+                                (name.clone(), limit)
+                            } else {
+                                (String::new(), String::new())
+                            }
+                        }
+                        _ => (String::new(), String::new()),
+                    };
+                    if !bound_var.is_empty() {
+                        names.loop_bounds.insert(bound_var, limit_text);
                     }
                 }
                 let c = self.emit_expr(cond, names, out);
@@ -1146,8 +1165,15 @@ impl Lowerer {
                 if let Some((arr_name, elem_ctype)) = self.flat_index_receiver(obj, names) {
                     let arr_cid = names.lookup(arr_name.as_str()).unwrap().to_string();
                     let idx_raw = self.flat_index_expr(index, names, out);
-                    let len_cid = names.lookup_or_name(&format!("{}_len", arr_name));
                     let func = names.current_scope.clone();
+
+                    // Resolve array length: prefer array_len_exprs (raw bound
+                    // expression from list comprehension), fall back to {name}_len CID.
+                    let len_cid = names
+                        .array_len_exprs
+                        .get(arr_name.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| names.lookup_or_name(&format!("{}_len", arr_name)));
 
                     // Check bounds-check elimination: index var bounded by array length.
                     let bounds_eliminated = match index.as_ref() {
