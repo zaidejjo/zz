@@ -1896,6 +1896,56 @@ impl Lowerer {
             let ev = self.emit_expr(&end_expr, names, out);
             let v = &vars[0].name;
             let green = self.green_active();
+
+            // Pointer arithmetic optimization for flat array stores:
+            // `for k in 0..n { arr[k] = val }` → `T *ptr = arr; for (...) { *ptr++ = val; }`
+            // Lets clang vectorize stores with SIMD. Only fires when the body
+            // is a single flat array index store with the loop var as index.
+            let ptr_store: Option<(String, String)> = if !green && body.stmts.len() == 1 {
+                if let Stmt::Assign {
+                    target, value: _, ..
+                } = &body.stmts[0]
+                {
+                    if let Expr::Index { obj, index, .. } = target {
+                        if let Expr::Ident { name: idx_name, .. } = index.as_ref() {
+                            if idx_name == v.as_str() {
+                                if let Expr::Ident { name: arr_name, .. } = obj.as_ref() {
+                                    if let Some(ctype) = names.lookup_type(arr_name) {
+                                        if ctype == "bool *"
+                                            || ctype == "int64_t *"
+                                            || ctype == "double *"
+                                        {
+                                            let arr_cid =
+                                                names.lookup(arr_name).unwrap().to_string();
+                                            let elem_ctype = ctype
+                                                .strip_suffix(" *")
+                                                .unwrap_or(&ctype)
+                                                .to_string();
+                                            Some((arr_cid, elem_ctype))
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             // Green closures: the loop variable lives in a frame cell
             // (a resume may land inside the body). Plain path keeps the
             // unboxed stack local.
@@ -2056,11 +2106,17 @@ impl Lowerer {
                             out.push_str(&format!("    {ederef} = {ev_unboxed};\n"));
                             ederef
                         });
-                    format!("for ({cid} = {sv_unboxed}; {cid} < {end_ref}; {cid}++) {{\n")
+                    format!("for ({cid} = {sv_unboxed}; {cid} < {end_ref}; {cid}++, ptr += 1) {{\n")
                 } else {
-                    format!(
-                        "for (int64_t {cid} = {sv_unboxed}; {cid} < {ev_unboxed}; {cid}++) {{\n"
-                    )
+                    if let Some((ref _arr_cid, ref _elem_ctype)) = ptr_store {
+                        format!(
+                            "for (int64_t {cid} = {sv_unboxed}; {cid} < {ev_unboxed}; {cid}++, ptr += 1) {{\n"
+                        )
+                    } else {
+                        format!(
+                            "for (int64_t {cid} = {sv_unboxed}; {cid} < {ev_unboxed}; {cid}++) {{\n"
+                        )
+                    }
                 };
                 // Record loop bound for bounds-check elimination:
                 // `for i in 0..limit` means `i < limit` inside the body,
@@ -2073,6 +2129,11 @@ impl Lowerer {
                 // before the loop header.
                 for pre in self.loop_pre_code.borrow_mut().drain(..) {
                     out.push_str(&pre);
+                }
+                // Pointer setup for flat array store optimization:
+                // `T *ptr = arr;` before the loop lets clang vectorize stores.
+                if let Some((ref arr_cid, ref elem_ctype)) = ptr_store {
+                    out.push_str(&format!("    {elem_ctype} *ptr = {arr_cid};\n"));
                 }
                 out.push_str(&s);
                 // Loop-top safepoint (mirrors the VM's `Op::Safepoint`),
@@ -2250,8 +2311,41 @@ impl Lowerer {
             // on later iterations; end-of-body knowledge is likewise
             // unsound past the exit (zero-trip loops skip the body).
             names.clear_array_lens();
-            for bstmt in &body.stmts {
-                self.emit_stmt(bstmt, names, out, false);
+            // Pointer store optimization: emit *ptr++ = val instead of
+            // arr[k] = val for SIMD-friendly stores.
+            if let Some((ref _arr_cid, ref elem_ctype)) = ptr_store {
+                if let Stmt::Assign {
+                    target: _, value, ..
+                } = &body.stmts[0]
+                {
+                    // Emit raw value for flat array store (no boxing).
+                    let val_raw = match value {
+                        Expr::Bool { value, .. } => {
+                            if *value {
+                                "true".to_string()
+                            } else {
+                                "false".to_string()
+                            }
+                        }
+                        Expr::Int { value, .. } => value.to_string(),
+                        Expr::Float { value, .. } => value.to_string(),
+                        _ => {
+                            // Fall back to boxed emission for complex values
+                            let emitted = self.emit_expr(value, names, out);
+                            match elem_ctype.as_str() {
+                                "bool" => format!("({emitted}).b"),
+                                "int64_t" => format!("({emitted}).i"),
+                                "double" => format!("({emitted}).f"),
+                                _ => emitted,
+                            }
+                        }
+                    };
+                    out.push_str(&format!("    *ptr++ = {val_raw};\n"));
+                }
+            } else {
+                for bstmt in &body.stmts {
+                    self.emit_stmt(bstmt, names, out, false);
+                }
             }
             self.loop_scope_end(names, out, body_scope);
             names.clear_array_lens();

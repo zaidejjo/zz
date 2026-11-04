@@ -1034,6 +1034,9 @@ impl Lowerer {
                         names.loop_bounds.insert(bound_var, limit_text);
                     }
                 }
+                // Pointer arithmetic for while loop array stores (future optimization).
+                let ptr_store_while: Option<(String, String, String)> = None;
+
                 let c = self.emit_expr(cond, names, out);
                 let c = box_scalar_operand(cond, names, &c);
                 out.push_str(&format!("        if (!zz_truthy({c})) break;\n"));
