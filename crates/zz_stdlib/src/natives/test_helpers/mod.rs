@@ -150,7 +150,7 @@ mod tests {
             .trim_start_matches(".ok(")
             .trim_end_matches(')')
             .parse()
-            .expect("port");
+            .unwrap_or_else(|e| panic!("failed to parse port: {e}"));
         // Range only: re-binding here would be TOCTOU-flaky under parallel
         // libtest (kernel may hand the closed port to another thread first).
         assert!((1..=65535).contains(&port), "got {port}");

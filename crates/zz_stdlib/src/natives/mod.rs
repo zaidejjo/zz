@@ -1,7 +1,10 @@
 //! Standard library native implementations, consumed by the interpreter.
 //!
 //! Native functions take `&mut Vec<Value>` (not a slice) because
-//! `std.vec.push` must grow the argument vector.
+//! `std.vec.push` must grow the argument vector. The `ptr_arg` lint is
+//! allowed module-wide because the native ABI contract requires
+//! `&mut Vec<Value>`; changing every native to `&mut [Value]` would be a
+//! much larger refactor with no benefit.
 
 #![allow(clippy::ptr_arg)]
 
