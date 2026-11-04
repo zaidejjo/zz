@@ -299,7 +299,7 @@ impl Interp {
             }
             Stmt::Break { span } => Ok(Flow::Break(*span)),
             Stmt::Continue { span } => Ok(Flow::Continue(*span)),
-            Stmt::Defer { expr, .. } => {
+            Stmt::Defer { expr, span } => {
                 let closure = FuncValue {
                     params: vec![],
                     body: expr.as_ref().clone(),
@@ -309,10 +309,14 @@ impl Interp {
                     // Deferred expression: value ignored.
                     tail_value: true,
                 };
-                self.defer_stacks
-                    .last_mut()
-                    .unwrap()
-                    .push(Value::Func(std::rc::Rc::new(closure)));
+                match self.defer_stacks.last_mut() {
+                    Some(stack) => {
+                        stack.push(Value::Func(std::rc::Rc::new(closure)));
+                    }
+                    None => {
+                        return Err(EvalError::new("`defer` outside of a function", *span));
+                    }
+                }
                 Ok(Flow::Value(Value::Unit))
             }
             Stmt::Destructure { pat, value, .. } => {
