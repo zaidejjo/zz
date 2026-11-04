@@ -339,9 +339,11 @@ mod tests {
         // bytes, csv, property). TOML lives as an external package (~/Projects/toml),
         // not in the stdlib.
         assert_eq!(programs.len(), 16, "expected 16 pure-ZZ stdlib modules");
-        // Each module should have a non-empty types map.
+        // Each module should compile and have a non-empty types map.
         for (i, tp) in programs.iter().enumerate() {
-            let tp = tp.as_ref().expect("stdlib module should compile");
+            let tp = tp.as_ref().unwrap_or_else(|e| {
+                panic!("stdlib module {i} failed to compile: {e}");
+            });
             assert!(
                 !tp.types.is_empty(),
                 "module {i} should have resolved types"
@@ -352,7 +354,9 @@ mod tests {
     #[test]
     fn pure_zz_str_has_expected_functions() {
         let programs = zz_stdlib_programs();
-        let str_prog = programs[0].as_ref().expect("str module should compile"); // str/mod.zz
+        let str_prog = programs[0].as_ref().unwrap_or_else(|e| {
+            panic!("str module failed to compile: {e}");
+        }); // str/mod.zz
         assert!(
             str_prog.funcs.contains_key("str.repeat"),
             "str.repeat should be defined"
@@ -382,7 +386,9 @@ mod tests {
     #[test]
     fn pure_zz_math_has_expected_functions() {
         let programs = zz_stdlib_programs();
-        let math_prog = programs[1].as_ref().expect("math module should compile"); // math/mod.zz
+        let math_prog = programs[1].as_ref().unwrap_or_else(|e| {
+            panic!("math module failed to compile: {e}");
+        }); // math/mod.zz
         assert!(
             math_prog.funcs.contains_key("math.sum"),
             "math.sum should be defined"
@@ -524,7 +530,9 @@ mod tests {
     #[test]
     fn pure_zz_regexp_has_expected_functions() {
         let programs = zz_stdlib_programs();
-        let regexp_prog = programs[4].as_ref().expect("regexp module should compile"); // regexp/mod.zz
+        let regexp_prog = programs[4]
+            .as_ref()
+            .unwrap_or_else(|e| panic!("regexp module failed to compile: {e}")); // regexp/mod.zz
         assert!(
             regexp_prog.funcs.contains_key("Regexp.new"),
             "Regexp.new should be defined"
@@ -538,7 +546,9 @@ mod tests {
     #[test]
     fn pure_zz_time_has_duration() {
         let programs = zz_stdlib_programs();
-        let time_prog = programs[5].as_ref().expect("time module should compile"); // time/mod.zz
+        let time_prog = programs[5]
+            .as_ref()
+            .unwrap_or_else(|e| panic!("time module failed to compile: {e}")); // time/mod.zz
         for name in [
             "time.micros",
             "time.millis",
@@ -559,7 +569,9 @@ mod tests {
     #[test]
     fn pure_zz_path_has_helpers() {
         let programs = zz_stdlib_programs();
-        let path_prog = programs[8].as_ref().expect("path module should compile"); // path/mod.zz
+        let path_prog = programs[8]
+            .as_ref()
+            .unwrap_or_else(|e| panic!("path module failed to compile: {e}")); // path/mod.zz
         for name in [
             "path.join",
             "path.join_all",
@@ -579,7 +591,9 @@ mod tests {
     #[test]
     fn pure_zz_http_has_helpers() {
         let programs = zz_stdlib_programs();
-        let http_prog = programs[9].as_ref().expect("http module should compile"); // http/mod.zz
+        let http_prog = programs[9]
+            .as_ref()
+            .unwrap_or_else(|e| panic!("http module failed to compile: {e}")); // http/mod.zz
         for name in [
             "http.use",
             "http.ok",
@@ -603,7 +617,9 @@ mod tests {
     #[test]
     fn pure_zz_args_has_parser() {
         let programs = zz_stdlib_programs();
-        let args_prog = programs[6].as_ref().expect("args module should compile"); // args/mod.zz
+        let args_prog = programs[6]
+            .as_ref()
+            .unwrap_or_else(|e| panic!("args module failed to compile: {e}")); // args/mod.zz
         assert!(
             args_prog.funcs.contains_key("ArgsParser.new"),
             "ArgsParser.new should be defined"
@@ -647,7 +663,9 @@ mod tests {
             );
         }
         // dec (dec/mod.zz, index 12)
-        let dec_prog = programs[12].as_ref().expect("dec module should compile");
+        let dec_prog = programs[12]
+            .as_ref()
+            .unwrap_or_else(|e| panic!("dec module failed to compile: {e}"));
         for name in ["dec.add", "dec.cmp", "dec.format", "dec.is_valid"] {
             assert!(
                 dec_prog.funcs.contains_key(name),
@@ -655,7 +673,9 @@ mod tests {
             );
         }
         // bytes builders (bytes/mod.zz, index 13)
-        let bytes_prog = programs[13].as_ref().expect("bytes module should compile");
+        let bytes_prog = programs[13]
+            .as_ref()
+            .unwrap_or_else(|e| panic!("bytes module failed to compile: {e}"));
         for name in [
             "bytes.builder",
             "bytes.push_byte",
@@ -668,7 +688,9 @@ mod tests {
             );
         }
         // csv (csv/mod.zz, index 14)
-        let csv_prog = programs[14].as_ref().expect("csv module should compile");
+        let csv_prog = programs[14]
+            .as_ref()
+            .unwrap_or_else(|e| panic!("csv module failed to compile: {e}"));
         for name in ["csv.parse", "csv.stringify", "csv.to_json", "csv.header"] {
             assert!(
                 csv_prog.funcs.contains_key(name),
@@ -699,7 +721,9 @@ mod tests {
     #[test]
     fn pure_zz_colors_has_palette() {
         let programs = zz_stdlib_programs();
-        let colors_prog = programs[7].as_ref().expect("colors module should compile"); // colors/mod.zz
+        let colors_prog = programs[7]
+            .as_ref()
+            .unwrap_or_else(|e| panic!("colors module failed to compile: {e}")); // colors/mod.zz
         for name in [
             "colors.red",
             "colors.green",

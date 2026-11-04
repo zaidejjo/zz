@@ -1,0 +1,12 @@
+# ZZ Lang rustfmt configuration.
+# CI gate: `cargo fmt --check`
+
+max_width = 100
+tab_spaces = 4
+imports_granularity = "Crate"
+reorder_imports = true
+group_imports = "StdExternalCrate"
+format_code_in_comments = true
+normalize_comments = true
+format_doc_comments = true
+wrap_comments = true
