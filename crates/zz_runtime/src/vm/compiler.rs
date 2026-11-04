@@ -3377,6 +3377,7 @@ impl Compiler {
                                     name: method_name.clone(),
                                     argc: (args.len() + named.len()) as u16,
                                     span: e.span(),
+                                    recv_home: None,
                                 });
                                 // Write back: StoreVar(obj) pops the result into the variable
                                 match self.resolve(obj_name) {
@@ -3415,6 +3416,7 @@ impl Compiler {
                                     name: method_name.clone(),
                                     argc: (args.len() + named.len()) as u16,
                                     span: e.span(),
+                                    recv_home: None,
                                 });
                                 self.compile_path_store(&recv_parts, e.span());
                                 return StmtValue::None;
@@ -3441,6 +3443,7 @@ impl Compiler {
                                     name: method_name.clone(),
                                     argc: (args.len() + named.len()) as u16,
                                     span: e.span(),
+                                    recv_home: None,
                                 });
                                 match self.resolve(name) {
                                     Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
@@ -4489,6 +4492,7 @@ impl Compiler {
                                 name: parts.last().unwrap().clone(),
                                 argc: self.db_call_argc(args, *span) as u16,
                                 span: *span,
+                                recv_home: None,
                             });
                             // Skip the trailing generic CallMethod below —
                             // the db call is fully emitted.
@@ -4556,11 +4560,13 @@ impl Compiler {
                                 argc: (args.len() + 1) as u16,
                                 span: *span,
                                 pspan: *pspan,
+                                recv_home: Some(TakeHome::Slot(slot as u16)),
                             }),
                             (None, None) => self.emit(Op::CallMethod {
                                 name: parts.last().unwrap().clone(),
                                 argc: argc as u16,
                                 span: *span,
+                                recv_home: None,
                             }),
                         }
                     } else {
@@ -4583,6 +4589,7 @@ impl Compiler {
                                 name: parts.last().unwrap().clone(),
                                 argc: self.db_call_argc(args, *span) as u16,
                                 span: *span,
+                                recv_home: None,
                             });
                         } else if is_module_db_call {
                             // Free-function form with explicit receiver
@@ -4607,6 +4614,7 @@ impl Compiler {
                                     argc: argc as u16,
                                     span: *span,
                                     pspan: *pspan,
+                                    recv_home: None,
                                 });
                             }
                         } else if is_range {
@@ -4661,12 +4669,23 @@ impl Compiler {
                                 span: *span,
                             });
                         } else {
+                            // Top-level/env receiver (e.g. `c.inc()`): copy the
+                            // mutated `self` back to the binding so `impl`
+                            // method mutations persist. For promoted/embedded
+                            // methods (`zaid.area()` where `area` lives on the
+                            // embedded `Base`), `self` is the embedded
+                            // sub-struct, not the outer binding; the runtime
+                            // write-back guard below skips those so the outer
+                            // struct is never corrupted by a mismatched type.
+                            let head = parts[0].clone();
+                            let recv_home = Some(TakeHome::Env(head));
                             self.emit(Op::CallPath {
                                 parts: parts.clone(),
                                 joined: parts.join("."),
                                 argc: argc as u16,
                                 span: *span,
                                 pspan: *pspan,
+                                recv_home,
                             });
                         }
                     }
@@ -4700,6 +4719,7 @@ impl Compiler {
                             name: name.clone(),
                             argc: argc as u16,
                             span: *span,
+                            recv_home: None,
                         });
                         return;
                     }
@@ -4737,17 +4757,32 @@ impl Compiler {
                             argc: (args.len() + 1) as u16,
                             span: *span,
                         }),
-                        (None, Some((type_name, joined))) => self.emit(Op::CallPath {
-                            parts: vec![type_name, name.clone()],
-                            joined,
-                            argc: (args.len() + 1) as u16,
-                            span: *span,
-                            pspan: obj.span(),
-                        }),
+                        (None, Some((type_name, joined))) => {
+                            // `obj` is an identifier receiver (guaranteed by
+                            // `resolved_method` above); copy the mutated
+                            // `self` back to its binding so `impl` method
+                            // mutations persist.
+                            let recv_home = match obj.as_ref() {
+                                Expr::Ident { name, .. } => match self.resolve(name) {
+                                    Resolved::Slot(slot) => Some(TakeHome::Slot(slot as u16)),
+                                    Resolved::Env => Some(TakeHome::Env(name.clone())),
+                                },
+                                _ => None,
+                            };
+                            self.emit(Op::CallPath {
+                                parts: vec![type_name, name.clone()],
+                                joined,
+                                argc: (args.len() + 1) as u16,
+                                span: *span,
+                                pspan: obj.span(),
+                                recv_home,
+                            });
+                        }
                         (None, None) => self.emit(Op::CallMethod {
                             name: name.clone(),
                             argc: (args.len() + named.len()) as u16,
                             span: *span,
+                            recv_home: None,
                         }),
                     }
                 }

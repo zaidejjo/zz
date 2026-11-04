@@ -1,0 +1,29 @@
+// features: func-call, int-arith, locals, methods, print, struct-methods, structs
+// Regression test for issue #760: struct method `self` mutation must persist.
+// `self` is passed by value, so assigning to `self.field` inside an `impl`
+// method must copy the mutated receiver back to the caller's storage.
+struct Counter {
+    count: int,
+}
+
+impl Counter {
+    func inc(self) -> int {
+        self.count = self.count + 1
+        return self.count
+    }
+    func inc_void(self) {
+        self.count = self.count + 1
+    }
+}
+c := Counter{count: 0}
+if c.inc() != 1 {
+    fail("self mutation #1")
+}
+if c.inc() != 2 {
+    fail("self mutation #2")
+}
+c.inc_void()
+if c.count != 3 {
+    fail("self mutation #3")
+}
+println("struct_method_self_mutation_ok")

@@ -133,6 +133,10 @@ struct Frame {
     prev_env: EnvLink,
     /// Stack index where this frame's evaluation begins.
     stack_base: usize,
+    /// Receiver home for `impl` method `self` write-back: where to copy the
+    /// mutated `self` back to when this frame returns (`c.inc()` persists).
+    /// `None` for regular functions.
+    self_home: Option<TakeHome>,
     /// Deferred closures accumulated in this frame. Saved/restored across
     /// nested calls so each frame only drains its own defers.
     defer_stack: Vec<Value>,
@@ -436,6 +440,7 @@ impl Vm {
                     prev_env,
                     stack_base,
                     defer_stack: saved_defers,
+                    self_home: None,
                     func_span: Span::default(),
                 });
             }
@@ -468,6 +473,7 @@ impl Vm {
             ip: 0,
             prev_env: interp.env.clone(),
             stack_base,
+            self_home: None,
             defer_stack: Vec::new(),
             func_span: Span::default(),
         });
@@ -668,6 +674,7 @@ impl Vm {
                 // later chunks (REPL statements, other modules) can read them.
                 // Do this BEFORE popping the chunk result, since a `Keep`
                 // declaration's value may live in a promoted slot.
+                let self_home = f.self_home.clone();
                 for (name, slot) in &f.chunk.toplevel_slots {
                     let idx = sb + *slot as usize;
                     if idx < self.stack.len() {
@@ -680,6 +687,33 @@ impl Vm {
                 } else {
                     Value::Unit
                 };
+                // Copy the mutated `self` (arg 0) back to the receiver home so
+                // `impl` method mutations persist (`c.inc_void()` mutating `c`).
+                // Must run before `truncate`, which would drop arg 0.
+                // For env receivers the mutated `self` is only written back
+                // when it has the same type as the binding (a direct `impl`
+                // method). For promoted/embedded methods (`zaid.area()` where
+                // `area` lives on `Base`), `self` is the embedded sub-struct,
+                // whose type differs from the binding's, so writing it back
+                // would corrupt the outer struct.
+                if let Some(home) = self_home {
+                    if self.stack.len() > sb {
+                        let self_val = std::mem::replace(&mut self.stack[sb], Value::Unit);
+                        match &home {
+                            TakeHome::Env(name) => {
+                                let persist = interp.env.get(name).is_some_and(|head| {
+                                    Self::value_type_name(&head) == Self::value_type_name(&self_val)
+                                });
+                                if persist {
+                                    Self::restore_home(self, interp, &home, self_val);
+                                }
+                            }
+                            TakeHome::Slot(_) => {
+                                Self::restore_home(self, interp, &home, self_val);
+                            }
+                        }
+                    }
+                }
                 let f = self.frames.pop().unwrap();
                 self.stack.truncate(f.stack_base);
                 interp.env = f.prev_env;
@@ -2945,7 +2979,13 @@ impl Vm {
                                         if fv.chunk.is_some() {
                                             self.frames.last_mut().unwrap().ip = ip;
                                             let callee = Value::Func(std::rc::Rc::clone(&fv));
-                                            self.call_value(callee, vec![err_c], span_c, interp)?;
+                                            self.call_value(
+                                                callee,
+                                                vec![err_c],
+                                                span_c,
+                                                interp,
+                                                None,
+                                            )?;
                                             self.try_convert_depths.push(self.frames.len());
                                             re_cache!();
                                         } else {
@@ -3031,13 +3071,14 @@ impl Vm {
                     let callee = self.stack.pop().unwrap();
                     // Sync ip back so the parent frame resumes at the right spot.
                     self.frames.last_mut().unwrap().ip = ip;
-                    self.call_value(callee, args, span, interp)?;
+                    self.call_value(callee, args, span, interp, None)?;
                     re_cache!();
                     yield_check!();
                 }
                 Op::CallPath {
                     parts,
                     joined,
+                    recv_home,
                     argc,
                     span,
                     pspan,
@@ -3065,7 +3106,7 @@ impl Vm {
                         // stack, in parameter order: no scratch buffer, no
                         // pop/push round trip.
                         let base = self.stack.len() - argc as usize;
-                        self.open_frame(base, chunk, env, span, interp);
+                        self.open_frame(base, chunk, env, span, interp, (*recv_home).clone());
                         re_cache!();
                         yield_check!();
                         continue;
@@ -3087,6 +3128,7 @@ impl Vm {
                         span,
                         interp,
                         Some((caller, ip, gen)),
+                        recv_home.clone(),
                     ) {
                         None => {
                             re_cache!();
@@ -3108,7 +3150,7 @@ impl Vm {
                         if is_direct {
                             let callee = interp.resolve_path_value(parts, pspan)?;
                             self.frames.last_mut().unwrap().ip = ip;
-                            self.call_value(callee, args, span, interp)?;
+                            self.call_value(callee, args, span, interp, None)?;
                             re_cache!();
                             yield_check!();
                             continue;
@@ -3227,7 +3269,13 @@ impl Vm {
                                         let mut arg_vals = args;
                                         arg_vals.insert(0, recv);
                                         self.frames.last_mut().unwrap().ip = ip;
-                                        self.call_value(f, arg_vals, span, interp)?;
+                                        self.call_value(
+                                            f,
+                                            arg_vals,
+                                            span,
+                                            interp,
+                                            recv_home.clone(),
+                                        )?;
                                         re_cache!();
                                         yield_check!();
                                         continue;
@@ -3277,7 +3325,7 @@ impl Vm {
                             let mut arg_vals = args;
                             arg_vals.insert(0, recv);
                             self.frames.last_mut().unwrap().ip = ip;
-                            self.call_value(f, arg_vals, span, interp)?;
+                            self.call_value(f, arg_vals, span, interp, recv_home.clone())?;
                             re_cache!();
                             yield_check!();
                             continue;
@@ -3285,11 +3333,16 @@ impl Vm {
                     }
                     let callee = interp.resolve_path_value(parts, pspan)?;
                     self.frames.last_mut().unwrap().ip = ip;
-                    self.call_value(callee, args, span, interp)?;
+                    self.call_value(callee, args, span, interp, None)?;
                     re_cache!();
                     yield_check!();
                 }
-                Op::CallMethod { name, argc, span } => {
+                Op::CallMethod {
+                    name,
+                    recv_home,
+                    argc,
+                    span,
+                } => {
                     let argc = *argc;
                     let span = *span;
                     let mut args = take_scratch_args();
@@ -3336,12 +3389,12 @@ impl Vm {
                     // method call is a field miss by definition, so the
                     // formatted error was pure waste on every call.
                     match object_field_opt(&recv, name) {
-                        Some(f) => self.call_value(f, args, span, interp)?,
+                        Some(f) => self.call_value(f, args, span, interp, None)?,
                         None => {
                             let (f, recv) = interp.lookup_method_recv(&recv, name, span)?;
                             let mut arg_vals = args;
                             arg_vals.insert(0, recv);
-                            self.call_value(f, arg_vals, span, interp)?;
+                            self.call_value(f, arg_vals, span, interp, recv_home.clone())?;
                         }
                     }
                     re_cache!();
@@ -3548,6 +3601,7 @@ impl Vm {
         args: Vec<Value>,
         span: Span,
         interp: &mut Interp,
+        self_home: Option<TakeHome>,
     ) {
         let stack_base = self.stack.len();
         let mut args = args;
@@ -3556,7 +3610,7 @@ impl Vm {
         // slot below — steady-state calls never allocate.
         self.stack.append(&mut args);
         return_scratch_args(args);
-        self.open_frame(stack_base, chunk, env, span, interp);
+        self.open_frame(stack_base, chunk, env, span, interp, self_home);
     }
 
     /// Push a call frame whose arguments already occupy the top of the
@@ -3572,6 +3626,7 @@ impl Vm {
         env: EnvLink,
         span: Span,
         interp: &mut Interp,
+        self_home: Option<TakeHome>,
     ) {
         let prev_env = std::mem::replace(&mut interp.env, env);
         let saved_defers = std::mem::take(&mut self.defer_stack);
@@ -3580,6 +3635,7 @@ impl Vm {
             ip: 0,
             prev_env,
             stack_base,
+            self_home,
             defer_stack: saved_defers,
             func_span: span,
         });
@@ -3607,13 +3663,14 @@ impl Vm {
         span: Span,
         interp: &mut Interp,
         site: Option<(u64, usize, u64)>,
+        self_home: Option<TakeHome>,
     ) -> Option<Vec<Value>> {
         match self.resolve_direct(name, args.len(), interp) {
             Some((chunk, env)) => {
                 if let Some((chunk_id, ip, gen)) = site {
                     self.fill_direct_call(chunk_id, ip, args.len() as u16, gen, &chunk, &env);
                 }
-                self.enter_call_frame(chunk, env, args, span, interp);
+                self.enter_call_frame(chunk, env, args, span, interp, self_home);
                 None
             }
             None => Some(args),
@@ -3694,6 +3751,7 @@ impl Vm {
         args: Vec<Value>,
         span: Span,
         interp: &mut Interp,
+        self_home: Option<TakeHome>,
     ) -> Result<(), EvalError> {
         match callee {
             Value::Func(fv) if fv.chunk.is_some() => {
@@ -3755,7 +3813,7 @@ impl Vm {
                     }
                 }
                 let chunk = fv.chunk.clone().expect("chunk presence checked above");
-                self.enter_call_frame(chunk, fv.env.clone(), args, span, interp);
+                self.enter_call_frame(chunk, fv.env.clone(), args, span, interp, self_home);
                 Ok(())
             }
             other => {
@@ -3842,9 +3900,35 @@ impl Vm {
             Flow::Yield(_) => return Unwind::Error(crate::runtime::EvalError::yield_escape()),
         };
         let f = self.frames.pop().unwrap();
+        interp.env = f.prev_env;
+        // Copy the mutated `self` (arg 0) back to the receiver home so `impl`
+        // method mutations persist to `c` (`c.inc()` mutating `c`). Must run
+        // before `truncate`, which would otherwise drop arg 0.
+        // For env receivers the mutated `self` is only written back when it
+        // has the same type as the binding (a direct `impl` method). For
+        // promoted/embedded methods, `self` is the embedded sub-struct, whose
+        // type differs from the binding's, so writing it back would corrupt
+        // the outer struct.
+        if let Some(home) = f.self_home {
+            if self.stack.len() > f.stack_base {
+                let self_val = std::mem::replace(&mut self.stack[f.stack_base], Value::Unit);
+                match &home {
+                    TakeHome::Env(name) => {
+                        let persist = interp.env.get(name).is_some_and(|head| {
+                            Self::value_type_name(&head) == Self::value_type_name(&self_val)
+                        });
+                        if persist {
+                            Self::restore_home(self, interp, &home, self_val);
+                        }
+                    }
+                    TakeHome::Slot(_) => {
+                        Self::restore_home(self, interp, &home, self_val);
+                    }
+                }
+            }
+        }
         self.loops.retain(|li| li.frame_idx < self.frames.len());
         self.stack.truncate(f.stack_base);
-        interp.env = f.prev_env;
         if self.frames.is_empty() {
             if let Some(span) = brk {
                 return Unwind::Escaped(Flow::Break(span));
@@ -3977,6 +4061,37 @@ impl Vm {
                 ))
             }
             TakeHome::Env(name) => interp.env.take(name),
+        }
+    }
+
+    /// Dynamic type name of a value, used to decide whether an `impl` method's
+    /// mutated `self` may be copied back to its receiver binding without
+    /// corrupting it. `Object`s report their qualified struct name; promoted
+    // embedded methods pass a sub-struct whose name differs from the outer
+    // binding's, so the write-back is skipped in that case.
+    fn value_type_name(v: &Value) -> String {
+        match v {
+            Value::Object(o) => o.name.clone(),
+            Value::Int(_) => "int".into(),
+            Value::Float(_) => "float".into(),
+            Value::Bool(_) => "bool".into(),
+            Value::Str(_) => "str".into(),
+            Value::Bytes(_) => "bytes".into(),
+            Value::Array(_) => "array".into(),
+            Value::Dict(_) => "dict".into(),
+            Value::Func(_) => "func".into(),
+            Value::Db(_) => "db".into(),
+            Value::Unit => "unit".into(),
+            Value::Result(_) => "result".into(),
+            Value::Option(_) => "option".into(),
+            Value::Chan(_) => "chan".into(),
+            Value::HttpRequest(_) => "http.request".into(),
+            Value::HttpServer(_) => "http.server".into(),
+            Value::TcpStream(_) => "tcp.stream".into(),
+            Value::TcpListener(_) => "tcp.listener".into(),
+            Value::Json(_) => "json".into(),
+            Value::Response(_) => "http.response".into(),
+            _ => "value".into(),
         }
     }
 

@@ -621,6 +621,14 @@ pub struct Lowerer {
     /// mutations on `self` persist to the receiver (`c.inc()` mutating `c`).
     /// `None` for regular (non-impl) functions.
     pub(crate) impl_self_lvalue: std::cell::RefCell<Option<String>>,
+    /// For an impl method call lowering a boxed receiver (`c.inc()` where
+    /// `c` is a `zz_value`): the `(home, raw)` pair — the original boxed
+    /// `zz_value` lvalue and the raw struct temp it was unboxed into. After
+    /// the method runs, the mutated `raw` is boxed back and assigned to
+    /// `home` so receiver mutations persist (`c.count` keeps its new value).
+    /// `None` when the receiver is already raw (writes back via `*self`)
+    /// or for non-impl calls.
+    pub(crate) impl_self_writeback: std::cell::RefCell<Option<(String, String)>>,
     /// Unit-emission mode: definitions/prototypes use external linkage so
     /// per-module translation units link together. Off = single-TU
     /// `static` (byte-identical legacy output).
@@ -669,6 +677,7 @@ impl Lowerer {
             readonly_params,
             unit_mode: std::cell::Cell::new(false),
             impl_self_lvalue: std::cell::RefCell::new(None),
+            impl_self_writeback: std::cell::RefCell::new(None),
             unimplemented_natives: std::cell::RefCell::new(Vec::new()),
             loop_depth: std::cell::Cell::new(0),
             loop_pre_code: std::cell::RefCell::new(Vec::new()),

@@ -567,6 +567,11 @@ pub enum Op {
         /// `parts` pre-joined (`a.b.c`): computed once at compile time so
         /// the hot dispatch loop never allocates a lookup string per call.
         joined: String,
+        /// Where the receiver was loaded from, so an `impl` method can copy
+        /// the mutated `self` back to the receiver (`c.inc()` persists).
+        /// `None` for plain namespace calls or when the receiver isn't a
+        /// simple slot/env binding.
+        recv_home: Option<TakeHome>,
         argc: u16,
         span: Span,
         pspan: Span,
@@ -575,7 +580,14 @@ pub enum Op {
     /// Call the last path component as a field or method on a receiver that
     /// was loaded from a local slot (`p.dist()` where `p` is a local).
     /// Pops `argc` args, then the receiver.
-    CallMethod { name: String, argc: u16, span: Span },
+    CallMethod {
+        name: String,
+        /// Where the receiver was loaded from, for `self` write-back (see
+        /// [`Op::CallPath`]`s `recv_home`).
+        recv_home: Option<TakeHome>,
+        argc: u16,
+        span: Span,
+    },
 
     /// Direct native function call: resolves the function by name in the
     /// native registry and calls it directly, bypassing env/func/method
