@@ -48,7 +48,7 @@ zz_frontend → zz_checker → zz_hir → zz_ir → { zz_runtime ↔ zz_codegen 
   `zz_codegen_cc` (clang driver, runtime archive cache, PGO, cross targets)
 - **zz_codegen_{types,runtime,ffi}**: shared build types, embedded C runtime
   (with content-hash rebuild guard), native/FFI symbol tables + link metadata
-- **zz_stdlib**: 900+ natives (VM registry + C twins + Rust staticlib via `ffi.rs`)
+- **zz_stdlib**: ~460 natives (VM registry + C twins + Rust staticlib via `ffi.rs`); see `crates/zz_stdlib/src/natives/mod.rs` count assertion
 - **zz_cli** (`zz`): run/build/test/check/fix/fmt, REPL, loader with module cache, doctor, upgrade
 - **zz_lsp** (`zz-lsp`), **zz_pm** (registry), **zz_paths** (ZZ_HOME/cache
   layout + containment checks, no deps), **zz_plugin**, **zz_fmt**, **zz_arena**
