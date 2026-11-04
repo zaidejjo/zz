@@ -71,7 +71,12 @@ pub(crate) fn str_rfind(
 fn byte_find(s: &str, sub: &str, from: i64) -> i64 {
     let bytes = s.as_bytes();
     let n = bytes.len() as i64;
-    let start = from.clamp(0, n) as usize;
+    let mut start = from.clamp(0, n) as usize;
+    // Snap forward to the next UTF-8 character boundary if `from` lands
+    // inside a multi-byte sequence (matches the C twin's `snap_fwd`).
+    while start < n as usize && bytes[start] & 0xC0 == 0x80 {
+        start += 1;
+    }
     if sub.is_empty() {
         return start as i64;
     }
@@ -87,7 +92,12 @@ fn byte_find(s: &str, sub: &str, from: i64) -> i64 {
 fn byte_rfind(s: &str, sub: &str, from: i64) -> i64 {
     let bytes = s.as_bytes();
     let n = bytes.len() as i64;
-    let end = from.clamp(0, n) as usize;
+    let mut end = from.clamp(0, n) as usize;
+    // Snap backward to the previous UTF-8 character boundary if `from` lands
+    // inside a multi-byte sequence (matches the C twin's `snap_bwd`).
+    while end > 0 && end < n as usize && bytes[end] & 0xC0 == 0x80 {
+        end -= 1;
+    }
     if sub.is_empty() {
         return end as i64;
     }
