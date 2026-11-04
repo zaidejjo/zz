@@ -467,7 +467,45 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
 /// Single choke point so the macros and the sweep below can never
 /// disagree on what "equal" means.
 fn norm_stream(s: &str) -> String {
-    strip_numeric_lines(&mask_scratch_paths(&normalize_addrs(s)))
+    strip_numeric_lines(&mask_scratch_paths(&normalize_addrs(&sort_warnings(s))))
+}
+
+/// Sort `warning:` blocks so clang/VM declaration order doesn't affect
+/// parity. Warnings are inherently order-independent: the same warnings
+/// appear on both engines, but the backend may emit them in definition
+/// order (VM) vs. topological order (native). Each block is a "warning:"
+/// line plus its "    = ..." continuation lines.
+fn sort_warnings(s: &str) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let mut blocks: Vec<String> = Vec::new();
+    let mut rest: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].starts_with("warning:") {
+            let mut block: Vec<&str> = Vec::new();
+            block.push(lines[i]);
+            i += 1;
+            while i < lines.len() && lines[i].starts_with("    = ") {
+                block.push(lines[i]);
+                i += 1;
+            }
+            blocks.push(block.join("\n"));
+        } else {
+            rest.push(lines[i].to_string());
+            i += 1;
+        }
+    }
+    blocks.sort();
+    let mut out = String::new();
+    for line in &rest {
+        out.push_str(line);
+        out.push('\n');
+    }
+    for block in &blocks {
+        out.push_str(block);
+        out.push('\n');
+    }
+    out
 }
 
 /// Scratch-directory prefixes masked per run: fixtures create their
