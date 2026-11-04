@@ -230,7 +230,32 @@ zz_value zz_tuple(zz_value a, zz_value b);
 zz_value zz_len(zz_value v, int *err);
 zz_value zz_len_field(zz_value *obj, const char *field, int *err);
 zz_value zz_vec_len(zz_value v, int *err);
-zz_value zz_vec_append(zz_value arr, zz_value item, int *err);
+// vec.append(arr, item) — append item to array in place.
+// NOTE: the codegen uses this as the array-literal builder (calls ignore the
+// return). Kept as a mutator for that contract; `vec.push` is the functional
+// copy-on-write variant that matches the VM.
+// static inline so the 1M+ append calls in tight loops pay zero call overhead.
+static inline zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
+    (void)err;
+    if (arr.tag != ZZ_ARRAY) return zz_unit();
+    zz_array *a = arr.arr;
+    if (a->len >= a->cap) {
+        size_t new_cap = a->cap ? a->cap * 2 : 8;
+        if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_STACK_MAGIC
+            || a->refs == ZZ_ARRAY_ARENA_MAGIC || a->items == NULL) {
+            zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
+            for (size_t i = 0; i < a->len; i++)
+                new_items[i] = a->items[i];
+            a->items = new_items;
+            if (a->refs != 1) a->refs = 0;
+        } else {
+            a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));
+        }
+        a->cap = new_cap;
+    }
+    a->items[a->len++] = zz_clone_for_store(item);
+    return zz_unit();
+}
 zz_value zz_vec_push(zz_value arr, zz_value item, int *err);
 // Move-aware push for `x = vec.push(x, e)`: `taken` is owned (the caller
 // moved it out of its slot, which now holds unit). A uniquely-owned heap

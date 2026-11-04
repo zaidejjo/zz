@@ -1345,38 +1345,6 @@ zz_value zz_vec_len(zz_value v, int *err) {
 // NOTE: the codegen uses this as the array-literal builder (calls ignore the
 // return). Kept as a mutator for that contract; `vec.push` is the functional
 // copy-on-write variant that matches the VM.
-zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
-    (void)err;
-    if (arr.tag != ZZ_ARRAY) return zz_unit();
-    zz_array *a = arr.arr;
-    if (a->len >= a->cap) {
-        size_t new_cap = a->cap ? a->cap * 2 : 8;
-        // LIT_MAGIC / ARENA_MAGIC arrays have items from arena — realloc() on
-        // arena memory is invalid. Also handle n=0 case where items is NULL.
-        // Migrate to malloc, switch to refs=0 (arena-allocated header sentinel)
-        // so zz_release knows items is malloc'd but header is still arena.
-        if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_STACK_MAGIC
-            || a->refs == ZZ_ARRAY_ARENA_MAGIC || a->items == NULL) {
-            zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
-            // Copy existing elements if any.
-            for (size_t i = 0; i < a->len; i++) {
-                new_items[i] = a->items[i];
-            }
-            a->items = new_items;
-            // Preserve `refs == 1` (see `zz_array_push`): only untracked
-            // shares (sentinels) collapse to 0.
-            if (a->refs != 1) a->refs = 0;  // Arena-allocated header, malloc'd items
-        } else {
-            a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));
-        }
-        a->cap = new_cap;
-    }
-    // Share convention (was zz_clone): heal arena-owned values to heap so the
-    // element survives the loop-arena reset.
-    a->items[a->len++] = zz_clone_for_store(item);
-    return zz_unit();
-}
-
 // vec.push(arr, item) — appends item and returns the array.
 // In-place fast path: when `arr` is uniquely owned (refs == 1), mutate it
 // directly instead of copying — building an array via repeated push is then
