@@ -2588,6 +2588,12 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
+    // Count assertion: mirrors `assert_eq!(funcs.len(), 685)` in
+    // `crates/zz_stdlib/src/funcs.rs:4166`. Keeps the signatures table
+    // and the natives registry in lockstep — adding a native to one
+    // table without the other will fail CI here rather than at runtime.
+    assert_eq!(m.len(), 463, "natives registry count drifted; update this assertion");
+
     m
 }
 
