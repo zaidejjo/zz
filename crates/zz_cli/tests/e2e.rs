@@ -648,6 +648,11 @@ e2e_success_test!(
     "method_chain_recv.zz"
 );
 e2e_success_test!(
+    e2e_regression_struct_method_self_mutation,
+    "regression",
+    "struct_method_self_mutation.zz"
+);
+e2e_success_test!(
     e2e_syntax_method_shadow_free,
     "syntax",
     "method_shadow_free.zz"

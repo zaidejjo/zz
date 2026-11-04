@@ -1819,6 +1819,7 @@ fn direct_call_enters_frame_for_compiled_function() {
         Span::new(0, 0),
         &mut interp,
         None,
+        None,
     );
     assert!(entered.is_none(), "matching arity must enter the frame");
     assert!(
@@ -1851,26 +1852,40 @@ fn direct_call_declines_and_hands_the_arguments_back() {
 
     // Arity mismatch: defaults and arity errors belong to the general path.
     let back = vm
-        .try_enter_direct_call("top.fib", Vec::new(), span, &mut interp, None)
+        .try_enter_direct_call("top.fib", Vec::new(), span, &mut interp, None, None)
         .expect("declined calls return their arguments");
     assert!(back.is_empty());
 
     // Unknown name.
     let back = vm
-        .try_enter_direct_call("top.missing", vec![Value::Int(1)], span, &mut interp, None)
+        .try_enter_direct_call(
+            "top.missing",
+            vec![Value::Int(1)],
+            span,
+            &mut interp,
+            None,
+            None,
+        )
         .expect("declined calls return their arguments");
     assert_eq!(back, vec![Value::Int(1)]);
 
     // Registered but without bytecode (an AST-only closure).
     let back = vm
-        .try_enter_direct_call("top.closure", Vec::new(), span, &mut interp, None)
+        .try_enter_direct_call("top.closure", Vec::new(), span, &mut interp, None, None)
         .expect("declined calls return their arguments");
     assert!(back.is_empty());
 
     // A shadowing non-function binding wins over the function table.
     interp.env.define("top.fib", Value::Int(9));
     let back = vm
-        .try_enter_direct_call("top.fib", vec![Value::Int(1)], span, &mut interp, None)
+        .try_enter_direct_call(
+            "top.fib",
+            vec![Value::Int(1)],
+            span,
+            &mut interp,
+            None,
+            None,
+        )
         .expect("declined calls return their arguments");
     assert_eq!(back, vec![Value::Int(1)]);
 

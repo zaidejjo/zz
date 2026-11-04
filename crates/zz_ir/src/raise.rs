@@ -684,12 +684,14 @@ impl<'a> Raiser<'a> {
                     argc: *argc,
                     span: VmSpan::default(),
                     pspan: VmSpan::new(pspan.start, pspan.end),
+                    recv_home: None,
                 })
             }
             Op::CallMethod { name, argc } => Ok(VmOp::CallMethod {
                 name: self.str(*name)?,
                 argc: *argc,
                 span: VmSpan::default(),
+                recv_home: None,
             }),
             Op::CallNative { name, argc } => Ok(VmOp::CallNative {
                 name: self.str(*name)?,

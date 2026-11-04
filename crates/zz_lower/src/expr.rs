@@ -3964,15 +3964,29 @@ impl Lowerer {
                             Some(cid) => {
                                 let cid = cid.to_string();
                                 // Raw struct local: pass its address
-                                // directly. Boxed local (e.g. bound to a
-                                // call/index result): unbox into a temp.
+                                // directly; mutations write back via
+                                // `*self = v0` at every return. Boxed local
+                                // (e.g. bound to a call/index result, or a
+                                // boxed global): unbox into a temp, then
+                                // copy the mutated `self` back to the home
+                                // after the call so `c.inc()` persists.
                                 let is_raw = names
                                     .lookup_type(name)
                                     .is_some_and(|t| t.starts_with("zz_struct_"));
                                 if is_raw {
                                     cid
                                 } else {
-                                    unbox_tmp(&cid, names, out)
+                                    let raw = unbox_tmp(&cid, names, out);
+                                    // Only unboxed (raw-struct) receivers need
+                                    // write-back: non-unboxed boxed receivers
+                                    // are mutated through the `zz_value *self`
+                                    // pointer in place, so their boxed object
+                                    // is updated directly.
+                                    if unboxed {
+                                        self.impl_self_writeback
+                                            .replace(Some((cid.clone(), raw.clone())));
+                                    }
+                                    raw
                                 }
                             }
                             None => self.emit_expr(method_receiver, names, out),
@@ -4004,14 +4018,27 @@ impl Lowerer {
                     };
                     let rest_args: Vec<String> = arg_items.into_iter().skip(1).collect();
                     let rest_n = rest_args.len();
-                    if rest_n == 0 {
-                        return format!("{cf}(&{recv_val}, NULL, 0)");
+                    let call = if rest_n == 0 {
+                        format!("{cf}(&{recv_val}, NULL, 0)")
+                    } else {
+                        format!(
+                            "{cf}(&{recv_val}, (zz_value[]){{ {joined} }}, {n})",
+                            joined = rest_args.join(", "),
+                            n = rest_n
+                        )
+                    };
+                    // Emit the impl call into a temp, then copy the mutated
+                    // `self` back to a boxed receiver home (`c.inc()` must
+                    // persist). Statements stay ordered: unbox → call →
+                    // write-back → result temp.
+                    let result_tmp = names.fresh("_call");
+                    out.push_str(&format!("    zz_value {result_tmp} = {call};\n"));
+                    if let Some((home, raw)) = self.impl_self_writeback.borrow_mut().take() {
+                        let boxed =
+                            self.box_raw_struct(sname.as_deref().unwrap_or(""), &raw, names, out);
+                        out.push_str(&format!("    zz_assign(&{home}, {boxed});\n"));
                     }
-                    return format!(
-                        "{cf}(&{recv_val}, (zz_value[]){{ {joined} }}, {n})",
-                        joined = rest_args.join(", "),
-                        n = rest_n
-                    );
+                    return result_tmp;
                 }
                 // No receiver (shouldn't happen for impl methods but
                 // fall through to the regular path defensively).
