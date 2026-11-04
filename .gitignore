@@ -43,3 +43,4 @@ tests/fuzz/__pycache__/
 
 # agent session metadata (local only)
 .opencode/
+*.profraw
