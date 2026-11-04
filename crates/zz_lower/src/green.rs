@@ -378,7 +378,7 @@ impl Lowerer {
         if fresh {
             out.push_str(&format!("    {ptr} = ({ctype}*)malloc(sizeof({ctype}));\n"));
         } else {
-            out.push_str("    if (!{ptr}) {\n");
+            out.push_str(&format!("    if (!{ptr}) {{\n"));
             out.push_str(&arena_alloc);
             out.push_str("    }\n");
         }
