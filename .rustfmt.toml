@@ -1,0 +1,5 @@
+# ZZ Lang rustfmt configuration.
+# CI gate: `cargo fmt --check`
+
+max_width = 100
+tab_spaces = 4
