@@ -1034,8 +1034,126 @@ impl Lowerer {
                         names.loop_bounds.insert(bound_var, limit_text);
                     }
                 }
-                // Pointer arithmetic for while loop array stores (future optimization).
-                let ptr_store_while: Option<(String, String, String)> = None;
+                // Pointer arithmetic for while loop array stores:
+                // `while j < n { flags[j] = false; j = j + i }` →
+                // `bool *ptr = flags; while (j < n) { *ptr = false; ptr += i; j += i; }`
+                let ptr_store_while: Option<(String, String, String)> = if body.stmts.len() >= 2 {
+                    let mut found: Option<(String, String, String)> = None;
+                    for bstmt in &body.stmts {
+                        if let Stmt::Assign {
+                            target, value: _, ..
+                        } = bstmt
+                        {
+                            if let Expr::Index { obj, index, .. } = target {
+                                if let Expr::Ident { name: idx_name, .. } = &**index {
+                                    if let Expr::Ident { name: arr_name, .. } = &**obj {
+                                        if let Some(ctype) = names.lookup_type(arr_name) {
+                                            if ctype == "bool *"
+                                                || ctype == "int64_t *"
+                                                || ctype == "double *"
+                                            {
+                                                let has_incr = body.stmts.iter().any(|s| {
+                                                    if let Stmt::Assign { target: t2, value: v2, .. } = s {
+                                                        if let Expr::Ident { name: n2, .. } = t2 {
+                                                            if n2 == idx_name {
+                                                                if let Expr::Binary {
+                                                                    op: zz_frontend::ast::BinOp::Add,
+                                                                    left,
+                                                                    right,
+                                                                    ..
+                                                                } = v2
+                                                                {
+                                                                    matches!(left.as_ref(), Expr::Ident { name: n3, .. } if n3 == idx_name)
+                                                                        || matches!(right.as_ref(), Expr::Ident { name: n3, .. } if n3 == idx_name)
+                                                                } else {
+                                                                    false
+                                                                }
+                                                            } else {
+                                                                false
+                                                            }
+                                                        } else {
+                                                            false
+                                                        }
+                                                    } else {
+                                                        false
+                                                    }
+                                                });
+                                                if has_incr {
+                                                    let arr_cid =
+                                                        names.lookup(arr_name).unwrap().to_string();
+                                                    let elem_ctype = ctype
+                                                        .strip_suffix(" *")
+                                                        .unwrap_or(&ctype)
+                                                        .to_string();
+                                                    let mut step_text: Option<String> = None;
+                                                    for s2 in body.stmts.iter() {
+                                                        if let Stmt::Assign {
+                                                            target: t2,
+                                                            value: v2,
+                                                            ..
+                                                        } = s2
+                                                        {
+                                                            if let Expr::Ident {
+                                                                name: n2, ..
+                                                            } = t2
+                                                            {
+                                                                if n2 == idx_name {
+                                                                    if let Expr::Binary {
+                                                                        op:
+                                                                            zz_frontend::ast::BinOp::Add,
+                                                                        left,
+                                                                        right,
+                                                                        ..
+                                                                    } = v2
+                                                                    {
+                                                                        if matches!(left.as_ref(), Expr::Ident { name: n3, .. } if n3 == idx_name)
+                                                                        {
+                                                                            let mut scratch =
+                                                                                String::new();
+                                                                            step_text = Some(
+                                                                                self.emit_expr(
+                                                                                    right,
+                                                                                    names,
+                                                                                    &mut scratch,
+                                                                                ),
+                                                                            );
+                                                                        } else if matches!(right.as_ref(), Expr::Ident { name: n3, .. } if n3 == idx_name)
+                                                                        {
+                                                                            let mut scratch =
+                                                                                String::new();
+                                                                            step_text = Some(
+                                                                                self.emit_expr(
+                                                                                    left,
+                                                                                    names,
+                                                                                    &mut scratch,
+                                                                                ),
+                                                                            );
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    if let Some(st) = step_text {
+                                                        found = Some((arr_cid, elem_ctype, st));
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    found
+                } else {
+                    None
+                };
+
+                if let Some((ref arr_cid, ref elem_ctype, ref _step_text)) = ptr_store_while {
+                    out.push_str(&format!("        {elem_ctype} *ptr_while = {arr_cid};\n"));
+                }
 
                 let c = self.emit_expr(cond, names, out);
                 let c = box_scalar_operand(cond, names, &c);
@@ -1046,9 +1164,90 @@ impl Lowerer {
                 // The marker additionally releases body-declared heap
                 // locals at the bottom of every iteration.
                 let while_scope = self.loop_scope_begin(names);
-                // Loop body is never a function tail.
-                for bstmt in &body.stmts {
-                    self.emit_stmt(bstmt, names, out, false);
+                // Pointer arithmetic optimization: emit *ptr_while = val instead of
+                // arr[idx] = val for SIMD-friendly stores, and ptr_while += step
+                // at end of body.
+                if let Some((ref _arr_cid, ref elem_ctype, ref step_text)) = ptr_store_while {
+                    if body.stmts.len() >= 2 {
+                        let store_idx = body.stmts.iter().position(|s| {
+                            if let Stmt::Assign { target, value: _, .. } = s {
+                                if let Expr::Index { obj, index, .. } = target {
+                                    if let Expr::Ident { name: idx_name, .. } = &**index {
+                                        if let Expr::Ident { name: arr_name, .. } = &**obj {
+                                            return body.stmts.iter().any(|s2| {
+                                                if let Stmt::Assign { target: t2, value: v2, .. } = s2 {
+                                                    if let Expr::Ident { name: n2, .. } = t2 {
+                                                        if n2 == idx_name {
+                                                            if let Expr::Binary {
+                                                                op: zz_frontend::ast::BinOp::Add,
+                                                                left,
+                                                                right,
+                                                                ..
+                                                            } = v2
+                                                            {
+                                                                return matches!(left.as_ref(), Expr::Ident { name: n3, .. } if n3 == idx_name)
+                                                                    || matches!(right.as_ref(), Expr::Ident { name: n3, .. } if n3 == idx_name);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                false
+                                            });
+                                        }
+                                    }
+                                }
+                                false
+                            } else {
+                                false
+                            }
+                        });
+                        if let Some(si) = store_idx {
+                            if let Stmt::Assign { target, value, .. } = &body.stmts[si] {
+                                if let Expr::Index { obj, index, .. } = target {
+                                    if let Expr::Ident { name: _, .. } = &**index {
+                                        if let Expr::Ident { name: arr_name, .. } = &**obj {
+                                            let val_raw = match value {
+                                                Expr::Bool { value, .. } => {
+                                                    if *value {
+                                                        "true".to_string()
+                                                    } else {
+                                                        "false".to_string()
+                                                    }
+                                                }
+                                                Expr::Int { value, .. } => value.to_string(),
+                                                Expr::Float { value, .. } => value.to_string(),
+                                                _ => {
+                                                    let emitted = self.emit_expr(value, names, out);
+                                                    match elem_ctype.as_str() {
+                                                        "bool" => format!("({emitted}).b"),
+                                                        "int64_t" => format!("({emitted}).i"),
+                                                        "double" => format!("({emitted}).f"),
+                                                        _ => emitted,
+                                                    }
+                                                }
+                                            };
+                                            out.push_str(&format!(
+                                                "        *ptr_while = {val_raw};\n"
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                            out.push_str(&format!("        ptr_while += {step_text};\n"));
+                        } else {
+                            for bstmt in &body.stmts {
+                                self.emit_stmt(bstmt, names, out, false);
+                            }
+                        }
+                    } else {
+                        for bstmt in &body.stmts {
+                            self.emit_stmt(bstmt, names, out, false);
+                        }
+                    }
+                } else {
+                    for bstmt in &body.stmts {
+                        self.emit_stmt(bstmt, names, out, false);
+                    }
                 }
                 self.loop_scope_end(names, out, while_scope);
                 // End-of-body literal knowledge must not escape the loop:
