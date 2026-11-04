@@ -64,7 +64,14 @@ impl ColorMode {
 
 /// `stderr().is_terminal()`, cached: the answer cannot change during a
 /// process, and every styled line would otherwise hit the same syscall.
+///
+/// `ZZ_FORCE_NON_TTY=1` overrides the real terminal state so piped-mode
+/// code paths can be tested under `cargo test` (where stderr may be a real
+/// terminal). Checked before the cache so the override always takes effect.
 fn stderr_is_tty() -> bool {
+    if zz_pm::paths::env_var_os("ZZ_FORCE_NON_TTY").is_some() {
+        return false;
+    }
     static TTY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *TTY.get_or_init(|| std::io::stderr().is_terminal())
 }
@@ -466,6 +473,7 @@ mod tests {
     fn spinner_start_finish_is_quiet_when_piped() {
         // Under `cargo test` stderr is not a TTY: start prints one line,
         // finish prints the ok line, no thread is spawned.
+        let _c = zz_pm::paths::env_scope(&[("ZZ_FORCE_NON_TTY", Some("1".into()))]);
         let spinner = Spinner::start("testing spinner");
         assert!(spinner.handle.is_none());
         spinner.finish("spinner done");
@@ -504,6 +512,7 @@ mod tests {
             ("NO_COLOR", None),
             ("ZZ_COLOR", None),
             ("TERM", Some("xterm".into())),
+            ("ZZ_FORCE_NON_TTY", Some("1".into())),
         ]);
         assert_eq!(ColorMode::resolve(), ColorMode::Auto);
         assert!(!color_enabled(), "cargo test stderr is not a TTY");
@@ -512,6 +521,7 @@ mod tests {
     #[test]
     fn phase_prefix_is_numbered_and_piped_mode_is_quiet() {
         let _c = no_color();
+        let _t = zz_pm::paths::env_scope(&[("ZZ_FORCE_NON_TTY", Some("1".into()))]);
         let phase = Phase::start(2, 5, "Optimizing");
         assert!(
             phase.prefix.starts_with("==> [2/5] Optimizing"),
