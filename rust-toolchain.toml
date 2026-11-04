@@ -1,7 +1,0 @@
-[toolchain]
-channel = "1.99.1"
-profile = "minimal"
-
-[component]
-rustfmt = true
-clippy = true
