@@ -995,6 +995,26 @@ impl Lowerer {
                 // condition; in-body re-establishment (fresh literals)
                 // still folds within the iteration.
                 names.clear_array_lens();
+                // Track while-loop bound for bounds-check elimination:
+                // `while j < n { ... }` means j < n inside the body, so
+                // `arr[j]` with arr.len == n is provably in bounds.
+                if let Expr::Binary {
+                    op: zz_frontend::ast::BinOp::Lt,
+                    left,
+                    right,
+                    ..
+                } = cond.as_ref()
+                {
+                    if let Expr::Ident { name, .. } = left.as_ref() {
+                        // Emit the bound expression into a scratch buffer
+                        // (side effects are harmless — the actual condition
+                        // emission below re-emits it, but for simple idents
+                        // this is just a variable reference).
+                        let mut scratch = String::new();
+                        let limit_text = self.emit_expr(right, names, &mut scratch);
+                        names.loop_bounds.insert(name.clone(), limit_text);
+                    }
+                }
                 let c = self.emit_expr(cond, names, out);
                 let c = box_scalar_operand(cond, names, &c);
                 out.push_str(&format!("        if (!zz_truthy({c})) break;\n"));
@@ -1721,6 +1741,69 @@ impl Lowerer {
                     }
                     _ => None,
                 };
+
+                // Fast path: scalar body + known bounds + no filter → flat
+                // storage. `[true for _ in 0..n]` becomes `bool *buf =
+                // alloc(n); for (...) buf[len++] = true;` — raw memory
+                // access with zero boxed-value overhead.
+                let is_scalar_body = matches!(
+                    body.as_ref(),
+                    Expr::Bool { .. } | Expr::Int { .. } | Expr::Float { .. }
+                );
+                if is_scalar_body && filter.is_none() && !self.green_active() && bounds.is_some() {
+                    let (elem_ctype, raw_val): (&str, String) = match body.as_ref() {
+                        Expr::Bool { value, .. } => (
+                            "bool",
+                            if *value {
+                                "true".to_string()
+                            } else {
+                                "false".to_string()
+                            },
+                        ),
+                        Expr::Int { value, .. } => ("int64_t", value.to_string()),
+                        Expr::Float { value, .. } => ("double", value.to_string()),
+                        _ => unreachable!(),
+                    };
+                    let (ref a, ref b) = bounds.as_ref().unwrap();
+                    let count = format!("({b}.i - {a}.i)");
+                    // Declare flat buffer on the function arena (O(1) reset at
+                    // function exit, no per-element refcount traffic).
+                    out.push_str(&format!(
+                        "    {elem_ctype} *{comp} = ({elem_ctype} *)zz_arena_alloc(&_func_arena, (size_t){count} * sizeof({elem_ctype}), 1);\n"
+                    ));
+                    out.push_str(&format!("    size_t {comp}_len = 0;\n"));
+                    out.push_str(&format!("    size_t {comp}_cap = {count};\n"));
+                    // Record flat backing so `flat_index_receiver` and index
+                    // stores emit direct `comp[i]` access.
+                    names
+                        .flat_backing
+                        .insert(comp.clone(), (comp.clone(), elem_ctype.to_string()));
+                    // Strip zz_int()/zz_float()/zz_bool() wrapper so the
+                    // stored length matches raw loop bounds (e.g. "n" not
+                    // "zz_int(n)") for bounds-check elimination.
+                    let b_raw = ["zz_int(", "zz_float(", "zz_bool("]
+                        .iter()
+                        .find_map(|p| b.strip_prefix(p).and_then(|s| s.strip_suffix(')')))
+                        .unwrap_or(b.as_str());
+                    names
+                        .array_len_exprs
+                        .insert(comp.clone(), b_raw.to_string());
+                    // Emit the fill loop.
+                    out.push_str(&format!(
+                        "    for (int64_t __ci = ({a}).i; __ci < ({b}).i; __ci++) {{\n"
+                    ));
+                    names.push_scope();
+                    let xcid = names.enter(&var.name);
+                    out.push_str(&format!("        zz_value {xcid} = zz_int(__ci);\n"));
+                    out.push_str(&format!("        {comp}[{comp}_len++] = {raw_val};\n"));
+                    names.pop_scope();
+                    out.push_str("    }\n");
+                    // Set last_flat_comp AFTER the loop's pop_scope clears it.
+                    names.last_flat_comp = Some((comp.clone(), elem_ctype.to_string()));
+                    return comp;
+                }
+
+                // Boxed path: existing behavior.
                 out.push_str(&format!("    zz_value {comp} = zz_array_new();\n"));
                 // Pre-reserve capacity for counted comprehensions:
                 // `[x for _ in 0..n]` pre-sizes the result to n elements,

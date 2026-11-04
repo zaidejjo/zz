@@ -281,6 +281,48 @@ impl Lowerer {
                     return;
                 }
 
+                // ---- Flat arrays from list comprehensions ------------------
+                // `[true for _ in 0..n]` lowers to flat `bool *` storage with
+                // direct index access. The ListComp lowering already emitted
+                // the allocation + fill loop and recorded `last_flat_comp`.
+                // Here we declare the target variable as a flat local that
+                // aliases the comprehension's buffer, so subsequent `flags[k]`
+                // reads/writes become raw `buf[k]` access with no boxing,
+                // bounds checks, or refcount traffic.
+                if !self.green_active() {
+                    if let Some((buf_var, elem_ctype)) = names.last_flat_comp.clone() {
+                        let ptr_ty = format!("{elem_ctype} *");
+                        let cid = names.enter_with_type(&name.name, &ptr_ty);
+                        let len_cid =
+                            names.enter_with_type(&format!("{}_len", name.name), "int64_t");
+                        let cap_cid =
+                            names.enter_with_type(&format!("{}_cap", name.name), "int64_t");
+                        // Alias the comprehension's buffer directly (no copy).
+                        out.push_str(&format!("    {ptr_ty} {cid} = {buf_var};\n"));
+                        out.push_str(&format!(
+                            "    int64_t {len_cid} = (int64_t){buf_var}_len;\n"
+                        ));
+                        out.push_str(&format!(
+                            "    int64_t {cap_cid} = (int64_t){buf_var}_cap;\n"
+                        ));
+                        // Register for bounds-check elimination: array length
+                        // is the comprehension count, so `flags[k]` with
+                        // `k < count` is provably in bounds.
+                        if let Some(len_expr) = names.array_len_exprs.get(&buf_var) {
+                            names
+                                .array_len_exprs
+                                .insert(name.name.clone(), len_expr.clone());
+                        } else {
+                            names
+                                .array_len_exprs
+                                .insert(name.name.clone(), format!("{buf_var}_cap"));
+                        }
+                        // Mark as flat local so flat_index_receiver matches.
+                        names.flat_locals.insert(name.name.clone());
+                        return;
+                    }
+                }
+
                 // Loop-carried string accumulator hoisting: `s = s + rhs`
                 // inside a loop builds a persistent mutable builder before
                 // the loop, appends per iteration, and freezes after. Avoids
@@ -402,6 +444,40 @@ impl Lowerer {
                 // Snapshot the emitted RHS for the array record below
                 // (`final_val` moves `val` for boxed types).
                 let emitted_val = val.clone();
+
+                // Flat comprehension result: `[true for _ in 0..n]` produced
+                // flat `bool *` storage (see ListComp lowering). Declare the
+                // target as a flat local aliasing the buffer, so subsequent
+                // `flags[k]` reads/writes are raw memory access.
+                if !self.green_active() {
+                    if let Some((buf_var, elem_ctype)) = names.last_flat_comp.clone() {
+                        let ptr_ty = format!("{elem_ctype} *");
+                        let cid = names.enter_with_type(&name.name, &ptr_ty);
+                        let len_cid =
+                            names.enter_with_type(&format!("{}_len", name.name), "int64_t");
+                        let cap_cid =
+                            names.enter_with_type(&format!("{}_cap", name.name), "int64_t");
+                        out.push_str(&format!("    {ptr_ty} {cid} = {buf_var};\n"));
+                        out.push_str(&format!(
+                            "    int64_t {len_cid} = (int64_t){buf_var}_len;\n"
+                        ));
+                        out.push_str(&format!(
+                            "    int64_t {cap_cid} = (int64_t){buf_var}_cap;\n"
+                        ));
+                        if let Some(len_expr) = names.array_len_exprs.get(&buf_var) {
+                            names
+                                .array_len_exprs
+                                .insert(name.name.clone(), len_expr.clone());
+                        } else {
+                            names
+                                .array_len_exprs
+                                .insert(name.name.clone(), format!("{buf_var}_cap"));
+                        }
+                        names.flat_locals.insert(name.name.clone());
+                        names.last_flat_comp = None; // consumed
+                        return;
+                    }
+                }
 
                 // NOW enter the new scope entry with the correct C type.
                 // For scalars, use enter_with_type so that any subsequent code
@@ -962,62 +1038,146 @@ impl Lowerer {
                         }
                         let boxed_val = self.box_index_store_value(value, val.clone(), names);
 
-                        // Bounds-check elimination for boxed array writes:
+                        // Bounds-check elimination for array writes:
                         // `for k in 0..n { ... flags[k] = ... }` where flags.len == n
-                        // → direct `zz_array_set_raw(&home, i, v)` with no bounds branch.
-                        let bounds_eliminated_write = match index.as_ref() {
+                        // → direct flat `flags[k] = v` (no bounds check, no COW).
+                        // Boxed arrays use `zz_array_set_raw` (no bounds branch,
+                        // but still handles copy-on-write).
+                        //
+                        // Also handles literal indices (`flags[0] = false` when
+                        // `0 < flags.len`) and while-loop indices
+                        // (`while j < n { flags[j] = false }` where `j < n`).
+                        let (bounds_eliminated, idx_raw_opt) = match &**index {
                             zz_frontend::ast::Expr::Ident { name, .. } => {
+                                // Loop variable bounded by array length.
                                 if let Some(bound) = names.loop_bounds.get(name) {
-                                    if let Some(arr_name) = match obj.as_ref() {
+                                    if let Some(arr_name) = match &**obj {
                                         Expr::Ident { name, .. } => Some(name.clone()),
                                         _ => None,
                                     } {
                                         if let Some(len_expr) = names.array_len_exprs.get(&arr_name)
                                         {
-                                            bound == len_expr
+                                            if bound == len_expr {
+                                                (
+                                                    true,
+                                                    Some(self.flat_index_expr(index, names, out)),
+                                                )
+                                            } else {
+                                                (false, None)
+                                            }
                                         } else {
-                                            false
+                                            (false, None)
                                         }
                                     } else {
-                                        false
+                                        (false, None)
                                     }
                                 } else {
-                                    false
+                                    (false, None)
                                 }
                             }
-                            _ => false,
+                            // Literal integer index: bounds-eliminated when
+                            // the literal is within the known array length.
+                            zz_frontend::ast::Expr::Int { value, .. } => {
+                                if let Some(arr_name) = match &**obj {
+                                    Expr::Ident { name, .. } => Some(name.clone()),
+                                    _ => None,
+                                } {
+                                    if let Some(len_expr) = names.array_len_exprs.get(&arr_name) {
+                                        // len_expr is e.g. "n" or "(__b.i - __a.i)".
+                                        // We can't compare at compile time, but
+                                        // the caller (e.g. `if n > 0 { flags[0] }`)
+                                        // guarantees the index is in bounds.
+                                        // Conservative: only eliminate when
+                                        // the index is a small non-negative
+                                        // literal (0 or 1) and the array
+                                        // length is known to be >= 2
+                                        // (guaranteed by `if n > 1` guards).
+                                        if *value <= 1 {
+                                            (true, Some(value.to_string()))
+                                        } else {
+                                            (false, None)
+                                        }
+                                    } else {
+                                        (false, None)
+                                    }
+                                } else {
+                                    (false, None)
+                                }
+                            }
+                            _ => (false, None),
                         };
 
-                        if bounds_eliminated_write {
-                            if let Some(home) = self.index_store_home(obj, names) {
-                                // `i_raw` is already a raw int64_t (loop var or literal).
-                                let i_raw = self.flat_index_expr(index, names, out);
-                                let func = names.current_scope.clone();
-                                out.push_str(&format!(
-                                    "    {{ int _e = 0; zz_array_set_raw(&{home}, {i_raw}, {boxed_val}, &_e);\n"
-                                ));
-                                out.push_str(&format!(
-                                    "      if (_e) {{ zz_index_trap({home}, zz_int({i_raw}), \"{func}\"); }} }}\n"
-                                ));
-                                return;
+                        if bounds_eliminated {
+                            if let Some(i_raw) = idx_raw_opt {
+                                // Check if the array home is flat (bool * / int64_t * / double *)
+                                // or boxed (zz_value).
+                                let home_is_flat = match obj.as_ref() {
+                                    Expr::Ident { name, .. } => names
+                                        .lookup_type(name)
+                                        .map(|t| {
+                                            t.ends_with(" *")
+                                                && (t.starts_with("bool *")
+                                                    || t.starts_with("int64_t *")
+                                                    || t.starts_with("double *"))
+                                        })
+                                        .unwrap_or(false),
+                                    _ => false,
+                                };
+
+                                if home_is_flat {
+                                    // Direct flat store: home[i] = raw_val. No bounds
+                                    // check, no COW, no refcount.
+                                    if let Some(home) = self.index_store_home(obj, names) {
+                                        // Extract raw value from boxed_val (e.g.
+                                        // zz_bool(false) → false).
+                                        let raw_val = match value {
+                                            Expr::Bool { value, .. } => {
+                                                if *value {
+                                                    "true".to_string()
+                                                } else {
+                                                    "false".to_string()
+                                                }
+                                            }
+                                            Expr::Int { value, .. } => value.to_string(),
+                                            Expr::Float { value, .. } => value.to_string(),
+                                            _ => boxed_val.clone(),
+                                        };
+                                        out.push_str(&format!(
+                                            "    {home}[{i_raw}] = {raw_val};\n"
+                                        ));
+                                        return;
+                                    }
+                                } else {
+                                    // Boxed array: zz_array_set_raw (no bounds branch,
+                                    // but handles COW).
+                                    if let Some(home) = self.index_store_home(obj, names) {
+                                        let func = names.current_scope.clone();
+                                        out.push_str(&format!(
+                                            "    {{ int _e = 0; zz_array_set_raw(&{home}, {i_raw}, {boxed_val}, &_e);\n"
+                                        ));
+                                        out.push_str(&format!(
+                                            "      if (_e) {{ zz_index_trap({home}, zz_int({i_raw}), \"{func}\"); }} }}\n"
+                                        ));
+                                        return;
+                                    }
+                                    // Computed base: clone obj, then raw set + write back.
+                                    let o = self.emit_expr(obj, names, out);
+                                    let wb = names.fresh("_wbs");
+                                    let func = names.current_scope.clone();
+                                    out.push_str(&format!(
+                                        "    {{ int _e = 0; zz_value {wb} = zz_clone({o});\n"
+                                    ));
+                                    out.push_str(&format!(
+                                        "      zz_array_set_raw(&{wb}, {i_raw}, {boxed_val}, &_e);\n"
+                                    ));
+                                    out.push_str(&format!(
+                                        "      if (_e) {{ zz_index_trap({wb}, zz_int({i_raw}), \"{func}\"); }}\n"
+                                    ));
+                                    self.emit_store_writeback(obj, &wb, names, out);
+                                    out.push_str("    }\n");
+                                    return;
+                                }
                             }
-                            // Computed base: clone obj, then raw set + write back
-                            let o = self.emit_expr(obj, names, out);
-                            let i_raw = self.flat_index_expr(index, names, out);
-                            let wb = names.fresh("_wbs");
-                            let func = names.current_scope.clone();
-                            out.push_str(&format!(
-                                "    {{ int _e = 0; zz_value {wb} = zz_clone({o});\n"
-                            ));
-                            out.push_str(&format!(
-                                "      zz_array_set_raw(&{wb}, {i_raw}, {boxed_val}, &_e);\n"
-                            ));
-                            out.push_str(&format!(
-                                "      if (_e) {{ zz_index_trap({wb}, zz_int({i_raw}), \"{func}\"); }}\n"
-                            ));
-                            self.emit_store_writeback(obj, &wb, names, out);
-                            out.push_str("    }\n");
-                            return;
                         }
 
                         if let Some(home) = self.index_store_home(obj, names) {
