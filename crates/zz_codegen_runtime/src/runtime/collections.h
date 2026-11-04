@@ -61,6 +61,10 @@ zz_value zz_array_new_lit(zz_arena *arena, size_t n);
 // `zz_array_new_lit` (or newly heap-allocated literals) with spare capacity.
 void zz_array_push_lit(zz_array *a, zz_value item);
 
+// Pre-reserve capacity for at least `additional` more elements.
+// Caller must hold the only share (refs == 1). No-op when capacity suffices.
+void zz_array_reserve(zz_value arr, size_t additional, int *err);
+
 // ---- containers --------------------------------------------------------
 void zz_array_push(zz_array *a, zz_value v);
 // Inlined: every `arr[i]` in a loop pays no call overhead. The tag/bounds
@@ -81,6 +85,35 @@ static inline zz_value zz_array_get(const zz_array *a, zz_value idx, int *err) {
         return zz_unit();
     }
     return zz_clone(a->items[i]);
+}
+
+// Bounds-eliminated read: caller guarantees 0 <= i < len. Skips the tag
+// check and bounds branch entirely. Returns a cloned value (refcount
+// bumped) so the caller's release discipline is unchanged.
+static inline zz_value zz_array_get_raw(const zz_array *a, int64_t i) {
+    return zz_clone(a->items[(size_t)i]);
+}
+
+// Forward declaration: defined below at `zz_array_dup`.
+zz_value zz_array_dup(const zz_array *a);
+
+// Bounds-eliminated write: caller guarantees 0 <= i < len. Skips the bounds
+// branch but still handles copy-on-write when the buffer is shared
+// (refs != 1). Takes a `zz_value *obj` so the container pointer can be
+// reseated on COW. `err` is set on OOM only, never on bounds.
+static inline void zz_array_set_raw(zz_value *obj, int64_t i, zz_value v, int *err) {
+    if (!obj || obj->tag != ZZ_ARRAY || !obj->arr) { if (err) *err = 1; return; }
+    zz_array *a = obj->arr;
+    if (a->refs != 1) {
+        zz_value fresh = zz_array_dup(a);
+        if (!fresh.arr) { if (err) *err = 1; return; }
+        zz_release_array(a);
+        obj->arr = fresh.arr;
+        a = obj->arr;
+    }
+    zz_release(&a->items[(size_t)i]);
+    a->items[(size_t)i] = zz_clone(v);
+    if (err) *err = 0;
 }
 void zz_array_set(zz_array *a, zz_value idx, zz_value v, int *err);
 size_t zz_array_len(const zz_array *a);

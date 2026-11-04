@@ -1118,13 +1118,40 @@ impl Lowerer {
                 // Flat scalar array index: `arr[k]` where `arr` is `[int]`/`[float]`/`[bool]`
                 // → direct `({cid})[{i}]` read, no `zz_index_get` bounds-check/clone.
                 // Handles both `arr[k]` (Ident) and `ns.arr[k]` (Path for namespaced globals).
+                //
+                // Bounds-check elimination: if the index variable is a loop
+                // variable bounded by `limit` (from `for i in 0..limit`) and
+                // the array's length equals `limit` (from `[x for _ in 0..limit]`),
+                // then `arr[i]` is provably in bounds and we elide `zz_flat_index`.
                 if let Some((arr_name, elem_ctype)) = self.flat_index_receiver(obj, names) {
                     let arr_cid = names.lookup(arr_name.as_str()).unwrap().to_string();
                     let idx_raw = self.flat_index_expr(index, names, out);
                     let len_cid = names.lookup_or_name(&format!("{}_len", arr_name));
                     let func = names.current_scope.clone();
-                    let raw =
-                        format!("({arr_cid})[zz_flat_index({idx_raw}, {len_cid}, \"{func}\")]");
+
+                    // Check bounds-check elimination: index var bounded by array length.
+                    let bounds_eliminated = match index.as_ref() {
+                        zz_frontend::ast::Expr::Ident { name, .. } => {
+                            if let Some(bound) = names.loop_bounds.get(name) {
+                                if let Some(len_expr) = names.array_len_exprs.get(arr_name.as_str())
+                                {
+                                    bound == len_expr
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false,
+                    };
+
+                    let raw = if bounds_eliminated {
+                        // Direct access: no bounds check needed.
+                        format!("({arr_cid})[{idx_raw}]")
+                    } else {
+                        format!("({arr_cid})[zz_flat_index({idx_raw}, {len_cid}, \"{func}\")]")
+                    };
                     return auto_box(&raw, Some(elem_ctype.as_str()));
                 }
                 // Two fast-paths over the naive
@@ -1144,6 +1171,45 @@ impl Lowerer {
                     _ => self.emit_expr(obj, names, out),
                 };
                 let i = self.emit_expr(index, names, out);
+
+                // Bounds-check elimination for boxed arrays:
+                // `for k in 0..n { ... flags[k] ... }` where flags.len == n
+                // → direct `zz_array_get_raw(o.arr, i)` with no bounds branch.
+                let bounds_eliminated = match index.as_ref() {
+                    zz_frontend::ast::Expr::Ident { name, .. } => {
+                        if let Some(bound) = names.loop_bounds.get(name) {
+                            // Check if arr's length equals the loop bound.
+                            // `array_len_exprs` tracks arrays created by
+                            // `[x for _ in 0..limit]` list comprehensions.
+                            if let Some(arr_name) = match obj.as_ref() {
+                                Expr::Ident { name, .. } => Some(name.clone()),
+                                _ => None,
+                            } {
+                                if let Some(len_expr) = names.array_len_exprs.get(&arr_name) {
+                                    bound == len_expr
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+
+                if bounds_eliminated {
+                    // Direct raw read: no bounds check, no error trap.
+                    // `o` is a zz_value; extract `.arr` for the raw C array.
+                    let tmp = names.fresh("_idxv");
+                    out.push_str(&format!(
+                        "    zz_value {tmp} = zz_array_get_raw(({o}).arr, ({i}));\n"
+                    ));
+                    return tmp;
+                }
+
                 // Box a scalar index (ident/raw-arith) to a zz_value.
                 let i_boxed = self.box_index_arg(index, i, names);
                 // Hoist the read into a temp and check the error flag:
@@ -1629,7 +1695,6 @@ impl Lowerer {
                 ..
             } => {
                 let comp = names.fresh("__comp");
-                out.push_str(&format!("    zz_value {comp} = zz_array_new();\n"));
                 // Static bounds when the iterable is `range(a, b)` or `a..b`.
                 let bounds: Option<(String, String)> = match iter.as_ref() {
                     Expr::Call { callee, args, .. } => {
@@ -1656,10 +1721,23 @@ impl Lowerer {
                     }
                     _ => None,
                 };
+                out.push_str(&format!("    zz_value {comp} = zz_array_new();\n"));
+                // Pre-reserve capacity for counted comprehensions:
+                // `[x for _ in 0..n]` pre-sizes the result to n elements,
+                // eliminating per-iteration grow guards during construction.
+                if let Some((ref a, ref b)) = bounds {
+                    out.push_str(&format!(
+                        "    {{ int _e = 0; zz_array_reserve({comp}, (size_t)({b}.i - {a}.i), &_e); }}\n"
+                    ));
+                }
                 if let Some((a, b)) = bounds {
                     out.push_str(&format!(
                         "    for (int64_t __ci = ({a}).i; __ci < ({b}).i; __ci++) {{\n"
                     ));
+                    // Track comprehension array length for bounds-check elimination:
+                    // `[x for _ in 0..n]` creates an array of length `n`, so
+                    // `arr[i]` with `i < n` inside a subsequent loop is in bounds.
+                    names.array_len_exprs.insert(comp.clone(), b.clone());
                     // Lexical scope for the comprehension variable
                     // (shadowing must not leak past the braces).
                     names.push_scope();

@@ -496,6 +496,31 @@ impl Lowerer {
                 if let Expr::Array { elems, .. } = value {
                     names.set_array_len(&name.name, elems.len());
                     self.record_array_elems(&name.name, elems, &emitted_val, names);
+                } else if let Expr::ListComp { iter, .. } = value {
+                    // List comprehension `[x for _ in 0..n]` produces an array
+                    // of length `n`. Record it so bounds-check elimination can
+                    // prove `flags[k]` is in bounds when `k < n`.
+                    if let Some((_, end_expr)) = match iter.as_ref() {
+                        Expr::Call { callee, args, .. } => {
+                            let is_range = matches!(
+                                callee.as_ref(),
+                                Expr::Ident { name, .. } if name == "range"
+                            );
+                            if is_range && args.len() == 2 {
+                                Some((args[0].clone(), args[1].clone()))
+                            } else {
+                                None
+                            }
+                        }
+                        Expr::Range { start, end, .. } => {
+                            Some((start.as_ref().clone(), end.as_ref().clone()))
+                        }
+                        _ => None,
+                    } {
+                        let b = self.emit_expr(&end_expr, names, &mut String::new());
+                        names.array_len_exprs.insert(name.name.clone(), b);
+                    }
+                    names.invalidate_stack_array_elems(&name.name);
                 } else {
                     names.invalidate_stack_array_elems(&name.name);
                     if let Expr::Ident { name: src, .. } = value {
@@ -936,6 +961,65 @@ impl Lowerer {
                             names.invalidate_stack_array_elems(&root);
                         }
                         let boxed_val = self.box_index_store_value(value, val.clone(), names);
+
+                        // Bounds-check elimination for boxed array writes:
+                        // `for k in 0..n { ... flags[k] = ... }` where flags.len == n
+                        // → direct `zz_array_set_raw(&home, i, v)` with no bounds branch.
+                        let bounds_eliminated_write = match index.as_ref() {
+                            zz_frontend::ast::Expr::Ident { name, .. } => {
+                                if let Some(bound) = names.loop_bounds.get(name) {
+                                    if let Some(arr_name) = match obj.as_ref() {
+                                        Expr::Ident { name, .. } => Some(name.clone()),
+                                        _ => None,
+                                    } {
+                                        if let Some(len_expr) = names.array_len_exprs.get(&arr_name)
+                                        {
+                                            bound == len_expr
+                                        } else {
+                                            false
+                                        }
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        };
+
+                        if bounds_eliminated_write {
+                            if let Some(home) = self.index_store_home(obj, names) {
+                                // `i_raw` is already a raw int64_t (loop var or literal).
+                                let i_raw = self.flat_index_expr(index, names, out);
+                                let func = names.current_scope.clone();
+                                out.push_str(&format!(
+                                    "    {{ int _e = 0; zz_array_set_raw(&{home}, {i_raw}, {boxed_val}, &_e);\n"
+                                ));
+                                out.push_str(&format!(
+                                    "      if (_e) {{ zz_index_trap({home}, zz_int({i_raw}), \"{func}\"); }} }}\n"
+                                ));
+                                return;
+                            }
+                            // Computed base: clone obj, then raw set + write back
+                            let o = self.emit_expr(obj, names, out);
+                            let i_raw = self.flat_index_expr(index, names, out);
+                            let wb = names.fresh("_wbs");
+                            let func = names.current_scope.clone();
+                            out.push_str(&format!(
+                                "    {{ int _e = 0; zz_value {wb} = zz_clone({o});\n"
+                            ));
+                            out.push_str(&format!(
+                                "      zz_array_set_raw(&{wb}, {i_raw}, {boxed_val}, &_e);\n"
+                            ));
+                            out.push_str(&format!(
+                                "      if (_e) {{ zz_index_trap({wb}, zz_int({i_raw}), \"{func}\"); }}\n"
+                            ));
+                            self.emit_store_writeback(obj, &wb, names, out);
+                            out.push_str("    }\n");
+                            return;
+                        }
+
                         if let Some(home) = self.index_store_home(obj, names) {
                             let i = self.emit_expr(index, names, out);
                             // Box a scalar index to a zz_value.
@@ -1818,6 +1902,13 @@ impl Lowerer {
                         "for (int64_t {cid} = {sv_unboxed}; {cid} < {ev_unboxed}; {cid}++) {{\n"
                     )
                 };
+                // Record loop bound for bounds-check elimination:
+                // `for i in 0..limit` means `i < limit` inside the body,
+                // so `arr[i]` with `arr.len >= limit` is provably in bounds.
+                if !green {
+                    let bound_expr = ev_unboxed.clone();
+                    names.loop_bounds.insert(v.clone(), bound_expr);
+                }
                 // Emit hoisted pre-loop code (e.g. string accumulator builder init)
                 // before the loop header.
                 for pre in self.loop_pre_code.borrow_mut().drain(..) {
@@ -1843,12 +1934,12 @@ impl Lowerer {
                 };
                 if let Some(n) = loop_n {
                     if n > 0 && vars.len() == 1 {
-                        let loop_var = &vars[0].name;
+                        let _loop_var = &vars[0].name;
                         if let Some(Stmt::Expr(call)) = body.stmts.first() {
                             if body.stmts.len() == 1 {
                                 if let Expr::Call { callee, args, .. } = call {
                                     if let Some((arr_name, arr_ctype)) =
-                                        flat_push_receiver(callee, args, loop_var, names, self)
+                                        flat_push_receiver(callee, args, _loop_var, names, self)
                                     {
                                         let len_cid =
                                             names.lookup_or_name(&format!("{}_len", arr_name));
@@ -2605,12 +2696,18 @@ fn mutating_method_target(e: &Expr, names: &NameCtx) -> Option<(String, String)>
     }
 }
 
-/// Detect `arr.push(loop_var)` where `arr` is a flat (unboxed) array and
-/// `loop_var` is the loop variable. Returns `(array_name, element_ctype)`.
+/// Detect `arr.push(...)` where `arr` is a flat (unboxed) array inside a
+/// counted loop `for i in 0..N`. Returns `(array_name, element_ctype)`.
+///
+/// Any single-argument `push` on a flat array in a counted loop pre-reserves
+/// capacity N once before the loop, removing the per-iteration grow guard.
+/// The argument need not be the loop variable — `arr.push(1)` and
+/// `arr.push(loop_var)` both benefit equally since we know the loop runs N
+/// times and thus needs at most N elements.
 fn flat_push_receiver(
     callee: &Expr,
     args: &[Expr],
-    loop_var: &str,
+    _loop_var: &str,
     names: &NameCtx,
     lowerer: &Lowerer,
 ) -> Option<(String, String)> {
@@ -2618,10 +2715,6 @@ fn flat_push_receiver(
     let [arg] = args else {
         return None;
     };
-    // Argument must be the loop variable.
-    if !matches!(arg, Expr::Ident { name, .. } if name == loop_var) {
-        return None;
-    }
     // Receiver must be a flat array: resolve its C type and check.
     let (recv_name, recv_ctype) = match callee {
         // `arr.push(x)` parsed as a two-part path where the head is a local.
@@ -2640,6 +2733,7 @@ fn flat_push_receiver(
         },
         _ => return None,
     };
+    let _ = arg; // argument value doesn't matter for pre-reserve
     let is_flat = lowerer.scalar_array_from_ptr(&recv_ctype).is_some()
         || lowerer.flat_array_from_ptr(&recv_ctype).is_some();
     is_flat.then_some((recv_name, recv_ctype))

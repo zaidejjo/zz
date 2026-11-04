@@ -273,6 +273,27 @@ void zz_array_push_lit(zz_array *a, zz_value item) {
     a->items[a->len++] = item;
 }
 
+// Ensure the array has capacity for at least `additional` more elements.
+// Caller must hold the only share (refs == 1); grows in place with zero
+// copies when capacity suffices, realloc when growth is needed. Used by
+// list comprehensions over counted ranges to pre-size the result array.
+void zz_array_reserve(zz_value arr, size_t additional, int *err) {
+    if (arr.tag != ZZ_ARRAY || !arr.arr) { if (err) *err = 1; return; }
+    zz_array *a = arr.arr;
+    // refs == 1 excludes arena/lit/stack sentinels and any live borrow;
+    // the buffer is malloc'd and safe to realloc.
+    if (a->refs != 1) { if (err) *err = 1; return; }
+    size_t need = a->len + additional;
+    if (need <= a->cap) { if (err) *err = 0; return; }
+    size_t nc = a->cap == 0 ? 8 : a->cap;
+    while (nc < need) nc *= 2;
+    zz_value *ni = (zz_value *)realloc(a->items, nc * sizeof(zz_value));
+    if (!ni) { if (err) *err = 1; return; }
+    a->items = ni;
+    a->cap = nc;
+    if (err) *err = 0;
+}
+
 void zz_array_push(zz_array *a, zz_value item) {
     if (a->len == a->cap) {
         size_t nc = a->cap == 0 ? 4 : a->cap * 2;
@@ -1356,10 +1377,21 @@ zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
     return zz_unit();
 }
 
-// vec.push(arr, item) — returns a NEW array with item appended
-// (matches the VM: the input array is left untouched).
+// vec.push(arr, item) — appends item and returns the array.
+// In-place fast path: when `arr` is uniquely owned (refs == 1), mutate it
+// directly instead of copying — building an array via repeated push is then
+// O(n) instead of O(n²). Matches `zz_vec_push_take`'s fast path but without
+// requiring the caller to take the argument first.
+// VM parity: the VM's `vec.push` also reuses the argument's Vec buffer when
+// uniquely owned (Arc::try_unwrap), so this is behaviorally identical.
 zz_value zz_vec_push(zz_value arr, zz_value item, int *err) {
     if (arr.tag != ZZ_ARRAY) return zz_unit();
+    // In-place fast path: uniquely owned heap array (refs == 1 excludes every
+    // sentinel — arena 0, STACK/LIT/ARENA magics — and any live borrow).
+    if (arr.arr && arr.arr->refs == 1) {
+        zz_array_push(arr.arr, item);
+        return arr;
+    }
     zz_value out = zz_array_dup(arr.arr);
     zz_array *a = out.arr;
     if (a->len >= a->cap) {
