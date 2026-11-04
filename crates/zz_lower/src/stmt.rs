@@ -1181,6 +1181,55 @@ impl Lowerer {
                         }
 
                         if let Some(home) = self.index_store_home(obj, names) {
+                            // Flat scalar array (bool * / int64_t * / double *):
+                            // always emit a flat store with a runtime bounds
+                            // check via zz_flat_index. This path is reached when
+                            // bounds-check elimination could not prove the index
+                            // in bounds (e.g. while-loop indices), and the old
+                            // boxed `zz_index_set(&{home}, ...)` would pass a
+                            // `bool **` where a `zz_value *` is expected.
+                            let (flat_home, arr_name) = match obj.as_ref() {
+                                Expr::Ident { name, .. } => {
+                                    let is_flat = names
+                                        .lookup_type(name)
+                                        .map(|t| {
+                                            t.ends_with(" *")
+                                                && (t.starts_with("bool *")
+                                                    || t.starts_with("int64_t *")
+                                                    || t.starts_with("double *"))
+                                        })
+                                        .unwrap_or(false);
+                                    (is_flat, name.clone())
+                                }
+                                _ => (false, String::new()),
+                            };
+                            if flat_home {
+                                let i_raw = self.flat_index_expr(index, names, out);
+                                let len_cid = names
+                                    .array_len_exprs
+                                    .get(&arr_name)
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        names.lookup_or_name(&format!("{arr_name}_len"))
+                                    });
+                                let func = names.current_scope.clone();
+                                let raw_val = match value {
+                                    Expr::Bool { value, .. } => {
+                                        if *value {
+                                            "true".to_string()
+                                        } else {
+                                            "false".to_string()
+                                        }
+                                    }
+                                    Expr::Int { value, .. } => value.to_string(),
+                                    Expr::Float { value, .. } => value.to_string(),
+                                    _ => boxed_val.clone(),
+                                };
+                                out.push_str(&format!(
+                                    "    {{ int _e = 0; {home}[zz_flat_index({i_raw}, {len_cid}, \"{func}\")] = {raw_val}; }}\n"
+                                ));
+                                return;
+                            }
                             let i = self.emit_expr(index, names, out);
                             // Box a scalar index to a zz_value.
                             let i_boxed = self.box_index_arg(index, i, names);

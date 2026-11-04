@@ -5054,10 +5054,11 @@ impl Compiler {
                     skip = Some(self.chunk.code.len());
                     self.emit(Op::JumpIfFalse(0));
                 }
-                self.emit(Op::LoadSlot(result_slot as u16));
                 self.compile_expr(body);
-                self.emit(Op::ArrayPush(*span));
-                self.emit(Op::StoreSlot(result_slot as u16));
+                self.emit(Op::VecPush {
+                    home: TakeHome::Slot(result_slot as u16),
+                    span: *span,
+                });
                 let header = self.emit_for_next(vec![var.name.clone()], in_env, body_start, *span);
                 self.patch_jump(header);
                 let exit = self.chunk.code.len();
