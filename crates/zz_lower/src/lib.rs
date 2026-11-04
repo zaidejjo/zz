@@ -495,6 +495,12 @@ impl Lowerer {
                     }
                     if let Expr::Array { elems, .. } = value {
                         names.set_array_len(zz_name, elems.len());
+                    } else if !first_init {
+                        // Reassignment to a non-literal value invalidates the
+                        // statically-known array length (e.g. `a = vec.push(a, 9)`),
+                        // so `len(a)` calls `zz_len(a)` instead of a stale
+                        // compile-time constant.
+                        names.invalidate_array_len(zz_name);
                     }
                     body.push_str(&out);
                 }

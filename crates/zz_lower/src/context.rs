@@ -430,8 +430,12 @@ impl NameCtx {
     }
     /// Forget any statically-known literal length for `name`. Called when
     /// `name` is reassigned with a non-literal value or aliased into a call.
+    /// Top-level globals may be namespaced (`mod.a`) while Assign targets
+    /// use the short name (`a`), so remove both the exact key and any
+    /// namespaced variant ending in `.{name}`.
     pub(crate) fn invalidate_array_len(&mut self, name: &str) {
-        self.array_lens.remove(name);
+        self.array_lens
+            .retain(|k, _| k != name && !k.ends_with(&format!(".{name}")));
     }
 
     /// Statically-known length of `name` if it was most recently bound to

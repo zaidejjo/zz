@@ -4046,7 +4046,9 @@ impl TypeCheckOps for Checker {
         self.current_ret = prev_ret;
         self.pop_scope();
         // Unify body type with the return var (from any `return` statements).
-        let _ = self.unifier.unify(&ret_var, &bt);
+        if let Err(e) = self.unifier.unify(&ret_var, &bt) {
+            self.report_mismatch(e, body.span());
+        }
         let mut resolved_ret = self.unifier.resolve(&ret_var);
         // If a return type annotation is provided, unify it with the inferred return type.
         if let Some(ann) = ret_ty {

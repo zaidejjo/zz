@@ -1752,8 +1752,35 @@ impl Lowerer {
             // after this point: drop index forwarding for it (plus any
             // literal mentioning it) so later reads stay truthful.
             names.invalidate_stack_array_elems(&fv);
-            let Some(ptr) = names.cell_ptr(&fv) else {
-                continue;
+            let ptr = match names.cell_ptr(&fv) {
+                Some(p) => p,
+                None => {
+                    // Promote stack variables (e.g. top-level loop vars) to
+                    // heap cells so closures can capture them by reference
+                    // (#532). Without this, a closure inside a top-level
+                    // `for` loop reads the loop variable as an uninitialized
+                    // global instead of the per-iteration value.
+                    let stack_ctype = names
+                        .stack
+                        .get(&fv)
+                        .and_then(|v| v.last())
+                        .map(|(_, c)| c.clone());
+                    match stack_ctype {
+                        Some(ctype) => {
+                            let ptr = names.fresh("_capcell");
+                            let deref = format!("(*{ptr})");
+                            names.insert_capture(&fv, &ptr, &deref, &ctype, None);
+                            caps.push((fv, ptr.clone(), ctype.clone(), None));
+                            // Emit the cell variable declaration so the cap
+                            // array can reference it.
+                            out.push_str(&format!(
+                                "    {ctype} *{ptr} = ({ctype}*)malloc(sizeof({ctype}));\n"
+                            ));
+                            continue;
+                        }
+                        None => continue,
+                    }
+                }
             };
             let ctype = names.lookup_type(&fv).unwrap_or("zz_value").to_string();
             let checker = names.checker_types.get(&fv).cloned();
