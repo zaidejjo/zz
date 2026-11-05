@@ -147,20 +147,17 @@ impl Lowerer {
                     names.enter_cell(&p.name.name, &ptr, &deref, "zz_value", n);
                 } else {
                     let cid = names.enter(&p.name.name);
-                    // Ownership contract: callers always hand every heap
-                    // argument an owned share (a retained clone, a moved
-                    // local, or a fresh temporary), so the callee must drop
-                    // that share on *every* exit path. A `cleanup` attribute
-                    // does exactly that for `return`, `?`/`try` early
-                    // returns, and fall-through alike — no manually emitted
-                    // release sites to miss. `zz_release` is a no-op for
-                    // scalars and closes `Db` handles idempotently.
-                    //
-                    // Captured params are excluded below: their storage is
-                    // the heap cell handed to the closure environment, which
-                    // owns the share instead (see the captured branch).
+                    // DB handles must drop their share on function exit
+                    // (callee-owned). Non-DB params are caller-managed:
+                    // the caller clones/retains and releases them, so the
+                    // callee does NOT attach a cleanup attribute.
+                    let db_attr = if matches!(&pt, zz_checker::Type::Db) {
+                        " __attribute__((cleanup(zz_db_value_cleanup)))"
+                    } else {
+                        ""
+                    };
                     o.push_str(&format!(
-                        "    zz_value {cid} __attribute__((cleanup(zz_release))) = args[{idx}];\n",
+                        "    zz_value {cid}{db_attr} = args[{idx}];\n",
                         idx = i - arg_offset
                     ));
                 }

@@ -4201,6 +4201,39 @@ impl Lowerer {
             if arg_items.is_empty() {
                 return format!("{cf}(NULL, 0)");
             }
+            // Escape-analysis borrow (#383): arguments to proven read-only
+            // parameters pass the live local instead of a retained share.
+            // Same shape guard as the read-only-native fast path above:
+            // only exact `zz_clone(barecid)` locals (which outlive the
+            // synchronous call); complex temporaries keep owned form.
+            // Skipped under green (suspend/resume) and for method calls,
+            // and requires 1:1 arg alignment as a structural backstop.
+            // Non-DB params have no cleanup attribute (caller-managed), so
+            // borrowing is safe — the callee never releases them.
+            if !self.green_active()
+                && method_receiver.is_none()
+                && named.is_empty()
+                && arg_items.len() == ordered_args.len()
+            {
+                for (i, item) in arg_items.iter_mut().enumerate() {
+                    if !Self::param_is_readonly(&self.readonly_params, &cname, i) {
+                        continue;
+                    }
+                    if let Some(inner) = item
+                        .strip_prefix("zz_clone(")
+                        .and_then(|s| s.strip_suffix(')'))
+                    {
+                        if !inner.is_empty()
+                            && inner
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                            && !inner.starts_with("zz_")
+                        {
+                            *item = inner.to_string();
+                        }
+                    }
+                }
+            }
             return format!(
                 "({cf}((zz_value[]){{ {joined} }}, {n}))",
                 joined = arg_items.join(", "),
