@@ -13,6 +13,7 @@ extern "C" {
 
 // ---- array / dict constructors -----------------------------------------
 zz_value zz_array_new(void);
+zz_value zz_array_new_sized(size_t cap);
 zz_value zz_dict_new(void);
 zz_value zz_dict_new_sized(size_t hint);
 

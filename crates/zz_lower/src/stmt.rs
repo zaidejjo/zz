@@ -479,12 +479,30 @@ impl Lowerer {
                                 *existing_ty = ctype.clone();
                             }
                         }
-                        let db_attr = if db_local {
-                            " __attribute__((cleanup(zz_db_value_cleanup)))"
-                        } else {
-                            ""
-                        };
-                        out.push_str(&format!("    {ctype} {cid}{db_attr} = {final_val};\n"));
+                        // Function-scope locals (declared outside any
+                        // loop) have no other release site: `loop_scope_end`
+                        // only covers bindings created inside a loop, and a
+                        // C local dying at function return does not run
+                        // `zz_release`. Attach a cleanup attribute so heap
+                        // arrays/strings/dicts die on every exit path,
+                        // including early `return`/`?`. DB handles use the
+                        // same idempotent release (it nulls the slot), so
+                        // they need no special attribute.
+                        //
+                        // Loop-body locals are deliberately excluded:
+                        // `loop_scope_end` already releases them each
+                        // iteration, and `zz_release` does not clear the
+                        // slot for non-DB tags — a second cleanup would
+                        // double-free.
+                        let cleanup_attr =
+                            if self.loop_scope_depth.get() == 0 && ctype == "zz_value" {
+                                " __attribute__((cleanup(zz_release)))"
+                            } else if db_local {
+                                " __attribute__((cleanup(zz_db_value_cleanup)))"
+                            } else {
+                                ""
+                            };
+                        out.push_str(&format!("    {ctype} {cid}{cleanup_attr} = {final_val};\n"));
                     }
                 }
                 // Track array literals so `len(v)` can fold to the arity,
@@ -512,8 +530,20 @@ impl Lowerer {
                 if let Expr::Ident { name, .. } = target {
                     if name == "_" {
                         *self.void_context.borrow_mut() = true;
-                        self.emit_expr(value, names, out);
+                        let val = self.emit_expr(value, names, out);
                         *self.void_context.borrow_mut() = false;
+                        // Discard the result, releasing any refcounted share
+                        // it owns (e.g. a `Result` box from `f.close()`).
+                        // Push/append return `unit`/receiver so `ty_at` is
+                        // `Unit` and no release is emitted for them.
+                        if stmt_call_needs_release(self, value, names) {
+                            let tmp = names.fresh("_stmt");
+                            out.push_str(&format!(
+                                "    zz_value {tmp} = {val};\n    (void){tmp};\n    zz_release(&{tmp});\n"
+                            ));
+                        } else {
+                            out.push_str(&format!("    (void)({val});\n"));
+                        }
                         return;
                     }
                 }
@@ -1158,13 +1188,27 @@ impl Lowerer {
                     if self.green_active() {
                         self.stmt_direct.set(true);
                     }
+                    // Decide up front (immutable) whether the discarded call
+                    // result owns a refcounted share that must be released.
+                    // `emit_expr` takes &mut self, so capture first.
+                    let release_result = stmt_call_needs_release(self, e, names);
                     let val = self.emit_expr(e, names, out);
                     *self.void_context.borrow_mut() = false;
                     // Flat push in a pre-reserved counted loop: push code
                     // already emitted inline (no grow guard) by emit_expr;
                     // skip the `(void)(zz_unit())` wrapper.
+                    // Also skip when `emit_call` already emitted a complete
+                    // statement (temp decls + call + releases) and returned
+                    // `zz_unit()`.
                     if !self.skip_flat_push_grow.get() {
-                        out.push_str(&format!("    (void)({val});\n"));
+                        if release_result {
+                            let tmp = names.fresh("_stmt");
+                            out.push_str(&format!(
+                                "    zz_value {tmp} = {val};\n    (void){tmp};\n    zz_release(&{tmp});\n"
+                            ));
+                        } else {
+                            out.push_str(&format!("    (void)({val});\n"));
+                        }
                     }
                 } else if !is_leaf_expr(e) {
                     // Statement-position `if/else` discards its temp:
@@ -1209,7 +1253,9 @@ impl Lowerer {
                 ..
             } => {
                 self.loop_depth.set(self.loop_depth.get() + 1);
+                self.loop_scope_depth.set(self.loop_scope_depth.get() + 1);
                 self.emit_for(vars, iter, body, *span, names, out);
+                self.loop_scope_depth.set(self.loop_scope_depth.get() - 1);
                 self.loop_depth.set(self.loop_depth.get() - 1);
             }
             Stmt::Break { .. } => out.push_str("    break;\n"),
@@ -1408,6 +1454,13 @@ impl Lowerer {
                         None => return false,
                     }
                 }
+                Expr::Fmt { .. } => {
+                    // Lower the f-string into an owned temp with the
+                    // pre-sized mutable builder path, append it, then drop
+                    // the temp. Without this the whole `row` accumulator is
+                    // reallocated and copied once per pixel.
+                    plan.push(Term::StrCall(term));
+                }
                 Expr::Call {
                     callee,
                     args,
@@ -1503,19 +1556,23 @@ impl Lowerer {
                 }
                 Term::StrCall(term) => {
                     // Self-append (`s = s + s`) arrives here as an Ident:
-                    // clone first so grow cannot free the source.
-                    let val = if matches!(term, Expr::Ident { .. } | Expr::Path { .. }) {
-                        let src = self.emit_expr(term, names, out);
-                        // emit_expr on an Ident already bumps (zz_clone);
-                        // use it directly as the owned temp.
-                        src
+                    // clone first so grow cannot free the source. `str(x)`
+                    // calls similarly produce an owned temp that must be
+                    // released after the append. An `Expr::Fmt` term, however,
+                    // lowers to `__fmtN` which already carries a
+                    // `cleanup(zz_release)` (see `emit_expr`), so append it
+                    // directly and let that cleanup drop it — a separate
+                    // `{tmp}` + release would double-free the same string.
+                    let is_fmt = matches!(term, Expr::Fmt { .. });
+                    let val = self.emit_expr(term, names, out);
+                    if is_fmt {
+                        out.push_str(&format!("    zz_str_append_str(&{cid}, {val});\n"));
                     } else {
-                        self.emit_expr(term, names, out)
-                    };
-                    let tmp = names.fresh("_sapp");
-                    out.push_str(&format!("    zz_value {tmp} = {val};\n"));
-                    out.push_str(&format!("    zz_str_append_str(&{cid}, {tmp});\n"));
-                    out.push_str(&format!("    zz_release(&{tmp});\n"));
+                        let tmp = names.fresh("_sapp");
+                        out.push_str(&format!("    zz_value {tmp} = {val};\n"));
+                        out.push_str(&format!("    zz_str_append_str(&{cid}, {tmp});\n"));
+                        out.push_str(&format!("    zz_release(&{tmp});\n"));
+                    }
                 }
             }
         }
@@ -2603,6 +2660,57 @@ fn mutating_method_target(e: &Expr, names: &NameCtx) -> Option<(String, String)>
         },
         _ => None,
     }
+}
+
+/// `zz_vec_push`/`zz_vec_append` (and method-form `push`/`append`) return the
+/// receiver handle unchanged in void context, so discarding them must not
+/// release (the caller still owns the receiver).
+fn callee_is_inplace_push(callee: &Expr) -> bool {
+    match callee {
+        Expr::Ident { name, .. } => matches!(name.as_str(), "zz_vec_push" | "zz_vec_append"),
+        Expr::Path { parts, .. } => {
+            matches!(
+                parts.last().map(String::as_str),
+                Some("push") | Some("append")
+            )
+        }
+        Expr::Field { name, .. } => matches!(name.as_str(), "push" | "append"),
+        _ => false,
+    }
+}
+
+/// Decide whether a statement-position call result owns a refcounted
+/// `zz_value` share that must be released when the result is discarded
+/// (e.g. `f.write_chunk(...)`'s `Result` box). Scalars, unit, void and
+/// unboxed-struct returns are raw C values with no `zz_value` to release.
+fn stmt_call_needs_release(lowerer: &Lowerer, e: &Expr, names: &NameCtx) -> bool {
+    let Expr::Call { callee, .. } = e else {
+        return false;
+    };
+    if callee_is_inplace_push(callee) {
+        return false;
+    }
+    let Some(ty) = lowerer.ty_at(names, e.span()) else {
+        return false;
+    };
+    if matches!(
+        ty,
+        zz_checker::Type::Int
+            | zz_checker::Type::Float
+            | zz_checker::Type::Bool
+            | zz_checker::Type::Unit
+            | zz_checker::Type::Void
+    ) {
+        return false;
+    }
+    if let zz_checker::Type::Struct(sname, _) = ty {
+        if lowerer.is_unboxed_struct(sname) {
+            return false;
+        }
+    }
+    // Everything else (Str, Array, Dict, Option, Result, File, Object, Func,
+    // Range, Db, Bytes, Json, opaque handles, ...) owns a refcounted share.
+    true
 }
 
 /// Detect `arr.push(loop_var)` where `arr` is a flat (unboxed) array and

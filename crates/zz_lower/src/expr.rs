@@ -178,6 +178,19 @@ fn mentions_decorator(d: &Decorator, name: &str) -> bool {
         || d.named.iter().any(|(_, v)| mentions_ident(v, name))
 }
 
+/// Temporarily sets [`Lowerer::native_call_args`] while lowering the
+/// arguments of a native call, then resets it on drop (covers every
+/// early-return path out of `emit_call`). Natives borrow their arguments,
+/// so Ident arguments are passed bare instead of `zz_clone`d.
+struct NativeCallArgsGuard<'a> {
+    cell: &'a std::cell::Cell<bool>,
+}
+impl<'a> Drop for NativeCallArgsGuard<'a> {
+    fn drop(&mut self) {
+        self.cell.set(false);
+    }
+}
+
 impl Lowerer {
     /// Emit a block in value position, returning a C expression string
     /// for its tail value. Shared by value-position blocks and if-branch
@@ -299,7 +312,12 @@ impl Lowerer {
                     }
                 }
                 est = est.max(16);
-                out.push_str(&format!("    zz_value {fvar} = zz_str_new_mut({est});\n"));
+                // The builder is an owned heap value; attach a cleanup so it is
+                // released when it goes out of scope (e.g. a standalone f-string
+                // passed directly to `fs.write_chunk`/`println` with no binding).
+                out.push_str(&format!(
+                    "    zz_value {fvar} __attribute__((cleanup(zz_release))) = zz_str_new_mut({est});\n"
+                ));
                 for part in parts {
                     match part {
                         FmtPart::Text(t) => {
@@ -357,7 +375,18 @@ impl Lowerer {
                             // through; cloning would also be a type error
                             // (zz_clone takes zz_value).
                             t if t.starts_with("zz_struct_") => cid.to_string(),
-                            _ => format!("zz_clone({cid})"),
+                            _ => {
+                                // Native callees borrow their arguments
+                                // (they never retain/release them), so pass
+                                // the bare local instead of zz_clone — a
+                                // clone would bump the refcount with nothing
+                                // to drop it, leaking the share.
+                                if self.native_call_args.get() {
+                                    cid.to_string()
+                                } else {
+                                    format!("zz_clone({cid})")
+                                }
+                            }
                         }
                     } else {
                         // Fallback to safe behavior if type unknown
@@ -687,7 +716,20 @@ impl Lowerer {
                         let r = box_scalar_operand(right, names, &r);
                         let r = self.box_struct_operand(right, r, &raw_r, names, out);
                         let tmp = names.fresh("elvis");
-                        out.push_str(&format!("    zz_value {tmp} = {l};\n"));
+                        // `zz_elvis(left, right)` borrows `left` (reads it
+                        // during the call) and releases `right`. The caller
+                        // owns `left` and must release it — attach a cleanup
+                        // attribute to the temp so it is released exactly once.
+                        // For ident lefts, clone first so `elvis21 := v20`'s
+                        // cleanup releases `v20`, not the clone.
+                        let is_ident_left = matches!(left.as_ref(), Expr::Ident { .. });
+                        if is_ident_left {
+                            out.push_str(&format!("    zz_value {tmp} __attribute__((cleanup(zz_release))) = zz_clone({l});\n"));
+                        } else {
+                            out.push_str(&format!(
+                                "    zz_value {tmp} __attribute__((cleanup(zz_release))) = {l};\n"
+                            ));
+                        }
                         format!("zz_elvis({tmp}, {r})")
                     }
                     _ => {
@@ -1004,10 +1046,24 @@ impl Lowerer {
                 // The marker additionally releases body-declared heap
                 // locals at the bottom of every iteration.
                 let while_scope = self.loop_scope_begin(names);
+                // Enter the loop scope so statement lowering can tell
+                // body-declared locals (released by `loop_scope_end`) from
+                // function-scope locals (released by their `cleanup`
+                // attribute). Without this, a `while` body local would get
+                // both release sites and `zz_release` would double-free.
+                // Track the scope for local-cleanup decisions only. Do NOT
+                // bump `loop_depth`: the string-accumulator hoisting path
+                // assumes a single owning `for` loop whose accumulator starts
+                // empty, while a `while` body can append to a builder that
+                // already holds data (nested row loops). The non-inline
+                // `zz_str_append_str` path is already amortized O(1) once the
+                // buffer is uniquely owned, and it handles immutable inputs.
+                self.loop_scope_depth.set(self.loop_scope_depth.get() + 1);
                 // Loop body is never a function tail.
                 for bstmt in &body.stmts {
                     self.emit_stmt(bstmt, names, out, false);
                 }
+                self.loop_scope_depth.set(self.loop_scope_depth.get() - 1);
                 self.loop_scope_end(names, out, while_scope);
                 // End-of-body literal knowledge must not escape the loop:
                 // a later iteration re-enters through the guard (already
@@ -1153,19 +1209,19 @@ impl Lowerer {
                 // flows through this check. Bound once into owned temps
                 // (borrow-safe synchronous use) so the trap below reports
                 // the exact operands without re-evaluating them (#251).
-                let e = names.fresh("_idxe");
+                let err_tmp = names.fresh("_idxe");
                 let tmp = names.fresh("_idxv");
                 let otmp = names.fresh("_idxo");
                 let itmp = names.fresh("_idxi");
                 let func = names.current_scope.clone();
                 out.push_str(&format!("    zz_value {otmp} = {o};\n"));
                 out.push_str(&format!("    zz_value {itmp} = {i_boxed};\n"));
-                out.push_str(&format!("    int {e} = 0;\n"));
+                out.push_str(&format!("    int {err_tmp} = 0;\n"));
                 out.push_str(&format!(
-                    "    zz_value {tmp} = zz_index_get({otmp}, {itmp}, &{e});\n"
+                    "    zz_value {tmp} = zz_index_get({otmp}, {itmp}, &{err_tmp});\n"
                 ));
                 out.push_str(&format!(
-                    "    if ({e}) {{ zz_index_trap({otmp}, {itmp}, \"{func}\"); }}\n"
+                    "    if ({err_tmp}) {{ zz_index_trap({otmp}, {itmp}, \"{func}\"); }}\n"
                 ));
                 tmp
             }
@@ -2086,7 +2142,7 @@ impl Lowerer {
         let convert: Option<String> = self.tp.try_converts.get(&span).cloned().unwrap_or(None);
 
         // Emit the early-return for a `Result` error payload held in `tmp`.
-        let emit_result_err_return = |out: &mut String, names: &mut NameCtx| {
+        let emit_result_err_return = |out: &mut String, names: &mut NameCtx, tmp: String| {
             if let Some(fname) = convert.clone() {
                 let err_tmp = names.fresh("_try_err");
                 let conv_tmp = names.fresh("_try_conv");
@@ -2110,8 +2166,10 @@ impl Lowerer {
                         "        zz_value {conv_tmp} = {cf}((zz_value[]){{ {err_tmp} }}, 1);\n"
                     ));
                 }
+                out.push_str(&format!("        zz_release(&{tmp});\n"));
                 out.push_str(&format!("        return zz_variant_err({conv_tmp});\n"));
             } else {
+                out.push_str(&format!("        zz_release(&{tmp});\n"));
                 out.push_str(&format!("        return {tmp};\n"));
             }
         };
@@ -2119,15 +2177,24 @@ impl Lowerer {
         match self.ty_at(names, inner.span()) {
             Some(zz_checker::Type::Option(_)) => {
                 out.push_str(&format!("    if ({tmp}.tag == ZZ_OPTION_NONE) {{\n"));
+                out.push_str(&format!("        zz_release(&{tmp});\n"));
                 out.push_str("        return (zz_value){ZZ_OPTION_NONE, {0}};\n");
                 out.push_str("    }\n");
-                format!("zz_match_some({tmp})")
+                let res_tmp = names.fresh("_try_ok");
+                out.push_str(&format!(
+                    "    zz_value {res_tmp} = zz_match_some({tmp});\n    zz_release(&{tmp});\n"
+                ));
+                res_tmp
             }
             Some(zz_checker::Type::Result(_, _)) => {
                 out.push_str(&format!("    if ({tmp}.tag == ZZ_RESULT_ERR) {{\n"));
-                emit_result_err_return(out, names);
+                emit_result_err_return(out, names, tmp.clone());
                 out.push_str("    }\n");
-                format!("zz_match_ok({tmp})")
+                let res_tmp = names.fresh("_try_ok");
+                out.push_str(&format!(
+                    "    zz_value {res_tmp} = zz_match_ok({tmp});\n    zz_release(&{tmp});\n"
+                ));
+                res_tmp
             }
             // Unresolved/dynamic operand: guard both tags. The error arm
             // applies the conversion when one was resolved; otherwise the
@@ -2137,15 +2204,16 @@ impl Lowerer {
             // arm is defensive-only).
             _ => {
                 out.push_str(&format!("    if ({tmp}.tag == ZZ_RESULT_ERR) {{\n"));
-                emit_result_err_return(out, names);
+                emit_result_err_return(out, names, tmp.clone());
                 out.push_str("    }\n");
                 out.push_str(&format!("    if ({tmp}.tag == ZZ_OPTION_NONE) {{\n"));
+                out.push_str(&format!("        zz_release(&{tmp});\n"));
                 out.push_str("        return (zz_value){ZZ_OPTION_NONE, {0}};\n");
                 out.push_str("    }\n");
                 let res_tmp = names.fresh("_try_ok");
                 out.push_str(&format!("    zz_value {res_tmp};\n"));
                 out.push_str(&format!(
-                    "    if ({tmp}.tag == ZZ_OPTION_SOME) {{ {res_tmp} = zz_match_some({tmp}); }} else {{ {res_tmp} = zz_match_ok({tmp}); }}\n"
+                    "    if ({tmp}.tag == ZZ_OPTION_SOME) {{ {res_tmp} = zz_match_some({tmp}); }} else {{ {res_tmp} = zz_match_ok({tmp}); }}\n    zz_release(&{tmp});\n"
                 ));
                 res_tmp
             }
@@ -2209,7 +2277,7 @@ impl Lowerer {
     /// when escape analysis proved the parameter never outlives the call.
     /// Missing entries (natives, methods, unknown callees, arity drift)
     /// answer false, preserving today's clone behavior.
-    fn param_is_readonly(
+    pub(crate) fn param_is_readonly(
         masks: &std::collections::HashMap<String, Vec<bool>>,
         cname: &str,
         idx: usize,
@@ -3198,7 +3266,19 @@ impl Lowerer {
                 native_impl(&cname),
                 Some("zz_vec_push") | Some("zz_vec_append")
             ) && matches!(recv, Expr::Ident { .. });
-            let recv_val = if borrow_recv {
+            // In expression context (result used), clone the receiver so
+            // `zz_vec_push` sees refs > 1 and dups (copy-on-write), leaving
+            // the original array untouched — preserving ZZ value semantics
+            // (`let c = a.push(x)` must not mutate `a`). In void context
+            // (statement position), borrow the receiver directly so
+            // `zz_vec_push` sees refs == 1 and mutates in place (no copy).
+            let clone_recv = !borrow_recv || *self.void_context.borrow();
+            let recv_val = if borrow_recv && !clone_recv {
+                // Expression context: clone the receiver before passing.
+                // zz_vec_push will see refs >= 2 and take the COW path.
+                let emitted = self.emit_expr(recv, names, out);
+                format!("zz_clone({emitted})")
+            } else if borrow_recv {
                 if let Expr::Ident { name, .. } = recv {
                     names
                         .lookup(name)
@@ -3401,6 +3481,17 @@ impl Lowerer {
                 .collect(),
             None => vec![None; ordered_args.len()],
         };
+        // Natives borrow their arguments (they never retain or release
+        // them), so pass Ident arguments bare instead of zz_clone — a clone
+        // would bump the refcount with nothing to drop it, leaking the share.
+        let std_name = format!("std.{cname}");
+        let is_native_call = self.reachable_natives.contains(&cname)
+            || self.reachable_natives.contains(&std_name)
+            || native_supported(&cname);
+        self.native_call_args.set(is_native_call);
+        let _guard = NativeCallArgsGuard {
+            cell: &self.native_call_args,
+        };
         for (arg_idx, a) in ordered_args.iter().enumerate() {
             if let Some(sname) = struct_box_for_arg.get(arg_idx).and_then(|o| o.clone()) {
                 // Escape-analysis borrow (#383): when the callee provably
@@ -3523,10 +3614,12 @@ impl Lowerer {
                             format!("zz_int({emitted_inner})")
                         }
                     } else {
-                        // Already a zz_value — but we may need to clone it
-                        // if it's a reference-counted type.
+                        // Already a zz_value. Every user-function argument
+                        // carries its own share: the callee releases it via
+                        // `cleanup(zz_release)`, so the caller must retain a
+                        // clone here (borrow-passing would make the callee
+                        // drop a share it does not own).
                         if let Expr::Ident { name, .. } = inner {
-                            // If the variable is a refcounted type, clone it.
                             if let Some(_ty) = names.lookup_type(name) {
                                 format!("zz_clone({emitted_inner})")
                             } else {
@@ -4107,37 +4200,6 @@ impl Lowerer {
             }
             if arg_items.is_empty() {
                 return format!("{cf}(NULL, 0)");
-            }
-            // Escape-analysis borrow (#383): arguments to proven read-only
-            // parameters pass the live local instead of a retained share.
-            // Same shape guard as the read-only-native fast path above:
-            // only exact `zz_clone(barecid)` locals (which outlive the
-            // synchronous call); complex temporaries keep owned form.
-            // Skipped under green (suspend/resume) and for method calls,
-            // and requires 1:1 arg alignment as a structural backstop.
-            if !self.green_active()
-                && method_receiver.is_none()
-                && named.is_empty()
-                && arg_items.len() == ordered_args.len()
-            {
-                for (i, item) in arg_items.iter_mut().enumerate() {
-                    if !Self::param_is_readonly(&self.readonly_params, &cname_for_native, i) {
-                        continue;
-                    }
-                    if let Some(inner) = item
-                        .strip_prefix("zz_clone(")
-                        .and_then(|s| s.strip_suffix(')'))
-                    {
-                        if !inner.is_empty()
-                            && inner
-                                .bytes()
-                                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                            && !inner.starts_with("zz_")
-                        {
-                            *item = inner.to_string();
-                        }
-                    }
-                }
             }
             return format!(
                 "({cf}((zz_value[]){{ {joined} }}, {n}))",
@@ -5405,19 +5467,31 @@ impl Lowerer {
         }
         let item_val = self.emit_expr(item, names, out);
         // Auto-box if needed (historical Ident fast path, preserved).
-        let boxed = if let Expr::Ident { name: n, .. } = item {
-            auto_box(&item_val, names.lookup_type(n))
+        // For a refcounted Ident, `emit_expr` already produced `zz_clone(cid)`
+        // — an owned temp that `zz_vec_append` clones into the array. We must
+        // release that temp after the append, or the share leaks (one boxed
+        // object per array element). Scalar Ident / inline fallbacks need no
+        // release (no heap share created).
+        let (boxed, boxed_is_owned_temp) = if let Expr::Ident { name: n, .. } = item {
+            let b = auto_box(&item_val, names.lookup_type(n));
+            let is_owned = b.starts_with("zz_clone(");
+            (b, is_owned)
         } else {
-            box_scalar_operand(item, names, &item_val)
+            (box_scalar_operand(item, names, &item_val), false)
         };
-        out.push_str(&format!(
-            "    {{ int _e = 0; zz_vec_append({arr_var}, {boxed}, &_e); }}\n"
-        ));
+        if boxed_is_owned_temp {
+            let tmp = names.fresh("_arr_el");
+            out.push_str(&format!("    zz_value {tmp} = {boxed};\n"));
+            out.push_str(&format!(
+                "    {{ int _e = 0; zz_vec_append({arr_var}, {tmp}, &_e); }}\n"
+            ));
+            out.push_str(&format!("    zz_release(&{tmp});\n"));
+        } else {
+            out.push_str(&format!(
+                "    {{ int _e = 0; zz_vec_append({arr_var}, {boxed}, &_e); }}\n"
+            ));
+        }
     }
-
-    /// Box an index expression to a `zz_value` for `idx` arguments. Scalar
-    /// locals (int64_t/double/bool) and raw arithmetic need an explicit box;
-    /// already-boxed expressions pass through unchanged.
     pub(crate) fn box_index_arg(&self, e: &Expr, emitted: String, names: &NameCtx) -> String {
         if let Expr::Ident { name, .. } = e {
             return auto_box(&emitted, names.lookup_type(name));
@@ -6151,8 +6225,17 @@ impl Lowerer {
                 self.green_cell(names, "zz_value", false, out, Some("_green_arena"));
             deref
         } else {
+            // The scrutinee wrapper is owned by this match for its whole
+            // extent. Attach a cleanup attribute so the `Result`/`Option`
+            // box (and any payload it still references) is released on
+            // every exit path — fall-through, arm `break`/`continue`, and
+            // early `return`/`?` alike. Arms extract their own cloned
+            // payloads (`zz_match_ok`/`zz_match_err` bump the inner ref),
+            // so releasing the wrapper here cannot double-free them.
             let scrut_tmp = names.fresh("_match");
-            out.push_str(&format!("    zz_value {scrut_tmp} = zz_unit();\n"));
+            out.push_str(&format!(
+                "    zz_value {scrut_tmp} __attribute__((cleanup(zz_release))) = zz_unit();\n"
+            ));
             scrut_tmp
         };
         let boxed = box_scalar_operand(scrutinee, names, &scrut_val);

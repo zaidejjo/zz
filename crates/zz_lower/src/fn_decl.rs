@@ -147,18 +147,20 @@ impl Lowerer {
                     names.enter_cell(&p.name.name, &ptr, &deref, "zz_value", n);
                 } else {
                     let cid = names.enter(&p.name.name);
-                    // The caller passes an owning clone (or a fresh
-                    // temporary) for every argument. DB handles must drop
-                    // that share on function exit, exactly like DB locals;
-                    // otherwise a helper that receives a handle leaks one
-                    // reference and keeps the connection open.
-                    let db_attr = if matches!(&pt, zz_checker::Type::Db) {
-                        " __attribute__((cleanup(zz_db_value_cleanup)))"
-                    } else {
-                        ""
-                    };
+                    // Ownership contract: callers always hand every heap
+                    // argument an owned share (a retained clone, a moved
+                    // local, or a fresh temporary), so the callee must drop
+                    // that share on *every* exit path. A `cleanup` attribute
+                    // does exactly that for `return`, `?`/`try` early
+                    // returns, and fall-through alike — no manually emitted
+                    // release sites to miss. `zz_release` is a no-op for
+                    // scalars and closes `Db` handles idempotently.
+                    //
+                    // Captured params are excluded below: their storage is
+                    // the heap cell handed to the closure environment, which
+                    // owns the share instead (see the captured branch).
                     o.push_str(&format!(
-                        "    zz_value {cid}{db_attr} = args[{idx}];\n",
+                        "    zz_value {cid} __attribute__((cleanup(zz_release))) = args[{idx}];\n",
                         idx = i - arg_offset
                     ));
                 }
@@ -189,6 +191,9 @@ impl Lowerer {
         self.emit_func_block(block, names, &mut body_out, false);
         o.push_str(&body_out);
         self.emit_defer_runner(o);
+        // Function parameters are released by their `cleanup(zz_release)`
+        // attributes at every return path (see `emit_function`), so the
+        // epilogue only handles `self` write-back and fall-through.
         // Copy `self` back to the caller's storage so mutations made inside
         // an impl method persist to the receiver (`c.inc()` mutating `c`).
         // `self` was copied into a local at entry; this writes the final

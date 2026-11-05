@@ -554,6 +554,17 @@ pub struct Lowerer {
     /// fire at depth 1 so code accumulated in a nested loop body never
     /// leaks into an enclosing loop's pre/post code.
     pub(crate) loop_depth: std::cell::Cell<usize>,
+    /// Nesting depth of *any* loop (`for` or `while`) currently being
+    /// lowered. Unlike [`loop_depth`](Self::loop_depth), this gates local
+    /// cleanup attributes: body-declared locals are released by
+    /// `loop_scope_end` at the end of every iteration, so attaching a
+    /// function-scope `cleanup(zz_release)` to them would double-free.
+    pub(crate) loop_scope_depth: std::cell::Cell<usize>,
+    /// Set while lowering the arguments of a native call. Natives borrow
+    /// their arguments (they never retain or release them), so Ident
+    /// arguments should be passed bare instead of `zz_clone`d — a clone
+    /// would bump the refcount with nothing to drop it, leaking the share.
+    pub(crate) native_call_args: std::cell::Cell<bool>,
     /// C code to emit before the next `for(...)` loop header, accumulated
     /// by hoisting optimizations during body lowering. Consumed by
     /// `emit_for`.
@@ -684,6 +695,8 @@ impl Lowerer {
             impl_self_writeback: std::cell::RefCell::new(None),
             unimplemented_natives: std::cell::RefCell::new(Vec::new()),
             loop_depth: std::cell::Cell::new(0),
+            loop_scope_depth: std::cell::Cell::new(0),
+            native_call_args: std::cell::Cell::new(false),
             loop_pre_code: std::cell::RefCell::new(Vec::new()),
             loop_post_code: std::cell::RefCell::new(Vec::new()),
             skip_flat_push_grow: std::cell::Cell::new(false),
@@ -1172,6 +1185,11 @@ impl Lowerer {
                 callee.as_ref(),
                 Expr::Ident { name, .. } if name == "str" || name == "std.str"
             ),
+            // F-strings always produce a fresh immutable `ZZ_STR`. Treating
+            // them as strings lets `s = s + f"{x}"` fold into the in-place
+            // append chain instead of copying the whole accumulator per
+            // iteration (the O(N^2) mandelbrot row bug).
+            Expr::Fmt { .. } => true,
             _ => false,
         }
     }

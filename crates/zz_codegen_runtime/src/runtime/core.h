@@ -739,9 +739,20 @@ static inline void zz_retain(zz_value *v) {
     }
 }
 
+// Release a `ZZ_FILE` streaming handle: close the underlying FILE if still
+// open, free the owned path copy and the handle struct itself. `zz_fs_close`
+// only flushes/fcloses and marks closed — it does not free the struct — so
+// release is the single owner. Defined in core.c (struct zz_file is complete
+// there). Idempotent and nulls the slot, so cleanup attributes are safe.
+void zz_release_file_handle(zz_value *v);
+
 static inline void zz_release(zz_value *v) {
     switch (v->tag) {
     case ZZ_STR:
+    case ZZ_MUTABLE_STR:
+        // Mutable builders are exclusively owned but still carry a heap
+        // header/buffer. They must be freed exactly like immutable strings;
+        // omitting this tag leaked every unfrozen loop accumulator.
         if (v->s && !v->s->interned) {
             // Arena-allocated strings have refs==0 sentinel — skip free.
             if (v->s->refs == 0) {
@@ -797,6 +808,13 @@ static inline void zz_release(zz_value *v) {
             zz_db_release_handle(db);
         }
         break;
+    case ZZ_FILE:
+        // Streaming handle: release is the single owner that frees the
+        // handle. `zz_fs_close` only flushes/fcloses and marks closed; it
+        // does not free the struct. Defined out of line (core.c) because
+        // `struct zz_file` is incomplete in this header.
+        zz_release_file_handle(v);
+        break;
     case ZZ_WEAK:
         if (v->weak) {
             int last = zz_arc_relaxed_enabled()
@@ -840,9 +858,10 @@ zz_value zz_heal_for_move(zz_value v);
 
 static inline void zz_assign(zz_value *dst, zz_value src) {
     // Release old value if it's a refcounted type.
-    if (dst->tag == ZZ_STR || dst->tag == ZZ_ARRAY || dst->tag == ZZ_BYTES ||
+    if (dst->tag == ZZ_STR || dst->tag == ZZ_MUTABLE_STR ||
+        dst->tag == ZZ_ARRAY || dst->tag == ZZ_BYTES ||
         dst->tag == ZZ_DICT || dst->tag == ZZ_FUNC || dst->tag == ZZ_OBJECT ||
-        dst->tag == ZZ_RANGE || dst->tag == ZZ_DB ||
+        dst->tag == ZZ_RANGE || dst->tag == ZZ_DB || dst->tag == ZZ_FILE ||
         dst->tag == ZZ_OPTION_SOME || dst->tag == ZZ_RESULT_OK ||
         dst->tag == ZZ_RESULT_ERR || dst->tag == ZZ_JSON ||
         dst->tag == ZZ_WEAK) {

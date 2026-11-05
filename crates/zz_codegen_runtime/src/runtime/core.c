@@ -520,7 +520,14 @@ zz_value zz_closure_make_ex(zz_dispatch_fn f, void **cells, size_t nenv) {
 static zz_value zz_static_thunk(zz_value *args, size_t argc, void **env, size_t nenv) {
     (void)nenv;
     zz_native_fn f = (zz_native_fn)(env[0]);
-    return f(args, argc);
+    // Named functions own (and release) every heap argument they receive —
+    // direct call sites always pass a retained share. First-class call
+    // sites hand the thunk *borrowed* values (generated closure-call
+    // temporaries, runtime callbacks over array elements), so clone each
+    // argument here; the callee's `cleanup(zz_release)` consumes them.
+    zz_value owned[argc ? argc : 1];
+    for (size_t i = 0; i < argc; i++) owned[i] = zz_clone(args[i]);
+    return f(owned, argc);
 }
 
 zz_value zz_func_of_static(zz_native_fn f) {
@@ -540,6 +547,12 @@ static zz_value zz_method_thunk(zz_value *args, size_t argc, void **env, size_t 
     (void)nenv;
     zz_value_method_fn f = (zz_value_method_fn)(env[0]);
     if (argc > 0) {
+        // `args[0]` is the receiver the method body writes back through
+        // (owned by the caller). Explicit arguments follow the same
+        // ownership contract as plain named functions: the callee releases
+        // them, so hand it retained shares even though the call-site temp
+        // is borrowed.
+        for (size_t i = 1; i < argc; i++) args[i] = zz_clone(args[i]);
         return f(&args[0], argc > 1 ? &args[1] : NULL, argc > 1 ? argc - 1 : 0);
     }
     return zz_unit();
@@ -7932,8 +7945,10 @@ int zz_main_result_code(zz_value r) {
         char *msg = zz_value_to_display_string(r.payload);
         fprintf(stderr, "%s\n", msg ? msg : "<error>");
         free(msg);
+        zz_release(&r);
         return 1;
     }
+    zz_release(&r);
     return 0;
 }
 
@@ -10648,6 +10663,20 @@ static struct zz_file *zz_file_alloc(FILE *fp, const char *path, int writable) {
     return f;
 }
 
+// Release a `ZZ_FILE` handle: close the underlying FILE if still open, free
+// the owned path copy and the handle struct itself, then null the slot.
+// Idempotent: after a prior `zz_fs_close` the fields are already
+// NULL/closed, so this only frees the struct. Called from `zz_release` and
+// thus from cleanup attributes on every exit path.
+void zz_release_file_handle(zz_value *v) {
+    if (v->file) {
+        if (!v->file->closed && v->file->fp) fclose(v->file->fp);
+        free(v->file->path);
+        free(v->file);
+        v->file = NULL;
+    }
+}
+
 static zz_value zz_file_closed_err(const char *op) {
     size_t n = strlen("fs:") + strlen(op) + strlen(":closed") + 1;
     char *msg = (char *)malloc(n);
@@ -10766,8 +10795,9 @@ zz_value zz_fs_close(zz_value f, int *err) {
         f.file->fp = NULL;
     }
     f.file->closed = 1;
-    free(f.file->path);
-    f.file->path = NULL;
+    // Do NOT free `f.file` or `f.file->path` here: `zz_release` owns freeing
+    // the handle struct (see the ZZ_FILE case in core.h). Freeing here would
+    // double-free when the handle value is later released (e.g. cleanup attr).
     return zz_variant_ok(zz_unit());
 }
 
