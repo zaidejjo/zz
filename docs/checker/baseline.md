@@ -15,12 +15,13 @@ The full `cargo test --workspace` was **not executed to completion** in this ses
 | Suite | Command | Pass | Fail | Skip | Status |
 |-------|---------|------|------|------|--------|
 | workspace unit | `cargo test --workspace` | — | — | — | not-run |
-| e2e discovery | `cargo test -p zz_cli --test e2e` | — | — | — | not-run |
-| dual-engine parity | `cargo test -p zz_cli --test dual_engine_parity` | — | — | — | not-run |
-| batched parity | `cargo test -p zz_cli --test batched_parity` | — | — | — | not-run |
-| check regression | `cargo test -p zz_cli --test performance_check_regression` | — | — | — | not-run |
+| e2e discovery | `cargo test -p zz_cli --test e2e -- e2e_discover` | 2 | 0 | 0 | green |
+| dual-engine parity (closure subset) | `cargo test -p zz_cli --test dual_engine_parity -- closure` | 7 | 0 | 0 | green |
+| dual-engine parity (full) | `cargo test -p zz_cli --test dual_engine_parity` | — | — | — | not-run (interrupted; closure subset green) |
+| batched parity | `cargo test -p zz_cli --test batched_parity` | 2 | 0 | 0 | green |
+| check regression | `cargo test -p zz_cli --test performance_check_regression` | 4 | 0 | 0 | green |
 
-> Update this table with real numbers once the suites are run. Do not mark Phase 0 complete until every suite is green (or every failure is explained in a linked decision/commit).
+> Update this table when the full dual_engine_parity + workspace suites complete. Do not mark Phase 0 complete until every suite is green (or every failure is explained).
 
 ## Benchmark results (Phase 0, scripts/bench_check.sh)
 
