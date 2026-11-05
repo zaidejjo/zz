@@ -2025,6 +2025,31 @@ fn range_loop_fast_path_matches_the_tree_walker() {
     );
 }
 
+/// List comprehension `[expr for _ in 0..n]` must append in place via
+/// `VecPush`, not `LoadSlot + ArrayPush + StoreSlot` (which clones the
+/// whole accumulated array every iteration → O(n²)). Correctness is checked
+/// against the tree-walker, and the emitted chunk must contain `VecPush`.
+#[test]
+fn list_comp_range_emits_in_place_vec_push() {
+    assert_same("a := [true for _ in 0..8]\nlen(a)");
+    assert_same("a := [i for i in 0..6]\na");
+    assert_same("a := [i * 2 for i in 0..5]\nlen(a)");
+    assert_same("a := [i for i in 2..9]\na");
+    assert_same("a := [true for _ in 0..0]\nlen(a)");
+
+    let chunk = compile_with_push_native("a := [true for _ in 0..8]\n");
+    assert!(
+        has_op(&chunk, |op| matches!(op, Op::VecPush { .. })),
+        "expected fused VecPush for list comp, got {:?}",
+        chunk.code
+    );
+    assert!(
+        !has_op(&chunk, |op| matches!(op, Op::ArrayPush { .. })),
+        "list comp must not use ArrayPush (clones per iteration): {:?}",
+        chunk.code
+    );
+}
+
 /// A `for` loop in non-final statement position has its value discarded by
 /// the caller's `Op::Pop`, so the per-iteration `Unit` + `SetLoopResult`
 /// pair is dead work and must not be emitted. The `Unit` placeholder pushed

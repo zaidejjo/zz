@@ -114,6 +114,15 @@ pub struct NameCtx {
     /// most recently bound to (straight-line code only). Used to fold
     /// `len(v)` to a constant so tight loops lower to raw scalar arith.
     pub(crate) array_lens: HashMap<String, usize>,
+    /// zz var name → C expression for its runtime length (e.g. from
+    /// `[val; N]` where N is a variable). Used by bounds-check elimination:
+    /// when a loop var `i` is bounded by `limit` and `arr.len_expr == limit`,
+    /// `arr[i]` is provably in bounds and the `zz_flat_index` check elides.
+    pub(crate) array_len_exprs: HashMap<String, String>,
+    /// Loop variable name → upper bound C expression (from `for i in 0..limit`).
+    /// Used by bounds-check elimination: when `arr.len_expr == limit`, `arr[i]`
+    /// inside the loop is provably in bounds.
+    pub(crate) loop_bounds: HashMap<String, String>,
     /// zz var name → pure-scalar array literal elements it was most
     /// recently bound to (straight-line code only). Used to forward
     /// `arr[lit]` reads to the element's raw C expression, eliminating
@@ -145,6 +154,15 @@ pub struct NameCtx {
     /// SROA: `p.x` in `for p in pts { sum += p.x }` rewrites to
     /// `({pts})[_idx].x` directly, eliminating the per-iteration struct copy.
     pub(crate) flat_struct_loop_vars: HashMap<String, (String, String, String)>,
+    /// zz_value variable name → (flat buffer C expression, element ctype).
+    /// Populated when a list comprehension `[scalar for _ in 0..n]` produces
+    /// flat storage instead of a boxed array. Enables direct `buf[i]` reads
+    /// and writes through `flat_index_receiver` / index stores.
+    pub(crate) flat_backing: HashMap<String, (String, String)>,
+    /// Last list comprehension that produced flat storage: (flat buffer C id,
+    /// element ctype). Set by ListComp lowering, consumed by Decl handler to
+    /// declare the target variable as a flat local instead of zz_value.
+    pub(crate) last_flat_comp: Option<(String, String)>,
 }
 
 impl NameCtx {
@@ -160,12 +178,16 @@ impl NameCtx {
             flat_locals: HashSet::new(),
             scope_markers: Vec::new(),
             array_lens: HashMap::new(),
+            array_len_exprs: HashMap::new(),
+            loop_bounds: HashMap::new(),
             stack_array_elems: HashMap::new(),
             last_promoted_array: None,
             checker_types: HashMap::new(),
             current_scope: zz_checker::TOP_SCOPE.to_string(),
             scalar_fn_sigs: HashMap::new(),
             flat_struct_loop_vars: HashMap::new(),
+            flat_backing: HashMap::new(),
+            last_flat_comp: None,
         }
     }
 
@@ -411,8 +433,12 @@ impl NameCtx {
         // Forwarded element texts embed C identifiers that die with the
         // scope — drop all of them (missed opt past the boundary, never
         // a stale read). `array_lens` survives (bare counts need no ids).
+        // `loop_bounds` dies with the scope: loop variables are scoped.
+        // `flat_backing` and `last_flat_comp` persist: they map zz_value
+        // variables to flat buffers that live for the function lifetime.
         self.stack_array_elems.clear();
         self.last_promoted_array = None;
+        self.loop_bounds.clear();
         if let Some(marker) = self.scope_markers.pop() {
             for vec in self.stack.values_mut() {
                 vec.retain(|(cid, _)| cid_counter(cid) < marker);
@@ -1617,11 +1643,20 @@ impl Lowerer {
     /// `(C-id, element-ctype)`. Handles both `arr[k]` (Ident) and
     /// `ns.arr[k]` (Path for namespaced globals). Returns `None` unless
     /// the receiver is a known flat scalar array.
+    ///
+    /// Also checks `flat_backing`: zz_value variables backed by flat
+    /// storage from list comprehensions (`[true for _ in 0..n]`).
     pub(crate) fn flat_index_receiver(
         &self,
         obj: &zz_frontend::ast::Expr,
         names: &NameCtx,
     ) -> Option<(String, String)> {
+        // Flat backing from list comprehensions takes priority.
+        if let zz_frontend::ast::Expr::Ident { name, .. } = obj {
+            if let Some((buf_expr, elem_ctype)) = names.flat_backing.get(name) {
+                return Some((buf_expr.clone(), elem_ctype.clone()));
+            }
+        }
         let (name, ctype) = match obj {
             zz_frontend::ast::Expr::Ident { name, .. } => {
                 let ctype = names.lookup_type(name.as_str()).unwrap_or("");

@@ -995,9 +995,78 @@ impl Lowerer {
                 // condition; in-body re-establishment (fresh literals)
                 // still folds within the iteration.
                 names.clear_array_lens();
+                // Track while-loop bound for bounds-check elimination:
+                // `while j < n { ... }` means j < n inside the body, so
+                // `arr[j]` with arr.len == n is provably in bounds.
+                if let Expr::Binary {
+                    op: zz_frontend::ast::BinOp::Lt,
+                    left,
+                    right,
+                    ..
+                } = cond.as_ref()
+                {
+                    // `while j < n` → `j < n` bound for bounds elimination.
+                    // `while i * i < n` → `i < n` bound (i*i < n implies i < n
+                    // for i >= 0, which holds since i starts at 0 and grows).
+                    let (bound_var, limit_text) = match left.as_ref() {
+                        Expr::Ident { name, .. } => {
+                            let mut scratch = String::new();
+                            let limit = self.emit_expr(right, names, &mut scratch);
+                            (name.clone(), limit)
+                        }
+                        Expr::Binary {
+                            op: zz_frontend::ast::BinOp::Mul,
+                            left: l,
+                            right: _r,
+                            ..
+                        } if matches!(l.as_ref(), Expr::Ident { .. }) => {
+                            if let Expr::Ident { name, .. } = l.as_ref() {
+                                let mut scratch = String::new();
+                                let limit = self.emit_expr(right, names, &mut scratch);
+                                (name.clone(), limit)
+                            } else {
+                                (String::new(), String::new())
+                            }
+                        }
+                        _ => (String::new(), String::new()),
+                    };
+                    if !bound_var.is_empty() {
+                        names.loop_bounds.insert(bound_var, limit_text);
+                    }
+                }
                 let c = self.emit_expr(cond, names, out);
-                let c = box_scalar_operand(cond, names, &c);
-                out.push_str(&format!("        if (!zz_truthy({c})) break;\n"));
+                // While conditions: if the condition is already a raw C scalar
+                // (comparison, flat bool read), test it directly without
+                // zz_truthy()/zz_bool() wrapping. Fall back to boxed path
+                // otherwise.
+                match crate::context::raw_scalar_text(cond, &c, names) {
+                    Some((raw, "bool")) => {
+                        out.push_str(&format!("        if (!{raw}) break;\n"));
+                    }
+                    Some((raw, "double")) => {
+                        out.push_str(&format!(
+                            "        if (!zz_truthy(zz_float({raw}))) break;\n"
+                        ));
+                    }
+                    Some((raw, _)) => {
+                        out.push_str(&format!("        if (!zz_truthy(zz_int({raw}))) break;\n"));
+                    }
+                    None => {
+                        let c = box_scalar_operand(cond, names, &c);
+                        // Flat bool array reads emit a raw C bool — use it
+                        // directly instead of boxing through zz_truthy().
+                        // Simple identifiers (_idxv10, etc.) hold boxed
+                        // zz_value and need zz_truthy(). emit_expr wraps
+                        // call results in parens, so strip leading '('
+                        // before checking for zz_ prefix.
+                        let c_trim = c.trim_start_matches('(');
+                        if c_trim.starts_with("zz_") || crate::context::is_simple_ident(c_trim) {
+                            out.push_str(&format!("        if (!zz_truthy({c})) break;\n"));
+                        } else {
+                            out.push_str(&format!("        if (!{c}) break;\n"));
+                        }
+                    }
+                }
                 // Lexical scope for the body (same push/pop_scope
                 // discipline as for-loop bodies and value blocks):
                 // shadowing declarations must not leak past the braces.
@@ -1052,12 +1121,35 @@ impl Lowerer {
                         Some((raw, _)) => format!("({raw} != 0)"),
                         None => {
                             let c = box_scalar_operand(cond, names, &c);
-                            format!("zz_truthy({c})")
+                            // Flat bool array reads emit a raw C bool — test
+                            // directly instead of boxing through zz_truthy().
+                            // Simple identifiers (_idxv10, etc.) hold boxed
+                            // zz_value and need zz_truthy(). emit_expr wraps
+                            // call results in parens, so strip leading '('
+                            // before checking for zz_ prefix.
+                            let c_trim = c.trim_start_matches('(');
+                            if c_trim.starts_with("zz_") || crate::context::is_simple_ident(c_trim)
+                            {
+                                format!("zz_truthy({c})")
+                            } else {
+                                c
+                            }
                         }
                     }
                 } else {
                     let c = box_scalar_operand(cond, names, &c);
-                    format!("zz_truthy({c})")
+                    // Flat bool array reads emit a raw C bool — test directly
+                    // instead of boxing through zz_truthy().
+                    // Simple identifiers (_idxv10, etc.) hold boxed zz_value
+                    // and need zz_truthy(). emit_expr wraps call results in
+                    // parens, so strip leading '(' before checking for zz_
+                    // prefix.
+                    let c_trim = c.trim_start_matches('(');
+                    if c_trim.starts_with("zz_") || crate::context::is_simple_ident(c_trim) {
+                        format!("zz_truthy({c})")
+                    } else {
+                        c
+                    }
                 };
                 let tmp = names.fresh("_ifv");
                 out.push_str(&format!("    zz_value {tmp} = zz_unit();\n"));
@@ -1118,13 +1210,53 @@ impl Lowerer {
                 // Flat scalar array index: `arr[k]` where `arr` is `[int]`/`[float]`/`[bool]`
                 // → direct `({cid})[{i}]` read, no `zz_index_get` bounds-check/clone.
                 // Handles both `arr[k]` (Ident) and `ns.arr[k]` (Path for namespaced globals).
+                //
+                // Bounds-check elimination: if the index variable is a loop
+                // variable bounded by `limit` (from `for i in 0..limit`) and
+                // the array's length equals `limit` (from `[x for _ in 0..limit]`),
+                // then `arr[i]` is provably in bounds and we elide `zz_flat_index`.
                 if let Some((arr_name, elem_ctype)) = self.flat_index_receiver(obj, names) {
                     let arr_cid = names.lookup(arr_name.as_str()).unwrap().to_string();
                     let idx_raw = self.flat_index_expr(index, names, out);
-                    let len_cid = names.lookup_or_name(&format!("{}_len", arr_name));
                     let func = names.current_scope.clone();
-                    let raw =
-                        format!("({arr_cid})[zz_flat_index({idx_raw}, {len_cid}, \"{func}\")]");
+
+                    // Resolve array length: prefer array_len_exprs (raw bound
+                    // expression from list comprehension), fall back to {name}_len CID.
+                    let len_cid = names
+                        .array_len_exprs
+                        .get(arr_name.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| names.lookup_or_name(&format!("{}_len", arr_name)));
+
+                    // Check bounds-check elimination: index var bounded by array length.
+                    let bounds_eliminated = match index.as_ref() {
+                        zz_frontend::ast::Expr::Ident { name, .. } => {
+                            if let Some(bound) = names.loop_bounds.get(name) {
+                                if let Some(len_expr) = names.array_len_exprs.get(arr_name.as_str())
+                                {
+                                    bound == len_expr
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false,
+                    };
+
+                    let raw = if bounds_eliminated {
+                        // Direct access: no bounds check needed.
+                        format!("({arr_cid})[{idx_raw}]")
+                    } else {
+                        format!("({arr_cid})[zz_flat_index({idx_raw}, {len_cid}, \"{func}\")]")
+                    };
+                    // For flat bool arrays, return the raw C bool instead of
+                    // boxing it via zz_bool(). The caller (if/while condition)
+                    // can use the raw bool directly without zz_truthy().
+                    if elem_ctype == "bool" {
+                        return raw;
+                    }
                     return auto_box(&raw, Some(elem_ctype.as_str()));
                 }
                 // Two fast-paths over the naive
@@ -1144,6 +1276,45 @@ impl Lowerer {
                     _ => self.emit_expr(obj, names, out),
                 };
                 let i = self.emit_expr(index, names, out);
+
+                // Bounds-check elimination for boxed arrays:
+                // `for k in 0..n { ... flags[k] ... }` where flags.len == n
+                // → direct `zz_array_get_raw(o.arr, i)` with no bounds branch.
+                let bounds_eliminated = match index.as_ref() {
+                    zz_frontend::ast::Expr::Ident { name, .. } => {
+                        if let Some(bound) = names.loop_bounds.get(name) {
+                            // Check if arr's length equals the loop bound.
+                            // `array_len_exprs` tracks arrays created by
+                            // `[x for _ in 0..limit]` list comprehensions.
+                            if let Some(arr_name) = match obj.as_ref() {
+                                Expr::Ident { name, .. } => Some(name.clone()),
+                                _ => None,
+                            } {
+                                if let Some(len_expr) = names.array_len_exprs.get(&arr_name) {
+                                    bound == len_expr
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+
+                if bounds_eliminated {
+                    // Direct raw read: no bounds check, no error trap.
+                    // `o` is a zz_value; extract `.arr` for the raw C array.
+                    let tmp = names.fresh("_idxv");
+                    out.push_str(&format!(
+                        "    zz_value {tmp} = zz_array_get_raw(({o}).arr, ({i}));\n"
+                    ));
+                    return tmp;
+                }
+
                 // Box a scalar index (ident/raw-arith) to a zz_value.
                 let i_boxed = self.box_index_arg(index, i, names);
                 // Hoist the read into a temp and check the error flag:
@@ -1629,7 +1800,6 @@ impl Lowerer {
                 ..
             } => {
                 let comp = names.fresh("__comp");
-                out.push_str(&format!("    zz_value {comp} = zz_array_new();\n"));
                 // Static bounds when the iterable is `range(a, b)` or `a..b`.
                 let bounds: Option<(String, String)> = match iter.as_ref() {
                     Expr::Call { callee, args, .. } => {
@@ -1656,10 +1826,98 @@ impl Lowerer {
                     }
                     _ => None,
                 };
-                if let Some((a, b)) = bounds {
+
+                // Fast path: scalar body + known bounds + no filter → flat
+                // storage. `[true for _ in 0..n]` becomes `bool *buf =
+                // alloc(n); for (...) buf[len++] = true;` — raw memory
+                // access with zero boxed-value overhead.
+                let is_scalar_body = matches!(
+                    body.as_ref(),
+                    Expr::Bool { .. } | Expr::Int { .. } | Expr::Float { .. }
+                );
+                if is_scalar_body && filter.is_none() && !self.green_active() {
+                    if let Some((ref a, ref b)) = bounds {
+                        let (elem_ctype, raw_val): (&str, String) = match body.as_ref() {
+                            Expr::Bool { value, .. } => (
+                                "bool",
+                                if *value {
+                                    "true".to_string()
+                                } else {
+                                    "false".to_string()
+                                },
+                            ),
+                            Expr::Int { value, .. } => ("int64_t", value.to_string()),
+                            Expr::Float { value, .. } => ("double", value.to_string()),
+                            _ => unreachable!(),
+                        };
+                        // Hoist loop bounds once — used for both arena alloc size
+                        // and fill loop, avoiding duplicate zz_int() calls.
+                        let ha = names.fresh("__a");
+                        let hb = names.fresh("__b");
+                        out.push_str(&format!(
+                            "    int64_t {ha} = ({a}).i; int64_t {hb} = ({b}).i;\n"
+                        ));
+                        // Declare flat buffer on the function arena (O(1) reset at
+                        // function exit, no per-element refcount traffic).
+                        out.push_str(&format!(
+                            "    {elem_ctype} *{comp} = ({elem_ctype} *)zz_arena_alloc(&_func_arena, (size_t)({hb} - {ha}) * sizeof({elem_ctype}), 1);\n"
+                        ));
+                        out.push_str(&format!("    size_t {comp}_len = 0;\n"));
+                        out.push_str(&format!("    size_t {comp}_cap = ({hb} - {ha});\n"));
+                        // Record flat backing so `flat_index_receiver` and index
+                        // stores emit direct `comp[i]` access.
+                        names
+                            .flat_backing
+                            .insert(comp.clone(), (comp.clone(), elem_ctype.to_string()));
+                        // Strip zz_int()/zz_float()/zz_bool() wrapper so the
+                        // stored length matches raw loop bounds (e.g. "n" not
+                        // "zz_int(n)") for bounds-check elimination.
+                        let b_raw = ["zz_int(", "zz_float(", "zz_bool("]
+                            .iter()
+                            .find_map(|p| b.strip_prefix(p).and_then(|s| s.strip_suffix(')')))
+                            .unwrap_or(b.as_str());
+                        names
+                            .array_len_exprs
+                            .insert(comp.clone(), b_raw.to_string());
+                        // Emit the fill loop using hoisted bounds __a/__b.
+                        out.push_str(&format!(
+                            "    for (int64_t __ci = {ha}; __ci < {hb}; __ci++) {{\n"
+                        ));
+                        names.push_scope();
+                        let xcid = names.enter(&var.name);
+                        out.push_str(&format!("        zz_value {xcid} = zz_int(__ci);\n"));
+                        out.push_str(&format!("        {comp}[{comp}_len++] = {raw_val};\n"));
+                        names.pop_scope();
+                        out.push_str("    }\n");
+                        // Set last_flat_comp AFTER the loop's pop_scope clears it.
+                        names.last_flat_comp = Some((comp.clone(), elem_ctype.to_string()));
+                        return comp;
+                    }
+                }
+
+                // Boxed path: existing behavior.
+                out.push_str(&format!("    zz_value {comp} = zz_array_new();\n"));
+                // Pre-reserve capacity for counted comprehensions:
+                // `[x for _ in 0..n]` pre-sizes the result to n elements,
+                // eliminating per-iteration grow guards during construction.
+                if let Some((ref a, ref b)) = bounds {
+                    // Hoist loop bounds once — used for both reserve and fill
+                    // loop, avoiding duplicate zz_int() calls.
+                    let ha = names.fresh("__a");
+                    let hb = names.fresh("__b");
                     out.push_str(&format!(
-                        "    for (int64_t __ci = ({a}).i; __ci < ({b}).i; __ci++) {{\n"
+                        "    int64_t {ha} = ({a}).i; int64_t {hb} = ({b}).i;\n"
                     ));
+                    out.push_str(&format!(
+                        "    {{ int _e = 0; zz_array_reserve({comp}, (size_t)({hb} - {ha}), &_e); }}\n"
+                    ));
+                    out.push_str(&format!(
+                        "    for (int64_t __ci = {ha}; __ci < {hb}; __ci++) {{\n"
+                    ));
+                    // Track comprehension array length for bounds-check elimination:
+                    // `[x for _ in 0..n]` creates an array of length `n`, so
+                    // `arr[i]` with `i < n` inside a subsequent loop is in bounds.
+                    names.array_len_exprs.insert(comp.clone(), b.clone());
                     // Lexical scope for the comprehension variable
                     // (shadowing must not leak past the braces).
                     names.push_scope();
@@ -1672,7 +1930,13 @@ impl Lowerer {
                         let mut cond_scratch = String::new();
                         let cv = self.emit_expr(c, names, &mut cond_scratch);
                         let cv = box_scalar_operand(c, names, &cv);
-                        out.push_str(&format!("        if (zz_truthy({cv})) {{\n"));
+                        // Flat bool array reads emit a raw C bool — use directly
+                        // without zz_truthy().
+                        if cv.starts_with("zz_") {
+                            out.push_str(&format!("        if (zz_truthy({cv})) {{\n"));
+                        } else {
+                            out.push_str(&format!("        if ({cv}) {{\n"));
+                        }
                         out.push_str(&cond_scratch);
                         out.push_str(&body_scratch);
                         out.push_str(&format!(
@@ -3768,6 +4032,7 @@ impl Lowerer {
             if matches!(
                 effective_name,
                 "zz_len"
+                    | "zz_vec_len"
                     | "zz_fs_write"
                     | "zz_fs_append"
                     | "zz_db_query"

@@ -162,7 +162,7 @@ impl BuildOptions {
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
             verbose: false,
-            native_cpu: false,
+            native_cpu: true,
             profile_path: None,
             relaxed_float: false,
         }
@@ -187,7 +187,7 @@ impl BuildOptions {
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
             verbose: false,
-            native_cpu: false,
+            native_cpu: true,
             profile_path: None,
             relaxed_float: false,
         }

@@ -273,6 +273,27 @@ void zz_array_push_lit(zz_array *a, zz_value item) {
     a->items[a->len++] = item;
 }
 
+// Ensure the array has capacity for at least `additional` more elements.
+// Caller must hold the only share (refs == 1); grows in place with zero
+// copies when capacity suffices, realloc when growth is needed. Used by
+// list comprehensions over counted ranges to pre-size the result array.
+void zz_array_reserve(zz_value arr, size_t additional, int *err) {
+    if (arr.tag != ZZ_ARRAY || !arr.arr) { if (err) *err = 1; return; }
+    zz_array *a = arr.arr;
+    // refs == 1 excludes arena/lit/stack sentinels and any live borrow;
+    // the buffer is malloc'd and safe to realloc.
+    if (a->refs != 1) { if (err) *err = 1; return; }
+    size_t need = a->len + additional;
+    if (need <= a->cap) { if (err) *err = 0; return; }
+    size_t nc = a->cap == 0 ? 8 : a->cap;
+    while (nc < need) nc *= 2;
+    zz_value *ni = (zz_value *)realloc(a->items, nc * sizeof(zz_value));
+    if (!ni) { if (err) *err = 1; return; }
+    a->items = ni;
+    a->cap = nc;
+    if (err) *err = 0;
+}
+
 void zz_array_push(zz_array *a, zz_value item) {
     if (a->len == a->cap) {
         size_t nc = a->cap == 0 ? 4 : a->cap * 2;
@@ -1324,42 +1345,21 @@ zz_value zz_vec_len(zz_value v, int *err) {
 // NOTE: the codegen uses this as the array-literal builder (calls ignore the
 // return). Kept as a mutator for that contract; `vec.push` is the functional
 // copy-on-write variant that matches the VM.
-zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
-    (void)err;
-    if (arr.tag != ZZ_ARRAY) return zz_unit();
-    zz_array *a = arr.arr;
-    if (a->len >= a->cap) {
-        size_t new_cap = a->cap ? a->cap * 2 : 8;
-        // LIT_MAGIC / ARENA_MAGIC arrays have items from arena — realloc() on
-        // arena memory is invalid. Also handle n=0 case where items is NULL.
-        // Migrate to malloc, switch to refs=0 (arena-allocated header sentinel)
-        // so zz_release knows items is malloc'd but header is still arena.
-        if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_STACK_MAGIC
-            || a->refs == ZZ_ARRAY_ARENA_MAGIC || a->items == NULL) {
-            zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
-            // Copy existing elements if any.
-            for (size_t i = 0; i < a->len; i++) {
-                new_items[i] = a->items[i];
-            }
-            a->items = new_items;
-            // Preserve `refs == 1` (see `zz_array_push`): only untracked
-            // shares (sentinels) collapse to 0.
-            if (a->refs != 1) a->refs = 0;  // Arena-allocated header, malloc'd items
-        } else {
-            a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));
-        }
-        a->cap = new_cap;
-    }
-    // Share convention (was zz_clone): heal arena-owned values to heap so the
-    // element survives the loop-arena reset.
-    a->items[a->len++] = zz_clone_for_store(item);
-    return zz_unit();
-}
-
-// vec.push(arr, item) — returns a NEW array with item appended
-// (matches the VM: the input array is left untouched).
+// vec.push(arr, item) — appends item and returns the array.
+// In-place fast path: when `arr` is uniquely owned (refs == 1), mutate it
+// directly instead of copying — building an array via repeated push is then
+// O(n) instead of O(n²). Matches `zz_vec_push_take`'s fast path but without
+// requiring the caller to take the argument first.
+// VM parity: the VM's `vec.push` also reuses the argument's Vec buffer when
+// uniquely owned (Arc::try_unwrap), so this is behaviorally identical.
 zz_value zz_vec_push(zz_value arr, zz_value item, int *err) {
     if (arr.tag != ZZ_ARRAY) return zz_unit();
+    // In-place fast path: uniquely owned heap array (refs == 1 excludes every
+    // sentinel — arena 0, STACK/LIT/ARENA magics — and any live borrow).
+    if (arr.arr && arr.arr->refs == 1) {
+        zz_array_push(arr.arr, item);
+        return arr;
+    }
     zz_value out = zz_array_dup(arr.arr);
     zz_array *a = out.arr;
     if (a->len >= a->cap) {
