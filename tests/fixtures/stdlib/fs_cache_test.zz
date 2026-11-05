@@ -10,7 +10,7 @@ import std.str
 func read_ok(p: str) -> str {
     return match fs.read(p) {
         .ok(s) => s
-        .err(e) => "ERR:{e}"
+        .err(e) => e
     }
 }
 

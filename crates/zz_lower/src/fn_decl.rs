@@ -147,11 +147,10 @@ impl Lowerer {
                     names.enter_cell(&p.name.name, &ptr, &deref, "zz_value", n);
                 } else {
                     let cid = names.enter(&p.name.name);
-                    // The caller passes an owning clone (or a fresh
-                    // temporary) for every argument. DB handles must drop
-                    // that share on function exit, exactly like DB locals;
-                    // otherwise a helper that receives a handle leaks one
-                    // reference and keeps the connection open.
+                    // DB handles must drop their share on function exit
+                    // (callee-owned). Non-DB params are caller-managed:
+                    // the caller clones/retains and releases them, so the
+                    // callee does NOT attach a cleanup attribute.
                     let db_attr = if matches!(&pt, zz_checker::Type::Db) {
                         " __attribute__((cleanup(zz_db_value_cleanup)))"
                     } else {
@@ -189,6 +188,9 @@ impl Lowerer {
         self.emit_func_block(block, names, &mut body_out, false);
         o.push_str(&body_out);
         self.emit_defer_runner(o);
+        // Function parameters are released by their `cleanup(zz_release)`
+        // attributes at every return path (see `emit_function`), so the
+        // epilogue only handles `self` write-back and fall-through.
         // Copy `self` back to the caller's storage so mutations made inside
         // an impl method persist to the receiver (`c.inc()` mutating `c`).
         // `self` was copied into a local at entry; this writes the final

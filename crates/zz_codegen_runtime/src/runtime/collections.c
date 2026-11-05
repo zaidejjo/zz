@@ -184,6 +184,22 @@ zz_value zz_array_new(void) {
     return v;
 }
 
+// Heap array constructor with a pre-allocated items buffer. Eliminates the
+// calloc + realloc cascade when the caller knows the final size up front
+// (e.g. `zz_array_dup`): all `cap` inserts fit without growth. The buffer
+// stays growable beyond `cap`.
+zz_value zz_array_new_sized(size_t cap) {
+    zz_array *a = (zz_array *)calloc(1, sizeof(zz_array));
+    a->refs = 1;
+    a->len = 0;
+    a->cap = cap;
+    a->items = cap > 0 ? (zz_value *)malloc(cap * sizeof(zz_value)) : NULL;
+    zz_value v;
+    v.tag = ZZ_ARRAY;
+    v.arr = a;
+    return v;
+}
+
 // Arena-aware array constructor. When arena is non-NULL, the zz_array
 // header is bump-allocated (no malloc, O(1)). The items buffer still uses
 // malloc since it may realloc on growth.
@@ -381,8 +397,8 @@ zz_value zz_array_slice(const zz_array *a, zz_value start, zz_value end, int *er
 // bumps the refcount), callers may freely mutate the returned array without
 // affecting the original.
 zz_value zz_array_dup(const zz_array *a) {
-    zz_value out = zz_array_new();
-    for (size_t i = 0; i < a->len; i++) {
+    zz_value out = zz_array_new_sized(a ? a->len : 0);
+    for (size_t i = 0; i < (a ? a->len : 0); i++) {
         zz_array_push(out.arr, zz_clone(a->items[i]));
     }
     return out;
@@ -769,6 +785,7 @@ zz_value zz_dict_dup_value(const zz_dict *d) {
         // outlives the arena that built the original.
         zz_value v = zz_clone(d->entries[i].val);
         zz_dict_set(out.dict, d->entries[i].key, v);
+        zz_release(&v);
     }
     return out;
 }
@@ -792,6 +809,7 @@ void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err) {
         }
         if (!fresh.arr) {
             if (err) *err = 1;
+            zz_release(&item);
             return;
         }
         zz_release_array(obj->arr);
@@ -805,6 +823,7 @@ void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err) {
         }
         if (!fresh.dict) {
             if (err) *err = 1;
+            zz_release(&item);
             return;
         }
         zz_release_dict(obj->dict);
@@ -813,9 +832,11 @@ void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err) {
     switch (obj->tag) {
     case ZZ_ARRAY:
         zz_array_set(obj->arr, idx, item, err);
+        zz_release(&item);
         return;
     case ZZ_DICT:
         zz_dict_set(obj->dict, idx, item);
+        zz_release(&item);
         if (err) *err = 0;
         return;
     default:
@@ -850,9 +871,10 @@ void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
     e->key = zz_clone_for_store(key);
     // Values use the move convention (callers transfer ownership): arena-owned
     // values heal to heap copies so the stored element survives the loop-arena
-    // reset; heap values are adopted as-is (no bump — same as the old
-    // `zz_str_heal_arena` passthrough, extended to containers).
-    e->val = zz_heal_for_move(val);
+    // reset; heap values are adopted as-is. `zz_assign` retains the new value
+    // so the dict entry owns an independent share — the caller's `item` share
+    // is then released by `zz_index_set`, keeping refcounts balanced.
+    zz_assign(&e->val, zz_heal_for_move(val));
     zz_dict_idx_insert(d, d->len - 1);
 }
 
@@ -1275,7 +1297,10 @@ zz_value zz_elvis(zz_value left, zz_value right) {
         out = zz_clone(left);
     else
         out = zz_clone(right);
-    zz_release(&left);
+    // `zz_elvis` borrows `left` (reads it during the call) — the caller owns
+    // `left` and must release it (typically via `cleanup(zz_release)` on the
+    // temp). `right` is consumed (released) here since callers pass owned
+    // shares.
     zz_release(&right);
     return out;
 }
@@ -1341,25 +1366,20 @@ zz_value zz_vec_len(zz_value v, int *err) {
     return zz_len(v, err);
 }
 
-// vec.append(arr, item) — append item to array in place.
-// NOTE: the codegen uses this as the array-literal builder (calls ignore the
-// return). Kept as a mutator for that contract; `vec.push` is the functional
-// copy-on-write variant that matches the VM.
-// vec.push(arr, item) — appends item and returns the array.
-// In-place fast path: when `arr` is uniquely owned (refs == 1), mutate it
-// directly instead of copying — building an array via repeated push is then
-// O(n) instead of O(n²). Matches `zz_vec_push_take`'s fast path but without
-// requiring the caller to take the argument first.
-// VM parity: the VM's `vec.push` also reuses the argument's Vec buffer when
-// uniquely owned (Arc::try_unwrap), so this is behaviorally identical.
+// vec.push(arr, item) — returns a NEW array with item appended
+// (matches the VM: the input array is left untouched).
+// Fast path: when `arr` is uniquely owned (refs == 1), mutate in place and
+// return the same handle — no full-array copy. When shared (refs != 1),
+// fall back to copy-on-write via zz_array_dup so callers still see a fresh
+// array and the original is left untouched.
 zz_value zz_vec_push(zz_value arr, zz_value item, int *err) {
     if (arr.tag != ZZ_ARRAY) return zz_unit();
-    // In-place fast path: uniquely owned heap array (refs == 1 excludes every
-    // sentinel — arena 0, STACK/LIT/ARENA magics — and any live borrow).
+    // Uniquely owned heap buffer: push in place, return the same handle.
     if (arr.arr && arr.arr->refs == 1) {
         zz_array_push(arr.arr, item);
         return arr;
     }
+    // Shared or sentinel buffer: copy-on-write, original left untouched.
     zz_value out = zz_array_dup(arr.arr);
     zz_array *a = out.arr;
     if (a->len >= a->cap) {

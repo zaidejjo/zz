@@ -520,7 +520,14 @@ zz_value zz_closure_make_ex(zz_dispatch_fn f, void **cells, size_t nenv) {
 static zz_value zz_static_thunk(zz_value *args, size_t argc, void **env, size_t nenv) {
     (void)nenv;
     zz_native_fn f = (zz_native_fn)(env[0]);
-    return f(args, argc);
+    // Named functions own (and release) every heap argument they receive —
+    // direct call sites always pass a retained share. First-class call
+    // sites hand the thunk *borrowed* values (generated closure-call
+    // temporaries, runtime callbacks over array elements), so clone each
+    // argument here; the callee's `cleanup(zz_release)` consumes them.
+    zz_value owned[argc ? argc : 1];
+    for (size_t i = 0; i < argc; i++) owned[i] = zz_clone(args[i]);
+    return f(owned, argc);
 }
 
 zz_value zz_func_of_static(zz_native_fn f) {
@@ -540,6 +547,12 @@ static zz_value zz_method_thunk(zz_value *args, size_t argc, void **env, size_t 
     (void)nenv;
     zz_value_method_fn f = (zz_value_method_fn)(env[0]);
     if (argc > 0) {
+        // `args[0]` is the receiver the method body writes back through
+        // (owned by the caller). Explicit arguments follow the same
+        // ownership contract as plain named functions: the callee releases
+        // them, so hand it retained shares even though the call-site temp
+        // is borrowed.
+        for (size_t i = 1; i < argc; i++) args[i] = zz_clone(args[i]);
         return f(&args[0], argc > 1 ? &args[1] : NULL, argc > 1 ? argc - 1 : 0);
     }
     return zz_unit();
@@ -2618,13 +2631,21 @@ static void zz_run_task(zz_task_t task) {
         }
         return;
     }
-    if (!task.frame) task.frame = zz_frame_new();
     zz_task_frame *fr = task.frame;
     fr->is_task = 1;
     // Every run starts live: a recycled worker thread may carry a stale
     // suspend verdict from an earlier task. Only an actual suspend during
     // THIS run may set it (green entries do so before returning).
     zz_suspend_verdict = 0;
+    // First-ever run: no frame yet means the green context hasn't been
+    // created. A suspend here is the one-time context-setup suspend; run
+    // again immediately so the body executes and the task completes in one
+    // dispatch. A non-first-run suspend (mid-body, e.g. at task.join inside
+    // the closure) must NOT be re-run — that would restart the closure from
+    // the top and cause exponential duplication (audit au8 tree). Just
+    // re-enqueue for a worker to resume at its suspend point.
+    int first_run = (task.frame == NULL);
+    if (!task.frame) task.frame = zz_frame_new();
     zz_task_frame *saved_fr = zz_current_frame;
     zz_task_t *saved_task = zz_current_task;
     zz_current_frame = fr;
@@ -2636,12 +2657,28 @@ static void zz_run_task(zz_task_t task) {
     // corrupt this run's unwind that it legitimately overlaps (the
     // waiter queue owns the continuation from handoff on).
     if (zz_green_suspended()) {
-        // Suspended: the waiter queue holds a task copy (closure + join
-        // + frame) that resumes with the handed-off value. This copy
-        // owns nothing — the resuming run completes and frees.
-        return;
+        if (first_run) {
+            // Context-setup suspend: run again to execute the body and
+            // complete. The second run resumes from the top with context
+            // already set up, so it does NOT re-suspend on setup.
+            zz_value result2 = zz_call_closure_raw(task.fn, args, 1);
+            if (!zz_green_suspended()) {
+                zz_task_join_complete(task.join, result2);
+                zz_release(&result2);
+            } else {
+                // Still suspended — re-enqueue for a worker to resume.
+                zz_enqueue_task(task);
+                return;
+            }
+        } else {
+            // Mid-body suspend: re-enqueue, do NOT restart from the top.
+            zz_enqueue_task(task);
+            return;
+        }
+    } else {
+        zz_task_join_complete(task.join, result);
+        zz_release(&result);
     }
-    zz_task_join_complete(task.join, result);
     if (task.fn.tag == ZZ_NATIVE) {
         zz_closure_release_rep(task.fn);
     } else {
@@ -2735,7 +2772,7 @@ static int zz_worker_help_once(void) {
 // multi-recv aliasing). Old-style condvar sleepers get one signal.
 void zz_task_join_complete(zz_task_join *join, zz_value result) {
     pthread_mutex_lock(&join->lock);
-    join->result = result;
+    join->result = zz_clone(result);
     join->completed = 1;
     zz_green_waiter *w = join->gwait_head;
     join->gwait_head = NULL;
@@ -2748,7 +2785,7 @@ void zz_task_join_complete(zz_task_join *join, zz_value result) {
     size_t cap = 0;
     while (w) {
         zz_green_waiter *next = w->next;
-        w->frame->value = result;
+        w->frame->value = zz_clone(result);
         w->frame->has_value = 1;
         if (w->is_task) {
             if (ntasks == cap) {
@@ -3172,9 +3209,18 @@ zz_value zz_task_join_recv(zz_value join_val, int *err) {
     // Same top-up discipline as channel recv: only when genuinely about
     // to park (!completed), at most once; the parked-worker gate + hard
     // cap inside zz_executor_top_up bound the total.
-    if (!join->completed && zz_is_worker) {
+    // Called from any thread (worker or main) — a blocking main thread
+    // must also spawn a replacement worker, otherwise a task that only
+    // the blocked thread could run strands forever (audit au12).
+    if (!join->completed) {
+        // Top-up: spawn replacement workers so a task that only the blocked
+        // thread could run doesn't strand forever (audit au12).
         zz_executor_top_up();
     }
+    // Park on the condvar. A worker will complete the task and signal the
+    // condvar via zz_task_join_complete. Announce-then-verify: re-check
+    // completed under the lock before waiting, so a completion that happens
+    // between the check and the wait is not missed.
     for (;;) {
         if (join->completed) break;
         // Helping (audit CRITICAL-1): same discipline as channel recv —
@@ -3201,10 +3247,6 @@ zz_value zz_task_join_recv(zz_value join_val, int *err) {
     *err = 0;
     return result;
 }
-
-// `task.try_join(handle)` — non-blocking check: `.some(result)` when the
-// task finished (consuming, like the VM), `.none` while it is still running.
-// Never blocks, never touches `err` (the call shims drop it).
 zz_value zz_task_try_join(zz_value join_val, int *err) {
     (void)err;
     if (join_val.tag != ZZ_TASK_JOIN) {
@@ -7932,8 +7974,10 @@ int zz_main_result_code(zz_value r) {
         char *msg = zz_value_to_display_string(r.payload);
         fprintf(stderr, "%s\n", msg ? msg : "<error>");
         free(msg);
+        zz_release(&r);
         return 1;
     }
+    zz_release(&r);
     return 0;
 }
 
@@ -10648,6 +10692,20 @@ static struct zz_file *zz_file_alloc(FILE *fp, const char *path, int writable) {
     return f;
 }
 
+// Release a `ZZ_FILE` handle: close the underlying FILE if still open, free
+// the owned path copy and the handle struct itself, then null the slot.
+// Idempotent: after a prior `zz_fs_close` the fields are already
+// NULL/closed, so this only frees the struct. Called from `zz_release` and
+// thus from cleanup attributes on every exit path.
+void zz_release_file_handle(zz_value *v) {
+    if (v->file) {
+        if (!v->file->closed && v->file->fp) fclose(v->file->fp);
+        free(v->file->path);
+        free(v->file);
+        v->file = NULL;
+    }
+}
+
 static zz_value zz_file_closed_err(const char *op) {
     size_t n = strlen("fs:") + strlen(op) + strlen(":closed") + 1;
     char *msg = (char *)malloc(n);
@@ -10766,8 +10824,9 @@ zz_value zz_fs_close(zz_value f, int *err) {
         f.file->fp = NULL;
     }
     f.file->closed = 1;
-    free(f.file->path);
-    f.file->path = NULL;
+    // Do NOT free `f.file` or `f.file->path` here: `zz_release` owns freeing
+    // the handle struct (see the ZZ_FILE case in core.h). Freeing here would
+    // double-free when the handle value is later released (e.g. cleanup attr).
     return zz_variant_ok(zz_unit());
 }
 
