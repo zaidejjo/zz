@@ -1880,7 +1880,9 @@ impl Lowerer {
                             .array_len_exprs
                             .insert(comp.clone(), b_raw.to_string());
                         // Emit the fill loop using hoisted bounds __a/__b.
-                        out.push_str("    for (int64_t __ci = {ha}; __ci < {hb}; __ci++) {\n");
+                        out.push_str(&format!(
+                            "    for (int64_t __ci = {ha}; __ci < {hb}; __ci++) {{\n"
+                        ));
                         names.push_scope();
                         let xcid = names.enter(&var.name);
                         out.push_str(&format!("        zz_value {xcid} = zz_int(__ci);\n"));
@@ -1909,7 +1911,9 @@ impl Lowerer {
                     out.push_str(&format!(
                         "    {{ int _e = 0; zz_array_reserve({comp}, (size_t)({hb} - {ha}), &_e); }}\n"
                     ));
-                    out.push_str("    for (int64_t __ci = {ha}; __ci < {hb}; __ci++) {\n");
+                    out.push_str(&format!(
+                        "    for (int64_t __ci = {ha}; __ci < {hb}; __ci++) {{\n"
+                    ));
                     // Track comprehension array length for bounds-check elimination:
                     // `[x for _ in 0..n]` creates an array of length `n`, so
                     // `arr[i]` with `i < n` inside a subsequent loop is in bounds.
@@ -4028,6 +4032,7 @@ impl Lowerer {
             if matches!(
                 effective_name,
                 "zz_len"
+                    | "zz_vec_len"
                     | "zz_fs_write"
                     | "zz_fs_append"
                     | "zz_db_query"
