@@ -1056,8 +1056,11 @@ impl Lowerer {
                         // Flat bool array reads emit a raw C bool — use it
                         // directly instead of boxing through zz_truthy().
                         // Simple identifiers (_idxv10, etc.) hold boxed
-                        // zz_value and need zz_truthy().
-                        if c.starts_with("zz_") || crate::context::is_simple_ident(c.as_str()) {
+                        // zz_value and need zz_truthy(). emit_expr wraps
+                        // call results in parens, so strip leading '('
+                        // before checking for zz_ prefix.
+                        let c_trim = c.trim_start_matches('(');
+                        if c_trim.starts_with("zz_") || crate::context::is_simple_ident(c_trim) {
                             out.push_str(&format!("        if (!zz_truthy({c})) break;\n"));
                         } else {
                             out.push_str(&format!("        if (!{c}) break;\n"));
@@ -1121,8 +1124,12 @@ impl Lowerer {
                             // Flat bool array reads emit a raw C bool — test
                             // directly instead of boxing through zz_truthy().
                             // Simple identifiers (_idxv10, etc.) hold boxed
-                            // zz_value and need zz_truthy().
-                            if c.starts_with("zz_") || crate::context::is_simple_ident(c.as_str()) {
+                            // zz_value and need zz_truthy(). emit_expr wraps
+                            // call results in parens, so strip leading '('
+                            // before checking for zz_ prefix.
+                            let c_trim = c.trim_start_matches('(');
+                            if c_trim.starts_with("zz_") || crate::context::is_simple_ident(c_trim)
+                            {
                                 format!("zz_truthy({c})")
                             } else {
                                 c
@@ -1134,8 +1141,11 @@ impl Lowerer {
                     // Flat bool array reads emit a raw C bool — test directly
                     // instead of boxing through zz_truthy().
                     // Simple identifiers (_idxv10, etc.) hold boxed zz_value
-                    // and need zz_truthy().
-                    if c.starts_with("zz_") || crate::context::is_simple_ident(c.as_str()) {
+                    // and need zz_truthy(). emit_expr wraps call results in
+                    // parens, so strip leading '(' before checking for zz_
+                    // prefix.
+                    let c_trim = c.trim_start_matches('(');
+                    if c_trim.starts_with("zz_") || crate::context::is_simple_ident(c_trim) {
                         format!("zz_truthy({c})")
                     } else {
                         c
