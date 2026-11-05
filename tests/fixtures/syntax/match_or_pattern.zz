@@ -1,0 +1,9 @@
+// features: bool-logic, locals, match, print, string-literal
+// E2E: Or-patterns count toward exhaustiveness; `true | false` covers `bool`.
+func main() {
+    b := true
+    match b {
+        true | false => 1
+    }
+    println("match_or_pattern_ok")
+}

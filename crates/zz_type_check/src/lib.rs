@@ -13,6 +13,8 @@ use zz_structs::StructOps;
 use zz_suggest::suggest_all;
 use zz_types::Type;
 
+mod definite_assignment;
+
 /// Cheap static sanity check over the literal SQL text: balanced
 /// single/double quotes and parens. Returns an error message when the
 /// text is clearly malformed; `None` means "looks plausible".
@@ -336,6 +338,19 @@ pub trait TypeCheckOps {
     fn bind_pattern(&mut self, pat: &Pattern, ty: &Type);
 
     fn check_exhaustive(&mut self, st: &Type, arms: &[zz_span_ast::ast::MatchArm], span: Span);
+
+    /// True if `pat` matches every value of its type (wildcard / binding /
+    /// catch-all or-pattern / all-catch-all tuple).
+    fn pat_covers_all(&self, pat: &Pattern) -> bool;
+
+    /// Constructors of `ty` not covered by `pats` (Maranget specialization).
+    fn missing_patterns(&self, pats: &[&Pattern], ty: &Type) -> Option<Vec<String>>;
+
+    /// Flatten an `or`-pattern into its alternatives.
+    fn or_alt<'a>(&self, pat: &'a Pattern) -> Vec<&'a Pattern>;
+
+    /// Argument pattern of a variant pattern `.V(arg)`, or wildcard if none.
+    fn variant_arg(&self, pat: &Pattern) -> Pattern;
 }
 
 /// `print`/`println` accept any number of values (#713): like other
@@ -4787,9 +4802,11 @@ impl TypeCheckOps for Checker {
         if matches!(self.unifier.resolve(st), Type::Error) {
             return;
         }
+        // A wildcard or binding pattern matches every value, so either makes
+        // the match exhaustive (a binding binds whatever the scrutinee holds).
         fn pat_is_wildcard(pat: &Pattern) -> bool {
             match pat {
-                Pattern::Wildcard { .. } => true,
+                Pattern::Wildcard { .. } | Pattern::Binding { .. } => true,
                 Pattern::Or { pats, .. } => pats.iter().any(pat_is_wildcard),
                 _ => false,
             }
@@ -4892,6 +4909,208 @@ impl TypeCheckOps for Checker {
                 format!("non-exhaustive match: missing {missing} (or add a `_` arm)"),
                 span,
             ));
+        }
+    }
+
+    /// True if `pat` matches every value of its type: a wildcard, a binding,
+    /// or an `or`-pattern containing one, or a tuple whose every element is
+    /// itself a catch-all.
+    fn pat_covers_all(&self, pat: &Pattern) -> bool {
+        match pat {
+            Pattern::Wildcard { .. } | Pattern::Binding { .. } => true,
+            Pattern::Or { pats, .. } => pats.iter().any(|p| self.pat_covers_all(p)),
+            Pattern::Tuple { pats, .. } => pats.iter().all(|p| self.pat_covers_all(p)),
+            _ => false,
+        }
+    }
+
+    /// Determine which top-level constructors of `ty` are NOT covered by
+    /// `pats` (a list of unguarded patterns). Returns `None` when `ty` can't
+    /// be analyzed conservatively (assume covered), or `Some(missing)` when
+    /// constructors are provably absent. Nested constructors are checked
+    /// recursively (Maranget-style specialization).
+    fn missing_patterns(&self, pats: &[&Pattern], ty: &Type) -> Option<Vec<String>> {
+        use zz_span_ast::ast::Lit;
+        // Flatten `or`-patterns: `a | b` covers whatever `a` or `b` covers.
+        let flat: Vec<&Pattern> = pats.iter().copied().flat_map(|p| self.or_alt(p)).collect();
+        // Catch-all present → nothing missing.
+        if flat.iter().any(|p| self.pat_covers_all(p)) {
+            return Some(Vec::new());
+        }
+        match ty {
+            Type::Enum(ename, _) => {
+                let variants: Vec<(String, Option<Type>)> = self
+                    .enums
+                    .get(ename)
+                    .map(|s| {
+                        s.variants
+                            .iter()
+                            .map(|(v, p)| (v.clone(), p.clone()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if variants.is_empty() {
+                    // Unknown enum: can't verify, assume covered.
+                    return Some(Vec::new());
+                }
+                let mut missing = Vec::new();
+                for (vname, payload) in &variants {
+                    let sub: Vec<&Pattern> = flat
+                        .iter()
+                        .filter(|p| matches!(p, Pattern::Variant { name, .. } if name == vname))
+                        .copied()
+                        .collect();
+                    if sub.is_empty() {
+                        missing.push(format!(".{vname}"));
+                        continue;
+                    }
+                    // Recurse: variant arms must cover the payload type.
+                    let payload_ty = payload.clone().unwrap_or(Type::Unit);
+                    let args: Vec<Pattern> = sub.iter().map(|p| self.variant_arg(*p)).collect();
+                    if let Some(m) =
+                        self.missing_patterns(&args.iter().collect::<Vec<&Pattern>>(), &payload_ty)
+                    {
+                        if !m.is_empty() {
+                            missing.push(format!(".{vname} ({})", m.join(", ")));
+                        }
+                    }
+                }
+                Some(missing)
+            }
+            Type::Option(inner) => {
+                let has_none = flat
+                    .iter()
+                    .any(|p| matches!(p, Pattern::Variant { name, .. } if name == "none"));
+                let some_sub: Vec<&Pattern> = flat
+                    .iter()
+                    .filter(|p| matches!(p, Pattern::Variant { name, .. } if name == "some"))
+                    .copied()
+                    .collect();
+                let mut missing = Vec::new();
+                if !has_none {
+                    missing.push(".none".to_string());
+                }
+                if !some_sub.is_empty() {
+                    let inner_ty = &**inner;
+                    let args: Vec<Pattern> =
+                        some_sub.iter().map(|p| self.variant_arg(*p)).collect();
+                    if let Some(m) =
+                        self.missing_patterns(&args.iter().collect::<Vec<&Pattern>>(), inner_ty)
+                    {
+                        if !m.is_empty() {
+                            missing.push(format!(".some ({})", m.join(", ")));
+                        }
+                    }
+                } else if missing.is_empty() {
+                    // `.none` present but no `.some` at all → missing .some.
+                    missing.push(".some".to_string());
+                }
+                Some(missing)
+            }
+            Type::Result(ok, _err) => {
+                let has_err = flat
+                    .iter()
+                    .any(|p| matches!(p, Pattern::Variant { name, .. } if name == "err"));
+                let ok_sub: Vec<&Pattern> = flat
+                    .iter()
+                    .filter(|p| matches!(p, Pattern::Variant { name, .. } if name == "ok"))
+                    .copied()
+                    .collect();
+                let mut missing = Vec::new();
+                if !has_err {
+                    missing.push(".err".to_string());
+                }
+                if !ok_sub.is_empty() {
+                    let args: Vec<Pattern> = ok_sub.iter().map(|p| self.variant_arg(*p)).collect();
+                    if let Some(m) =
+                        self.missing_patterns(&args.iter().collect::<Vec<&Pattern>>(), ok)
+                    {
+                        if !m.is_empty() {
+                            missing.push(format!(".ok ({})", m.join(", ")));
+                        }
+                    }
+                } else if missing.is_empty() {
+                    missing.push(".ok".to_string());
+                }
+                Some(missing)
+            }
+            Type::Bool => {
+                let has_true = flat.iter().any(|p| {
+                    matches!(
+                        p,
+                        Pattern::Literal {
+                            value: Lit::Bool(b),
+                            ..
+                        } if *b
+                    )
+                });
+                let has_false = flat.iter().any(|p| {
+                    matches!(
+                        p,
+                        Pattern::Literal {
+                            value: Lit::Bool(b),
+                            ..
+                        } if !*b
+                    )
+                });
+                let mut missing = Vec::new();
+                if !has_true {
+                    missing.push("true".to_string());
+                }
+                if !has_false {
+                    missing.push("false".to_string());
+                }
+                Some(missing)
+            }
+            Type::Tuple(_ts) => {
+                // A tuple domain is covered only if a catch-all pattern is
+                // present (handled by `pat_covers_all` above, which returns
+                // early). Without one, literal tuple patterns cover only
+                // finitely many points of an open domain, so the match is
+                // non-exhaustive.
+                Some(vec!["tuple pattern".to_string()])
+            }
+            Type::Int
+            | Type::Float
+            | Type::Str
+            | Type::Unit
+            | Type::Never
+            | Type::Var(_)
+            | Type::Named(_) => {
+                let has_literal = flat.iter().any(|p| matches!(p, Pattern::Literal { .. }));
+                if has_literal {
+                    Some(vec!["`_` wildcard arm".to_string()])
+                } else {
+                    Some(Vec::new())
+                }
+            }
+            _ => Some(Vec::new()), // opaque / function / etc.: assume covered
+        }
+    }
+
+    /// Flatten an `or`-pattern into its alternatives (non-or patterns pass
+    /// through unchanged).
+    fn or_alt<'a>(&self, pat: &'a Pattern) -> Vec<&'a Pattern> {
+        match pat {
+            Pattern::Or { pats, .. } => {
+                let mut out = Vec::new();
+                for p in pats {
+                    out.extend(self.or_alt(p));
+                }
+                out
+            }
+            p => vec![p],
+        }
+    }
+
+    /// Extract the argument pattern of a variant pattern `.V(arg)`, or a
+    /// wildcard if the variant has no payload.
+    fn variant_arg(&self, pat: &Pattern) -> Pattern {
+        match pat {
+            Pattern::Variant { arg: Some(a), .. } => (**a).clone(),
+            _ => Pattern::Wildcard {
+                span: Span::new(0, 0),
+            },
         }
     }
 
@@ -5084,6 +5303,7 @@ impl TypeCheckOps for Checker {
         if let Err(e) = self.unifier.unify(&fallthrough, &sig.ret) {
             self.report_mismatch(e, body.span);
         }
+        definite_assignment::analyze_function_body(self, body);
     }
 
     /// Report a missing-return diagnostic with improved diagnostics:

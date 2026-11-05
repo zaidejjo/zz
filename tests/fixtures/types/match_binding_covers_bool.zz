@@ -1,0 +1,15 @@
+// features: bool-logic, locals, match, print, string-literal
+// E2E: A binding pattern is a catch-all and covers every value of its type.
+// Before the Maranget rewrite, `x => 1` on `bool` was wrongly reported as
+// non-exhaustive ("missing `.true` or `.false`").
+func main() {
+    b := true
+    match b {
+        x => 1
+    }
+    b = false
+    match b {
+        x => 0
+    }
+    println("match_binding_covers_bool_ok")
+}
