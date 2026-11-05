@@ -1082,7 +1082,7 @@ impl Lowerer {
                                     Expr::Ident { name, .. } => Some(name.clone()),
                                     _ => None,
                                 } {
-                                    if let Some(len_expr) = names.array_len_exprs.get(&arr_name) {
+                                    if let Some(_len_expr) = names.array_len_exprs.get(&arr_name) {
                                         // len_expr is e.g. "n" or "(__b.i - __a.i)".
                                         // We can't compare at compile time, but
                                         // the caller (e.g. `if n > 0 { flags[0] }`)
@@ -1952,28 +1952,23 @@ impl Lowerer {
             // is a single flat array index store with the loop var as index.
             let ptr_store: Option<(String, String)> = if !green && body.stmts.len() == 1 {
                 if let Stmt::Assign {
-                    target, value: _, ..
+                    target: Expr::Index { obj, index, .. },
+                    value: _,
+                    span: _,
                 } = &body.stmts[0]
                 {
-                    if let Expr::Index { obj, index, .. } = target {
-                        if let Expr::Ident { name: idx_name, .. } = index.as_ref() {
-                            if idx_name == v.as_str() {
-                                if let Expr::Ident { name: arr_name, .. } = obj.as_ref() {
-                                    if let Some(ctype) = names.lookup_type(arr_name) {
-                                        if ctype == "bool *"
-                                            || ctype == "int64_t *"
-                                            || ctype == "double *"
-                                        {
-                                            let arr_cid =
-                                                names.lookup(arr_name).unwrap().to_string();
-                                            let elem_ctype = ctype
-                                                .strip_suffix(" *")
-                                                .unwrap_or(&ctype)
-                                                .to_string();
-                                            Some((arr_cid, elem_ctype))
-                                        } else {
-                                            None
-                                        }
+                    if let Expr::Ident { name: idx_name, .. } = index.as_ref() {
+                        if idx_name == v.as_str() {
+                            if let Expr::Ident { name: arr_name, .. } = obj.as_ref() {
+                                if let Some(ctype) = names.lookup_type(arr_name) {
+                                    if ctype == "bool *"
+                                        || ctype == "int64_t *"
+                                        || ctype == "double *"
+                                    {
+                                        let arr_cid = names.lookup(arr_name).unwrap().to_string();
+                                        let elem_ctype =
+                                            ctype.strip_suffix(" *").unwrap_or(ctype).to_string();
+                                        Some((arr_cid, elem_ctype))
                                     } else {
                                         None
                                     }

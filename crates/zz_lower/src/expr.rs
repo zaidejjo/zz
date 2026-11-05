@@ -1034,9 +1034,6 @@ impl Lowerer {
                         names.loop_bounds.insert(bound_var, limit_text);
                     }
                 }
-                // Pointer arithmetic for while loop array stores (future optimization).
-                let ptr_store_while: Option<(String, String, String)> = None;
-
                 let c = self.emit_expr(cond, names, out);
                 // While conditions: if the condition is already a raw C scalar
                 // (comparison, flat bool read), test it directly without
@@ -1816,61 +1813,60 @@ impl Lowerer {
                     body.as_ref(),
                     Expr::Bool { .. } | Expr::Int { .. } | Expr::Float { .. }
                 );
-                if is_scalar_body && filter.is_none() && !self.green_active() && bounds.is_some() {
-                    let (elem_ctype, raw_val): (&str, String) = match body.as_ref() {
-                        Expr::Bool { value, .. } => (
-                            "bool",
-                            if *value {
-                                "true".to_string()
-                            } else {
-                                "false".to_string()
-                            },
-                        ),
-                        Expr::Int { value, .. } => ("int64_t", value.to_string()),
-                        Expr::Float { value, .. } => ("double", value.to_string()),
-                        _ => unreachable!(),
-                    };
-                    let (ref a, ref b) = bounds.as_ref().unwrap();
-                    // Hoist loop bounds once — used for both arena alloc size
-                    // and fill loop, avoiding duplicate zz_int() calls.
-                    out.push_str(&format!(
-                        "    int64_t __a = ({a}).i; int64_t __b = ({b}).i;\n"
-                    ));
-                    // Declare flat buffer on the function arena (O(1) reset at
-                    // function exit, no per-element refcount traffic).
-                    out.push_str(&format!(
-                        "    {elem_ctype} *{comp} = ({elem_ctype} *)zz_arena_alloc(&_func_arena, (size_t)(__b - __a) * sizeof({elem_ctype}), 1);\n"
-                    ));
-                    out.push_str(&format!("    size_t {comp}_len = 0;\n"));
-                    out.push_str(&format!("    size_t {comp}_cap = (__b - __a);\n"));
-                    // Record flat backing so `flat_index_receiver` and index
-                    // stores emit direct `comp[i]` access.
-                    names
-                        .flat_backing
-                        .insert(comp.clone(), (comp.clone(), elem_ctype.to_string()));
-                    // Strip zz_int()/zz_float()/zz_bool() wrapper so the
-                    // stored length matches raw loop bounds (e.g. "n" not
-                    // "zz_int(n)") for bounds-check elimination.
-                    let b_raw = ["zz_int(", "zz_float(", "zz_bool("]
-                        .iter()
-                        .find_map(|p| b.strip_prefix(p).and_then(|s| s.strip_suffix(')')))
-                        .unwrap_or(b.as_str());
-                    names
-                        .array_len_exprs
-                        .insert(comp.clone(), b_raw.to_string());
-                    // Emit the fill loop using hoisted bounds __a/__b.
-                    out.push_str(&format!(
-                        "    for (int64_t __ci = __a; __ci < __b; __ci++) {{\n"
-                    ));
-                    names.push_scope();
-                    let xcid = names.enter(&var.name);
-                    out.push_str(&format!("        zz_value {xcid} = zz_int(__ci);\n"));
-                    out.push_str(&format!("        {comp}[{comp}_len++] = {raw_val};\n"));
-                    names.pop_scope();
-                    out.push_str("    }\n");
-                    // Set last_flat_comp AFTER the loop's pop_scope clears it.
-                    names.last_flat_comp = Some((comp.clone(), elem_ctype.to_string()));
-                    return comp;
+                if is_scalar_body && filter.is_none() && !self.green_active() {
+                    if let Some((ref a, ref b)) = bounds {
+                        let (elem_ctype, raw_val): (&str, String) = match body.as_ref() {
+                            Expr::Bool { value, .. } => (
+                                "bool",
+                                if *value {
+                                    "true".to_string()
+                                } else {
+                                    "false".to_string()
+                                },
+                            ),
+                            Expr::Int { value, .. } => ("int64_t", value.to_string()),
+                            Expr::Float { value, .. } => ("double", value.to_string()),
+                            _ => unreachable!(),
+                        };
+                        // Hoist loop bounds once — used for both arena alloc size
+                        // and fill loop, avoiding duplicate zz_int() calls.
+                        out.push_str(&format!(
+                            "    int64_t __a = ({a}).i; int64_t __b = ({b}).i;\n"
+                        ));
+                        // Declare flat buffer on the function arena (O(1) reset at
+                        // function exit, no per-element refcount traffic).
+                        out.push_str(&format!(
+                            "    {elem_ctype} *{comp} = ({elem_ctype} *)zz_arena_alloc(&_func_arena, (size_t)(__b - __a) * sizeof({elem_ctype}), 1);\n"
+                        ));
+                        out.push_str(&format!("    size_t {comp}_len = 0;\n"));
+                        out.push_str(&format!("    size_t {comp}_cap = (__b - __a);\n"));
+                        // Record flat backing so `flat_index_receiver` and index
+                        // stores emit direct `comp[i]` access.
+                        names
+                            .flat_backing
+                            .insert(comp.clone(), (comp.clone(), elem_ctype.to_string()));
+                        // Strip zz_int()/zz_float()/zz_bool() wrapper so the
+                        // stored length matches raw loop bounds (e.g. "n" not
+                        // "zz_int(n)") for bounds-check elimination.
+                        let b_raw = ["zz_int(", "zz_float(", "zz_bool("]
+                            .iter()
+                            .find_map(|p| b.strip_prefix(p).and_then(|s| s.strip_suffix(')')))
+                            .unwrap_or(b.as_str());
+                        names
+                            .array_len_exprs
+                            .insert(comp.clone(), b_raw.to_string());
+                        // Emit the fill loop using hoisted bounds __a/__b.
+                        out.push_str("    for (int64_t __ci = __a; __ci < __b; __ci++) {\n");
+                        names.push_scope();
+                        let xcid = names.enter(&var.name);
+                        out.push_str(&format!("        zz_value {xcid} = zz_int(__ci);\n"));
+                        out.push_str(&format!("        {comp}[{comp}_len++] = {raw_val};\n"));
+                        names.pop_scope();
+                        out.push_str("    }\n");
+                        // Set last_flat_comp AFTER the loop's pop_scope clears it.
+                        names.last_flat_comp = Some((comp.clone(), elem_ctype.to_string()));
+                        return comp;
+                    }
                 }
 
                 // Boxed path: existing behavior.
@@ -1887,9 +1883,7 @@ impl Lowerer {
                     out.push_str(&format!(
                         "    {{ int _e = 0; zz_array_reserve({comp}, (size_t)(__b - __a), &_e); }}\n"
                     ));
-                    out.push_str(&format!(
-                        "    for (int64_t __ci = __a; __ci < __b; __ci++) {{\n"
-                    ));
+                    out.push_str("    for (int64_t __ci = __a; __ci < __b; __ci++) {\n");
                     // Track comprehension array length for bounds-check elimination:
                     // `[x for _ in 0..n]` creates an array of length `n`, so
                     // `arr[i]` with `i < n` inside a subsequent loop is in bounds.
