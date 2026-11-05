@@ -10,6 +10,8 @@
 //! Skipped automatically if `zz build -p` is not available (e.g. minimal
 //! CI containers that only ran `cargo check`).
 
+use std::fmt::Write as _;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -243,4 +245,95 @@ fn regression_bench_struct_access_compiles_and_runs() {
         stdout.contains("sum_x: 499999500000"),
         "struct_access sum_x drifted.\nstdout:\n{stdout}"
     );
+}
+
+// ----- bench_check_20k ---------------------------------------------
+// Performance regression: `zz check` on a 20k-line synthetic program
+// (many funcs, structs, long match chains, big arrays, imports) must
+// complete well under 5s cold. Guards against quadratic blowups in the
+// checker (scope_cache invalidation, merge_types O(n²), repeated
+// deep-resolve, per-call table cloning, ...).
+//
+// Uses the release/dev `zz` binary already built by `cargo test`
+// (CARGO_BIN_EXE_zz). Writes the generated program to a temp file so it
+// does not pollute the repo.
+#[test]
+fn regression_check_20k_lines_under_5s() {
+    const CHECK_TARGET_MS: u128 = 5_000; // 5 s, generous-but-real
+    const TARGET_LINES: usize = 20_000;
+
+    let root = workspace_root();
+    let zz = zz_bin();
+
+    let tmp_dir = root.join("bench/performance_check/.zzbin");
+    let _ = fs::create_dir_all(&tmp_dir);
+    let src = tmp_dir.join("bench_check_20k.zz");
+
+    // --- generate synthetic 20k-line program -------------------------
+    let per_func = 18; // lines per function
+    let nfuncs = TARGET_LINES / per_func;
+    let mut prog = String::with_capacity(TARGET_LINES * 20);
+    for i in 1..=12 {
+        writeln!(prog, "import std.str as s{i}").unwrap();
+    }
+    writeln!(prog).unwrap();
+    writeln!(prog, "struct BigRecord {{").unwrap();
+    for j in 1..=20 {
+        writeln!(prog, "  f{j}: int,").unwrap();
+    }
+    writeln!(prog, "}}").unwrap();
+    writeln!(prog, "struct Wrapper {{ inner: BigRecord }}").unwrap();
+    writeln!(prog).unwrap();
+    writeln!(
+        prog,
+        "struct Box4<T1, T2, T3, T4> {{ a: T1, b: T2, c: T3, d: T4 }}"
+    )
+    .unwrap();
+    writeln!(prog).unwrap();
+    for k in 1..=nfuncs {
+        writeln!(prog, "func gen_{k}(x: int, n: int) -> int {{").unwrap();
+        writeln!(prog, "  arr := [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]").unwrap();
+        writeln!(prog, "  big := Box4{{ a: x, b: x, c: x, d: x }}").unwrap();
+        writeln!(prog, "  total := 0").unwrap();
+        writeln!(prog, "  i := 0").unwrap();
+        writeln!(prog, "  while i < n {{").unwrap();
+        writeln!(prog, "    total = total + arr[i % 10]").unwrap();
+        writeln!(prog, "    i = i + 1").unwrap();
+        writeln!(prog, "  }}").unwrap();
+        writeln!(prog, "  m := match x {{").unwrap();
+        for arm in 1..=6 {
+            writeln!(prog, "    {arm} => {arm} * n,").unwrap();
+        }
+        writeln!(prog, "    _ => 0").unwrap();
+        writeln!(prog, "  }}").unwrap();
+        writeln!(prog, "  _ = big.a + big.b + big.c + big.d").unwrap();
+        writeln!(prog, "  return total + m").unwrap();
+        writeln!(prog, "}}").unwrap();
+        writeln!(prog).unwrap();
+    }
+    writeln!(prog, r#"println("bench_gen_ok")"#).unwrap();
+
+    fs::write(&src, &prog).expect("write bench program");
+    let actual_lines = prog.lines().count();
+
+    // --- measure cold `zz check` ------------------------------------
+    let start = Instant::now();
+    let output = Command::new(&zz)
+        .arg("check")
+        .arg(&src)
+        .current_dir(&root)
+        .output()
+        .expect("failed to invoke `zz check`");
+    let wall_ms = start.elapsed().as_millis();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "`zz check` failed on generated {actual_lines}-line program.\nstderr:\n{stderr}"
+    );
+    assert!(
+        wall_ms < CHECK_TARGET_MS,
+        "`zz check` on {actual_lines} lines took {wall_ms}ms, exceeds target {CHECK_TARGET_MS}ms"
+    );
+    eprintln!("PERF: zz check {actual_lines} lines in {wall_ms}ms (target < {CHECK_TARGET_MS}ms)");
 }

@@ -60,6 +60,8 @@ gen_program() {
 		echo
 
 		# Many functions: long match chains + big arrays + generic struct use
+		# Shorter bodies (~8 lines) → more functions per line, stressing the
+		# checker's per-function overhead (target: ~3k funcs at 20k lines).
 		local k=1
 		while [[ $k -le $nfuncs ]]; do
 			echo "func gen_$k(x: int, n: int) -> int {"
