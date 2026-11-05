@@ -3768,6 +3768,7 @@ impl Lowerer {
             if matches!(
                 effective_name,
                 "zz_len"
+                    | "zz_vec_len"
                     | "zz_fs_write"
                     | "zz_fs_append"
                     | "zz_db_query"
