@@ -153,6 +153,11 @@ impl InferOps for Checker {
         span: Span,
     ) {
         for (gen, bounds) in &sig.bounds {
+            // Unbounded generics (`func f<T>`) carry no obligations; only
+            // bound-carrying generics (`func f<T: Num>`) are checked.
+            if bounds.is_empty() {
+                continue;
+            }
             let bound_list = bounds
                 .iter()
                 .map(|b| b.name())
