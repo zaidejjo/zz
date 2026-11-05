@@ -694,6 +694,11 @@ e2e_success_test!(e2e_types_enum_generics, "types", "enum_generics.zz");
 e2e_success_test!(e2e_types_struct_embedding, "types", "struct_embedding.zz");
 e2e_success_test!(e2e_types_generics, "types", "generics.zz");
 e2e_success_test!(e2e_types_generic_bounds, "types", "generic_bounds.zz");
+e2e_success_test!(
+    e2e_types_generic_bound_pinned,
+    "types",
+    "generic_bound_pinned.zz"
+);
 e2e_success_test!(e2e_types_variants, "types", "variants.zz");
 e2e_success_test!(e2e_types_type_inference, "types", "type_inference.zz");
 e2e_success_test!(e2e_types_smart_try, "types", "smart_try.zz");
