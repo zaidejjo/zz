@@ -1,0 +1,7 @@
+// features: arrays, error-case, int-arith
+// ERROR: Constant-foldable array index out of bounds is rejected at check time,
+// not just direct int literals (item 5). `1 + 2` folds to 3, out of bounds for
+// length 3.
+func main() {
+    println([1, 2, 3][1 + 2])
+}

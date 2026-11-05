@@ -70,6 +70,49 @@ fn index_range_hint(len: usize) -> String {
     }
 }
 
+/// Fold an integer literal expression to a constant i64. Handles int
+/// literals, negated literals, and binary add/sub/mul/div/rem of int
+/// literals. Returns `None` for anything that can't be folded at check
+/// time (leaving the runtime bounds-check to handle it — zero false
+/// positives).
+fn const_eval_int(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Int { value, .. } => Some(*value),
+        Expr::Unary {
+            op: UnOp::Neg,
+            expr,
+            ..
+        } => const_eval_int(expr).and_then(|v| v.checked_neg()),
+        Expr::Binary {
+            op, left, right, ..
+        } => {
+            let a = const_eval_int(left)?;
+            let b = const_eval_int(right)?;
+            match op {
+                BinOp::Add => a.checked_add(b),
+                BinOp::Sub => a.checked_sub(b),
+                BinOp::Mul => a.checked_mul(b),
+                BinOp::Div => {
+                    if b == 0 {
+                        None // div-by-zero handled by check_arith
+                    } else {
+                        a.checked_div(b)
+                    }
+                }
+                BinOp::Rem => {
+                    if b == 0 {
+                        None
+                    } else {
+                        a.checked_rem(b)
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// A method invocation: resolved signature plus receiver, args, and span.
 pub struct MethodCall<'a> {
     pub sig: &'a FuncSig,
@@ -1165,20 +1208,10 @@ impl TypeCheckOps for Checker {
     /// report the out-of-bounds before the program runs (the runtime would
     /// trap on it anyway), with the valid range as the hint.
     fn check_literal_array_index(&mut self, len: usize, index: &Expr) {
-        let raw: i64 = match index {
-            Expr::Int { value, .. } => *value,
-            Expr::Unary {
-                op: UnOp::Neg,
-                expr,
-                ..
-            } => match expr.as_ref() {
-                Expr::Int { value, .. } => match value.checked_neg() {
-                    Some(v) => v,
-                    None => return,
-                },
-                _ => return,
-            },
-            _ => return, // not a literal: runtime bounds-check handles it
+
+        let raw: i64 = match const_eval_int(index) {
+            Some(v) => v,
+            None => return,
         };
         let in_bounds = if raw < 0 {
             (len as i64).checked_add(raw).is_some_and(|i| i >= 0)

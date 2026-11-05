@@ -1494,6 +1494,11 @@ parity_strict_error!(parity_err_edge_rem_zero, "edge_rem_zero_err.zz");
 parity_strict_error!(parity_err_unknown_field, "unknown_field.zz");
 parity_strict_error!(parity_err_struct_init_assign, "struct_init_assign_error.zz");
 parity_strict_error!(parity_err_int_float_cmp, "int_float_cmp.zz");
+// Item 5: constant-foldable array index OOB must be rejected by both engines.
+parity_strict_error!(
+    parity_err_array_index_oob_foldable,
+    "array_index_oob_foldable.zz"
+);
 // Generic bound soundness: unconstrained / violating bound generics must be
 // rejected by both engines (deferred obligation check).
 parity_strict_error!(
