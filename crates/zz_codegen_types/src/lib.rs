@@ -74,7 +74,7 @@ impl BuildOptions {
             strip: true,
             static_link: false,
             gc_sections: true,
-            thin_lto: true,
+            thin_lto: false,
             pgo: PgoMode::None,
             native_rt: false,
             pg_link: false,
@@ -87,7 +87,7 @@ impl BuildOptions {
             plugin_link_args: Vec::new(),
             embed_assets: Vec::new(),
             verbose: false,
-            native_cpu: true,
+            native_cpu: false,
             profile_path: None,
             relaxed_float: false,
         }
