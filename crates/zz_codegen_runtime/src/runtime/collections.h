@@ -255,7 +255,8 @@ static inline zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
             for (size_t i = 0; i < a->len; i++)
                 new_items[i] = a->items[i];
             a->items = new_items;
-            if (a->refs != 1) a->refs = 0;
+            // refs stays as-is: 1 for heap arrays, magic value for
+            // lit/stack/arena arrays — all remain uniquely owned.
         } else {
             a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));
         }
