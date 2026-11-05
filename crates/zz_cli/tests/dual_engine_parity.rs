@@ -888,6 +888,30 @@ parity_strict!(
     "syntax",
     "closure_fn_params.zz"
 );
+// Closure capture-by-reference parity: VM and native must agree on read/
+// write visibility, scope outliving, loops, nesting, and struct/array
+// captures (decision: capture by reference — docs/checker/decisions.md).
+parity_strict!(
+    parity_syntax_closure_mutate_captured,
+    "syntax",
+    "closure_mutate_captured.zz"
+);
+parity_strict!(
+    parity_syntax_closure_outlives_scope,
+    "syntax",
+    "closure_outlives_scope.zz"
+);
+parity_strict!(
+    parity_syntax_closure_in_loop,
+    "syntax",
+    "closure_in_loop.zz"
+);
+parity_strict!(parity_syntax_closure_nested, "syntax", "closure_nested.zz");
+parity_strict!(
+    parity_syntax_closure_capture_struct_array,
+    "syntax",
+    "closure_capture_struct_array.zz"
+);
 parity_strict!(parity_stdlib_shadow_test, "stdlib", "shadow_test.zz");
 parity_strict!(parity_syntax_destructuring, "syntax", "destructuring.zz");
 parity_strict!(
