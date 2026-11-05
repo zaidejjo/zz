@@ -1,0 +1,40 @@
+import std.time as time_mod
+
+// Sieve of Eratosthenes: count primes up to n.
+// Uses [true for _ in 0..n] list comprehension + flat array access.
+
+func prime_count(n: int) -> int {
+    flags := [true for _ in 0..n]
+    if n > 0 {
+        flags[0] = false
+    }
+    if n > 1 {
+        flags[1] = false
+    }
+    i := 2
+    while i * i < n {
+        if flags[i] {
+            j := i * i
+            while j < n {
+                flags[j] = false
+                j = j + i
+            }
+        }
+        i = i + 1
+    }
+    count := 0
+    for k in 0..n {
+        if flags[k] {
+            count = count + 1
+        }
+    }
+    return count
+}
+
+func main() {
+    t0 := time_mod.now_ms()
+    r := prime_count(1000000)
+    t1 := time_mod.now_ms()
+    println("prime: {t1 - t0}ms count={r}")
+    return r
+}

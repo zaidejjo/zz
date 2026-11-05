@@ -62,6 +62,10 @@ zz_value zz_array_new_lit(zz_arena *arena, size_t n);
 // `zz_array_new_lit` (or newly heap-allocated literals) with spare capacity.
 void zz_array_push_lit(zz_array *a, zz_value item);
 
+// Pre-reserve capacity for at least `additional` more elements.
+// Caller must hold the only share (refs == 1). No-op when capacity suffices.
+void zz_array_reserve(zz_value arr, size_t additional, int *err);
+
 // ---- containers --------------------------------------------------------
 void zz_array_push(zz_array *a, zz_value v);
 // Inlined: every `arr[i]` in a loop pays no call overhead. The tag/bounds
@@ -82,6 +86,35 @@ static inline zz_value zz_array_get(const zz_array *a, zz_value idx, int *err) {
         return zz_unit();
     }
     return zz_clone(a->items[i]);
+}
+
+// Bounds-eliminated read: caller guarantees 0 <= i < len. Skips the tag
+// check and bounds branch entirely. Returns a cloned value (refcount
+// bumped) so the caller's release discipline is unchanged.
+static inline zz_value zz_array_get_raw(const zz_array *a, int64_t i) {
+    return zz_clone(a->items[(size_t)i]);
+}
+
+// Forward declaration: defined below at `zz_array_dup`.
+zz_value zz_array_dup(const zz_array *a);
+
+// Bounds-eliminated write: caller guarantees 0 <= i < len. Skips the bounds
+// branch but still handles copy-on-write when the buffer is shared
+// (refs != 1). Takes a `zz_value *obj` so the container pointer can be
+// reseated on COW. `err` is set on OOM only, never on bounds.
+static inline void zz_array_set_raw(zz_value *obj, int64_t i, zz_value v, int *err) {
+    if (!obj || obj->tag != ZZ_ARRAY || !obj->arr) { if (err) *err = 1; return; }
+    zz_array *a = obj->arr;
+    if (a->refs != 1) {
+        zz_value fresh = zz_array_dup(a);
+        if (!fresh.arr) { if (err) *err = 1; return; }
+        zz_release_array(a);
+        obj->arr = fresh.arr;
+        a = obj->arr;
+    }
+    zz_release(&a->items[(size_t)i]);
+    a->items[(size_t)i] = zz_clone(v);
+    if (err) *err = 0;
 }
 void zz_array_set(zz_array *a, zz_value idx, zz_value v, int *err);
 size_t zz_array_len(const zz_array *a);
@@ -198,7 +231,41 @@ zz_value zz_tuple(zz_value a, zz_value b);
 zz_value zz_len(zz_value v, int *err);
 zz_value zz_len_field(zz_value *obj, const char *field, int *err);
 zz_value zz_vec_len(zz_value v, int *err);
-zz_value zz_vec_append(zz_value arr, zz_value item, int *err);
+// vec.append(arr, item) — append item to array in place.
+// NOTE: the codegen uses this as the array-literal builder (calls ignore the
+// return). Kept as a mutator for that contract; `vec.push` is the functional
+// copy-on-write variant that matches the VM.
+// static inline so the 1M+ append calls in tight loops pay zero call overhead.
+static inline zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
+    (void)err;
+    if (arr.tag != ZZ_ARRAY) return zz_unit();
+    zz_array *a = arr.arr;
+    // Copy-on-write: only mutate in place when uniquely owned (refs == 1).
+    // Stack/arena/lit arrays are uniquely owned (nothing else can point to
+    // stack or arena memory), so treat them like refs == 1.
+    int uniquely_owned = (a->refs == 1
+        || a->refs == ZZ_ARRAY_STACK_MAGIC
+        || a->refs == ZZ_ARRAY_LIT_MAGIC
+        || a->refs == ZZ_ARRAY_ARENA_MAGIC);
+    if (!uniquely_owned) return zz_unit();
+    if (a->len >= a->cap) {
+        size_t new_cap = a->cap ? a->cap * 2 : 8;
+        if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_STACK_MAGIC
+            || a->refs == ZZ_ARRAY_ARENA_MAGIC || a->items == NULL) {
+            zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
+            for (size_t i = 0; i < a->len; i++)
+                new_items[i] = a->items[i];
+            a->items = new_items;
+            // refs stays as-is: 1 for heap arrays, magic value for
+            // lit/stack/arena arrays — all remain uniquely owned.
+        } else {
+            a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));
+        }
+        a->cap = new_cap;
+    }
+    a->items[a->len++] = zz_clone_for_store(item);
+    return zz_unit();
+}
 zz_value zz_vec_push(zz_value arr, zz_value item, int *err);
 // Move-aware push for `x = vec.push(x, e)`: `taken` is owned (the caller
 // moved it out of its slot, which now holds unit). A uniquely-owned heap
