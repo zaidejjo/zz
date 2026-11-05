@@ -1,0 +1,11 @@
+// bound failing through struct field: T: Num, Wrapper<T> holds a T field.
+// Constructing Wrapper{ v: "nope" } pins T=str which violates Num.
+struct Wrapper<T> {
+    v: T,
+}
+
+func process<T: Num>(w: Wrapper<T>) -> T {
+    return w.v
+}
+x := process(Wrapper{v: "nope"})
+println(x)

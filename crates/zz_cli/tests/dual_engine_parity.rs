@@ -1494,6 +1494,24 @@ parity_strict_error!(parity_err_edge_rem_zero, "edge_rem_zero_err.zz");
 parity_strict_error!(parity_err_unknown_field, "unknown_field.zz");
 parity_strict_error!(parity_err_struct_init_assign, "struct_init_assign_error.zz");
 parity_strict_error!(parity_err_int_float_cmp, "int_float_cmp.zz");
+// Generic bound soundness: unconstrained / violating bound generics must be
+// rejected by both engines (deferred obligation check).
+parity_strict_error!(
+    parity_err_generic_bound_unconstrained_call,
+    "generic_bound_unconstrained_call.zz"
+);
+parity_strict_error!(
+    parity_err_generic_bound_inference_chain,
+    "generic_bound_inference_chain.zz"
+);
+parity_strict_error!(
+    parity_err_generic_bound_returned,
+    "generic_bound_returned.zz"
+);
+parity_strict_error!(
+    parity_err_generic_bound_struct_field,
+    "generic_bound_struct_field.zz"
+);
 
 // ===========================================================================
 // Known native failure tests — documented bugs

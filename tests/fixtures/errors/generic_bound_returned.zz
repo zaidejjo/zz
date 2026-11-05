@@ -1,0 +1,7 @@
+// bound failing through returned value: T: Num, body returns `str`, forcing
+// T=str which violates Num. Must be rejected (bound violation or mismatch).
+func make_bad<T: Num>() -> T {
+    return "nope"
+}
+x := make_bad()
+println(x)
