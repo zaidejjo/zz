@@ -2649,9 +2649,10 @@ static void zz_run_task(zz_task_t task) {
     // corrupt this run's unwind that it legitimately overlaps (the
     // waiter queue owns the continuation from handoff on).
     if (zz_green_suspended()) {
-        // Suspended: the waiter queue holds a task copy (closure + join
-        // + frame) that resumes with the handed-off value. This copy
-        // owns nothing — the resuming run completes and frees.
+        // Suspended: re-enqueue the task so a worker (or this thread on
+        // retry) can resume it. Without this, a green task that suspends
+        // on first run is stranded forever — its join never completes.
+        zz_enqueue_task(task);
         return;
     }
     zz_task_join_complete(task.join, result);
