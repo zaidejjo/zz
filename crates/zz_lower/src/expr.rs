@@ -1852,16 +1852,18 @@ impl Lowerer {
                         };
                         // Hoist loop bounds once — used for both arena alloc size
                         // and fill loop, avoiding duplicate zz_int() calls.
+                        let ha = names.fresh("__a");
+                        let hb = names.fresh("__b");
                         out.push_str(&format!(
-                            "    int64_t __a = ({a}).i; int64_t __b = ({b}).i;\n"
+                            "    int64_t {ha} = ({a}).i; int64_t {hb} = ({b}).i;\n"
                         ));
                         // Declare flat buffer on the function arena (O(1) reset at
                         // function exit, no per-element refcount traffic).
                         out.push_str(&format!(
-                            "    {elem_ctype} *{comp} = ({elem_ctype} *)zz_arena_alloc(&_func_arena, (size_t)(__b - __a) * sizeof({elem_ctype}), 1);\n"
+                            "    {elem_ctype} *{comp} = ({elem_ctype} *)zz_arena_alloc(&_func_arena, (size_t)({hb} - {ha}) * sizeof({elem_ctype}), 1);\n"
                         ));
                         out.push_str(&format!("    size_t {comp}_len = 0;\n"));
-                        out.push_str(&format!("    size_t {comp}_cap = (__b - __a);\n"));
+                        out.push_str(&format!("    size_t {comp}_cap = ({hb} - {ha});\n"));
                         // Record flat backing so `flat_index_receiver` and index
                         // stores emit direct `comp[i]` access.
                         names
@@ -1878,7 +1880,7 @@ impl Lowerer {
                             .array_len_exprs
                             .insert(comp.clone(), b_raw.to_string());
                         // Emit the fill loop using hoisted bounds __a/__b.
-                        out.push_str("    for (int64_t __ci = __a; __ci < __b; __ci++) {\n");
+                        out.push_str("    for (int64_t __ci = {ha}; __ci < {hb}; __ci++) {\n");
                         names.push_scope();
                         let xcid = names.enter(&var.name);
                         out.push_str(&format!("        zz_value {xcid} = zz_int(__ci);\n"));
@@ -1899,13 +1901,15 @@ impl Lowerer {
                 if let Some((ref a, ref b)) = bounds {
                     // Hoist loop bounds once — used for both reserve and fill
                     // loop, avoiding duplicate zz_int() calls.
+                    let ha = names.fresh("__a");
+                    let hb = names.fresh("__b");
                     out.push_str(&format!(
-                        "    int64_t __a = ({a}).i; int64_t __b = ({b}).i;\n"
+                        "    int64_t {ha} = ({a}).i; int64_t {hb} = ({b}).i;\n"
                     ));
                     out.push_str(&format!(
-                        "    {{ int _e = 0; zz_array_reserve({comp}, (size_t)(__b - __a), &_e); }}\n"
+                        "    {{ int _e = 0; zz_array_reserve({comp}, (size_t)({hb} - {ha}), &_e); }}\n"
                     ));
-                    out.push_str("    for (int64_t __ci = __a; __ci < __b; __ci++) {\n");
+                    out.push_str("    for (int64_t __ci = {ha}; __ci < {hb}; __ci++) {\n");
                     // Track comprehension array length for bounds-check elimination:
                     // `[x for _ in 0..n]` creates an array of length `n`, so
                     // `arr[i]` with `i < n` inside a subsequent loop is in bounds.
