@@ -1038,8 +1038,27 @@ impl Lowerer {
                 let ptr_store_while: Option<(String, String, String)> = None;
 
                 let c = self.emit_expr(cond, names, out);
-                let c = box_scalar_operand(cond, names, &c);
-                out.push_str(&format!("        if (!zz_truthy({c})) break;\n"));
+                // While conditions: if the condition is already a raw C scalar
+                // (comparison, flat bool read), test it directly without
+                // zz_truthy()/zz_bool() wrapping. Fall back to boxed path
+                // otherwise.
+                match crate::context::raw_scalar_text(cond, &c, names) {
+                    Some((raw, "bool")) => {
+                        out.push_str(&format!("        if (!{raw}) break;\n"));
+                    }
+                    Some((raw, "double")) => {
+                        out.push_str(&format!(
+                            "        if (!zz_truthy(zz_float({raw}))) break;\n"
+                        ));
+                    }
+                    Some((raw, _)) => {
+                        out.push_str(&format!("        if (!zz_truthy(zz_int({raw}))) break;\n"));
+                    }
+                    None => {
+                        let c = box_scalar_operand(cond, names, &c);
+                        out.push_str(&format!("        if (!zz_truthy({c})) break;\n"));
+                    }
+                }
                 // Lexical scope for the body (same push/pop_scope
                 // discipline as for-loop bodies and value blocks):
                 // shadowing declarations must not leak past the braces.
@@ -1094,12 +1113,24 @@ impl Lowerer {
                         Some((raw, _)) => format!("({raw} != 0)"),
                         None => {
                             let c = box_scalar_operand(cond, names, &c);
-                            format!("zz_truthy({c})")
+                            // Flat bool array reads emit a raw C bool — test
+                            // directly instead of boxing through zz_truthy().
+                            if c.starts_with("zz_") {
+                                format!("zz_truthy({c})")
+                            } else {
+                                c
+                            }
                         }
                     }
                 } else {
                     let c = box_scalar_operand(cond, names, &c);
-                    format!("zz_truthy({c})")
+                    // Flat bool array reads emit a raw C bool — test directly
+                    // instead of boxing through zz_truthy().
+                    if c.starts_with("zz_") {
+                        format!("zz_truthy({c})")
+                    } else {
+                        c
+                    }
                 };
                 let tmp = names.fresh("_ifv");
                 out.push_str(&format!("    zz_value {tmp} = zz_unit();\n"));
@@ -1201,6 +1232,12 @@ impl Lowerer {
                     } else {
                         format!("({arr_cid})[zz_flat_index({idx_raw}, {len_cid}, \"{func}\")]")
                     };
+                    // For flat bool arrays, return the raw C bool instead of
+                    // boxing it via zz_bool(). The caller (if/while condition)
+                    // can use the raw bool directly without zz_truthy().
+                    if elem_ctype == "bool" {
+                        return raw;
+                    }
                     return auto_box(&raw, Some(elem_ctype.as_str()));
                 }
                 // Two fast-paths over the naive
@@ -1794,14 +1831,18 @@ impl Lowerer {
                         _ => unreachable!(),
                     };
                     let (ref a, ref b) = bounds.as_ref().unwrap();
-                    let count = format!("({b}.i - {a}.i)");
+                    // Hoist loop bounds once — used for both arena alloc size
+                    // and fill loop, avoiding duplicate zz_int() calls.
+                    out.push_str(&format!(
+                        "    int64_t __a = ({a}).i; int64_t __b = ({b}).i;\n"
+                    ));
                     // Declare flat buffer on the function arena (O(1) reset at
                     // function exit, no per-element refcount traffic).
                     out.push_str(&format!(
-                        "    {elem_ctype} *{comp} = ({elem_ctype} *)zz_arena_alloc(&_func_arena, (size_t){count} * sizeof({elem_ctype}), 1);\n"
+                        "    {elem_ctype} *{comp} = ({elem_ctype} *)zz_arena_alloc(&_func_arena, (size_t)(__b - __a) * sizeof({elem_ctype}), 1);\n"
                     ));
                     out.push_str(&format!("    size_t {comp}_len = 0;\n"));
-                    out.push_str(&format!("    size_t {comp}_cap = {count};\n"));
+                    out.push_str(&format!("    size_t {comp}_cap = (__b - __a);\n"));
                     // Record flat backing so `flat_index_receiver` and index
                     // stores emit direct `comp[i]` access.
                     names
@@ -1817,9 +1858,9 @@ impl Lowerer {
                     names
                         .array_len_exprs
                         .insert(comp.clone(), b_raw.to_string());
-                    // Emit the fill loop.
+                    // Emit the fill loop using hoisted bounds __a/__b.
                     out.push_str(&format!(
-                        "    for (int64_t __ci = ({a}).i; __ci < ({b}).i; __ci++) {{\n"
+                        "    for (int64_t __ci = __a; __ci < __b; __ci++) {{\n"
                     ));
                     names.push_scope();
                     let xcid = names.enter(&var.name);
@@ -1838,13 +1879,16 @@ impl Lowerer {
                 // `[x for _ in 0..n]` pre-sizes the result to n elements,
                 // eliminating per-iteration grow guards during construction.
                 if let Some((ref a, ref b)) = bounds {
+                    // Hoist loop bounds once — used for both reserve and fill
+                    // loop, avoiding duplicate zz_int() calls.
                     out.push_str(&format!(
-                        "    {{ int _e = 0; zz_array_reserve({comp}, (size_t)({b}.i - {a}.i), &_e); }}\n"
+                        "    int64_t __a = ({a}).i; int64_t __b = ({b}).i;\n"
                     ));
-                }
-                if let Some((a, b)) = bounds {
                     out.push_str(&format!(
-                        "    for (int64_t __ci = ({a}).i; __ci < ({b}).i; __ci++) {{\n"
+                        "    {{ int _e = 0; zz_array_reserve({comp}, (size_t)(__b - __a), &_e); }}\n"
+                    ));
+                    out.push_str(&format!(
+                        "    for (int64_t __ci = __a; __ci < __b; __ci++) {{\n"
                     ));
                     // Track comprehension array length for bounds-check elimination:
                     // `[x for _ in 0..n]` creates an array of length `n`, so
@@ -1862,7 +1906,13 @@ impl Lowerer {
                         let mut cond_scratch = String::new();
                         let cv = self.emit_expr(c, names, &mut cond_scratch);
                         let cv = box_scalar_operand(c, names, &cv);
-                        out.push_str(&format!("        if (zz_truthy({cv})) {{\n"));
+                        // Flat bool array reads emit a raw C bool — use directly
+                        // without zz_truthy().
+                        if cv.starts_with("zz_") {
+                            out.push_str(&format!("        if (zz_truthy({cv})) {{\n"));
+                        } else {
+                            out.push_str(&format!("        if ({cv}) {{\n"));
+                        }
                         out.push_str(&cond_scratch);
                         out.push_str(&body_scratch);
                         out.push_str(&format!(

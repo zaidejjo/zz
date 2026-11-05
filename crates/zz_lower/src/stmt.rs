@@ -2951,7 +2951,13 @@ impl Lowerer {
             } => {
                 let c = self.emit_expr(cond, names, out);
                 let c = box_scalar_operand(cond, names, &c);
-                out.push_str(&format!("    if (zz_truthy({c})) {{\n"));
+                // Flat bool array reads emit a raw C bool (no zz_bool
+                // boxing). Use it directly without zz_truthy().
+                if c.starts_with("zz_") {
+                    out.push_str(&format!("    if (zz_truthy({c})) {{\n"));
+                } else {
+                    out.push_str(&format!("    if ({c}) {{\n"));
+                }
                 self.emit_tail_branch(then, names, out);
                 out.push_str("    } else {\n");
                 if let Some(el) = els {
