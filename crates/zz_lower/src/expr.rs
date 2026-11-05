@@ -1053,7 +1053,15 @@ impl Lowerer {
                     }
                     None => {
                         let c = box_scalar_operand(cond, names, &c);
-                        out.push_str(&format!("        if (!zz_truthy({c})) break;\n"));
+                        // Flat bool array reads emit a raw C bool — use it
+                        // directly instead of boxing through zz_truthy().
+                        // Simple identifiers (_idxv10, etc.) hold boxed
+                        // zz_value and need zz_truthy().
+                        if c.starts_with("zz_") || crate::context::is_simple_ident(c.as_str()) {
+                            out.push_str(&format!("        if (!zz_truthy({c})) break;\n"));
+                        } else {
+                            out.push_str(&format!("        if (!{c}) break;\n"));
+                        }
                     }
                 }
                 // Lexical scope for the body (same push/pop_scope
@@ -1112,7 +1120,9 @@ impl Lowerer {
                             let c = box_scalar_operand(cond, names, &c);
                             // Flat bool array reads emit a raw C bool — test
                             // directly instead of boxing through zz_truthy().
-                            if c.starts_with("zz_") {
+                            // Simple identifiers (_idxv10, etc.) hold boxed
+                            // zz_value and need zz_truthy().
+                            if c.starts_with("zz_") || crate::context::is_simple_ident(c.as_str()) {
                                 format!("zz_truthy({c})")
                             } else {
                                 c
@@ -1123,7 +1133,9 @@ impl Lowerer {
                     let c = box_scalar_operand(cond, names, &c);
                     // Flat bool array reads emit a raw C bool — test directly
                     // instead of boxing through zz_truthy().
-                    if c.starts_with("zz_") {
+                    // Simple identifiers (_idxv10, etc.) hold boxed zz_value
+                    // and need zz_truthy().
+                    if c.starts_with("zz_") || crate::context::is_simple_ident(c.as_str()) {
                         format!("zz_truthy({c})")
                     } else {
                         c
