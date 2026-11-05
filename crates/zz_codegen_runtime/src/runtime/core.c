@@ -3185,7 +3185,10 @@ zz_value zz_task_join_recv(zz_value join_val, int *err) {
     // Same top-up discipline as channel recv: only when genuinely about
     // to park (!completed), at most once; the parked-worker gate + hard
     // cap inside zz_executor_top_up bound the total.
-    if (!join->completed && zz_is_worker) {
+    // Called from any thread (worker or main) — a blocking main thread
+    // must also spawn a replacement worker, otherwise a task that only
+    // the blocked thread could run strands forever (audit au12).
+    if (!join->completed) {
         zz_executor_top_up();
     }
     for (;;) {
