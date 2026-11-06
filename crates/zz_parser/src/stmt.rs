@@ -282,6 +282,54 @@ impl<'a> Parser<'a> {
                 );
                 return self.parse_stmt();
             }
+            // `public` is not a ZZ keyword; use `pub`
+            TokenKind::Ident if self.peek().text == "public" => {
+                let pub_tok = self.advance();
+                self.push_error(
+                    error_at(
+                        "unexpected `public` — ZZ does not use `public`",
+                        pub_tok.span,
+                    )
+                    .with_note("write `pub` instead of `public`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(pub_tok.span.start, pub_tok.span.end),
+                        "pub",
+                        "replace with `pub`",
+                    )),
+                );
+                return self.parse_stmt();
+            }
+            // `class` is not a ZZ keyword; use `struct` + `impl`
+            TokenKind::Ident if self.peek().text == "class" => {
+                let class_tok = self.advance();
+                self.push_error(
+                    error_at(
+                        "unexpected `class` — ZZ does not have classes",
+                        class_tok.span,
+                    )
+                    .with_note("write `struct Name { ... }` instead of `class Name { ... }`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(class_tok.span.start, class_tok.span.end),
+                        "struct",
+                        "replace with `struct`",
+                    )),
+                );
+                return self.parse_stmt();
+            }
+            // `new` is not a ZZ keyword; use struct literal syntax
+            TokenKind::Ident if self.peek().text == "new" => {
+                let new_tok = self.advance();
+                self.push_error(
+                    error_at("unexpected `new` — ZZ does not use `new`", new_tok.span)
+                        .with_note("write `TypeName { ... }` instead of `new TypeName(...)`")
+                        .with_fixit(FixIt::safe(
+                            Span::new(new_tok.span.start, new_tok.span.end),
+                            "",
+                            "remove `new`",
+                        )),
+                );
+                return self.parse_stmt();
+            }
             _ => {
                 // Try `IDENT: TYPE = expr` (explicit declaration). Backtrack
                 // on failure so ordinary expressions still parse.
@@ -795,6 +843,26 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn parse_import(&mut self, pub_: bool) -> Stmt {
         let import_tok = self.advance();
+        // `import "std.str"` — quotes are not used on import paths in ZZ.
+        if self.at(TokenKind::Str) {
+            let str_tok = self.advance();
+            self.push_error(
+                error_at("unexpected string literal after `import`", str_tok.span)
+                    .with_note("write `import std.str` instead of `import \"std.str\"`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(str_tok.span.start, str_tok.span.end),
+                        "",
+                        "remove quotes",
+                    )),
+            );
+            return Stmt::Import {
+                path: vec!["".to_string()],
+                alias: None,
+                items: Vec::new(),
+                span: import_tok.span.join(str_tok.span),
+                pub_,
+            };
+        }
         let mut path = Vec::new();
         if let Some((seg, _)) = self.parse_import_segment() {
             path.push(seg);
