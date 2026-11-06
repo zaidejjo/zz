@@ -334,6 +334,37 @@ impl<'a> Parser<'a> {
                 span,
             };
         }
+        // `++x` / `--x` are not valid in ZZ — use `x += 1` / `x -= 1`.
+        if self.peek_kind() == TokenKind::Plus && self.peek_kind_at(1) == TokenKind::Plus {
+            let tok = self.advance();
+            self.advance(); // consume second `+`
+            let inner = self.parse_unary();
+            self.push_error(
+                error_at("unexpected `++` — ZZ does not have `++`", tok.span)
+                    .with_note("write `x += 1` instead of `++x`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(tok.span.start, tok.span.end),
+                        "",
+                        "remove `++`",
+                    )),
+            );
+            return inner;
+        }
+        if self.peek_kind() == TokenKind::Minus && self.peek_kind_at(1) == TokenKind::Minus {
+            let tok = self.advance();
+            self.advance(); // consume second `-`
+            let inner = self.parse_unary();
+            self.push_error(
+                error_at("unexpected `--` — ZZ does not have `--`", tok.span)
+                    .with_note("write `x -= 1` instead of `--x`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(tok.span.start, tok.span.end),
+                        "",
+                        "remove `--`",
+                    )),
+            );
+            return inner;
+        }
         let op = match self.peek_kind() {
             TokenKind::Minus => UnOp::Neg,
             TokenKind::Plus => UnOp::Pos,
@@ -369,6 +400,35 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn parse_postfix(&mut self) -> Expr {
         let mut expr = self.parse_primary();
+        // `x++` / `x--` are not valid in ZZ — use `x += 1` / `x -= 1`.
+        if self.peek_kind() == TokenKind::Plus && self.peek_kind_at(1) == TokenKind::Plus {
+            let tok = self.advance();
+            self.advance(); // consume second `+`
+            self.push_error(
+                error_at("unexpected `++` — ZZ does not have `++`", tok.span)
+                    .with_note("write `x += 1` instead of `x++`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(tok.span.start, tok.span.end),
+                        "",
+                        "remove `++`",
+                    )),
+            );
+            return expr;
+        }
+        if self.peek_kind() == TokenKind::Minus && self.peek_kind_at(1) == TokenKind::Minus {
+            let tok = self.advance();
+            self.advance(); // consume second `-`
+            self.push_error(
+                error_at("unexpected `--` — ZZ does not have `--`", tok.span)
+                    .with_note("write `x -= 1` instead of `x--`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(tok.span.start, tok.span.end),
+                        "",
+                        "remove `--`",
+                    )),
+            );
+            return expr;
+        }
         loop {
             match self.peek_kind() {
                 TokenKind::LParen => {

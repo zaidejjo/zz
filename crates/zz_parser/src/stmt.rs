@@ -330,6 +330,32 @@ impl<'a> Parser<'a> {
                 );
                 return self.parse_stmt();
             }
+            // `switch` is not a ZZ keyword; use `match`
+            TokenKind::Ident if self.peek().text == "switch" => {
+                let switch_tok = self.advance();
+                self.push_error(
+                    error_at(
+                        "unexpected `switch` — ZZ does not have `switch`",
+                        switch_tok.span,
+                    )
+                    .with_note("write `match` instead of `switch`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(switch_tok.span.start, switch_tok.span.end),
+                        "match",
+                        "replace with `match`",
+                    )),
+                );
+                return self.parse_stmt();
+            }
+            // `goto` is not a ZZ keyword
+            TokenKind::Ident if self.peek().text == "goto" => {
+                let goto_tok = self.advance();
+                self.push_error(error_at(
+                    "unexpected `goto` — ZZ does not have `goto`",
+                    goto_tok.span,
+                ));
+                return self.parse_stmt();
+            }
             _ => {
                 // Try `IDENT: TYPE = expr` (explicit declaration). Backtrack
                 // on failure so ordinary expressions still parse.

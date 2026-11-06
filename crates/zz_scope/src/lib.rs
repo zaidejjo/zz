@@ -686,6 +686,9 @@ impl ScopeOps for Checker {
                         diag = diag.with_note(format!(
                             "`{mod_name}` is imported; did you mean `{mod_name}.{suggestion}`?"
                         ));
+                        self.errors.push(diag);
+                        self.had_undefined_var = true;
+                        return Type::Error;
                     } else {
                         diag = diag.with_note(format!(
                             "`{mod_name}` is imported; `{member}` is not a member of `{mod_name}`",
