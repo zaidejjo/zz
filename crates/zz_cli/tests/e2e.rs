@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use zz_frontend::diag::{error_code_lookup, ErrorCode, ALL_ERROR_CODES};
 
 /// Monotonically increasing sweep token handed out to every `run_zz` call
 /// (dedicated per-fixture tests and the discovery sweep share one process,
@@ -2368,6 +2369,64 @@ fn e2e_fix_report_uses_real_line_numbers() {
         assert!(
             (1..=line_count).contains(&num),
             "reported line {num} is outside the file's {line_count} lines:\n{line}"
+        );
+    }
+}
+
+/// Every error code in the catalog must have a description, bad example,
+/// and fixed example, and `zz explain <code>` must print them.
+#[test]
+fn error_codes_have_explanations() {
+    for entry in ALL_ERROR_CODES {
+        assert!(
+            !entry.title.is_empty(),
+            "code {} has empty title",
+            entry.code
+        );
+        assert!(
+            !entry.description.is_empty(),
+            "code {} has empty description",
+            entry.code
+        );
+        assert!(
+            !entry.bad_example.is_empty(),
+            "code {} has empty bad_example",
+            entry.code
+        );
+        assert!(
+            !entry.fixed_example.is_empty(),
+            "code {} has empty fixed_example",
+            entry.code
+        );
+    }
+
+    // Every code from Z0001 to Z0010 must be explainable via the CLI.
+    for n in 1..=ALL_ERROR_CODES.len() {
+        let code = ErrorCode(n as u32);
+        let entry =
+            error_code_lookup(code).unwrap_or_else(|| panic!("code {code} missing from catalog"));
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_zz"))
+            .arg("explain")
+            .arg(code.to_string())
+            .output()
+            .expect("failed to run `zz explain`");
+        assert!(
+            output.status.success(),
+            "`zz explain {}` failed:\nstderr: {}",
+            code,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(&code.to_string()),
+            "`zz explain {}` output missing code: {stdout}",
+            code
+        );
+        assert!(
+            stdout.contains(entry.title),
+            "`zz explain {}` output missing title `{}`: {stdout}",
+            code,
+            entry.title
         );
     }
 }
