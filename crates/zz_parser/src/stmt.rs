@@ -4,7 +4,7 @@ use zz_diag::{error_at, FixIt};
 use zz_lexer::token::TokenKind;
 use zz_span_ast::ast::{
     BinOp, Block, Decorator, ExternFunc, Ident, ImportItem, Param, Pattern, Stmt, TraitBound,
-    TypeParam,
+    TyKind, TypeParam,
 };
 use zz_span_ast::Span;
 use zz_suggest::suggest_all;
@@ -196,6 +196,91 @@ impl<'a> Parser<'a> {
                     expr: Box::new(expr),
                     span,
                 }
+            }
+            // `let x := 5` or `let x = 5` — `let` is not a ZZ keyword; use `:=`
+            TokenKind::Ident if self.peek().text == "let" => {
+                let let_tok = self.advance();
+                self.push_error(
+                    error_at(
+                        "unexpected `let` — ZZ does not use `let` declarations",
+                        let_tok.span,
+                    )
+                    .with_note("write `x := 5` instead of `let x := 5`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(let_tok.span.start, let_tok.span.end),
+                        "",
+                        "remove `let`",
+                    )),
+                );
+                return self.parse_stmt();
+            }
+            // `var x := 5` — `var` is not a ZZ keyword; use `:=`
+            TokenKind::Ident if self.peek().text == "var" => {
+                let var_tok = self.advance();
+                self.push_error(
+                    error_at(
+                        "unexpected `var` — ZZ does not use `var` declarations",
+                        var_tok.span,
+                    )
+                    .with_note("write `x := 5` instead of `var x := 5`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(var_tok.span.start, var_tok.span.end),
+                        "",
+                        "remove `var`",
+                    )),
+                );
+                return self.parse_stmt();
+            }
+            // `end` — ZZ uses `}` to close blocks, not `end`
+            TokenKind::Ident if self.peek().text == "end" => {
+                let end_tok = self.advance();
+                self.push_error(
+                    error_at(
+                        "unexpected `end` — ZZ uses `}` to close blocks, not `end`",
+                        end_tok.span,
+                    )
+                    .with_note("write `}` instead of `end`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(end_tok.span.start, end_tok.span.end),
+                        "}",
+                        "replace `end` with `}`",
+                    )),
+                );
+                return self.parse_stmt();
+            }
+            // `def` / `fn` / `function` are not ZZ keywords; use `func`
+            TokenKind::Ident
+                if self.peek().text == "def"
+                    || self.peek().text == "fn"
+                    || self.peek().text == "function" =>
+            {
+                let kw_tok = self.advance();
+                // Look ahead for the real function name so the hint says
+                // `func foo(...)` instead of `func def(...)`.
+                let suggested_name = if self.at(TokenKind::Ident) {
+                    self.peek().text.clone().into_owned()
+                } else {
+                    kw_tok.text.clone().into_owned()
+                };
+                self.push_error(
+                    error_at(
+                        format!(
+                            "unexpected `{}` — ZZ does not use `{}` to declare functions",
+                            kw_tok.text, kw_tok.text
+                        ),
+                        kw_tok.span,
+                    )
+                    .with_note(format!(
+                        "write `func {}(...) {{ ... }}` instead",
+                        suggested_name
+                    ))
+                    .with_fixit(FixIt::safe(
+                        Span::new(kw_tok.span.start, kw_tok.span.end),
+                        "func",
+                        "replace with `func`",
+                    )),
+                );
+                return self.parse_stmt();
             }
             _ => {
                 // Try `IDENT: TYPE = expr` (explicit declaration). Backtrack
@@ -1133,7 +1218,47 @@ impl<'a> Parser<'a> {
         }
         // Then a type.
         let ty = self.parse_type();
-        // Then `=`.
+        // Then `=`. But `:=` here is a common mistake from other languages.
+        if self.at(TokenKind::ColonEq) {
+            let colon_eq_tok = self.advance(); // `:=`
+            let value = self.parse_expr();
+            let span = name.span.join(value.span());
+            let type_name = match &ty.kind {
+                TyKind::Int => "int",
+                TyKind::Float => "float",
+                TyKind::Bool => "bool",
+                TyKind::Str => "str",
+                TyKind::Unit => "unit",
+                TyKind::Named(n, _) => n.as_str(),
+                _ => "type",
+            };
+            self.push_error(
+                error_at(
+                    format!(
+                        "invalid declaration: use `{} = expr` or `{} := expr`",
+                        format!("{}: {}", name.text, type_name),
+                        name.text
+                    ),
+                    colon_eq_tok.span,
+                )
+                .with_fixit(FixIt::safe(
+                    Span::new(colon_eq_tok.span.start, colon_eq_tok.span.end),
+                    "=",
+                    "replace `:=` with `=`",
+                )),
+            );
+            return Some(Stmt::Decl {
+                ty: Some(ty),
+                name: Ident {
+                    name: name.text.into_owned(),
+                    span: name.span,
+                },
+                value,
+                span,
+                pub_,
+                is_const,
+            });
+        }
         if !self.eat(TokenKind::Assign) {
             return None;
         }

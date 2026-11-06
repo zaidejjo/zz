@@ -5005,6 +5005,53 @@ fn unused_private_function_main_unused_helper_warns() {
 }
 
 #[test]
+fn unused_self_receiver_silent() {
+    // `self` is a receiver; an impl method that doesn't read `self` (e.g. a
+    // constant method) must not be flagged as an unused variable.
+    let r = check_src(
+        "struct Circle { r: int, }\n\
+         impl Circle {\n\
+             func area(self) -> int { return 3 }\n\
+             func diameter(self) -> int { return self.r * 2 }\n\
+         }\n\
+         func main() -> int {\n\
+             c := Circle{ r: 5 }\n\
+             return c.area()\n\
+         }\n",
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused variable `self`")),
+        "unused self receiver should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_self_receiver_used_silent() {
+    // When `self` IS used it must obviously not warn either (sanity that we
+    // didn't blanket-silence `self`).
+    let r = check_src(
+        "struct Circle { r: int, }\n\
+         impl Circle {\n\
+             func radius(self) -> int { return self.r }\n\
+         }\n\
+         func main() -> int {\n\
+             c := Circle{ r: 7 }\n\
+             return c.radius()\n\
+         }\n",
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused variable `self`")),
+        "used self receiver should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
 fn unused_private_function_pub_silent() {
     // Pub functions are exported and may be used by other modules.
     let r = check_src("pub func unused() -> int { 1 }\n");

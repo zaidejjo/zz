@@ -12,6 +12,7 @@ use zz_span_ast::span::Span;
 use zz_structs::StructOps;
 use zz_suggest::suggest_all;
 use zz_types::Type;
+use zz_unify::Unifier;
 
 mod definite_assignment;
 
@@ -290,6 +291,15 @@ pub trait TypeCheckOps {
     /// name, so neither form is lost.
     fn receiver_impl_method(&self, recv: &Type, method: &str) -> bool;
 
+    /// Table-driven removed/renamed stdlib API check (see [`REMOVED_APIS`]).
+    fn check_removed_api(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        named: &[(Ident, Expr)],
+        span: Span,
+    ) -> Option<Type>;
+
     fn check_call(
         &mut self,
         callee: &Expr,
@@ -401,6 +411,108 @@ pub trait TypeCheckOps {
 fn is_print_builtin(name: &str) -> bool {
     matches!(name, "print" | "println")
 }
+
+/// A removed/renamed stdlib API: old spellings → replacement hint + the type
+/// the (now-removed) call used to produce, so downstream checking stays quiet.
+struct RemovedApi {
+    names: &'static [&'static str],
+    replacement: &'static str,
+    ret: RemovedRet,
+}
+
+#[derive(Clone, Copy)]
+enum RemovedRet {
+    Unit,
+    Int,
+    Str,
+    Array,
+    /// `Result<Str, Str>`
+    ResultStrStr,
+    /// `Result<Unit, Str>`
+    ResultUnitStr,
+    /// `Result<Array<Str>, Str>`
+    ResultArrayStr,
+}
+
+impl RemovedRet {
+    fn to_type(self, unifier: &mut Unifier) -> Type {
+        match self {
+            RemovedRet::Unit => Type::Unit,
+            RemovedRet::Int => Type::Int,
+            RemovedRet::Str => Type::Str,
+            RemovedRet::Array => Type::Array(Box::new(unifier.fresh_var())),
+            RemovedRet::ResultStrStr => Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+            RemovedRet::ResultUnitStr => Type::Result(Box::new(Type::Unit), Box::new(Type::Str)),
+            RemovedRet::ResultArrayStr => Type::Result(
+                Box::new(Type::Array(Box::new(Type::Str))),
+                Box::new(Type::Str),
+            ),
+        }
+    }
+}
+
+/// Removed/renamed stdlib APIs, checked table-driven so each arm doesn't
+/// repeat the "check args, report error, return type" boilerplate.
+/// Entries are consulted only when `name` does not resolve to a known
+/// function (so real `pg.query` after `import std.sqlz.postgres as pg`
+/// still resolves through the signature table).
+static REMOVED_APIS: &[RemovedApi] = &[
+    RemovedApi {
+        names: &["vec.append", "std.vec.append", "append"],
+        replacement: "vec.push(v, x) or the method form xs.push(x)",
+        ret: RemovedRet::Array,
+    },
+    RemovedApi {
+        names: &["pg.query", "postgres.query", "my.query", "mysql.query"],
+        replacement: "pg.query(..) / my.query(..)",
+        ret: RemovedRet::Array,
+    },
+    RemovedApi {
+        names: &["pg.exec", "postgres.exec", "my.exec", "mysql.exec"],
+        replacement: "pg.query(..) / my.query(..)",
+        ret: RemovedRet::Int,
+    },
+    RemovedApi {
+        names: &["std.env.unset", "env.unset"],
+        replacement: "env.remove(key)",
+        ret: RemovedRet::Unit,
+    },
+    RemovedApi {
+        names: &[
+            "std.fs.read_file",
+            "fs.read_file",
+            "std.fs.read_to_string",
+            "fs.read_to_string",
+        ],
+        replacement: "std.fs.read",
+        ret: RemovedRet::ResultStrStr,
+    },
+    RemovedApi {
+        names: &["std.fs.write_file", "fs.write_file"],
+        replacement: "std.fs.write",
+        ret: RemovedRet::ResultUnitStr,
+    },
+    RemovedApi {
+        names: &["std.fs.remove_file", "fs.remove_file"],
+        replacement: "std.fs.remove",
+        ret: RemovedRet::ResultUnitStr,
+    },
+    RemovedApi {
+        names: &["std.fs.readdir", "fs.readdir"],
+        replacement: "std.fs.read_dir",
+        ret: RemovedRet::ResultArrayStr,
+    },
+    RemovedApi {
+        names: &["std.fs.rename", "fs.rename"],
+        replacement: "fs.move(src, dst)",
+        ret: RemovedRet::ResultUnitStr,
+    },
+    RemovedApi {
+        names: &["std.net.tcp_close", "net.tcp_close", "tcp_close"],
+        replacement: "stream.close() / stream.shutdown()",
+        ret: RemovedRet::ResultUnitStr,
+    },
+];
 
 impl TypeCheckOps for Checker {
     // --- statements -------------------------------------------------------
@@ -1208,7 +1320,6 @@ impl TypeCheckOps for Checker {
     /// report the out-of-bounds before the program runs (the runtime would
     /// trap on it anyway), with the valid range as the hint.
     fn check_literal_array_index(&mut self, len: usize, index: &Expr) {
-
         let raw: i64 = match const_eval_int(index) {
             Some(v) => v,
             None => return,
@@ -2503,6 +2614,40 @@ impl TypeCheckOps for Checker {
         }
     }
 
+    /// Table-driven removed/renamed stdlib API check (see [`REMOVED_APIS`]).
+    /// Returns `Some(type)` when `name` is a removed API — after checking its
+    /// args (so nested errors surface) and reporting the rename hint — else
+    /// `None`, so normal unknown-callee diagnostics proceed.
+    fn check_removed_api(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        named: &[(Ident, Expr)],
+        span: Span,
+    ) -> Option<Type> {
+        if self.funcs.contains_key(name) {
+            return None;
+        }
+        let api = REMOVED_APIS.iter().find(|api| api.names.contains(&name))?;
+        // Still check the args so nested errors inside them surface, then
+        // stop: the name no longer resolves, and letting lookup run on would
+        // add a confusing second error.
+        for arg in args {
+            self.check_expr(arg);
+        }
+        for (_, val) in named {
+            self.check_expr(val);
+        }
+        self.errors.push(error_at(
+            format!(
+                "removed: `{name}` is gone — use {} instead",
+                api.replacement
+            ),
+            span,
+        ));
+        Some(api.ret.to_type(&mut self.unifier))
+    }
+
     fn check_call(
         &mut self,
         callee: &Expr,
@@ -2747,166 +2892,13 @@ impl TypeCheckOps for Checker {
             if self.funcs.contains_key(name) {
                 self.used_names.insert(name.clone());
             }
-            // Removed push spellings: `vec.append` / `std.vec.append` and the
-            // bare `append` builtin are gone — `vec.push` plus the method form
-            // `xs.push(x)` is the only spelling. Hard error with a hint
-            // (no silent redirect: the old bare form fused to an in-place
-            // statement op, so a quiet rewrite could change behavior).
-            if !self.funcs.contains_key(name)
-                && (name.as_str() == "vec.append"
-                    || name.as_str() == "std.vec.append"
-                    || name.as_str() == "append")
-            {
-                // Still check the args so nested errors inside them surface,
-                // then stop: the name no longer resolves, and letting lookup
-                // run on would add a confusing second error (e.g. suggesting
-                // `import std.fs` for the unrelated file `fs.append` API).
-                for arg in args {
-                    self.check_expr(arg);
-                }
-                for (_, val) in named {
-                    self.check_expr(val);
-                }
-                self.errors.push(error_at(
-                    "removed: `append` is gone — use `vec.push(v, x)` or the method form `xs.push(x)`",
-                    span,
-                ));
-                return Type::Array(Box::new(self.unifier.fresh_var()));
+            // Removed/renamed stdlib APIs (table-driven): each entry maps old
+            // spellings to a replacement hint and the type the removed call
+            // used to produce, so downstream checking stays quiet.
+            if let Some(ret) = self.check_removed_api(name, args, named, span) {
+                return ret;
             }
-            // Bare `pg.*` / `my.*` / `postgres.*` / `mysql.*` never resolve:
-            // postgres/mysql live nested inside sqlz. Guide to the import.
-            // (Skipped when the name resolves — e.g. `pg.query` after
-            // `import std.sqlz.postgres as pg` copies real sigs there.)
-            if !self.funcs.contains_key(name)
-                && (name.as_str() == "pg.query"
-                    || name.as_str() == "pg.exec"
-                    || name.as_str() == "postgres.query"
-                    || name.as_str() == "postgres.exec"
-                    || name.as_str() == "my.query"
-                    || name.as_str() == "my.exec"
-                    || name.as_str() == "mysql.query"
-                    || name.as_str() == "mysql.exec")
-            {
-                // Still check the args so nested errors surface, then stop:
-                // these names never resolve (nested modules need an import),
-                // and falling through would add a bare "undefined variable".
-                for arg in args {
-                    self.check_expr(arg);
-                }
-                for (_, val) in named {
-                    self.check_expr(val);
-                }
-                self.errors.push(error_at(
-                    "unknown module: postgres/mysql live inside `sqlz` — `import std.sqlz.postgres` (optionally `as pg`) or `import std.sqlz.mysql` (`as my`), then call `pg.query(..)` / `my.query(..)`",
-                    span,
-                ));
-                if name.as_str().ends_with(".exec") {
-                    return Type::Int;
-                }
-                return Type::Array(Box::new(self.unifier.fresh_var()));
-            }
-            // Removed stdlib aliases: one spelling per op survived (see
-            // `zz_stdlib`). Each arm checks the args (nested errors
-            // surface), reports a rename hint, and returns the
-            // replacement's type so downstream checking stays quiet.
-            // `std.env.unset` → `std.env.remove` (bare `env.unset` after
-            // `import std.env` routes here too: same dotted name).
-            if !self.funcs.contains_key(name)
-                && (name.as_str() == "std.env.unset" || name.as_str() == "env.unset")
-            {
-                for arg in args {
-                    self.check_expr(arg);
-                }
-                for (_, val) in named {
-                    self.check_expr(val);
-                }
-                self.errors.push(error_at(
-                    "removed: `env.unset` is gone — use `env.remove(key)`",
-                    span,
-                ));
-                return Type::Unit;
-            }
-            // `std.fs.read_file` / `std.fs.read_to_string` → `std.fs.read`;
-            // `std.fs.write_file` → `std.fs.write`; `std.fs.remove_file` →
-            // `std.fs.remove`; `std.fs.readdir` → `std.fs.read_dir`
-            // (bare `fs.*` spellings after `import std.fs` route here too).
-            if let Some(replacement) = match !self.funcs.contains_key(name) {
-                true => match name.as_str() {
-                    "std.fs.read_file"
-                    | "fs.read_file"
-                    | "std.fs.read_to_string"
-                    | "fs.read_to_string" => Some((
-                        "std.fs.read",
-                        Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
-                    )),
-                    "std.fs.write_file" | "fs.write_file" => Some((
-                        "std.fs.write",
-                        Type::Result(Box::new(Type::Unit), Box::new(Type::Str)),
-                    )),
-                    "std.fs.remove_file" | "fs.remove_file" => Some((
-                        "std.fs.remove",
-                        Type::Result(Box::new(Type::Unit), Box::new(Type::Str)),
-                    )),
-                    "std.fs.readdir" | "fs.readdir" => Some((
-                        "std.fs.read_dir",
-                        Type::Result(
-                            Box::new(Type::Array(Box::new(Type::Str))),
-                            Box::new(Type::Str),
-                        ),
-                    )),
-                    _ => None,
-                },
-                false => None,
-            } {
-                for arg in args {
-                    self.check_expr(arg);
-                }
-                for (_, val) in named {
-                    self.check_expr(val);
-                }
-                self.errors.push(error_at(
-                    format!(
-                        "removed: `{name}` is gone — use `{}` instead",
-                        replacement.0
-                    ),
-                    span,
-                ));
-                return replacement.1;
-            }
-            // `std.fs.rename` (identical to `move`) → `std.fs.move`.
-            if !self.funcs.contains_key(name)
-                && (name.as_str() == "std.fs.rename" || name.as_str() == "fs.rename")
-            {
-                for arg in args {
-                    self.check_expr(arg);
-                }
-                for (_, val) in named {
-                    self.check_expr(val);
-                }
-                self.errors.push(error_at(
-                    "removed: `fs.rename` is gone — use `fs.move(src, dst)`",
-                    span,
-                ));
-                return Type::Result(Box::new(Type::Unit), Box::new(Type::Str));
-            }
-            // `std.net.tcp_close` (legacy no-op) → `close` / `shutdown`.
-            if !self.funcs.contains_key(name)
-                && (name.as_str() == "std.net.tcp_close"
-                    || name.as_str() == "net.tcp_close"
-                    || name.as_str() == "tcp_close")
-            {
-                for arg in args {
-                    self.check_expr(arg);
-                }
-                for (_, val) in named {
-                    self.check_expr(val);
-                }
-                self.errors.push(error_at(
-                    "removed: `tcp_close` is gone — use `stream.close()` / `stream.shutdown()` for a real shutdown",
-                    span,
-                ));
-                return Type::Result(Box::new(Type::Unit), Box::new(Type::Str));
-            }
+
             // Math constants are values, not functions: `math.PI()` is
             // always an error — use bare `math.PI`.
             if self.is_math_const(name) && self.funcs.contains_key(name) {
@@ -5263,7 +5255,14 @@ impl TypeCheckOps for Checker {
             // diagnostics, e.g. the module-namespace shadow lint); the
             // signature table itself carries no spans.
             match params.get(i) {
-                Some(p) => self.define_var_at(&p.name.name, pty.clone(), p.name.span, false),
+                Some(p) => {
+                    // The `self` receiver of an impl method may legitimately
+                    // go unread (e.g. a constant method); don't flag it as an
+                    // unused variable. Named-function parameters keep the
+                    // warning.
+                    let warn_unused = p.name.name != "self";
+                    self.define_binding_at(&p.name.name, pty.clone(), p.name.span, warn_unused);
+                }
                 None => self.define(pname, pty.clone()),
             }
         }
