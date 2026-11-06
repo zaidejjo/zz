@@ -1,0 +1,9 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/http_route_method.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/http_route_method.zz)
+
+error: `std.http.route`: unknown method `FROB` (expected GET, POST, PUT, DELETE, PATCH, HEAD or OPTIONS)
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/http_route_method.zz:7:17
+    |
+    7 |     s = s.route("FROB", "/x", |_req| "bad-method")
+      |                 ^^^^^^
+zz: 1 file(s) failed type-check

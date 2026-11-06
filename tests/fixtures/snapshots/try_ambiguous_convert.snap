@@ -1,0 +1,22 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/try_ambiguous_convert.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/try_ambiguous_convert.zz)
+
+error: ambiguous conversion from `try_ambiguous_convert.ErrA`: already converts to `ErrB`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/try_ambiguous_convert.zz:10:5
+    |
+   10 |     func convert_to_ErrB2(self) -> ErrB {
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+error: previous conversion here
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/try_ambiguous_convert.zz:7:5
+    |
+    7 |     func convert_to_ErrB(self) -> ErrB {
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+error: Z0006: function returns `try_ambiguous_convert.ErrB` but its body can fall through; add `return `
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/try_ambiguous_convert.zz:11:9
+    |
+   11 |         ErrB{msg: self.msg}
+      |         ^^^^^^^^^^^^^^^^^^^
+    = named functions return a value only through `return`; the last expression is discarded
+zz: 1 file(s) failed type-check

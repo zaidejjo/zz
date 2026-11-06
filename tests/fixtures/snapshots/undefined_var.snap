@@ -1,0 +1,9 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/undefined_var.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/undefined_var.zz)
+
+error: Z0001: undefined variable `undefined_var`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/undefined_var.zz:3:9
+    |
+    3 | println(undefined_var)
+      |         ^^^^^^^^^^^^^
+zz: 1 file(s) failed type-check

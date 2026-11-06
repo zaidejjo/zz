@@ -1,0 +1,16 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/return_annotated_join_mismatch.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/return_annotated_join_mismatch.zz)
+
+error: type mismatch: expected `int`, found `str`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/return_annotated_join_mismatch.zz:5:7
+    |
+    5 |     x:int = if c {
+      |       ^^^
+    = to fix: change the annotation to `str` or convert the value
+error: type mismatch: expected `int`, found `str`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/return_annotated_join_mismatch.zz:10:12
+    |
+   10 |     return x
+      |            ^
+zz: 1 file(s) failed type-check

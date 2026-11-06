@@ -1,0 +1,32 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/println_function_value.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/println_function_value.zz)
+
+error: Z0001: undefined variable `math.sin`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/println_function_value.zz:6:9
+    |
+    6 | println(math.sin)
+      |         ^^^^^^^^
+    = `math` is imported; `sin` is not a member of `math`
+    = did you mean `math.asin`?
+error: cannot print function `math.sin`: call it with arguments
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/println_function_value.zz:6:9
+    |
+    6 | println(math.sin)
+      |         ^^^^^^^^
+    = did you mean `math.sin()`?
+error: Z0001: undefined variable `std.math.sin`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/println_function_value.zz:7:9
+    |
+    7 | println(std.math.sin)
+      |         ^^^^^^^^^^^^
+    = did you mean `std.math.asin`?
+error: cannot print function `std.math.sin`: call it with arguments
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/println_function_value.zz:7:9
+    |
+    7 | println(std.math.sin)
+      |         ^^^^^^^^^^^^
+    = did you mean `std.math.sin()`?
+zz: 1 file(s) failed type-check

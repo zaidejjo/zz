@@ -1,0 +1,9 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_bound_inference_chain.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/generic_bound_inference_chain.zz)
+
+error: type `str` does not satisfy bound `Num` for generic parameter `T`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_bound_inference_chain.zz:10:6
+    |
+   10 | x := unwrap_default(.some("nope"), "fallback")
+      |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+zz: 1 file(s) failed type-check

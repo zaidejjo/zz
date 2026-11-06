@@ -1,0 +1,10 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/chan_send_non_chan.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/chan_send_non_chan.zz)
+
+error: type mismatch: expected `chan`, found `int`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/chan_send_non_chan.zz:6:19
+    |
+    6 |     std.chan.send(1, 2)
+      |                   ^
+    = parameter `ch` expects `chan`
+zz: 1 file(s) failed type-check

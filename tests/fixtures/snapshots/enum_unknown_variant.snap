@@ -1,0 +1,9 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/enum_unknown_variant.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/enum_unknown_variant.zz)
+
+error: unknown variant `Num` for enum `enum_unknown_variant.Token` (expected one of: Eof, IntLit)
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/enum_unknown_variant.zz:9:10
+    |
+    9 |     t := Token.Num(1)
+      |          ^^^^^^^^^^^^
+zz: 1 file(s) failed type-check

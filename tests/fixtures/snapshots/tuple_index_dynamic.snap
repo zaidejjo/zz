@@ -1,0 +1,10 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/tuple_index_dynamic.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/tuple_index_dynamic.zz)
+
+error: tuple index must be an integer literal
+hint: destructure with `(a, b) := t` for dynamic access
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/tuple_index_dynamic.zz:5:11
+    |
+    5 | println(t[i])
+      |           ^
+zz: 1 file(s) failed type-check

@@ -1,0 +1,10 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/return_missing_else.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/return_missing_else.zz)
+
+error: Z0006: function returns `int` but its body can fall through; add `return `
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/return_missing_else.zz:5:5
+    |
+    5 |     if c {
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = named functions return a value only through `return`; the last expression is discarded
+zz: 1 file(s) failed type-check

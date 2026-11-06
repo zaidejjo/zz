@@ -1,0 +1,10 @@
+first module that broke: /home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/generic_bracket_params.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/generic_bracket_params.zz)
+
+error: generic parameters are declared with `<T>`, not `[T]`
+
+  --> /home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/generic_bracket_params.zz:3:11
+    |
+    3 | func first[T](x: T) -> T {
+      |           ^^^
+    = write `<T>` instead (`[T]` makes an array type, e.g. `[int]`; apply a generic type with `<T>`, e.g. `Box<T>`)
+zz: 1 file(s) failed type-check

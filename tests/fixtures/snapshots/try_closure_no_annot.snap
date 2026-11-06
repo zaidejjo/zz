@@ -1,0 +1,21 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/try_closure_no_annot.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/try_closure_no_annot.zz)
+
+error: closure must declare `-> Result<T, E>` to use `try`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/try_closure_no_annot.zz:7:10
+    |
+    7 | f := |x| try fetch()
+      |          ^^^^^^^^^^^
+error: type mismatch: expected `int`, found `Result<int, str>`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/try_closure_no_annot.zz:7:10
+    |
+    7 | f := |x| try fetch()
+      |          ^^^^^^^^^^^
+error: cannot infer the type of `try_closure_no_annot.f`; add a type annotation
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/try_closure_no_annot.zz:7:1
+    |
+    7 | f := |x| try fetch()
+      | ^
+zz: 1 file(s) failed type-check

@@ -1,0 +1,9 @@
+first module that broke: /home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/parse_error.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/parse_error.zz)
+
+error: expected expression, found end of input
+
+  --> /home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/parse_error.zz:4:1
+    |
+    4 | 
+      | ^
+zz: 1 file(s) failed type-check

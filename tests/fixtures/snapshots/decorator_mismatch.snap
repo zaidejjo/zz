@@ -1,0 +1,26 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/decorator_mismatch.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/decorator_mismatch.zz)
+
+error: type mismatch: expected `int`, found `str`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/decorator_mismatch.zz:7:1
+    |
+    7 | @bad
+      | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = parameter `f` expects `func(int) -> int`
+error: type mismatch: expected `int`, found `str`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/decorator_mismatch.zz:8:12
+    |
+    8 | func hello(name: str) -> str {
+      |            ^^^^
+    = parameter `_0` expects `int`
+error: type mismatch: expected `str`, found `int`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/decorator_mismatch.zz:7:1
+    |
+    7 | @bad
+      | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+warning: unused private function `decorator_mismatch.hello`, consider prefixing with `_decorator_mismatch.hello` or removing it
+
+    = function is never called or referenced
+zz: 1 file(s) failed type-check

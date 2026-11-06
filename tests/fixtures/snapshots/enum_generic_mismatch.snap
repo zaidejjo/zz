@@ -1,0 +1,9 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/enum_generic_mismatch.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/enum_generic_mismatch.zz)
+
+error: type mismatch: expected `int`, found `str`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/enum_generic_mismatch.zz:10:13
+    |
+   10 |     println(a == s)
+      |             ^^^^^^
+zz: 1 file(s) failed type-check

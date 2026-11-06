@@ -1,0 +1,10 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/tuple_index_oob.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/tuple_index_oob.zz)
+
+error: Z0008: tuple index out of bounds for length 2
+hint: valid indices are 0..=1 (or -1..=-2, counting from the end)
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/tuple_index_oob.zz:4:11
+    |
+    4 | println(t[5])
+      |           ^
+zz: 1 file(s) failed type-check

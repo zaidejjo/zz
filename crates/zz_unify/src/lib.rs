@@ -28,6 +28,10 @@ pub struct UnifyError {
     pub left_span: Option<Span>,
     /// Span where the found (right) type was declared/inferred, if known.
     pub right_span: Option<Span>,
+    /// The actual left `Type` (resolved) for structural diffing in diagnostics.
+    pub left_ty: Type,
+    /// The actual right `Type` (resolved) for structural diffing in diagnostics.
+    pub right_ty: Type,
 }
 
 impl Unifier {
@@ -299,6 +303,8 @@ impl Unifier {
                         message: "infinite type".into(),
                         left_span: None,
                         right_span: None,
+                        left_ty: a.clone(),
+                        right_ty: b.clone(),
                     });
                 }
                 self.journaled_insert(journal, x, b.clone());
@@ -312,6 +318,8 @@ impl Unifier {
                         message: "infinite type".into(),
                         left_span: None,
                         right_span: None,
+                        left_ty: a.clone(),
+                        right_ty: b.clone(),
                     });
                 }
                 self.journaled_insert(journal, y, a.clone());
@@ -350,6 +358,8 @@ impl Unifier {
                         message: "infinite type".into(),
                         left_span: None,
                         right_span: None,
+                        left_ty: a.clone(),
+                        right_ty: b.clone(),
                     })
                 } else {
                     self.journaled_insert(journal, x, t.clone());
@@ -380,6 +390,8 @@ impl Unifier {
                         message: "type argument arity mismatch".into(),
                         left_span: None,
                         right_span: None,
+                        left_ty: Type::Enum(a.clone(), aa.clone()),
+                        right_ty: Type::Enum(b.clone(), bb.clone()),
                     });
                 }
                 for (x, y) in aa.iter().zip(bb.iter()) {
@@ -395,6 +407,8 @@ impl Unifier {
                         message: "type argument arity mismatch".into(),
                         left_span: None,
                         right_span: None,
+                        left_ty: Type::Struct(a.clone(), aa.clone()),
+                        right_ty: Type::Struct(b.clone(), bb.clone()),
                     });
                 }
                 for (x, y) in aa.iter().zip(bb.iter()) {
@@ -435,6 +449,8 @@ impl Unifier {
                         message: "tuple arity mismatch".into(),
                         left_span: None,
                         right_span: None,
+                        left_ty: a.clone(),
+                        right_ty: b.clone(),
                     });
                 }
                 for (x, y) in xs.iter().zip(ys.iter()) {
@@ -467,6 +483,8 @@ impl Unifier {
                         message: "function arity mismatch".into(),
                         left_span: None,
                         right_span: None,
+                        left_ty: a.clone(),
+                        right_ty: b.clone(),
                     });
                 }
                 for (x, y) in p1.iter().zip(p2.iter()) {
@@ -492,6 +510,8 @@ impl Unifier {
                         message: "pointer mutability mismatch (`*const` vs `*mut`)".into(),
                         left_span: None,
                         right_span: None,
+                        left_ty: a.clone(),
+                        right_ty: b.clone(),
                     });
                 }
                 self.unify_inner(x, y, journal)
@@ -520,6 +540,8 @@ impl Unifier {
                 message: "type mismatch".into(),
                 left_span: None,
                 right_span: None,
+                left_ty: a.clone(),
+                right_ty: b.clone(),
             }),
         }
     }
@@ -572,6 +594,8 @@ impl Unifier {
             message: "type mismatch".into(),
             left_span: None,
             right_span: None,
+            left_ty: t.clone(),
+            right_ty: Type::Union(members.to_vec()),
         }))
     }
 }

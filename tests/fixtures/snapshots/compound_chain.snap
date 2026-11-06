@@ -1,0 +1,10 @@
+first module that broke: /home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/compound_chain.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/compound_chain.zz)
+
+error: cannot chain compound assignment
+hint: split into separate statements
+
+  --> /home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/compound_chain.zz:5:8
+    |
+    5 | x += y += 1
+      |        ^^
+zz: 1 file(s) failed type-check

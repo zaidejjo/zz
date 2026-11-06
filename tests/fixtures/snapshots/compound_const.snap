@@ -1,0 +1,10 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/compound_const.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/compound_const.zz)
+
+error: cannot assign to immutable variable `x`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/compound_const.zz:4:1
+    |
+    4 | x += 2
+      | ^
+    = hint: remove `const` to make `x` mutable
+zz: 1 file(s) failed type-check

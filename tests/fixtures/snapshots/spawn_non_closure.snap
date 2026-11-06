@@ -1,0 +1,17 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/spawn_non_closure.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/spawn_non_closure.zz)
+
+error: type mismatch: expected `func(_) -> _`, found `int`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/spawn_non_closure.zz:6:21
+    |
+    6 |     h := task.spawn(42)
+      |                     ^^
+    = parameter `f` expects `func(_) -> _`
+warning: unused variable `h`, consider prefixing with `_h`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/spawn_non_closure.zz:6:5
+    |
+    6 |     h := task.spawn(42)
+      |     ^
+    = variable is never read
+zz: 1 file(s) failed type-check

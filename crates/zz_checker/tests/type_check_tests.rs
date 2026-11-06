@@ -2623,7 +2623,7 @@ fn const_error_has_secondary_label() {
         .unwrap();
     let sec = diag
         .secondary
-        .as_ref()
+        .first()
         .expect("const error must carry a secondary label");
     assert_eq!(sec.message, "variable defined as immutable here");
     // The secondary span points at the `x` in `const x = 10` (byte 6).

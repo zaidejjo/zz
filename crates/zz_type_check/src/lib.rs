@@ -2270,13 +2270,25 @@ impl TypeCheckOps for Checker {
                 // Reject int/float mixed comparisons with a helpful message.
                 match (&lt, &rt) {
                     (Type::Int, Type::Float) | (Type::Float, Type::Int) => {
-                        self.errors.push(error_at(
+                        let (from, to, cast_fn) = if matches!(&lt, Type::Int) {
+                            (lt.clone(), rt.clone(), "float")
+                        } else {
+                            (lt.clone(), rt.clone(), "int")
+                        };
+                        let mut diag = error_at(
                             format!(
-                                "cannot compare `{}` with `{}`. Use `float(x)` to cast",
+                                "cannot compare `{}` with `{}`. Use `{cast_fn}(x)` to cast",
                                 lt, rt
                             ),
                             span,
+                        );
+                        // Suggest casting the left operand; the fixit points at the left
+                        // expression span via `left.span` which is available as `lt`'s origin.
+                        // We point at the comparison span; the note tells which side to cast.
+                        diag = diag.with_note(format!(
+                            "cast `{from}` to `{to}` with `{cast_fn}(...)` on the mismatched side"
                         ));
+                        self.errors.push(diag);
                         Type::Bool
                     }
                     // Generic operands: allowed only when the parameter
@@ -2372,14 +2384,24 @@ impl TypeCheckOps for Checker {
                     (&lt, &rt),
                     (Type::Error, _) | (_, Type::Error) | (Type::Never, _) | (_, Type::Never)
                 ) {
-                    self.errors.push(error_at(
+                    let mut diag = error_at(
                         format!(
                             "bitwise `{}` requires `int` operands, found `{lt}` and `{rt}`\n\
                              hint: use `int(x)` to cast, `&&`/`||` for boolean logic",
                             op.symbol()
                         ),
                         span,
-                    ));
+                    );
+                    let left_not_int = !matches!(&lt, Type::Int | Type::Var(_));
+                    let right_not_int = !matches!(&rt, Type::Int | Type::Var(_));
+                    if left_not_int && right_not_int {
+                        diag = diag.with_note("cast both operands to `int` with `int(...)`");
+                    } else if left_not_int {
+                        diag = diag.with_note("cast the left operand to `int` with `int(...)`");
+                    } else if right_not_int {
+                        diag = diag.with_note("cast the right operand to `int` with `int(...)`");
+                    }
+                    self.errors.push(diag);
                 }
                 Type::Error
             }
@@ -2435,13 +2457,17 @@ impl TypeCheckOps for Checker {
                     }
                     (_, _) if ea == eb => Type::Array(Box::new(ea)),
                     (a2, b2) => {
-                        self.errors.push(error_at(
+                        let mut diag = error_at(
                             format!(
                                 "cannot apply `+` to `[{a2}]` and `[{b2}]`: element types differ\n\
                                  hint: cast one side so both arrays share an element type",
                             ),
                             span,
+                        );
+                        diag = diag.with_note(format!(
+                            "cast `[{a2}]` to `[{b2}]` or `[{b2}]` to `[{a2}]` with `{b2}(...)` / `{a2}(...)`"
                         ));
+                        self.errors.push(diag);
                         Type::Error
                     }
                 }
@@ -4867,18 +4893,40 @@ impl TypeCheckOps for Checker {
             }
             let missing: Vec<&String> = needs.iter().filter(|n| !have.contains(n)).collect();
             if !missing.is_empty() {
-                let missing = missing
+                let missing_str = missing
                     .iter()
                     .map(|m| format!("`.{m}`"))
                     .collect::<Vec<_>>()
                     .join(" or ");
-                self.errors.push(
-                    error_at(
-                        format!("non-exhaustive match: missing {missing} (or add a `_` arm)"),
+                let mut diag = error_at(
+                    format!("non-exhaustive match: missing {missing_str} (or add a `_` arm)"),
+                    span,
+                )
+                .with_code(ErrorCode(4));
+                // Add a fixit for each missing arm, plus a wildcard arm.
+                let mut alts: Vec<String> = Vec::new();
+                for m in &missing {
+                    alts.push(format!("`{m} => ()`"));
+                }
+                alts.push("`_ => ()`".to_string());
+                if alts.len() == 1 {
+                    diag = diag.with_fixit(FixIt::safe(
                         span,
-                    )
-                    .with_code(ErrorCode(4)),
-                );
+                        format!("{} => () {{}}", missing[0]),
+                        "add missing arm",
+                    ));
+                } else {
+                    diag = diag.with_fixit(FixIt::ambiguous(
+                        span,
+                        format!("{} => () {{}}", missing[0]),
+                        "add missing arm",
+                        alts,
+                    ));
+                }
+                diag = diag.with_note(format!(
+                    "add arm(s) for {missing_str} or a `_` wildcard arm"
+                ));
+                self.errors.push(diag);
             }
             return;
         }

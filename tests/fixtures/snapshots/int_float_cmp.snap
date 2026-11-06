@@ -1,0 +1,10 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/int_float_cmp.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/int_float_cmp.zz)
+
+error: cannot compare `int` with `float`. Use `float(x)` to cast
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/int_float_cmp.zz:5:4
+    |
+    5 | if x == y {
+      |    ^^^^^^
+    = cast `int` to `float` with `float(...)` on the mismatched side
+zz: 1 file(s) failed type-check

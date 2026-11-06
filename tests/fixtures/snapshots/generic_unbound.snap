@@ -1,0 +1,9 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_unbound.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/generic_unbound.zz)
+
+error: Z0003: generic parameter `T` needs a `Num` bound for `+`; write `func ...<T: Num>`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_unbound.zz:4:5
+    |
+    4 |     x + y
+      |     ^^^^^
+zz: 1 file(s) failed type-check

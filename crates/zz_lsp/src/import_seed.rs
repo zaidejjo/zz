@@ -48,7 +48,7 @@ pub fn unknown_import_diags(program: &Program) -> Vec<RawDiag> {
                 span: Some(Span::new(0, 0)),
                 notes: Vec::new(),
                 fixits: Vec::new(),
-                secondary: None,
+                secondary: Vec::new(),
             });
             continue;
         }
@@ -65,7 +65,7 @@ pub fn unknown_import_diags(program: &Program) -> Vec<RawDiag> {
                 span: Some(Span::new(0, 0)),
                 notes: Vec::new(),
                 fixits: Vec::new(),
-                secondary: None,
+                secondary: Vec::new(),
             });
         }
     }

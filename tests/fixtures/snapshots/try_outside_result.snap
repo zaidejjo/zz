@@ -1,0 +1,13 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/try_outside_result.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/try_outside_result.zz)
+
+error: `?` on `Result` cannot propagate through a function returning `int`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/try_outside_result.zz:8:10
+    |
+    8 |     x := try fetch()
+      |          ^^^^^^^^^^^
+    = to use `?` here, change the return type to `Result<int, str>`
+warning: unused private function `try_outside_result.bad`, consider prefixing with `_try_outside_result.bad` or removing it
+
+    = function is never called or referenced
+zz: 1 file(s) failed type-check

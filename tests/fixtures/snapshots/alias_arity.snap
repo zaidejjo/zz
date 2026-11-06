@@ -1,0 +1,16 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/alias_arity.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/alias_arity.zz)
+
+error: type alias `alias_arity.Pair` takes 1 type argument but 2 given
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/alias_arity.zz:6:8
+    |
+    6 |     p: Pair<int, str> = (1, "a")
+      |        ^^^^
+error: type mismatch: expected `int`, found `str`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/alias_arity.zz:6:8
+    |
+    6 |     p: Pair<int, str> = (1, "a")
+      |        ^^^^
+    = to fix: change the annotation to `(int, str)` or convert the value
+zz: 1 file(s) failed type-check

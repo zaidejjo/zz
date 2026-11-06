@@ -1,0 +1,9 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/enum_extra_arg.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/enum_extra_arg.zz)
+
+error: variant `enum_extra_arg.Token.Eof` takes no arguments but 1 given
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/enum_extra_arg.zz:9:10
+    |
+    9 |     t := Token.Eof(1)
+      |          ^^^^^^^^^^^^
+zz: 1 file(s) failed type-check

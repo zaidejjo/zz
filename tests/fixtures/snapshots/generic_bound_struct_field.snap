@@ -1,0 +1,9 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_bound_struct_field.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/generic_bound_struct_field.zz)
+
+error: type `str` does not satisfy bound `Num` for generic parameter `T`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_bound_struct_field.zz:11:6
+    |
+   11 | x := process(Wrapper{v: "nope"})
+      |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+zz: 1 file(s) failed type-check

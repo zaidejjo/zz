@@ -92,8 +92,10 @@ pub struct RawDiag {
     pub span: Option<Span>,
     pub notes: Vec<String>,
     pub fixits: Vec<FixIt>,
-    /// Optional secondary source label (rendered above the primary span).
-    pub secondary: Option<SecondaryLabel>,
+    /// Secondary source labels (rendered above the primary span).
+    /// Multiple labels are supported for multi-span diagnostics
+    /// (e.g. "expected `Box<str>` here" + "found `Box<int>` here").
+    pub secondary: Vec<SecondaryLabel>,
 }
 
 // --- Stable error codes ----------------------------------------------------
@@ -254,7 +256,7 @@ pub fn error(message: impl Into<String>) -> RawDiag {
         span: None,
         notes: Vec::new(),
         fixits: Vec::new(),
-        secondary: None,
+        secondary: Vec::new(),
     }
 }
 
@@ -266,7 +268,7 @@ pub fn error_at(message: impl Into<String>, span: Span) -> RawDiag {
         span: Some(span),
         notes: Vec::new(),
         fixits: Vec::new(),
-        secondary: None,
+        secondary: Vec::new(),
     }
 }
 
@@ -278,7 +280,7 @@ pub fn warning(message: impl Into<String>) -> RawDiag {
         span: None,
         notes: Vec::new(),
         fixits: Vec::new(),
-        secondary: None,
+        secondary: Vec::new(),
     }
 }
 
@@ -290,7 +292,7 @@ pub fn warning_at(message: impl Into<String>, span: Span) -> RawDiag {
         span: Some(span),
         notes: Vec::new(),
         fixits: Vec::new(),
-        secondary: None,
+        secondary: Vec::new(),
     }
 }
 
@@ -302,7 +304,7 @@ pub fn note(message: impl Into<String>) -> RawDiag {
         span: None,
         notes: Vec::new(),
         fixits: Vec::new(),
-        secondary: None,
+        secondary: Vec::new(),
     }
 }
 
@@ -319,7 +321,7 @@ impl RawDiag {
 
     /// Attach a secondary source label (rendered above the primary span).
     pub fn with_secondary(mut self, label: SecondaryLabel) -> Self {
-        self.secondary = Some(label);
+        self.secondary.push(label);
         self
     }
 

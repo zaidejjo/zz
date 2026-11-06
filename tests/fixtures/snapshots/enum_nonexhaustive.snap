@@ -1,0 +1,10 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/enum_nonexhaustive.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/enum_nonexhaustive.zz)
+
+error: Z0004: non-exhaustive match: missing `.IntLit` (or add a `_` arm)
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/enum_nonexhaustive.zz:10:5
+    |
+   10 |     match t {
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add arm(s) for `.IntLit` or a `_` wildcard arm
+zz: 1 file(s) failed type-check

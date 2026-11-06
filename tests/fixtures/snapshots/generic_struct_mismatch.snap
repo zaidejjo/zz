@@ -1,0 +1,17 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_struct_mismatch.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/generic_struct_mismatch.zz)
+
+error: type mismatch: expected `str`, found `int`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_struct_mismatch.zz:4:4
+    |
+    4 | s: Box<str> = Box{ v: 1 }
+      |    ^^^
+    = to fix: change the annotation to `generic_struct_mismatch.Box<int>` or convert the value
+warning: unused variable `s`, consider prefixing with `_s`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_struct_mismatch.zz:4:1
+    |
+    4 | s: Box<str> = Box{ v: 1 }
+      | ^
+    = variable is never read
+zz: 1 file(s) failed type-check

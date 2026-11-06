@@ -1,0 +1,13 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/try_double_unwrap.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/try_double_unwrap.zz)
+
+error: cannot use `?` on a value of type `int`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/try_double_unwrap.zz:10:10
+    |
+   10 |     x := try fetch()?
+      |          ^^^^^^^^^^^^
+    = `?` unwraps `Result`/`Option`; `int` is neither — remove the `?`
+warning: unused private function `try_double_unwrap.load`, consider prefixing with `_try_double_unwrap.load` or removing it
+
+    = function is never called or referenced
+zz: 1 file(s) failed type-check

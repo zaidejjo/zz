@@ -1,0 +1,23 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_struct_arity.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/generic_struct_arity.zz)
+
+error: struct `generic_struct_arity.Box` takes 1 type argument (e.g. `generic_struct_arity.Box<T>`)
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_struct_arity.zz:4:4
+    |
+    4 | b: Box = Box{ v: 1 }
+      |    ^^^
+error: type argument arity mismatch
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_struct_arity.zz:4:4
+    |
+    4 | b: Box = Box{ v: 1 }
+      |    ^^^
+    = to fix: change the annotation to `generic_struct_arity.Box<int>` or convert the value
+warning: unused variable `b`, consider prefixing with `_b`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_struct_arity.zz:4:1
+    |
+    4 | b: Box = Box{ v: 1 }
+      | ^
+    = variable is never read
+zz: 1 file(s) failed type-check

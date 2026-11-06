@@ -727,7 +727,7 @@ fn undefined_diag_for(message: &str) -> Diagnostic {
         span: Some(zz_frontend::span::Span::new(0, 1)),
         notes: vec![],
         fixits: vec![],
-        secondary: None,
+        secondary: Vec::new(),
     };
     Diagnostic {
         range: Range {

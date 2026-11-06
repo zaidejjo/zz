@@ -1,0 +1,9 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/return_fallthrough_mismatch.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/return_fallthrough_mismatch.zz)
+
+error: type mismatch: expected `int`, found `str`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/return_fallthrough_mismatch.zz:5:12
+    |
+    5 |     return if c {
+      |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+zz: 1 file(s) failed type-check

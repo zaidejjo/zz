@@ -62,7 +62,7 @@ impl RawDiagBind for RawDiag {
         if let Some(span) = self.span {
             labels.push(Label::primary(file_id, span.to_range()));
         }
-        if let Some(sec) = &self.secondary {
+        for sec in &self.secondary {
             labels.push(
                 Label::secondary(file_id, sec.span.to_range()).with_message(sec.message.clone()),
             );
@@ -186,7 +186,7 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
                 // Gutter width must fit the widest line number shown (the
                 // secondary label may sit on a different line than the primary).
                 let mut gutter = format!("{line_num:>4}").len();
-                if let Some(sec) = &raw.secondary {
+                for sec in &raw.secondary {
                     if sec.span.end as usize <= source.len() {
                         let (sec_line_num, _) = line_col_for(source, sec.span.start as usize);
                         gutter = gutter.max(format!("{sec_line_num:>4}").len());
@@ -194,10 +194,11 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
                 }
                 let _ = write!(out, "\n    |");
 
-                // Secondary label first: source line + `-` carets + message.
+                // Secondary labels first: source line + `-` carets + message.
                 // When the span points outside the current source (e.g. a const
                 // defined in an earlier REPL snippet), fall back to a note.
-                if let Some(sec) = &raw.secondary {
+                let mut secondary_notes: Vec<String> = Vec::new();
+                for sec in &raw.secondary {
                     if sec.span.end as usize <= source.len() {
                         let (sec_line_num, _) = line_col_for(source, sec.span.start as usize);
                         let sec_lstart = line_start_for(source, sec.span.start as usize);
@@ -217,8 +218,11 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
                             width = gutter,
                         );
                     } else {
-                        secondary_note = Some(sec.message.clone());
+                        secondary_notes.push(sec.message.clone());
                     }
+                }
+                if !secondary_notes.is_empty() {
+                    secondary_note = Some(secondary_notes.join("; "));
                 }
 
                 // Source line
@@ -293,6 +297,7 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
         );
     }
 
+    out.push('\n');
     out
 }
 
@@ -373,6 +378,7 @@ pub fn render_to_string(
             for note_text in &raw.notes {
                 let _ = write!(out, "\n    = {note_text}");
             }
+            out.push('\n');
         }
     }
     out
@@ -406,30 +412,32 @@ pub fn render_to_stderr(files: &Files, file_id: FileId, diags: &[RawDiag], color
                     let (ln, col) = line_col_for(source, span.start as usize);
                     let _ = write!(line, "\n  --> {name}:{ln}:{}", col + 1);
                     let _ = write!(line, "\n    |");
-                    // Secondary label first (source line + `-` carets).
-                    if let Some(sec) = &raw.secondary {
-                        if sec.span.end as usize <= source.len() {
-                            let (sec_ln, _) = line_col_for(source, sec.span.start as usize);
-                            let sec_lstart = line_start_for(source, sec.span.start as usize);
-                            let sec_lend = line_end_for(source, sec.span.start as usize);
-                            let sec_line_text = &source[sec_lstart..sec_lend];
-                            let _ = write!(line, "\n {:>4} | {sec_line_text}", sec_ln);
-                            let sec_col_off = sec.span.start as usize - sec_lstart;
-                            let sec_len = (sec.span.end - sec.span.start) as usize;
-                            let _ = write!(line, "\n {:>4} |", "");
-                            let _ = write!(
-                                line,
-                                " {}{} {}",
-                                " ".repeat(sec_col_off),
-                                "-".repeat(sec_len),
-                                sec.message,
-                            );
-                        } else {
-                            let _ = write!(
-                                line,
-                                "\n    = {} (defined in a previous snippet)",
-                                sec.message,
-                            );
+                    // Secondary labels first (source line + `-` carets).
+                    if !raw.secondary.is_empty() {
+                        for sec in &raw.secondary {
+                            if sec.span.end as usize <= source.len() {
+                                let (sec_ln, _) = line_col_for(source, sec.span.start as usize);
+                                let sec_lstart = line_start_for(source, sec.span.start as usize);
+                                let sec_lend = line_end_for(source, sec.span.start as usize);
+                                let sec_line_text = &source[sec_lstart..sec_lend];
+                                let _ = write!(line, "\n {:>4} | {sec_line_text}", sec_ln);
+                                let sec_col_off = sec.span.start as usize - sec_lstart;
+                                let sec_len = (sec.span.end - sec.span.start) as usize;
+                                let _ = write!(line, "\n {:>4} |", "");
+                                let _ = write!(
+                                    line,
+                                    " {}{} {}",
+                                    " ".repeat(sec_col_off),
+                                    "-".repeat(sec_len),
+                                    sec.message,
+                                );
+                            } else {
+                                let _ = write!(
+                                    line,
+                                    "\n    = {} (defined in a previous snippet)",
+                                    sec.message,
+                                );
+                            }
                         }
                     }
                     let lstart = line_start_for(source, span.start as usize);

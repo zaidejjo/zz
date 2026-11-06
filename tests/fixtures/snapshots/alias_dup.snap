@@ -1,0 +1,15 @@
+first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/alias_dup.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/alias_dup.zz)
+
+error: duplicate definition of type alias `alias_dup.Tokens`
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/alias_dup.zz:4:1
+    |
+    4 | type Tokens = [int]
+      | ^^^^^^^^^^^^^^^^^^^
+error: previous definition here
+
+  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/alias_dup.zz:3:1
+    |
+    3 | type Tokens = [str]
+      | ^^^^^^^^^^^^^^^^^^^
+zz: 1 file(s) failed type-check
