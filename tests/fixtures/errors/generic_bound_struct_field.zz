@@ -1,3 +1,4 @@
+// features: generics, structs, error-case, func-call, print, string-literal
 // bound failing through struct field: T: Num, Wrapper<T> holds a T field.
 // Constructing Wrapper{ v: "nope" } pins T=str which violates Num.
 struct Wrapper<T> {

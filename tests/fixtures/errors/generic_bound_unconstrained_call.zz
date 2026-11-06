@@ -1,3 +1,4 @@
+// features: generics, error-case, func-call, print, string-literal
 // generic bound cannot be inferred at call site (no pinning argument).
 // `make<T: Num>()` leaves `T` unconstrained; the bound can never be verified,
 // so the call must be rejected rather than silently producing an opaque type.
