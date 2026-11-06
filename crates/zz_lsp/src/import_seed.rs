@@ -41,6 +41,7 @@ pub fn unknown_import_diags(program: &Program) -> Vec<RawDiag> {
         if path.len() < 2 {
             out.push(RawDiag {
                 severity: Severity::Error,
+                code: None,
                 message: "`import std` names no module\n\
                      hint: import a concrete module, e.g. `import std.str`"
                     .to_string(),
@@ -55,6 +56,7 @@ pub fn unknown_import_diags(program: &Program) -> Vec<RawDiag> {
         if !zz_stdlib::STDLIB_MODULES.contains(&module.as_str()) {
             out.push(RawDiag {
                 severity: Severity::Error,
+                code: None,
                 message: format!(
                     "unknown standard library module `std.{module}`\n\
                      hint: available modules are: {}",

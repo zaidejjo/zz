@@ -155,7 +155,8 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
         Severity::Warning => "warning".yellow().bold(),
         Severity::Help => "help".cyan().bold(),
     };
-    let _ = write!(out, "{}: {}", tag, raw.message.bold());
+    let code_str = raw.code.map(|c| format!("{}: ", c)).unwrap_or_default();
+    let _ = write!(out, "{}: {}{}", tag, code_str, raw.message.bold());
 
     // When the secondary span points outside the current source (e.g. a const
     // defined in an earlier REPL snippet), we emit it as a note instead.
@@ -324,7 +325,8 @@ pub fn render_to_stderr(files: &Files, file_id: FileId, diags: &[RawDiag]) {
                 Severity::Help => "help",
             };
             use std::fmt::Write;
-            let _ = write!(line, "{prefix}: {}", raw.message);
+            let code_str = raw.code.map(|c| format!("{c}: ")).unwrap_or_default();
+            let _ = write!(line, "{prefix}: {code_str}{}", raw.message);
             if let Some(span) = raw.span {
                 if let Ok(file) = files.get(file_id) {
                     let name = file.name();

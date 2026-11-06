@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use zz_checker_core::{Checker, FuncSig};
-use zz_diag_core::{error_at, warning_at, FixIt};
+use zz_diag_core::{error_at, warning_at, ErrorCode, FixIt};
 use zz_infer::{contains_var, default_variant_vars, InferOps};
 use zz_lints::http_lint::HttpLintOps;
 use zz_scope::ScopeOps;
@@ -1302,15 +1302,18 @@ impl TypeCheckOps for Checker {
         match pos {
             Some(i) if i < elems.len() => elems[i].clone(),
             _ => {
-                self.errors.push(error_at(
-                    format!(
-                        "tuple index out of bounds for length {}\n\
+                self.errors.push(
+                    error_at(
+                        format!(
+                            "tuple index out of bounds for length {}\n\
                          hint: {}",
-                        elems.len(),
-                        index_range_hint(elems.len())
-                    ),
-                    index.span(),
-                ));
+                            elems.len(),
+                            index_range_hint(elems.len())
+                        ),
+                        index.span(),
+                    )
+                    .with_code(ErrorCode(8)),
+                );
                 Type::Error
             }
         }
@@ -1332,14 +1335,17 @@ impl TypeCheckOps for Checker {
         if in_bounds {
             return;
         }
-        self.errors.push(error_at(
-            format!(
-                "index {raw} out of bounds for length {len}\n\
+        self.errors.push(
+            error_at(
+                format!(
+                    "index {raw} out of bounds for length {len}\n\
                  hint: {}",
-                index_range_hint(len)
-            ),
-            index.span(),
-        ));
+                    index_range_hint(len)
+                ),
+                index.span(),
+            )
+            .with_code(ErrorCode(8)),
+        );
     }
 
     /// Whether a loop body can leave through a `break` that targets this
@@ -2456,7 +2462,8 @@ impl TypeCheckOps for Checker {
                             op.symbol()
                         ),
                         span,
-                    ));
+                    )
+                    .with_code(ErrorCode(3)));
                     Type::Error
                 }
             }
@@ -2508,7 +2515,8 @@ impl TypeCheckOps for Checker {
                     let mut diag = error_at(
                         format!("cannot apply `{}` to `{}` and `{}`", op.symbol(), a, b),
                         span,
-                    );
+                    )
+                    .with_code(ErrorCode(2));
                     // Suggest the conversion matching the other operand (#247).
                     let conv = match (&a, &b) {
                         (Type::Str, Type::Int) | (Type::Int, Type::Str) => Some("str"),
@@ -4864,10 +4872,13 @@ impl TypeCheckOps for Checker {
                     .map(|m| format!("`.{m}`"))
                     .collect::<Vec<_>>()
                     .join(" or ");
-                self.errors.push(error_at(
-                    format!("non-exhaustive match: missing {missing} (or add a `_` arm)"),
-                    span,
-                ));
+                self.errors.push(
+                    error_at(
+                        format!("non-exhaustive match: missing {missing} (or add a `_` arm)"),
+                        span,
+                    )
+                    .with_code(ErrorCode(4)),
+                );
             }
             return;
         }
@@ -5380,7 +5391,8 @@ impl TypeCheckOps for Checker {
             format!("function returns `{ret_ty}` but its body can fall through; add `return `"),
             span,
         )
-        .with_note("named functions return a value only through `return`; the last expression is discarded");
+        .with_note("named functions return a value only through `return`; the last expression is discarded")
+        .with_code(ErrorCode(6));
         if let Some(insert_at) = value_tail {
             diag = diag.with_fixit(FixIt::safe(insert_at, "return ", "add `return`"));
         }

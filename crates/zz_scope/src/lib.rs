@@ -1,7 +1,7 @@
 //! Scope management and variable lookup.
 
 use zz_checker_core::{Checker, DefinedBinding};
-use zz_diag_core::{error_at, warning_at, FixIt};
+use zz_diag_core::{error_at, warning_at, ErrorCode, FixIt};
 use zz_span_ast::span::Span;
 use zz_structs::StructOps;
 use zz_suggest::{suggest_all, suggest_confident, suggest_dotted, suggest_top3};
@@ -391,7 +391,8 @@ impl ScopeOps for Checker {
                 for e in &extras {
                     candidates.push(e);
                 }
-                let mut diag = error_at(format!("undefined variable `{name}`"), span);
+                let mut diag =
+                    error_at(format!("undefined variable `{name}`"), span).with_code(ErrorCode(1));
                 // Confident (never-wrong) suggestions only; up to three for
                 // ambiguous cases. A missing hint is better than a wrong one.
                 let confident = suggest_top3(name, &candidates);
@@ -658,7 +659,8 @@ impl ScopeOps for Checker {
                     return Type::Error;
                 }
             }
-            let mut diag = error_at(format!("undefined variable `{joined}`"), span);
+            let mut diag =
+                error_at(format!("undefined variable `{joined}`"), span).with_code(ErrorCode(1));
             // Unimported-but-known std module root (`math.sin` without
             // `import std.math`): suggest the import alongside any typo
             // hint below. Reaching here means the root did not resolve,

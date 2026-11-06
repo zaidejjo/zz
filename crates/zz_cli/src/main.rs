@@ -22,7 +22,9 @@ mod vm_disasm;
 mod watch;
 
 use zz_arena::ScopedBump;
-use zz_frontend::diag::{error_at, render_to_string, Files};
+use zz_frontend::diag::{
+    error_at, error_code_lookup, render_to_string, ErrorCode, Files, ALL_ERROR_CODES,
+};
 use zz_frontend::span::Span;
 use zz_runtime::{Interp, Value};
 
@@ -404,6 +406,12 @@ fn main_inner() -> ExitCode {
                     ExitCode::FAILURE
                 }
             }
+        }
+        Some("explain") => {
+            if rest.is_empty() {
+                return explain_list_command();
+            }
+            return explain_command(rest);
         }
         Some("build") => match build_cmd(rest) {
             Ok(()) => ExitCode::SUCCESS,
@@ -869,6 +877,61 @@ FLAGS:
         _ => USAGE,
     };
     print!("{text}");
+}
+
+/// Print the explanation of an error code for `zz explain <code>`.
+fn explain_command(args: &[String]) -> ExitCode {
+    let code_str = args.first().map(|s| s.as_str()).unwrap_or("");
+    let code = if let Some(s) = code_str.strip_prefix('Z') {
+        match s.parse::<u32>() {
+            Ok(n) => ErrorCode(n),
+            Err(_) => {
+                eprintln!("zz explain: invalid code `{code_str}` (expected format like Z0001)");
+                eprintln!("Run `zz explain` without arguments to list all codes.");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        eprintln!("zz explain: invalid code `{code_str}` (expected format like Z0001)");
+        eprintln!("Run `zz explain` without arguments to list all codes.");
+        return ExitCode::FAILURE;
+    };
+
+    match error_code_lookup(code) {
+        Some(entry) => {
+            println!("{} — {}", code, entry.title);
+            println!();
+            println!("{}", entry.description);
+            println!();
+            println!("Bad:");
+            for line in entry.bad_example.lines() {
+                println!("  {line}");
+            }
+            println!();
+            println!("Fixed:");
+            for line in entry.fixed_example.lines() {
+                println!("  {line}");
+            }
+            ExitCode::SUCCESS
+        }
+        None => {
+            eprintln!("zz explain: unknown code `{code_str}`");
+            eprintln!("Run `zz explain` without arguments to list all codes.");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// List all error codes for `zz explain` (no arguments).
+fn explain_list_command() -> ExitCode {
+    println!("ZZ error codes:");
+    println!();
+    for entry in ALL_ERROR_CODES {
+        println!("  {} — {}", entry.code, entry.title);
+    }
+    println!();
+    println!("Run `zz explain <CODE>` for details, e.g. `zz explain Z0001`.");
+    ExitCode::SUCCESS
 }
 
 /// Convert a byte offset into a 1-based `(line, column)` pair.

@@ -53,5 +53,7 @@ pub mod diag {
     pub use zz_diag::{
         render_to_stderr, render_to_string, Diag, Files, FixIt, FixSafety, RawDiag, Severity,
     };
-    pub use zz_diag_core::{error_at, note, warning_at};
+    pub use zz_diag_core::{
+        error_at, error_code_lookup, note, warning_at, ErrorCode, ALL_ERROR_CODES,
+    };
 }
