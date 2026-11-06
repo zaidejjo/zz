@@ -356,21 +356,11 @@ impl Lowerer {
                                 .insert(name.name.clone());
                             // First iteration: accumulator is still an immutable
                             // ZZ_STR (from `out := ""` before the loop); convert
-                            // to a mutable builder in place, preserving any
-                            // existing content (e.g. after a freeze from an
-                            // inner loop's post code).
+                            // it to a mutable builder in place. Later
+                            // iterations skip the conversion (tag is now
+                            // ZZ_MUTABLE_STR) and just append.
                             out.push_str(&format!(
-                                "    if ({cid}.tag == ZZ_STR) {{\n\
-                                 if ({cid}.s->refs == 1 && !{cid}.s->interned) {{\n\
-                                     {cid}.s->mutable = 1;\n\
-                                     {cid}.tag = ZZ_MUTABLE_STR;\n\
-                                 }} else {{\n\
-                                     zz_value _old = {cid};\n\
-                                     {cid} = zz_str_new_mut(_old.s->len);\n\
-                                     zz_str_append_mut_str(&{cid}, _old);\n\
-                                     zz_release(&_old);\n\
-                                 }}\n\
-                                 }}\n"
+                                "    if ({cid}.tag == ZZ_STR) {{ {cid} = zz_str_new_mut(64); }}\n"
                             ));
                             out.push_str(&format!(
                                 "    zz_str_append_mut_str(&{cid}, {rhs_text});\n"
@@ -2416,6 +2406,12 @@ impl Lowerer {
             // Per-iteration scope: body-declared heap locals release at the
             // bottom (loop_scope_end) instead of accumulating per iteration.
             let body_scope = self.loop_scope_begin(names);
+            // Reset the per-loop accumulator name set so that a redeclared
+            // accumulator (e.g. `row := ""` at the top of each iteration) can
+            // be hoisted again on every iteration. Without this, the name
+            // stays in `accumulated_names` from the first iteration and the
+            // string-builder fast path is skipped on later iterations.
+            self.accumulated_names.borrow_mut().clear();
             // Loop firewall for literal-length/index-forwarding knowledge
             // (see the `while` guard fix, #350): the body reruns every
             // iteration and may reassign, so pre-loop folds would go stale

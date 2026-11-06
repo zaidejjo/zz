@@ -1139,6 +1139,11 @@ impl Lowerer {
                 // both release sites and `zz_release` would double-free.
                 // Track the scope for local-cleanup decisions only.
                 self.loop_scope_depth.set(self.loop_scope_depth.get() + 1);
+                // Reset per-iteration accumulator names so redeclared
+                // accumulators (e.g. `row := ""` at loop top) get hoisted
+                // again every iteration instead of being skipped due to a
+                // stale entry from a previous iteration.
+                self.accumulated_names.borrow_mut().clear();
                 // Loop body is never a function tail.
                 for bstmt in &body.stmts {
                     self.emit_stmt(bstmt, names, out, false);
