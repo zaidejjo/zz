@@ -2430,3 +2430,75 @@ fn error_codes_have_explanations() {
         );
     }
 }
+
+/// Snapshot tests for diagnostic output.
+///
+/// Runs `zz check` on each error fixture and compares stderr to a snapshot
+/// file under `tests/fixtures/snapshots/<stem>.snap`.
+///
+/// Set `UPDATE_SNAPSHOTS=1` to regenerate all snapshots.
+#[test]
+fn snapshot_error_diagnostics() {
+    use std::fs;
+    use std::process::Command;
+
+    let errors_dir = fixtures_dir().join("errors");
+    let snapshots_dir = errors_dir.parent().unwrap().join("snapshots");
+
+    // Collect all .zz files in the errors directory
+    let mut fixtures: Vec<_> = std::fs::read_dir(&errors_dir)
+        .expect("read fixture dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("zz"))
+        .collect();
+    fixtures.sort();
+
+    let update = std::env::var("UPDATE_SNAPSHOTS").is_ok();
+
+    let mut mismatches: Vec<String> = Vec::new();
+
+    for fixture in &fixtures {
+        let stem = fixture.file_stem().unwrap().to_string_lossy().to_string();
+        let snap_path = snapshots_dir.join(format!("{stem}.snap"));
+
+        // Run `zz check` on the fixture
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_zz"))
+            .arg("check")
+            .arg(&fixture)
+            .output()
+            .expect("failed to run `zz check`");
+
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        // If update mode, write the snapshot and continue
+        if update {
+            fs::write(&snap_path, &stderr).unwrap_or_else(|e| {
+                panic!("failed to write snapshot {}: {}", snap_path.display(), e)
+            });
+            continue;
+        }
+
+        // Otherwise, compare against the snapshot
+        let expected = fs::read_to_string(&snap_path).unwrap_or_else(|e| {
+            panic!(
+                "snapshot not found for {}: {}. Run with UPDATE_SNAPSHOTS=1 to generate.",
+                fixture.display(),
+                e
+            )
+        });
+
+        if stderr != expected {
+            mismatches.push(stem);
+        }
+    }
+
+    if !mismatches.is_empty() {
+        panic!(
+            "Snapshot mismatch for {} fixture(s): {:?}\n\
+             Run with UPDATE_SNAPSHOTS=1 to regenerate snapshots.",
+            mismatches.len(),
+            mismatches
+        );
+    }
+}
