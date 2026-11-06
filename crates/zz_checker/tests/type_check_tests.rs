@@ -4960,6 +4960,51 @@ fn unused_private_function_recursive_silent() {
 }
 
 #[test]
+fn unused_private_function_main_silent() {
+    // `main` is the runtime entry point and must never be reported as an
+    // unused private function, whether bare (`main`) or module-scoped
+    // (qualified `mymod.main`). Both forms are skipped by the `is_main`
+    // check in mod.rs.
+    let r = check_src("func main() -> int { 42 }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function")),
+        "bare main should not warn, got: {:?}",
+        r.errors
+    );
+    let r = check_src_with_module_ns("func main() -> int { 42 }\n", "mymod");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function")),
+        "module-scoped main should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_private_function_main_unused_helper_warns() {
+    // Even though `main` is silent, other genuinely-unused private functions
+    // must still warn.
+    let r = check_src("func main() -> int { 42 }\nfunc unused_helper() -> int { 1 }\n");
+    assert!(
+        r.errors.iter().any(|e| e
+            .message
+            .contains("unused private function `unused_helper`")),
+        "unused_helper should warn, got: {:?}",
+        r.errors
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused private function `main`")),
+        "main should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
 fn unused_private_function_pub_silent() {
     // Pub functions are exported and may be used by other modules.
     let r = check_src("pub func unused() -> int { 1 }\n");

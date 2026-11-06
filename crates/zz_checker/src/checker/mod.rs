@@ -831,8 +831,14 @@ fn check_program_impl(
     // silenced for variables), `main` (the runtime entry point), and
     // test/bench/setup/teardown functions (invoked by the harness at
     // runtime, not by direct calls in source).
+    // `main` is the runtime entry point: it may be defined bare (`main`) or
+    // qualified by its module namespace (`<ns>.main`), so skip either form.
+    // Test/bench/setup/teardown functions are invoked by the harness at
+    // runtime, not by direct calls, so they must not trigger unused-func
+    // warnings either.
     for name in &checker.local_funcs {
-        if name == "main"
+        let is_main = name == "main" || name.ends_with(".main");
+        if is_main
             || checker.test_funcs.contains(name.as_str())
             || pub_funcs_set.contains(name.as_str())
             || name.starts_with('_')
