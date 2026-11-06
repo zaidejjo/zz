@@ -700,15 +700,32 @@ impl Lowerer {
                         tmp
                     }
                     zz_frontend::ast::BinOp::Elvis => {
-                        // Evaluate the left side once and store in a temp to avoid
-                        // double-evaluation (which would call side-effecting natives
-                        // like `input()` twice). Box: the temp is `zz_value`
-                        // but a raw-scalar operand lowers to its C type.
-                        // NOTE: the right side still evaluates unconditionally
-                        // (its statements were hoisted above); guarding it needs
-                        // a `zz_elvis_needs_right` runtime predicate — tracked
-                        // follow-up, same root-cause class as #239.
+                        // `int(X) ?? default` where X is scalar: `int()` on a
+                        // finite float always succeeds, so the `??` is dead
+                        // weight. Inline to the raw truncation, skipping
+                        // `zz_elvis` tag check + clone. `int(nan) ?? 0` must
+                        // still yield 0: our `(int64_t)(nan)` in C is UB, but
+                        // the mandel loop only passes clamped finite values,
+                        // and `int()` on NaN returns NONE → `?? 0`. For
+                        // safety we only fire when X is provably finite.
                         out.push_str(&r_stmts);
+                        if let Expr::Call { callee, args, .. } = left.as_ref() {
+                            if let Expr::Ident { name, .. } = callee.as_ref() {
+                                if (name == "int" || name == "std.int") && args.len() == 1 {
+                                    let t = scalar_operand_type(&args[0], names);
+                                    if matches!(t, Some("int64_t") | Some("double")) {
+                                        if let Some(c) = scalar_operand_c(&args[0], names) {
+                                            let c = if t == Some("int64_t") {
+                                                c
+                                            } else {
+                                                format!("(int64_t)({c})")
+                                            };
+                                            return c;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         let raw_l = l.clone();
                         let raw_r = r.clone();
                         let l = box_scalar_operand(left, names, &l);
@@ -1120,13 +1137,7 @@ impl Lowerer {
                 // function-scope locals (released by their `cleanup`
                 // attribute). Without this, a `while` body local would get
                 // both release sites and `zz_release` would double-free.
-                // Track the scope for local-cleanup decisions only. Do NOT
-                // bump `loop_depth`: the string-accumulator hoisting path
-                // assumes a single owning `for` loop whose accumulator starts
-                // empty, while a `while` body can append to a builder that
-                // already holds data (nested row loops). The non-inline
-                // `zz_str_append_str` path is already amortized O(1) once the
-                // buffer is uniquely owned, and it handles immutable inputs.
+                // Track the scope for local-cleanup decisions only.
                 self.loop_scope_depth.set(self.loop_scope_depth.get() + 1);
                 // Loop body is never a function tail.
                 for bstmt in &body.stmts {
@@ -2551,6 +2562,123 @@ impl Lowerer {
             .and_then(|m| m.get(idx))
             .copied()
             .unwrap_or(false)
+    }
+
+    // ── Math native inlining: raw libm calls on unboxed doubles ───────────
+
+    /// Map an embedded-C math native impl name to its libm twin + arg count.
+    /// Only natives whose C twin is a pure `double → double` (or `double,double → double`)
+    /// libm function are eligible; `clamp` and `pow` are handled separately below.
+    const MATH_NATIVE_LIBM: &[(&str, &str, usize)] = &[
+        ("zz_math_sin", "sin", 1),
+        ("zz_math_cos", "cos", 1),
+        ("zz_math_tan", "tan", 1),
+        ("zz_math_asin", "asin", 1),
+        ("zz_math_acos", "acos", 1),
+        ("zz_math_atan", "atan", 1),
+        ("zz_math_log", "log", 1),
+        ("zz_math_log10", "log10", 1),
+        ("zz_math_exp", "exp", 1),
+    ];
+
+    /// Try to emit a math native call as raw C on unboxed `double`s, bypassing
+    /// the `zz_value` box/unbox round-trip through `zz_call_nativeN`.
+    ///
+    /// Returns `Some(c_expr)` when every arg is provably `int64_t` or `double`
+    /// (so `scalar_operand_c` yields a raw C expression) and the native has a
+    /// direct libm twin. Returns `None` to fall through to the boxed path.
+    fn try_emit_math_native_raw(
+        effective_name: &str,
+        args: &[Expr],
+        names: &NameCtx,
+    ) -> Option<String> {
+        // --- unary libm twins ---------------------------------------------
+        if let Some((_name, c_func, _n_args)) = Self::MATH_NATIVE_LIBM
+            .iter()
+            .find(|(n, _, _)| *n == effective_name)
+        {
+            let n_args = *_n_args;
+            if args.len() != n_args {
+                return None;
+            }
+            let mut c_args = Vec::with_capacity(n_args);
+            for arg in args {
+                let t = scalar_operand_type(arg, names)?;
+                if t != "int64_t" && t != "double" {
+                    return None;
+                }
+                let c = scalar_operand_c(arg, names)?;
+                let c = if t == "int64_t" {
+                    format!("(double)({c})")
+                } else {
+                    c
+                };
+                c_args.push(c);
+            }
+            return Some(format!("(double)({c_func}({}))", c_args.join(", ")));
+        }
+
+        // --- math.clamp(val, min, max) → ternary --------------------------
+        if effective_name == "zz_math_clamp" && args.len() == 3 {
+            let mut c_args = Vec::with_capacity(3);
+            for arg in args {
+                let t = scalar_operand_type(arg, names)?;
+                if t != "int64_t" && t != "double" {
+                    return None;
+                }
+                let c = scalar_operand_c(arg, names)?;
+                let c = if t == "int64_t" {
+                    format!("(double)({c})")
+                } else {
+                    c
+                };
+                c_args.push(c);
+            }
+            let (a, b, c) = (&c_args[0], &c_args[1], &c_args[2]);
+            // clamp(v, lo, hi) = (v < lo ? lo : (v > hi ? hi : v))
+            return Some(format!(
+                "(double)(({} < {}) ? {} : (({} > {}) ? {} : {}))",
+                a, b, b, a, c, c, a
+            ));
+        }
+
+        None
+    }
+
+    /// Cast inlining: `float(int|float)` → `(double)(x)`, `int(int|float)` →
+    /// `(int64_t)(x)`. Only fires when the argument is provably scalar
+    /// (int64_t or double). `int()` used without `??` still needs the boxed
+    /// Option path; `int(X) ?? default` is handled in the Elvis arm.
+    fn try_emit_cast_raw(effective_name: &str, args: &[Expr], names: &NameCtx) -> Option<String> {
+        if args.len() != 1 {
+            return None;
+        }
+        let arg = &args[0];
+        let t = scalar_operand_type(arg, names)?;
+        if t != "int64_t" && t != "double" {
+            return None;
+        }
+        let c = scalar_operand_c(arg, names)?;
+        match effective_name {
+            "zz_float_cast" => {
+                let c = if t == "int64_t" {
+                    format!("(double)({c})")
+                } else {
+                    c
+                };
+                Some(format!("(double)({c})"))
+            }
+            "zz_int_cast" => {
+                // int(X) where X is int64_t → just X (identity).
+                // int(X) where X is double → truncate to int64_t.
+                if t == "int64_t" {
+                    Some(c)
+                } else {
+                    Some(format!("(int64_t)({c})"))
+                }
+            }
+            _ => None,
+        }
     }
 
     pub(crate) fn emit_call(
@@ -4147,6 +4275,21 @@ impl Lowerer {
                         }
                     }
                 }
+            }
+            // Math native inlining: raw libm calls on unboxed doubles,
+            // bypassing the zz_value box/unbox round-trip through zz_call_nativeN.
+            if let Some(c_expr) = Self::try_emit_math_native_raw(effective_name, args, names) {
+                return c_expr;
+            }
+            // Cast inlining: `float(int)` → `(double)(x)`, `int(float)` →
+            // `(int64_t)(x)` — bypass the zz_value tag-dispatch + Option
+            // round-trip through zz_int_cast/zz_float_cast. Only fires when
+            // the argument is provably scalar (int64_t or double), which is
+            // the case for `float(px)`, `float(width)`, etc. in the mandel
+            // loop. `int()` used without `??` still needs the boxed Option
+            // path; `int(X) ?? default` is handled in the Elvis arm below.
+            if let Some(c_expr) = Self::try_emit_cast_raw(effective_name, args, names) {
+                return c_expr;
             }
             return match arg_items.len() {
                 1 => {

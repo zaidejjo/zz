@@ -356,11 +356,21 @@ impl Lowerer {
                                 .insert(name.name.clone());
                             // First iteration: accumulator is still an immutable
                             // ZZ_STR (from `out := ""` before the loop); convert
-                            // it to a mutable builder in place. Later
-                            // iterations skip the conversion (tag is now
-                            // ZZ_MUTABLE_STR) and just append.
+                            // to a mutable builder in place, preserving any
+                            // existing content (e.g. after a freeze from an
+                            // inner loop's post code).
                             out.push_str(&format!(
-                                "    if ({cid}.tag == ZZ_STR) {{ {cid} = zz_str_new_mut(64); }}\n"
+                                "    if ({cid}.tag == ZZ_STR) {{\n\
+                                 if ({cid}.s->refs == 1 && !{cid}.s->interned) {{\n\
+                                     {cid}.s->mutable = 1;\n\
+                                     {cid}.tag = ZZ_MUTABLE_STR;\n\
+                                 }} else {{\n\
+                                     zz_value _old = {cid};\n\
+                                     {cid} = zz_str_new_mut(_old.s->len);\n\
+                                     zz_str_append_mut_str(&{cid}, _old);\n\
+                                     zz_release(&_old);\n\
+                                 }}\n\
+                                 }}\n"
                             ));
                             out.push_str(&format!(
                                 "    zz_str_append_mut_str(&{cid}, {rhs_text});\n"
