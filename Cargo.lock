@@ -4295,5 +4295,6 @@ dependencies = [
 name = "zz_unify"
 version = "0.4.0"
 dependencies = [
+ "zz_span_ast",
  "zz_types",
 ]

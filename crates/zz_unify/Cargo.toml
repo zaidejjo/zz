@@ -6,3 +6,4 @@ license.workspace = true
 
 [dependencies]
 zz_types = { path = "../zz_types" }
+zz_span_ast = { path = "../zz_span_ast" }

@@ -10,7 +10,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use zz_diag_core::{error_at, RawDiag};
+use zz_diag_core::{error_at, ErrorCode, RawDiag, SecondaryLabel};
 use zz_span_ast::ast::{Stmt, Ty};
 use zz_span_ast::span::Span;
 use zz_types::Type;
@@ -596,6 +596,21 @@ impl Checker {
             other => other.to_string(),
         };
         let mut diag = error_at(msg, span);
+        // Add secondary labels showing where each type came from, when we
+        // have span info (e.g. "expected `int` because of this annotation
+        // here", "found `str` at this variable declaration").
+        if let Some(left_span) = err.left_span {
+            diag = diag.with_secondary(SecondaryLabel {
+                span: left_span,
+                message: format!("found `{}` here", err.left),
+            });
+        }
+        if let Some(right_span) = err.right_span {
+            diag = diag.with_secondary(SecondaryLabel {
+                span: right_span,
+                message: format!("expected `{}` here", err.right),
+            });
+        }
         for note in notes {
             diag = diag.with_note(note);
         }
