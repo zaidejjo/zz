@@ -23,7 +23,7 @@ mod watch;
 
 use zz_arena::ScopedBump;
 use zz_frontend::diag::{
-    error_at, error_code_lookup, render_to_string, ErrorCode, Files, ALL_ERROR_CODES,
+    error_at, error_code_lookup, render_to_string, ColorMode, ErrorCode, Files, ALL_ERROR_CODES,
 };
 use zz_frontend::span::Span;
 use zz_runtime::{Interp, Value};
@@ -450,6 +450,7 @@ fn main_inner() -> ExitCode {
             let mut rest_filtered: Vec<String> = Vec::with_capacity(rest.len());
             let mut rest_iter = rest.iter().peekable();
             let mut format_value: Option<String> = None;
+            let mut color_mode: ColorMode = ColorMode::Auto;
             while let Some(a) = rest_iter.next() {
                 if a == "--format" {
                     if let Some(v) = rest_iter.next() {
@@ -460,6 +461,41 @@ fn main_inner() -> ExitCode {
                 if let Some(v) = a.strip_prefix("--format=") {
                     format_value = Some(v.to_string());
                     rest_filtered.push(a.clone());
+                    continue;
+                }
+                if a == "--color" {
+                    if let Some(v) = rest_iter.next() {
+                        color_mode = match v.to_string().as_str() {
+                            "auto" => ColorMode::Auto,
+                            "always" => ColorMode::Always,
+                            "never" => ColorMode::Never,
+                            other => {
+                                eprintln!(
+                                    "zz: unknown `--color` value `{}` (expected `auto`, `always`, or `never`)\n",
+                                    other
+                                );
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                    } else {
+                        eprintln!("zz: `--color` requires a value (`auto`, `always`, or `never`)");
+                        return ExitCode::FAILURE;
+                    }
+                    continue;
+                }
+                if let Some(v) = a.strip_prefix("--color=") {
+                    color_mode = match v.to_string().as_str() {
+                        "auto" => ColorMode::Auto,
+                        "always" => ColorMode::Always,
+                        "never" => ColorMode::Never,
+                        other => {
+                            eprintln!(
+                                "zz: unknown `--color` value `{}` (expected `auto`, `always`, or `never`)\n",
+                                other
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    };
                     continue;
                 }
                 rest_filtered.push(a.clone());
@@ -505,6 +541,7 @@ fn main_inner() -> ExitCode {
                 has_hard,
                 has_stats,
                 format_json,
+                color_mode,
                 &features,
             ) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -526,6 +563,45 @@ fn main_inner() -> ExitCode {
             let has_hard = flags.contains(&"--hard".to_string());
             let has_interactive = flags.contains(&"--interactive".to_string());
             let interactive = has_interactive && !has_hard;
+            let mut rest_iter = flags.iter().peekable();
+            let mut color_mode = ColorMode::Auto;
+            while let Some(a) = rest_iter.next() {
+                if a == "--color" {
+                    if let Some(v) = rest_iter.next() {
+                        color_mode = match v.to_string().as_str() {
+                            "auto" => ColorMode::Auto,
+                            "always" => ColorMode::Always,
+                            "never" => ColorMode::Never,
+                            other => {
+                                eprintln!(
+                                    "zz: unknown `--color` value `{}` (expected `auto`, `always`, or `never`)\n",
+                                    other
+                                );
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                    } else {
+                        eprintln!("zz: `--color` requires a value (`auto`, `always`, or `never`)");
+                        return ExitCode::FAILURE;
+                    }
+                    continue;
+                }
+                if let Some(v) = a.strip_prefix("--color=") {
+                    color_mode = match v.to_string().as_str() {
+                        "auto" => ColorMode::Auto,
+                        "always" => ColorMode::Always,
+                        "never" => ColorMode::Never,
+                        other => {
+                            eprintln!(
+                                "zz: unknown `--color` value `{}` (expected `auto`, `always`, or `never`)\n",
+                                other
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    };
+                    continue;
+                }
+            }
             match check_or_fix_path(
                 &path,
                 true,
@@ -533,6 +609,7 @@ fn main_inner() -> ExitCode {
                 has_hard,
                 false,
                 false,
+                color_mode,
                 &zz_pm::manifest::FeatureSelection::default(),
             ) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -1164,7 +1241,10 @@ pub(crate) fn prepare_run_with_features(
     for e in &loaded.errors {
         let mut files = Files::new();
         let id = files.add(e.name.clone(), e.source.clone());
-        eprint!("{}", render_to_string(&files, id, &e.diags));
+        eprint!(
+            "{}",
+            render_to_string(&files, id, &e.diags, ColorMode::Auto)
+        );
         if e.diags
             .iter()
             .any(|d| d.severity == zz_frontend::diag::Severity::Error)
@@ -1354,7 +1434,7 @@ pub(crate) fn render_eval_error(e: &zz_runtime::EvalError, name: &str, source: &
         diag = diag.with_note(note.clone());
     }
     let diags = vec![diag];
-    eprint!("{}", render_to_string(&files, id, &diags));
+    eprint!("{}", render_to_string(&files, id, &diags, ColorMode::Auto));
     // The trailing `zz: ...` line is what survives when stderr is captured
     // and only the tail is read, so make it name the failure instead of the
     // opaque "program failed".
@@ -1638,12 +1718,12 @@ fn emit_ir_cmd(args: &[String]) -> Result<(), String> {
                 skip_next = false;
                 return false;
             }
-            if a.as_str() == "--output"
-                || a.as_str() == "-o"
-                || a.as_str() == "--embed"
-                || a.as_str() == "--target"
-                || a.as_str() == "--cc"
-                || a.as_str() == "--emit-ir"
+            if a.to_string().as_str() == "--output"
+                || a.to_string().as_str() == "-o"
+                || a.to_string().as_str() == "--embed"
+                || a.to_string().as_str() == "--target"
+                || a.to_string().as_str() == "--cc"
+                || a.to_string().as_str() == "--emit-ir"
             {
                 if !a.starts_with("--emit-ir") {
                     skip_next = true;
@@ -2239,11 +2319,11 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
                 skip_next = false;
                 return false;
             }
-            if a.as_str() == "--target"
-                || a.as_str() == "--cc"
-                || a.as_str() == "--embed"
-                || a.as_str() == "-o"
-                || a.as_str() == "--output"
+            if a.to_string().as_str() == "--target"
+                || a.to_string().as_str() == "--cc"
+                || a.to_string().as_str() == "--embed"
+                || a.to_string().as_str() == "-o"
+                || a.to_string().as_str() == "--output"
             {
                 skip_next = true;
                 return false;
@@ -2715,7 +2795,7 @@ fn help_before_entry(args: &[String]) -> bool {
         }
         if a.starts_with('-') {
             // `--flag=value` carries its value inline.
-            if !a.contains('=') && VALUE_FLAGS.contains(&a.as_str()) {
+            if !a.contains('=') && VALUE_FLAGS.contains(&a.to_string().as_str()) {
                 skip_next = true;
             }
             continue;
@@ -2765,7 +2845,7 @@ fn strip_output_flag(args: &[String]) -> Vec<String> {
             skip_next = false;
             continue;
         }
-        if FLAGS.contains(&a.as_str()) {
+        if FLAGS.contains(&a.to_string().as_str()) {
             skip_next = true;
             continue;
         }
@@ -3113,6 +3193,7 @@ fn check_or_fix_path(
     force: bool,
     show_stats: bool,
     format_json: bool,
+    color_mode: ColorMode,
     features: &zz_pm::manifest::FeatureSelection,
 ) -> Result<(), String> {
     use zz_frontend::diag::{FixSafety, Severity};
@@ -3256,7 +3337,7 @@ fn check_or_fix_path(
                 for e in &loaded.errors {
                     let mut files_ctx = Files::new();
                     let id = files_ctx.add(e.name.clone(), e.source.clone());
-                    eprint!("{}", render_to_string(&files_ctx, id, &e.diags));
+                    eprint!("{}", render_to_string(&files_ctx, id, &e.diags, color_mode));
                 }
             }
             if !safe_fixits.is_empty() {
@@ -3499,6 +3580,7 @@ mod tests {
                 false,
                 false,
                 false,
+                color_mode,
                 &zz_pm::manifest::FeatureSelection::default(),
             )
         })

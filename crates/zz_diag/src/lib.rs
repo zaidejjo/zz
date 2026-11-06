@@ -296,20 +296,92 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
     out
 }
 
+/// Color mode for diagnostic output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMode {
+    Auto,
+    Always,
+    Never,
+}
+
+impl Default for ColorMode {
+    fn default() -> Self {
+        ColorMode::Auto
+    }
+}
+
+impl ColorMode {
+    /// Resolve whether to use color, honoring NO_COLOR env var.
+    fn color_enabled(self) -> bool {
+        if self == ColorMode::Never {
+            return false;
+        }
+        if self == ColorMode::Always {
+            return true;
+        }
+        // Auto: respect NO_COLOR env var, otherwise use terminal detection
+        if std::env::var("NO_COLOR").is_ok() {
+            return false;
+        }
+        std::io::IsTerminal::is_terminal(&std::io::stderr())
+    }
+}
+
 /// Render diagnostics to an in-memory string (tests, REPL capture).
-/// Returns ANSI-colored output.
-pub fn render_to_string(files: &Files, file_id: FileId, diags: &[RawDiag]) -> String {
+/// Returns ANSI-colored output when color_mode is not Never.
+pub fn render_to_string(
+    files: &Files,
+    file_id: FileId,
+    diags: &[RawDiag],
+    color_mode: ColorMode,
+) -> String {
+    use std::fmt::Write;
     let mut out = String::new();
     for raw in diags {
-        out.push_str(&render_one_colored(files, file_id, raw));
-        out.push('\n');
+        if color_mode.color_enabled() {
+            out.push_str(&render_one_colored(files, file_id, raw));
+        } else {
+            // Plain text without ANSI codes
+            let _ = write!(
+                out,
+                "{}: {}{}\n",
+                match raw.severity {
+                    Severity::Error => "error",
+                    Severity::Warning => "warning",
+                    Severity::Help => "help",
+                },
+                raw.code.map(|c| format!("{c}: ")).unwrap_or_default(),
+                raw.message
+            );
+            if let Some(span) = raw.span {
+                if let Ok(file) = files.get(file_id) {
+                    let name = file.name();
+                    let source: &str = file.source().as_ref();
+                    let (ln, col) = line_col_for(source, span.start as usize);
+                    let _ = write!(out, "\n  --> {name}:{ln}:{}", col + 1);
+                    let _ = write!(out, "\n    |");
+                    let lstart = line_start_for(source, span.start as usize);
+                    let lend = line_end_for(source, span.start as usize);
+                    let line_text = &source[lstart..lend];
+                    let _ = write!(out, "\n {:>4} | {line_text}", ln);
+                    let col_off = span.start as usize - lstart;
+                    let len = ((span.end - span.start).max(1)) as usize;
+                    let _ = write!(out, "\n {:>4} |", "");
+                    let _ = write!(out, " {}{}", " ".repeat(col_off), "^".repeat(len));
+                }
+            }
+            for note_text in &raw.notes {
+                let _ = write!(out, "\n    = {note_text}");
+            }
+        }
     }
     out
 }
 
-/// Render diagnostics to stderr with ANSI colors (when stderr is a tty).
-pub fn render_to_stderr(files: &Files, file_id: FileId, diags: &[RawDiag]) {
-    let use_color = std::io::IsTerminal::is_terminal(&std::io::stderr());
+/// Render diagnostics to stderr with color control.
+pub fn render_to_stderr(files: &Files, file_id: FileId, diags: &[RawDiag], color_mode: ColorMode) {
+    let use_color = color_mode.color_enabled();
+    let mut writer = std::io::stderr();
     let mut writer = std::io::stderr();
 
     for raw in diags {

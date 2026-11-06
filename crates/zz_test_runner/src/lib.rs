@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use zz_build::{build_release, discover_plugin_manifests, BuildMode, ReleaseOptions};
 use zz_checker::FuncSig;
 use zz_frontend::ast::Stmt;
-use zz_frontend::diag::{render_to_string, Files};
+use zz_frontend::diag::{render_to_string, ColorMode, Files};
 use zz_frontend::doctest;
 use zz_frontend::span::Span;
 use zz_frontend::test_attr::{self, TestMeta};
@@ -1183,7 +1183,10 @@ fn discover_tests(path: &Path) -> Result<Vec<TestInfo>, String> {
     for e in &loaded.errors {
         let mut files = Files::new();
         let id = files.add(e.name.clone(), e.source.clone());
-        eprint!("{}", render_to_string(&files, id, &e.diags));
+        eprint!(
+            "{}",
+            render_to_string(&files, id, &e.diags, ColorMode::Auto)
+        );
         if e.diags
             .iter()
             .any(|d| d.severity == zz_frontend::diag::Severity::Error)
@@ -1413,7 +1416,7 @@ fn graft_doctests(
             {
                 let mut files = Files::new();
                 let id = files.add(name.clone(), source.clone());
-                eprint!("{}", render_to_string(&files, id, &diags));
+                eprint!("{}", render_to_string(&files, id, &diags, ColorMode::Auto));
                 return Err(format!("failed doctests in `{}`", path.display()));
             }
             prelude_stmts.extend(parsed.program.stmts);
@@ -1434,7 +1437,7 @@ fn graft_doctests(
             if parse_failed && !doc.compile_fail {
                 let mut files = Files::new();
                 let id = files.add(name.clone(), source.clone());
-                eprint!("{}", render_to_string(&files, id, &diags));
+                eprint!("{}", render_to_string(&files, id, &diags, ColorMode::Auto));
                 return Err(format!("failed doctests in `{}`", path.display()));
             }
             let mut named = Vec::new();
@@ -1542,7 +1545,7 @@ fn graft_doctests(
         if !diags.is_empty() {
             let mut files = Files::new();
             let id = files.add(name.clone(), source.clone());
-            eprint!("{}", render_to_string(&files, id, &diags));
+            eprint!("{}", render_to_string(&files, id, &diags, ColorMode::Auto));
             return Err(format!("failed doctests in `{}`", path.display()));
         }
     }
@@ -2566,7 +2569,7 @@ fn build_aot_harness(
         {
             let mut files = Files::new();
             let id = files.add(file.display().to_string(), raw.clone());
-            eprint!("{}", render_to_string(&files, id, &diags));
+            eprint!("{}", render_to_string(&files, id, &diags, ColorMode::Auto));
             return Err(format!("failed doctests in `{}`", file.display()));
         }
         docs
