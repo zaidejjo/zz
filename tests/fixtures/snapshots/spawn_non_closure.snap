@@ -7,11 +7,10 @@ error: type mismatch: expected `func(_) -> _`, found `int`
     6 |     h := task.spawn(42)
       |                     ^^
     = parameter `f` expects `func(_) -> _`
-warning: unused variable `h`, consider prefixing with `_h`
+warning: unused variable `h` is never read, consider prefixing with `_h`
 
   --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/spawn_non_closure.zz:6:5
     |
     6 |     h := task.spawn(42)
       |     ^
-    = variable is never read
 zz: 1 file(s) failed type-check

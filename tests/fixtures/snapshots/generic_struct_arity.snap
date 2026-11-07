@@ -13,11 +13,10 @@ error: type argument arity mismatch
     4 | b: Box = Box{ v: 1 }
       |    ^^^
     = to fix: change the annotation to `generic_struct_arity.Box<int>` or convert the value
-warning: unused variable `b`, consider prefixing with `_b`
+warning: unused variable `b` is never read, consider prefixing with `_b`
 
   --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_struct_arity.zz:4:1
     |
     4 | b: Box = Box{ v: 1 }
       | ^
-    = variable is never read
 zz: 1 file(s) failed type-check

@@ -280,7 +280,45 @@ impl<'a> Parser<'a> {
                         "replace with `func`",
                     )),
                 );
-                return self.parse_stmt();
+                // Recovery: parse the rest as if `func` was written, so the
+                // body and closing `}` are consumed properly and we don't
+                // emit cascading "unexpected `}`" errors on subsequent
+                // lines. The type checker will then flag `pritn` as
+                // undefined and suggest `print`/`println`.
+                // Recovery: consume tokens through the matching `}` so we
+                // don't emit cascading "unexpected `}`" errors on subsequent
+                // lines. The body inside is skipped; the user still gets the
+                // "use `func` instead of `def`" hint above.
+                let mut depth = 0u32;
+                loop {
+                    match self.peek_kind() {
+                        TokenKind::LBrace => {
+                            depth += 1;
+                            self.advance();
+                        }
+                        TokenKind::RBrace => {
+                            if depth == 0 {
+                                self.advance();
+                                break;
+                            }
+                            depth -= 1;
+                            self.advance();
+                        }
+                        TokenKind::Eof => break,
+                        _ => {
+                            self.advance();
+                        }
+                    }
+                }
+                // Return a placeholder so parse_stmt_list can continue
+                // parsing whatever follows the `}` (e.g. `greet("Zaid")`).
+                // We don't advance pos here; parse_stmt_list will advance
+                // past one token on the next iteration if we made no
+                // progress, avoiding an EOF error.
+                return Stmt::Return {
+                    value: None,
+                    span: self.peek().span,
+                };
             }
             // `public` is not a ZZ keyword; use `pub`
             TokenKind::Ident if self.peek().text == "public" => {

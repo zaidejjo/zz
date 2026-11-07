@@ -206,11 +206,10 @@ impl ScopeOps for Checker {
                 self.errors.push(
                     warning_at(
                         format!(
-                            "unused variable `{display}`, consider prefixing with `_{display}`"
+                            "unused variable `{display}` is never read, consider prefixing with `_{display}`"
                         ),
                         binding.span,
                     )
-                    .with_note("variable is never read")
                     .with_fixit(FixIt::safe(
                         binding.span,
                         fixit_name,
@@ -393,31 +392,10 @@ impl ScopeOps for Checker {
                 }
                 let mut diag =
                     error_at(format!("undefined variable `{name}`"), span).with_code(ErrorCode(1));
-                // Confident (never-wrong) suggestions only; up to three for
-                // ambiguous cases. A missing hint is better than a wrong one.
-                let confident = suggest_top3(name, &candidates);
-                match confident.as_slice() {
-                    [] => {}
-                    [single] => {
-                        diag = diag.with_note(format!("did you mean `{single}`?"));
-                        diag = diag.with_fixit(FixIt::safe(
-                            span,
-                            single.to_string(),
-                            "replace variable",
-                        ));
-                    }
-                    multiple => {
-                        let listed: Vec<String> =
-                            multiple.iter().map(|s| format!("`{s}`")).collect();
-                        diag = diag.with_note(format!("did you mean {}?", listed.join(" or ")));
-                        let alts: Vec<String> = multiple.iter().map(|s| s.to_string()).collect();
-                        diag = diag.with_fixit(FixIt::ambiguous(
-                            span,
-                            multiple[0].to_string(),
-                            "replace variable",
-                            alts,
-                        ));
-                    }
+                // Single best suggestion only — a missing hint is better than a wrong one.
+                if let Some(best) = suggest_top3(name, &candidates).first() {
+                    diag = diag.with_note(format!("did you mean `{best}`?"));
+                    diag = diag.with_fixit(FixIt::safe(span, best.to_string(), "replace variable"));
                 }
 
                 // If the name looks like `module.func` and matches a known

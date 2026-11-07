@@ -8,11 +8,10 @@ hint: use `int(x)` to cast, `&&`/`||` for boolean logic
     3 | x := 1.5 & 2
       |      ^^^^^^^
     = cast the left operand to `int` with `int(...)`
-warning: unused variable `x`, consider prefixing with `_x`
+warning: unused variable `x` is never read, consider prefixing with `_x`
 
   --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/bitwise_float.zz:3:1
     |
     3 | x := 1.5 & 2
       | ^
-    = variable is never read
 zz: 1 file(s) failed type-check

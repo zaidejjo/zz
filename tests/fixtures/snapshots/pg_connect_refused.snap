@@ -1,10 +1,9 @@
 first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/pg_connect_refused.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/pg_connect_refused.zz)
 
-warning: unused variable `mydb`, consider prefixing with `_mydb`
+warning: unused variable `mydb` is never read, consider prefixing with `_mydb`
 
   --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/pg_connect_refused.zz:5:1
     |
     5 | mydb := pg.connect("host=127.0.0.1 port=1 dbname=x user=u connect_timeout=1")
       | ^^^^
-    = variable is never read
 help: run `zz check --fix /home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/pg_connect_refused.zz` to automatically apply safe fixes

@@ -7,11 +7,10 @@ error: `add` takes 2 arguments (a: int, b: int), found 1
     7 | x := add(1)
       |      ^^^^^^
     = missing argument for `b: int`
-warning: unused variable `x`, consider prefixing with `_x`
+warning: unused variable `x` is never read, consider prefixing with `_x`
 
   --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/arity.zz:7:1
     |
     7 | x := add(1)
       | ^
-    = variable is never read
 zz: 1 file(s) failed type-check
