@@ -1,7 +1,7 @@
 //! Statement lowering: let bindings, assignments, if/else, match, loops,
 //! returns, and defer.
 
-use zz_frontend::ast::{Block, Expr, Pattern, Stmt, Ty, TyKind};
+use zz_frontend::ast::{Block, Expr, FmtPart, Pattern, Stmt, Ty, TyKind};
 
 use super::*;
 
@@ -354,20 +354,18 @@ impl Lowerer {
                                 .accumulated_names
                                 .borrow_mut()
                                 .insert(name.name.clone());
-                            // First iteration: accumulator is still an immutable
-                            // ZZ_STR (from `out := ""` before the loop); convert
-                            // it to a mutable builder in place. Later
-                            // iterations skip the conversion (tag is now
-                            // ZZ_MUTABLE_STR) and just append.
-                            out.push_str(&format!(
-                                "    if ({cid}.tag == ZZ_STR) {{ {cid} = zz_str_new_mut(64); }}\n"
-                            ));
+                            // Convert the accumulator to an exclusively-owned
+                            // mutable builder, preserving any content (an inner
+                            // loop may have frozen it back to ZZ_STR). Later
+                            // iterations find it mutable and skip the copy.
+                            Self::emit_ensure_mutable(out, &cid);
                             out.push_str(&format!(
                                 "    zz_str_append_mut_str(&{cid}, {rhs_text});\n"
                             ));
-                            self.loop_post_code
-                                .borrow_mut()
-                                .push(format!("    {cid} = zz_str_freeze({cid});\n"));
+                            // Freeze immediately so any later read this
+                            // iteration sees a well-formed immutable string.
+                            // The next append retags it mutable in place.
+                            out.push_str(&format!("    {cid} = zz_str_freeze({cid});\n"));
                             return;
                         }
                     }
@@ -1604,6 +1602,29 @@ impl Lowerer {
         }
     }
 
+    /// Ensure `cid` (a `zz_value` known to hold a string) is an exclusively
+    /// owned mutable builder, preserving any existing content.
+    ///
+    /// A frozen unique string is retagged mutable in place (no copy); an
+    /// interned literal or a shared string is copied into a fresh mutable
+    /// buffer so subsequent append paths can grow in place. This is the
+    /// conversion the loop accumulator fast paths use before appending.
+    fn emit_ensure_mutable(out: &mut String, cid: &str) {
+        out.push_str(&format!(
+            "    if ({cid}.tag == ZZ_STR) {{\n\
+             if ({cid}.s->refs == 1 && !{cid}.s->interned) {{\n\
+                 {cid}.s->mutable = 1;\n\
+                 {cid}.tag = ZZ_MUTABLE_STR;\n\
+             }} else {{\n\
+                 zz_value _old = {cid};\n\
+                 {cid} = zz_str_new_mut(_old.s->len);\n\
+                 zz_str_append_mut_str(&{cid}, _old);\n\
+                 zz_release(&_old);\n\
+             }}\n\
+             }}\n"
+        ));
+    }
+
     /// Bind a destructuring pattern to a temp holding the tuple value.
     /// Tuples are runtime arrays, so element `i` is `zz_index_get(src,
     /// zz_int(i))`. Bindings reuse the shared pattern binder (green-aware);
@@ -1697,6 +1718,8 @@ impl Lowerer {
             /// `str(x)` of a raw scalar int/bool: append the formatted
             /// value directly (C type, raw C text). No temp, no release.
             AppendScalar(&'static str, String),
+            /// A raw `double`: append its canonical rendering directly.
+            AppendDouble(String),
         }
         let mut plan: Vec<Term> = Vec::with_capacity(terms.len() - 1);
         for term in &terms[1..] {
@@ -1747,12 +1770,72 @@ impl Lowerer {
                         None => return false,
                     }
                 }
-                Expr::Fmt { .. } => {
-                    // Lower the f-string into an owned temp with the
-                    // pre-sized mutable builder path, append it, then drop
-                    // the temp. Without this the whole `row` accumulator is
-                    // reallocated and copied once per pixel.
-                    plan.push(Term::StrCall(term));
+                Expr::Fmt { parts, .. } => {
+                    // Expand the f-string parts directly into the append
+                    // plan when every embedded expression is a plain scalar
+                    // (int/bool/double) with no format spec. This drops the
+                    // per-f-string `__fmtN` builder *and* the per-part
+                    // `zz_to_str` allocation — the dominant cost in
+                    // `row = row + "{x} {y} {z} "` pixel loops.
+                    let mut expanded: Vec<Term> = Vec::with_capacity(parts.len());
+                    let mut all_scalar = true;
+                    for part in parts {
+                        match part {
+                            FmtPart::Text(t) => {
+                                // NUL-bearing text cannot ride the inline
+                                // `sizeof(literal)` path; keep the generic
+                                // f-string lowering for those (rare).
+                                if t.contains('\0') {
+                                    all_scalar = false;
+                                    break;
+                                }
+                                let lit_c = self.emit_str_literal(t);
+                                expanded.push(Term::Lit(extract_c_literal(&lit_c).to_string()));
+                            }
+                            FmtPart::Expr(inner, None) => match scalar_operand_type(inner, names) {
+                                Some("int64_t") | Some("bool") => {
+                                    match scalar_operand_c(inner, names) {
+                                        Some(raw) => {
+                                            let t = if scalar_operand_type(inner, names)
+                                                == Some("bool")
+                                            {
+                                                "bool"
+                                            } else {
+                                                "int64_t"
+                                            };
+                                            expanded.push(Term::AppendScalar(t, raw));
+                                        }
+                                        None => {
+                                            all_scalar = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                Some("double") => match scalar_operand_c(inner, names) {
+                                    Some(raw) => expanded.push(Term::AppendDouble(raw)),
+                                    None => {
+                                        all_scalar = false;
+                                        break;
+                                    }
+                                },
+                                _ => {
+                                    all_scalar = false;
+                                    break;
+                                }
+                            },
+                            FmtPart::Expr(_, Some(_)) => {
+                                all_scalar = false;
+                                break;
+                            }
+                        }
+                    }
+                    if all_scalar {
+                        plan.extend(expanded);
+                    } else {
+                        // Fall back to lowering the whole f-string into an
+                        // owned builder, appended and then dropped.
+                        plan.push(Term::StrCall(term));
+                    }
                 }
                 Expr::Call {
                     callee,
@@ -1801,12 +1884,7 @@ impl Lowerer {
         // immutable ZZ_STR accumulators are handled correctly.
         let inline = self.loop_depth.get() >= 1;
         if inline {
-            out.push_str(&format!(
-                "    if ({cid}.tag == ZZ_STR) {{ {cid} = zz_str_new_mut(64); }}\n"
-            ));
-            self.loop_post_code
-                .borrow_mut()
-                .push(format!("    {cid} = zz_str_freeze({cid});\n"));
+            Self::emit_ensure_mutable(out, &cid);
         }
         for step in plan {
             match step {
@@ -1837,15 +1915,17 @@ impl Lowerer {
                 }
                 Term::AppendScalar(t, raw) => {
                     // `str(int)` / `str(bool)` in append position: format
-                    // straight into the buffer (float keeps the generic
-                    // path — its `%.1f` vs `zz_print_double` fork must
-                    // match the cast exactly).
+                    // straight into the buffer (no temp, no release).
                     let helper = if t == "bool" {
                         "zz_str_append_bool"
                     } else {
                         "zz_str_append_int"
                     };
                     out.push_str(&format!("    {helper}(&{cid}, {raw});\n"));
+                }
+                Term::AppendDouble(raw) => {
+                    // Canonical double rendering straight into the buffer.
+                    out.push_str(&format!("    zz_str_append_double(&{cid}, {raw});\n"));
                 }
                 Term::StrCall(term) => {
                     // Self-append (`s = s + s`) arrives here as an Ident:
@@ -1868,6 +1948,13 @@ impl Lowerer {
                     }
                 }
             }
+        }
+        if inline {
+            // Freeze back to an immutable ZZ_STR so a later read in the same
+            // loop iteration (call argument, stored value) sees a well-formed
+            // string. The next append retags it mutable in place (no copy),
+            // so repeated statements stay O(1) per append.
+            out.push_str(&format!("    {cid} = zz_str_freeze({cid});\n"));
         }
         true
     }
@@ -2226,11 +2313,6 @@ impl Lowerer {
                     let bound_expr = ev_unboxed.clone();
                     names.loop_bounds.insert(v.clone(), bound_expr);
                 }
-                // Emit hoisted pre-loop code (e.g. string accumulator builder init)
-                // before the loop header.
-                for pre in self.loop_pre_code.borrow_mut().drain(..) {
-                    out.push_str(&pre);
-                }
                 // Pointer setup for flat array store optimization:
                 // `T *ptr = arr;` before the loop lets clang vectorize stores.
                 if let Some((ref arr_cid, ref elem_ctype)) = ptr_store {
@@ -2471,10 +2553,6 @@ impl Lowerer {
             // Clear the pre-reserve flag so later push calls outside this
             // loop regain the grow guard.
             self.skip_flat_push_grow.set(false);
-            // Emit hoisted post-loop code (e.g. string accumulator freeze).
-            for post in self.loop_post_code.borrow_mut().drain(..) {
-                out.push_str(&post);
-            }
             // Free the sub-arena's buffer once the loop completes.
             if let Some(ref name) = loop_arena {
                 out.push_str(&format!("    zz_arena_destroy(&{name});\n"));

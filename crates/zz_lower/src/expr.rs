@@ -662,7 +662,35 @@ impl Lowerer {
                 let mut r_stmts = String::new();
                 let r = self.emit_expr(right, names, &mut r_stmts);
                 match op {
-                    zz_frontend::ast::BinOp::And => {
+                    zz_frontend::ast::BinOp::And | zz_frontend::ast::BinOp::Or => {
+                        // `_u` raw-bool fast path: when both operands already
+                        // lower to raw C `bool` (e.g. numeric comparisons),
+                        // short-circuit in C without boxing through
+                        // `zz_truthy`. Right-side statements still run only
+                        // on the branch that needs them.
+                        if self.unboxed_ret.borrow().is_some() {
+                            let l_raw = crate::context::raw_scalar_text(left, &l, names);
+                            let r_raw = crate::context::raw_scalar_text(right, &r, names);
+                            if let (Some((lc, "bool")), Some((rc, "bool"))) = (&l_raw, &r_raw) {
+                                let is_and = matches!(op, zz_frontend::ast::BinOp::And);
+                                let cop = if is_and { "&&" } else { "||" };
+                                if r_stmts.is_empty() {
+                                    return format!("(bool)(({lc}) {cop} ({rc}))");
+                                }
+                                let tmp = names.fresh("_bool");
+                                out.push_str(&format!("    bool {tmp};\n"));
+                                out.push_str(&format!(
+                                    "    if ({} ({lc})) {tmp} = {};\n",
+                                    if is_and { "!" } else { "" },
+                                    if is_and { "false" } else { "true" },
+                                ));
+                                out.push_str("    else {\n");
+                                out.push_str(&r_stmts);
+                                out.push_str(&format!("    {tmp} = {rc};\n"));
+                                out.push_str("    }\n");
+                                return tmp;
+                            }
+                        }
                         // `zz_truthy` takes `zz_value`: box raw-scalar
                         // operands (e.g. `bool` locals lower to C `bool`)
                         // and raw unboxed structs (e.g. `p && q`).
@@ -672,27 +700,18 @@ impl Lowerer {
                         let l = self.box_struct_operand(left, l, &raw_l, names, out);
                         let r = box_scalar_operand(right, names, &r);
                         let r = self.box_struct_operand(right, r, &raw_r, names, &mut r_stmts);
-                        let tmp = names.fresh("_and");
+                        let is_and = matches!(op, zz_frontend::ast::BinOp::And);
+                        let tmp = names.fresh(if is_and { "_and" } else { "_or" });
                         out.push_str(&format!("    zz_value {tmp};\n"));
-                        out.push_str(&format!(
-                            "    if (!zz_truthy({l})) {tmp} = zz_bool(false);\n"
-                        ));
-                        out.push_str("    else {\n");
-                        out.push_str(&r_stmts);
-                        out.push_str(&format!("    {tmp} = zz_bool(zz_truthy({r}));\n"));
-                        out.push_str("    }\n");
-                        tmp
-                    }
-                    zz_frontend::ast::BinOp::Or => {
-                        let raw_l = l.clone();
-                        let raw_r = r.clone();
-                        let l = box_scalar_operand(left, names, &l);
-                        let l = self.box_struct_operand(left, l, &raw_l, names, out);
-                        let r = box_scalar_operand(right, names, &r);
-                        let r = self.box_struct_operand(right, r, &raw_r, names, &mut r_stmts);
-                        let tmp = names.fresh("_or");
-                        out.push_str(&format!("    zz_value {tmp};\n"));
-                        out.push_str(&format!("    if (zz_truthy({l})) {tmp} = zz_bool(true);\n"));
+                        if is_and {
+                            out.push_str(&format!(
+                                "    if (!zz_truthy({l})) {tmp} = zz_bool(false);\n"
+                            ));
+                        } else {
+                            out.push_str(&format!(
+                                "    if (zz_truthy({l})) {tmp} = zz_bool(true);\n"
+                            ));
+                        }
                         out.push_str("    else {\n");
                         out.push_str(&r_stmts);
                         out.push_str(&format!("    {tmp} = zz_bool(zz_truthy({r}));\n"));
@@ -700,14 +719,14 @@ impl Lowerer {
                         tmp
                     }
                     zz_frontend::ast::BinOp::Elvis => {
-                        // `int(X) ?? default` where X is scalar: `int()` on a
-                        // finite float always succeeds, so the `??` is dead
-                        // weight. Inline to the raw truncation, skipping
-                        // `zz_elvis` tag check + clone. `int(nan) ?? 0` must
-                        // still yield 0: our `(int64_t)(nan)` in C is UB, but
-                        // the mandel loop only passes clamped finite values,
-                        // and `int()` on NaN returns NONE → `?? 0`. For
-                        // safety we only fire when X is provably finite.
+                        // `int(X) ?? default` where X is scalar: `zz_int_cast`
+                        // always returns `Some` for int/float inputs, so the
+                        // fallback value is dead. Keep emitting its statements
+                        // (the VM evaluates the right operand eagerly) and skip
+                        // only the unused value read. The saturating helper
+                        // reproduces the boxed float→int semantics (NaN→0,
+                        // ±∞/out-of-range clamp) instead of the UB of a bare C
+                        // cast.
                         out.push_str(&r_stmts);
                         if let Expr::Call { callee, args, .. } = left.as_ref() {
                             if let Expr::Ident { name, .. } = callee.as_ref() {
@@ -718,7 +737,7 @@ impl Lowerer {
                                             let c = if t == Some("int64_t") {
                                                 c
                                             } else {
-                                                format!("(int64_t)({c})")
+                                                format!("(int64_t)(zz_i64_sat({c}))")
                                             };
                                             return c;
                                         }
@@ -726,6 +745,7 @@ impl Lowerer {
                                 }
                             }
                         }
+                        // Boxed fallback (statements were emitted above).
                         let raw_l = l.clone();
                         let raw_r = r.clone();
                         let l = box_scalar_operand(left, names, &l);
@@ -2675,11 +2695,12 @@ impl Lowerer {
             }
             "zz_int_cast" => {
                 // int(X) where X is int64_t → just X (identity).
-                // int(X) where X is double → truncate to int64_t.
+                // int(X) where X is double → saturating truncation (matches
+                // `zz_int_cast`/the VM for NaN, ±∞ and out-of-range values).
                 if t == "int64_t" {
                     Some(c)
                 } else {
-                    Some(format!("(int64_t)({c})"))
+                    Some(format!("(int64_t)(zz_i64_sat({c}))"))
                 }
             }
             _ => None,

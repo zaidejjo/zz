@@ -1156,6 +1156,16 @@ zz_value zz_time_now_ms(zz_value unused, int *err);
 zz_value zz_time_sleep_ms(zz_value ms, int *err);
 
 // ---- type casts ---------------------------------------------------------
+// Saturating float→int64 conversion, matching `zz_int_cast`'s ZZ_FLOAT arm
+// and the VM: NaN maps to 0, ±∞ and out-of-range values clamp to the int64
+// ends. Raw scalar `int(x) ?? d` lowering calls this so the unboxed fast
+// path keeps boxed semantics (and never executes the UB of a bare cast).
+static inline int64_t zz_i64_sat(double f) {
+    if (isnan(f)) return 0;
+    if (f >= (double)INT64_MAX) return INT64_MAX;
+    if (f <= (double)INT64_MIN) return INT64_MIN;
+    return (int64_t)f;
+}
 zz_value zz_typeof(zz_value v, int *err);
 zz_value zz_clone_deep(zz_value v, int *err);
 zz_value zz_int_cast(zz_value v, int *err);
