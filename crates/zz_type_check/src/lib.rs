@@ -13,6 +13,7 @@ use zz_suggest::suggest_all;
 use zz_types::Type;
 use zz_unify::Unifier;
 
+mod check_call_args;
 mod check_stmt;
 mod definite_assignment;
 
@@ -269,6 +270,10 @@ pub trait TypeCheckOps {
 
     fn check_arith(&mut self, op: BinOp, left: &Expr, right: &Expr, span: Span) -> Type;
 
+    /// Type-check array concatenation `[T] + [U]`: element types must match
+    /// exactly, or one side can be unified with the other.
+    fn check_array_concat(&mut self, a: &Box<Type>, b: &Box<Type>, span: Span) -> Type;
+
     /// True when a `head.method(args)` call must be read as a method call
     /// even though `head.method` also names a seeded free function: the
     /// head is a genuine local value, the direct reading is already
@@ -428,6 +433,9 @@ pub trait TypeCheckOps {
 
     /// Constructors of `ty` not covered by `pats` (Maranget specialization).
     fn missing_patterns(&self, pats: &[&Pattern], ty: &Type) -> Option<Vec<String>>;
+
+    /// Check missing patterns for an enum type.
+    fn missing_patterns_enum(&self, ename: &str, flat: &[&Pattern]) -> Option<Vec<String>>;
 
     /// Flatten an `or`-pattern into its alternatives.
     fn or_alt<'a>(&self, pat: &'a Pattern) -> Vec<&'a Pattern>;
@@ -1896,37 +1904,7 @@ impl TypeCheckOps for Checker {
             // exactly ([int] + [str] is a hard error; cast one side first).
             // An inference-var element (`[]`) unifies with the concrete side.
             (Type::Array(a), Type::Array(b)) if op == BinOp::Add => {
-                let ea = self.unifier.resolve(a);
-                let eb = self.unifier.resolve(b);
-                match (&ea, &eb) {
-                    (Type::Var(_), Type::Var(_)) => {
-                        // Both sides unknown — can't pin element type yet.
-                        Type::Array(Box::new(self.unifier.fresh_var()))
-                    }
-                    (Type::Var(_), concrete) => {
-                        self.unifier.bind_var(a, concrete.clone());
-                        Type::Array(Box::new(concrete.clone()))
-                    }
-                    (concrete, Type::Var(_)) => {
-                        self.unifier.bind_var(b, concrete.clone());
-                        Type::Array(Box::new(concrete.clone()))
-                    }
-                    (_, _) if ea == eb => Type::Array(Box::new(ea)),
-                    (a2, b2) => {
-                        let mut diag = error_at(
-                            format!(
-                                "cannot apply `+` to `[{a2}]` and `[{b2}]`: element types differ\n\
-                                 hint: cast one side so both arrays share an element type",
-                            ),
-                            span,
-                        );
-                        diag = diag.with_note(format!(
-                            "cast `[{a2}]` to `[{b2}]` or `[{b2}]` to `[{a2}]` with `{b2}(...)` / `{a2}(...)`"
-                        ));
-                        self.errors.push(diag);
-                        Type::Error
-                    }
-                }
+                self.check_array_concat(a, b, span)
             }
             (Type::Int, Type::Float) | (Type::Float, Type::Int) | (Type::Float, Type::Float) => {
                 Type::Float
@@ -2013,6 +1991,43 @@ impl TypeCheckOps for Checker {
                     }
                     self.errors.push(diag);
                 }
+                Type::Error
+            }
+        }
+    }
+
+    /// Type-check array concatenation `[T] + [U]`: element types must match
+    /// exactly, or one side can be unified with the other. Reports an error
+    /// with cast hints when element types differ.
+    fn check_array_concat(&mut self, a: &Box<Type>, b: &Box<Type>, span: Span) -> Type {
+        let ea = self.unifier.resolve(a);
+        let eb = self.unifier.resolve(b);
+        match (&ea, &eb) {
+            (Type::Var(_), Type::Var(_)) => {
+                // Both sides unknown — can't pin element type yet.
+                Type::Array(Box::new(self.unifier.fresh_var()))
+            }
+            (Type::Var(_), concrete) => {
+                self.unifier.bind_var(a, concrete.clone());
+                Type::Array(Box::new(concrete.clone()))
+            }
+            (concrete, Type::Var(_)) => {
+                self.unifier.bind_var(b, concrete.clone());
+                Type::Array(Box::new(concrete.clone()))
+            }
+            (_, _) if ea == eb => Type::Array(Box::new(ea)),
+            (a2, b2) => {
+                let mut diag = error_at(
+                    format!(
+                        "cannot apply `+` to `[{a2}]` and `[{b2}]`: element types differ\n\
+                         hint: cast one side so both arrays share an element type",
+                    ),
+                    span,
+                );
+                diag = diag.with_note(format!(
+                    "cast `[{a2}]` to `[{b2}]` or `[{b2}]` to `[{a2}]` with `{b2}(...)` / `{a2}(...)`"
+                ));
+                self.errors.push(diag);
                 Type::Error
             }
         }
@@ -2146,7 +2161,7 @@ impl TypeCheckOps for Checker {
         name: &str,
         args: &[Expr],
         named: &[(Ident, Expr)],
-        span: Span,
+        _span: Span,
     ) -> Option<Type> {
         if !is_print_builtin(name) || self.local_lookup_opt(name).is_some() {
             return None;
@@ -3255,174 +3270,31 @@ impl TypeCheckOps for Checker {
         named: &[(Ident, Expr)],
         span: Span,
     ) {
-        let total_provided = args.len() + named.len();
-        let total_params = ps.len();
-        let allowed_min = total_params - has_default.iter().filter(|&&d| d).count();
-
-        if total_provided < allowed_min || total_provided > total_params {
-            let sig = param_names
-                .iter()
-                .zip(ps.iter())
-                .map(|(n, t)| format!("{n}: {t}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let count = if allowed_min == total_params {
-                if total_params == 1 {
-                    "takes 1 argument".to_string()
-                } else {
-                    format!("takes {total_params} arguments")
-                }
-            } else {
-                format!("takes {allowed_min} to {total_params} arguments")
-            };
-            let head = match callee.filter(|c| !c.is_empty()) {
-                Some(name) => format!("`{name}` {count}"),
-                None => count,
-            };
-            let mut diag = error_at(format!("{head} ({sig}), found {total_provided}"), span);
-            // Name the missing parameters when too few were given. A named
-            // argument covers its parameter wherever it sits, so only
-            // report slots filled by neither position nor name.
-            if total_provided < allowed_min {
-                let missing: Vec<String> = param_names
-                    .iter()
-                    .zip(ps.iter())
-                    .enumerate()
-                    .filter(|(i, (n, _))| {
-                        *i >= args.len() && !named.iter().any(|(an, _)| an.name == **n)
-                    })
-                    .map(|(_, (n, t))| format!("{n}: {t}"))
-                    .collect();
-                if let Some(first) = missing.first() {
-                    diag = diag.with_note(format!("missing argument for `{first}`"));
-                }
-            }
-            self.errors.push(diag);
+        if check_call_args::check_arg_count(
+            self,
+            callee,
+            param_names,
+            ps,
+            has_default,
+            args,
+            named,
+            span,
+        ) {
             return;
         }
 
+        let total_params = ps.len();
         let mut slots: Vec<Option<&Expr>> = vec![None; total_params];
 
-        for (i, arg) in args.iter().enumerate() {
-            if i >= total_params {
-                self.errors.push(error_at(
-                    format!("too many positional arguments (max {})", total_params),
-                    arg.span(),
-                ));
-                return;
-            }
-            if slots[i].is_some() {
-                self.errors.push(error_at(
-                    format!("positional argument `{}` conflicts with named argument", i),
-                    arg.span(),
-                ));
-                return;
-            }
-            slots[i] = Some(arg);
+        if check_call_args::assign_positional_slots(self, total_params, args, &mut slots) {
+            return;
         }
 
-        for (name, val) in named {
-            let pos = param_names.iter().position(|pn| pn == &name.name);
-            match pos {
-                Some(i) => {
-                    if slots[i].is_some() {
-                        self.errors.push(error_at(
-                            format!("argument `{}` already provided positionally", name.name),
-                            val.span(),
-                        ));
-                        return;
-                    }
-                    slots[i] = Some(val);
-                }
-                None => {
-                    // Sherlock: typo'd named argument (`nmae:`) suggests
-                    // the real parameter with a fix — the name span now
-                    // rides the AST, so the error points at the typo
-                    // itself instead of the value.
-                    let mut diag =
-                        error_at(format!("unknown parameter `{}`", name.name), name.span);
-                    let refs: Vec<&str> = param_names.iter().map(|s| s.as_str()).collect();
-                    let all = suggest_all(&name.name, &refs);
-                    if let Some((suggestion, _)) = all.first() {
-                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
-                        let alts: Vec<String> = all.iter().map(|(s, _)| s.to_string()).collect();
-                        let fixit = if alts.len() == 1 {
-                            FixIt::safe(name.span, suggestion.to_string(), "replace parameter")
-                        } else {
-                            FixIt::ambiguous(
-                                name.span,
-                                suggestion.to_string(),
-                                "replace parameter",
-                                alts,
-                            )
-                        };
-                        diag = diag.with_fixit(fixit);
-                    }
-                    self.errors.push(diag);
-                    return;
-                }
-            }
+        if check_call_args::check_named_args(self, param_names, named, &mut slots) {
+            return;
         }
 
-        for (i, slot) in slots.iter().enumerate() {
-            if let Some(arg) = slot {
-                // When passing a closure to a function with a known
-                // signature, propagate expected param types so the body
-                // can resolve method calls on known types (e.g. `tx.exec`
-                // when `tx: Db`).  Without this, unannotated params get
-                // fresh vars and method dispatch fails on `?0`.
-                if let Expr::Closure {
-                    params,
-                    ret_ty,
-                    body,
-                    span,
-                } = arg
-                {
-                    let expected = self.unifier.resolve(&ps[i]);
-                    let ep = if let Type::Func(ep, _) = &expected {
-                        Some(ep.as_slice())
-                    } else {
-                        None
-                    };
-                    let at = self.check_closure(params, ret_ty.as_ref(), body, *span, ep);
-                    if let Err(e) = self.unifier.unify(&at, &ps[i]) {
-                        self.report_mismatch_with_notes(
-                            e,
-                            arg.span(),
-                            Self::param_mismatch_notes(param_names, ps, i),
-                        );
-                    }
-                } else {
-                    let at = self.check_expr(arg);
-                    let at = self.unifier.resolve(&at);
-                    let expected = self.unifier.resolve(&ps[i]);
-                    // A named function passed where a `func(...)` value is
-                    // expected (e.g. decorator application `dec(target)` or
-                    // HOFs like `map(xs, double)`): expand the signature so
-                    // structural unification applies instead of failing on
-                    // `Named` vs `Func`.
-                    let at = match (&at, &expected) {
-                        (Type::Named(n), Type::Func(_, _)) => {
-                            match zz_checker_core::lookup_std(&self.funcs, n).cloned() {
-                                Some(sig) => {
-                                    let (sps, sret, _) = self.instantiate(&sig);
-                                    Type::Func(sps, Box::new(sret))
-                                }
-                                None => at,
-                            }
-                        }
-                        _ => at,
-                    };
-                    if let Err(e) = self.unifier.unify(&at, &expected) {
-                        self.report_mismatch_with_notes(
-                            e,
-                            arg.span(),
-                            Self::param_mismatch_notes(param_names, ps, i),
-                        );
-                    }
-                }
-            }
-        }
+        check_call_args::check_filled_slots(self, param_names, ps, &slots);
     }
 
     /// Compile-time SQL verification for `db.query(sql)` / `db.exec(sql)`.
@@ -4461,43 +4333,7 @@ impl TypeCheckOps for Checker {
         }
         match ty {
             Type::Enum(ename, _) => {
-                let variants: Vec<(String, Option<Type>)> = self
-                    .enums
-                    .get(ename)
-                    .map(|s| {
-                        s.variants
-                            .iter()
-                            .map(|(v, p)| (v.clone(), p.clone()))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                if variants.is_empty() {
-                    // Unknown enum: can't verify, assume covered.
-                    return Some(Vec::new());
-                }
-                let mut missing = Vec::new();
-                for (vname, payload) in &variants {
-                    let sub: Vec<&Pattern> = flat
-                        .iter()
-                        .filter(|p| matches!(p, Pattern::Variant { name, .. } if name == vname))
-                        .copied()
-                        .collect();
-                    if sub.is_empty() {
-                        missing.push(format!(".{vname}"));
-                        continue;
-                    }
-                    // Recurse: variant arms must cover the payload type.
-                    let payload_ty = payload.clone().unwrap_or(Type::Unit);
-                    let args: Vec<Pattern> = sub.iter().map(|p| self.variant_arg(*p)).collect();
-                    if let Some(m) =
-                        self.missing_patterns(&args.iter().collect::<Vec<&Pattern>>(), &payload_ty)
-                    {
-                        if !m.is_empty() {
-                            missing.push(format!(".{vname} ({})", m.join(", ")));
-                        }
-                    }
-                }
-                Some(missing)
+                return self.missing_patterns_enum(ename, &flat);
             }
             Type::Option(inner) => {
                 let has_none = flat
@@ -4608,6 +4444,48 @@ impl TypeCheckOps for Checker {
             }
             _ => Some(Vec::new()), // opaque / function / etc.: assume covered
         }
+    }
+
+    /// Check missing patterns for an enum type: list variants with no
+    /// matching arm, recursing into payload types.
+    fn missing_patterns_enum(&self, ename: &str, flat: &[&Pattern]) -> Option<Vec<String>> {
+        let variants: Vec<(String, Option<Type>)> = self
+            .enums
+            .get(ename)
+            .map(|s| {
+                s.variants
+                    .iter()
+                    .map(|(v, p)| (v.clone(), p.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if variants.is_empty() {
+            // Unknown enum: can't verify, assume covered.
+            return Some(Vec::new());
+        }
+        let mut missing = Vec::new();
+        for (vname, payload) in &variants {
+            let sub: Vec<&Pattern> = flat
+                .iter()
+                .filter(|p| matches!(p, Pattern::Variant { name, .. } if name == vname))
+                .copied()
+                .collect();
+            if sub.is_empty() {
+                missing.push(format!(".{vname}"));
+                continue;
+            }
+            // Recurse: variant arms must cover the payload type.
+            let payload_ty = payload.clone().unwrap_or(Type::Unit);
+            let args: Vec<Pattern> = sub.iter().map(|p| self.variant_arg(*p)).collect();
+            if let Some(m) =
+                self.missing_patterns(&args.iter().collect::<Vec<&Pattern>>(), &payload_ty)
+            {
+                if !m.is_empty() {
+                    missing.push(format!(".{vname} ({})", m.join(", ")));
+                }
+            }
+        }
+        Some(missing)
     }
 
     /// Flatten an `or`-pattern into its alternatives (non-or patterns pass
