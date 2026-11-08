@@ -5,5 +5,6 @@ error: `=` in condition does assignment; use `==` to compare
   --> /home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/assign_in_condition.zz:5:15
     |
     5 |     if countr = 5 {
-      |               ^
+      |               ^ help: replace with `==`
+
 zz: 1 file(s) failed type-check

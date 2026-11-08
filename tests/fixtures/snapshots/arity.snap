@@ -12,5 +12,6 @@ warning: unused variable `x` is never read, consider prefixing with `_x`
   --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/arity.zz:7:1
     |
     7 | x := add(1)
-      | ^
+      | ^ help: replace with `_x`
+
 zz: 1 file(s) failed type-check

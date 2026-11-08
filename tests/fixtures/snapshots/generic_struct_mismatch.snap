@@ -12,5 +12,6 @@ warning: unused variable `s` is never read, consider prefixing with `_s`
   --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_struct_mismatch.zz:4:1
     |
     4 | s: Box<str> = Box{ v: 1 }
-      | ^
+      | ^ help: replace with `_s`
+
 zz: 1 file(s) failed type-check

@@ -17,6 +17,7 @@ error: Z0006: function returns `try_ambiguous_convert.ErrB` but its body can fal
   --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/try_ambiguous_convert.zz:11:9
     |
    11 |         ErrB{msg: self.msg}
-      |         ^^^^^^^^^^^^^^^^^^^
+      |         ^^^^^^^^^^^^^^^^^^^ help: replace with `return `
+
     = named functions return a value only through `return`; the last expression is discarded
 zz: 1 file(s) failed type-check

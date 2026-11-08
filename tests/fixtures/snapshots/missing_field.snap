@@ -11,5 +11,6 @@ warning: unused variable `p` is never read, consider prefixing with `_p`
   --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/missing_field.zz:5:1
     |
     5 | p := Point{x: 1}
-      | ^
+      | ^ help: replace with `_p`
+
 zz: 1 file(s) failed type-check

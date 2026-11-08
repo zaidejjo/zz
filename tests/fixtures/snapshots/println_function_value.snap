@@ -5,7 +5,8 @@ error: Z0001: undefined variable `math.sin`
   --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/println_function_value.zz:6:9
     |
     6 | println(math.sin)
-      |         ^^^^^^^^
+      |         ^^^^^^^^ help: replace with `math.asin`
+
     = `math` is imported; `sin` is not a member of `math`
     = did you mean `math.asin`?
 error: cannot print function `math.sin`: call it with arguments
@@ -13,20 +14,23 @@ error: cannot print function `math.sin`: call it with arguments
   --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/println_function_value.zz:6:9
     |
     6 | println(math.sin)
-      |         ^^^^^^^^
+      |         ^^^^^^^^ help: replace with `()`
+
     = did you mean `math.sin()`?
 error: Z0001: undefined variable `std.math.sin`
 
   --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/println_function_value.zz:7:9
     |
     7 | println(std.math.sin)
-      |         ^^^^^^^^^^^^
+      |         ^^^^^^^^^^^^ help: replace with `std.math.asin`
+
     = did you mean `std.math.asin`?
 error: cannot print function `std.math.sin`: call it with arguments
 
   --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/println_function_value.zz:7:9
     |
     7 | println(std.math.sin)
-      |         ^^^^^^^^^^^^
+      |         ^^^^^^^^^^^^ help: replace with `()`
+
     = did you mean `std.math.sin()`?
 zz: 1 file(s) failed type-check

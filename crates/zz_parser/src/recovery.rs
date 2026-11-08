@@ -136,6 +136,34 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Skip tokens until a call-argument boundary: `,` or `)` at delimiter
+    /// depth 0, `StmtEnd`, or `Eof`. Used after a call argument fails to
+    /// parse so one broken argument does not cascade into every following
+    /// token of the call. The boundary token is left unconsumed for the
+    /// caller (comma is eaten by the argument loop, `)` by `eat_close`).
+    pub(crate) fn skip_to_call_arg_end(&mut self) {
+        let mut depth = 0u32;
+        loop {
+            match self.peek_kind() {
+                TokenKind::Comma | TokenKind::StmtEnd | TokenKind::Eof => break,
+                TokenKind::LParen | TokenKind::LBrace | TokenKind::LBracket => {
+                    depth += 1;
+                    self.advance();
+                }
+                TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                    self.advance();
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+    }
+
     /// True when a `.name` continuation at the cursor is really the next
     /// match arm (`... .err(_) => ...`): an `Arrow` awaits at bracket
     /// depth 0 before any terminator. Neither `=>` nor `->` can continue

@@ -580,10 +580,29 @@ impl<'a> Parser<'a> {
                     span: tok.span,
                 };
                 self.advance(); // consume `:` or `=`
+                let errors_before = self.errors.len();
                 let value = self.parse_expr();
                 named.push((name, value));
+                if self.errors.len() > errors_before {
+                    self.skip_to_call_arg_end();
+                    if self.at(TokenKind::Comma) {
+                        continue;
+                    }
+                    break;
+                }
             } else {
+                let errors_before = self.errors.len();
                 args.push(self.parse_expr());
+                // One bad argument must not cascade into every following
+                // token of the call: skip to the argument boundary so the
+                // user sees one error per broken argument.
+                if self.errors.len() > errors_before {
+                    self.skip_to_call_arg_end();
+                    if self.at(TokenKind::Comma) {
+                        continue;
+                    }
+                    break;
+                }
             }
             if self.eat(TokenKind::Comma) {
                 // Trailing comma: `f(a, b,)` ends the list here, matching
@@ -984,6 +1003,26 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Match => self.parse_match(),
             TokenKind::Dot => self.parse_variant(),
+            // `func` starts a function declaration, not an expression.
+            // ZZ closures use `|params| { body }` syntax; report one clear
+            // error and skip to the statement end so the orphaned `(`…`)`/
+            // `->`/`{`…`}` trailing the keyword doesn't cascade into one
+            // diagnostic per token.
+            TokenKind::Func => {
+                let tok = self.advance();
+                self.push_error(
+                    error_at(
+                        "`func` is not an expression — ZZ closures use `|params| body` syntax",
+                        tok.span,
+                    )
+                    .with_note(
+                        "write `|req: http.request| { http.response(200, \"...\") }` \
+                         instead of `func(req: ...) -> ... { ... }`",
+                    ),
+                );
+                self.skip_to_stmt_end();
+                return dummy_expr(tok.span);
+            }
             _ => {
                 // A stray closing bracket in expression position (e.g. the
                 // second `]` in `[1, 2]]`): remove it and continue.
@@ -994,10 +1033,13 @@ impl<'a> Parser<'a> {
                     self.error_stray_close(tok.kind);
                     return dummy_expr(tok.span);
                 }
-                self.error_here(format!(
-                    "expected expression, found {}",
-                    tok.kind.describe()
-                ));
+                let msg = if tok.kind == TokenKind::Arrow {
+                    "expected expression, found `->` — ZZ closures use `|params| { body }` syntax"
+                        .to_string()
+                } else {
+                    format!("expected expression, found {}", tok.kind.describe())
+                };
+                self.error_here(msg);
                 dummy_expr(tok.span)
             }
         }

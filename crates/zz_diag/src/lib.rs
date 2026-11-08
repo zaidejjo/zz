@@ -373,6 +373,26 @@ pub fn render_to_string(
                     let len = ((span.end - span.start).max(1)) as usize;
                     let _ = write!(out, "\n {:>4} |", "");
                     let _ = write!(out, " {}{}", " ".repeat(col_off), "^".repeat(len));
+                    // Inline the first fixit hint under the carets so plain
+                    // output carries the same help as the colored renderer.
+                    if let Some(fixit) = raw.fixits.first() {
+                        let hint = if fixit.replacement.is_empty() {
+                            " help: remove this".to_string()
+                        } else {
+                            format!(
+                                " help: replace with {}",
+                                render_replacement(&fixit.replacement)
+                            )
+                        };
+                        let _ = writeln!(out, "{hint}");
+                    }
+                    for fixit in raw.fixits.iter().skip(1) {
+                        let _ = writeln!(
+                            out,
+                            "    = help: replace with {}",
+                            render_replacement(&fixit.replacement)
+                        );
+                    }
                 }
             }
             for note_text in &raw.notes {
@@ -387,7 +407,6 @@ pub fn render_to_string(
 /// Render diagnostics to stderr with color control.
 pub fn render_to_stderr(files: &Files, file_id: FileId, diags: &[RawDiag], color_mode: ColorMode) {
     let use_color = color_mode.color_enabled();
-    let mut writer = std::io::stderr();
     let mut writer = std::io::stderr();
 
     for raw in diags {

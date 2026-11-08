@@ -18,5 +18,6 @@ warning: unused variable `b` is never read, consider prefixing with `_b`
   --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_struct_arity.zz:4:1
     |
     4 | b: Box = Box{ v: 1 }
-      | ^
+      | ^ help: replace with `_b`
+
 zz: 1 file(s) failed type-check

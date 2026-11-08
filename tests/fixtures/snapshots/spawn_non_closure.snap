@@ -12,5 +12,6 @@ warning: unused variable `h` is never read, consider prefixing with `_h`
   --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/spawn_non_closure.zz:6:5
     |
     6 |     h := task.spawn(42)
-      |     ^
+      |     ^ help: replace with `_h`
+
 zz: 1 file(s) failed type-check
