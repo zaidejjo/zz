@@ -424,6 +424,14 @@ pub trait TypeCheckOps {
     fn find_converts(&self, from: &Type, to: &Type) -> Vec<Option<Span>>;
 
     fn bind_pattern(&mut self, pat: &Pattern, ty: &Type);
+    /// Bind a `.Variant` pattern: constrains the scrutinee type, then binds payload names.
+    fn bind_pattern_variant(
+        &mut self,
+        name: &str,
+        arg: &Option<Box<Pattern>>,
+        span: Span,
+        ty: &Type,
+    );
 
     fn check_exhaustive(&mut self, st: &Type, arms: &[zz_span_ast::ast::MatchArm], span: Span);
 
@@ -3879,202 +3887,7 @@ impl TypeCheckOps for Checker {
                 }
             }
             Pattern::Variant { name, arg, span } => {
-                // Sherlock: a builtin pattern constrains an uninferred
-                // scrutinee — `.ok`/`.err` proves `Result`, `.some`/`.none`
-                // proves `Option`. A later arm from the other family then
-                // reports a real mismatch instead of passing silently, and
-                // payloads bind to known types instead of fresh vars.
-                if let Type::Var(id) = self.unifier.resolve(ty) {
-                    let constrained = match name.as_str() {
-                        "ok" | "err" => Some(Type::Result(
-                            Box::new(self.unifier.fresh_var()),
-                            Box::new(self.unifier.fresh_var()),
-                        )),
-                        "some" | "none" => Some(Type::Option(Box::new(self.unifier.fresh_var()))),
-                        _ => None,
-                    };
-                    if let Some(ct) = constrained {
-                        self.unifier.bind(id, ct);
-                    }
-                }
-                let rt = self.unifier.resolve(ty);
-                let inner = match (&rt, name.as_str()) {
-                    (Type::Option(inner), "some") => match arg {
-                        Some(p) => Some((p.as_ref().clone(), (**inner).clone())),
-                        None => {
-                            self.errors.push(
-                                error_at("`.some` pattern requires an argument", *span)
-                                    .with_note(
-                                        "`.some` always carries a value — write `.some(v)` to use it or `.some(_)` to ignore it",
-                                    )
-                                    .with_note("run `zz fix` to rewrite this automatically")
-                                    .with_fixit(FixIt::safe(
-                                        *span,
-                                        ".some(_)",
-                                        "add wildcard payload",
-                                    )),
-                            );
-                            None
-                        }
-                    },
-                    (Type::Option(_), "none") => {
-                        if arg.is_some() {
-                            // The fixit only applies to a wildcard payload:
-                            // dropping `.none(x)` would orphan uses of `x`
-                            // in the arm body, so named payloads get the
-                            // error + notes and the user edits by hand.
-                            let mut diag = error_at("`.none` pattern takes no argument", *span)
-                                .with_note("`.none` carries no value — write `.none`");
-                            if matches!(arg.as_deref(), Some(Pattern::Wildcard { .. })) {
-                                diag = diag
-                                    .with_note("run `zz fix` to rewrite this automatically")
-                                    .with_fixit(FixIt::safe(*span, ".none", "drop payload"));
-                            }
-                            self.errors.push(diag);
-                        }
-                        None
-                    }
-                    (Type::Result(t, _), "ok") => match arg {
-                        Some(p) => Some((p.as_ref().clone(), (**t).clone())),
-                        None => {
-                            self.errors.push(
-                                error_at("`.ok` pattern requires an argument", *span)
-                                .with_note(
-                                    "`.ok` always carries a value — write `.ok(v)` to use it or `.ok(_)` to ignore it",
-                                )
-                                .with_note("run `zz fix` to rewrite this automatically")
-                                .with_fixit(FixIt::safe(
-                                    *span,
-                                    ".ok(_)",
-                                    "add wildcard payload",
-                                )),
-                            );
-                            None
-                        }
-                    },
-                    (Type::Result(_, e), "err") => match arg {
-                        Some(p) => Some((p.as_ref().clone(), (**e).clone())),
-                        None => {
-                            self.errors.push(
-                                error_at("`.err` pattern requires an argument", *span)
-                                .with_note(
-                                    "`.err` always carries a value — write `.err(e)` to use it or `.err(_)` to ignore it",
-                                )
-                                .with_note("run `zz fix` to rewrite this automatically")
-                                .with_fixit(FixIt::safe(
-                                    *span,
-                                    ".err(_)",
-                                    "add wildcard payload",
-                                )),
-                            );
-                            None
-                        }
-                    },
-                    (Type::Enum(ename, eargs), vname) => {
-                        match self.enum_variant_payload(ename, vname, *span) {
-                            Some(Some(pty)) => {
-                                // Substitute the scrutinee's arguments for
-                                // the enum's parameters (`Box<int>` + `T`
-                                // → `int`), exactly like generic struct
-                                // field access.
-                                let inner = self.subst_enum_payload(ename, eargs, &pty);
-                                match arg {
-                                    Some(p) => Some((p.as_ref().clone(), inner)),
-                                    None => {
-                                        self.errors.push(error_at(
-                                            format!(
-                                                "`.{vname}` pattern requires an argument (variant `{ename}.{vname}` holds a value)"
-                                            ),
-                                            *span,
-                                        ));
-                                        None
-                                    }
-                                }
-                            }
-                            Some(None) => {
-                                if arg.is_some() {
-                                    self.errors.push(error_at(
-                                        format!(
-                                            "`.{vname}` pattern takes no argument (variant `{ename}.{vname}` holds no value)"
-                                        ),
-                                        *span,
-                                    ));
-                                }
-                                None
-                            }
-                            // Unknown variant: already reported; bind
-                            // nothing to suppress cascades.
-                            None => None,
-                        }
-                    }
-                    (Type::Var(_), _) => arg
-                        .as_ref()
-                        .map(|p| (p.as_ref().clone(), self.unifier.fresh_var())),
-                    (Type::Error, _) => {
-                        // Poisoned scrutinee: bind names as Error silently
-                        // so follow-on uses don't cascade (#246).
-                        if let Some(p) = arg {
-                            self.bind_pattern(p, &Type::Error);
-                        }
-                        None
-                    }
-                    (other, vname) => {
-                        let mut diag = error_at(
-                            format!("pattern `.{vname}` does not match a value of type `{other}`"),
-                            *span,
-                        );
-                        // Sherlock hints: point at the right variant family
-                        // for the scrutinee type (#247 follow-up).
-                        let hint: Option<String> = match (other, vname) {
-                            (Type::Option(_), "ok") => {
-                                Some("use `.some(x)` for the Option value".to_string())
-                            }
-                            (Type::Option(_), "err") => {
-                                Some("Option has no `.err`; use `.some(x)` / `.none`".to_string())
-                            }
-                            (Type::Option(_), _) => {
-                                Some("Option patterns are `.some(x)` / `.none`".to_string())
-                            }
-                            (Type::Result(_, _), "some") => {
-                                Some("use `.ok(x)` for the Result value".to_string())
-                            }
-                            (Type::Result(_, _), "none") => Some(
-                                "use `.err(e)` for the Result error; `.none` is an Option pattern"
-                                    .to_string(),
-                            ),
-                            (Type::Result(_, _), _) => {
-                                Some("Result patterns are `.ok(x)` / `.err(e)`".to_string())
-                            }
-                            (Type::Bool, _) => {
-                                Some("use `true` / `false` patterns for `bool`".to_string())
-                            }
-                            _ => None,
-                        };
-                        if let Some(h) = hint {
-                            diag = diag.with_note(h);
-                        }
-                        // Mismatch-first help when variant arms meet a plain
-                        // scalar scrutinee (user assumed Result/Option) (#247).
-                        if matches!(
-                            other,
-                            Type::Int | Type::Float | Type::Str | Type::Unit | Type::Bool
-                        ) {
-                            diag = diag.with_note(format!(
-                                "match on plain `{other}` needs no `.ok`/`.err` arms"
-                            ));
-                        }
-                        self.errors.push(diag);
-                        // Bind the payload names as Error so their uses
-                        // don't cascade into `undefined variable` noise (#246).
-                        if let Some(p) = arg {
-                            self.bind_pattern(p, &Type::Error);
-                        }
-                        None
-                    }
-                };
-                if let Some((p, inner)) = inner {
-                    self.bind_pattern(&p, &inner);
-                }
+                self.bind_pattern_variant(name, arg, *span, ty);
             }
             Pattern::Or { pats, span } => {
                 if pats.is_empty() {
@@ -4162,6 +3975,214 @@ impl TypeCheckOps for Checker {
                     }
                 }
             }
+        }
+    }
+
+    /// Bind a `.Variant` pattern: constrains the scrutinee type for
+    /// builtin variants (`.ok`/`.err` → `Result`, `.some`/`.none` → `Option`),
+    /// then binds payload names to the resolved inner type.
+    fn bind_pattern_variant(
+        &mut self,
+        name: &str,
+        arg: &Option<Box<Pattern>>,
+        span: Span,
+        ty: &Type,
+    ) {
+        // Sherlock: a builtin pattern constrains an uninferred
+        // scrutinee — `.ok`/`.err` proves `Result`, `.some`/`.none`
+        // proves `Option`. A later arm from the other family then
+        // reports a real mismatch instead of passing silently, and
+        // payloads bind to known types instead of fresh vars.
+        if let Type::Var(id) = self.unifier.resolve(ty) {
+            let constrained = match name {
+                "ok" | "err" => Some(Type::Result(
+                    Box::new(self.unifier.fresh_var()),
+                    Box::new(self.unifier.fresh_var()),
+                )),
+                "some" | "none" => Some(Type::Option(Box::new(self.unifier.fresh_var()))),
+                _ => None,
+            };
+            if let Some(ct) = constrained {
+                self.unifier.bind(id, ct);
+            }
+        }
+        let rt = self.unifier.resolve(ty);
+        let inner = match (&rt, name) {
+            (Type::Option(inner), "some") => match arg {
+                Some(p) => Some((p.as_ref().clone(), (**inner).clone())),
+                None => {
+                    self.errors.push(
+                        error_at("`.some` pattern requires an argument", span)
+                            .with_note(
+                                "`.some` always carries a value — write `.some(v)` to use it or `.some(_)` to ignore it",
+                            )
+                            .with_note("run `zz fix` to rewrite this automatically")
+                            .with_fixit(FixIt::safe(
+                                span,
+                                ".some(_)",
+                                "add wildcard payload",
+                            )),
+                    );
+                    None
+                }
+            },
+            (Type::Option(_), "none") => {
+                if arg.is_some() {
+                    // The fixit only applies to a wildcard payload:
+                    // dropping `.none(x)` would orphan uses of `x`
+                    // in the arm body, so named payloads get the
+                    // error + notes and the user edits by hand.
+                    let mut diag = error_at("`.none` pattern takes no argument", span)
+                        .with_note("`.none` carries no value — write `.none`");
+                    if matches!(arg.as_deref(), Some(Pattern::Wildcard { .. })) {
+                        diag = diag
+                            .with_note("run `zz fix` to rewrite this automatically")
+                            .with_fixit(FixIt::safe(span, ".none", "drop payload"));
+                    }
+                    self.errors.push(diag);
+                }
+                None
+            }
+            (Type::Result(t, _), "ok") => match arg {
+                Some(p) => Some((p.as_ref().clone(), (**t).clone())),
+                None => {
+                    self.errors.push(
+                        error_at("`.ok` pattern requires an argument", span)
+                        .with_note(
+                            "`.ok` always carries a value — write `.ok(v)` to use it or `.ok(_)` to ignore it",
+                        )
+                        .with_note("run `zz fix` to rewrite this automatically")
+                        .with_fixit(FixIt::safe(
+                            span,
+                            ".ok(_)",
+                            "add wildcard payload",
+                        )),
+                    );
+                    None
+                }
+            },
+            (Type::Result(_, e), "err") => match arg {
+                Some(p) => Some((p.as_ref().clone(), (**e).clone())),
+                None => {
+                    self.errors.push(
+                        error_at("`.err` pattern requires an argument", span)
+                        .with_note(
+                            "`.err` always carries a value — write `.err(e)` to use it or `.err(_)` to ignore it",
+                        )
+                        .with_note("run `zz fix` to rewrite this automatically")
+                        .with_fixit(FixIt::safe(
+                            span,
+                            ".err(_)",
+                            "add wildcard payload",
+                        )),
+                    );
+                    None
+                }
+            },
+            (Type::Enum(ename, eargs), vname) => {
+                match self.enum_variant_payload(ename, vname, span) {
+                    Some(Some(pty)) => {
+                        // Substitute the scrutinee's arguments for
+                        // the enum's parameters (`Box<int>` + `T`
+                        // → `int`), exactly like generic struct
+                        // field access.
+                        let inner = self.subst_enum_payload(ename, eargs, &pty);
+                        match arg {
+                            Some(p) => Some((p.as_ref().clone(), inner)),
+                            None => {
+                                self.errors.push(error_at(
+                                    format!(
+                                        "`.{vname}` pattern requires an argument (variant `{ename}.{vname}` holds a value)"
+                                    ),
+                                    span,
+                                ));
+                                None
+                            }
+                        }
+                    }
+                    Some(None) => {
+                        if arg.is_some() {
+                            self.errors.push(error_at(
+                                format!(
+                                    "`.{vname}` pattern takes no argument (variant `{ename}.{vname}` holds no value)"
+                                ),
+                                span,
+                            ));
+                        }
+                        None
+                    }
+                    // Unknown variant: already reported; bind
+                    // nothing to suppress cascades.
+                    None => None,
+                }
+            }
+            (Type::Var(_), _) => arg
+                .as_ref()
+                .map(|p| (p.as_ref().clone(), self.unifier.fresh_var())),
+            (Type::Error, _) => {
+                // Poisoned scrutinee: bind names as Error silently
+                // so follow-on uses don't cascade (#246).
+                if let Some(p) = arg {
+                    self.bind_pattern(p, &Type::Error);
+                }
+                None
+            }
+            (other, vname) => {
+                let mut diag = error_at(
+                    format!("pattern `.{vname}` does not match a value of type `{other}`"),
+                    span,
+                );
+                // Sherlock hints: point at the right variant family
+                // for the scrutinee type (#247 follow-up).
+                let hint: Option<String> = match (other, vname) {
+                    (Type::Option(_), "ok") => {
+                        Some("use `.some(x)` for the Option value".to_string())
+                    }
+                    (Type::Option(_), "err") => {
+                        Some("Option has no `.err`; use `.some(x)` / `.none`".to_string())
+                    }
+                    (Type::Option(_), _) => {
+                        Some("Option patterns are `.some(x)` / `.none`".to_string())
+                    }
+                    (Type::Result(_, _), "some") => {
+                        Some("use `.ok(x)` for the Result value".to_string())
+                    }
+                    (Type::Result(_, _), "none") => Some(
+                        "use `.err(e)` for the Result error; `.none` is an Option pattern"
+                            .to_string(),
+                    ),
+                    (Type::Result(_, _), _) => {
+                        Some("Result patterns are `.ok(x)` / `.err(e)`".to_string())
+                    }
+                    (Type::Bool, _) => {
+                        Some("use `true` / `false` patterns for `bool`".to_string())
+                    }
+                    _ => None,
+                };
+                if let Some(h) = hint {
+                    diag = diag.with_note(h);
+                }
+                // Mismatch-first help when variant arms meet a plain
+                // scalar scrutinee (user assumed Result/Option) (#247).
+                if matches!(
+                    other,
+                    Type::Int | Type::Float | Type::Str | Type::Unit | Type::Bool
+                ) {
+                    diag = diag.with_note(format!(
+                        "match on plain `{other}` needs no `.ok`/`.err` arms"
+                    ));
+                }
+                self.errors.push(diag);
+                // Bind the payload names as Error so their uses
+                // don't cascade into `undefined variable` noise (#246).
+                if let Some(p) = arg {
+                    self.bind_pattern(p, &Type::Error);
+                }
+                None
+            }
+        };
+        if let Some((p, inner)) = inner {
+            self.bind_pattern(&p, &inner);
         }
     }
 
