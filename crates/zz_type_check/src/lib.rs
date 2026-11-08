@@ -311,6 +311,33 @@ pub trait TypeCheckOps {
         span: Span,
     ) -> Type;
 
+    /// Handle a `Field` callee (`obj.method(...)`): resolve the method
+    /// signature against the receiver's type and delegate to
+    /// `check_method_call`. Returns `Some(type)` if dispatched, `None`
+    /// to fall through to direct-name handling.
+    fn check_call_field_callee(
+        &mut self,
+        obj: &Expr,
+        method: String,
+        args: &[Expr],
+        named: &[(Ident, Expr)],
+        span: Span,
+    ) -> Option<Type>;
+
+    /// Handle `print`/`println` builtin calls. Returns `Some(Unit)` if
+    /// `name` is a print builtin and no local shadows it, `None` otherwise.
+    fn check_call_print_builtin(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        named: &[(Ident, Expr)],
+        span: Span,
+    ) -> Option<Type>;
+
+    /// Resolve a method signature for a typed receiver by looking up
+    /// `TypeName.method` in the stdlib table.
+    fn resolve_method_sig(&self, recv_t: &Type, method: &str) -> Option<FuncSig>;
+
     /// Check that the given positional and named arguments match the parameter
     /// types.  `has_default` indicates which trailing parameters have defaults;
     /// callers may omit those.
@@ -2111,6 +2138,226 @@ impl TypeCheckOps for Checker {
         Some(api.ret.to_type(&mut self.unifier))
     }
 
+    /// Handle `print`/`println` builtin calls: variadic, checks each argument,
+    /// warns about bare function values passed as arguments. Returns `Some(Unit)`
+    /// if `name` is a print builtin and no local shadows it, `None` otherwise.
+    fn check_call_print_builtin(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        named: &[(Ident, Expr)],
+        span: Span,
+    ) -> Option<Type> {
+        if !is_print_builtin(name) || self.local_lookup_opt(name).is_some() {
+            return None;
+        }
+        self.used_names.insert(name.to_string());
+        for arg in args {
+            self.check_expr(arg);
+        }
+        for (_, val) in named {
+            self.check_expr(val);
+        }
+        // A bare function value as any print argument is always a missing
+        // `()` (`println(env.os)` would print the function itself instead
+        // of calling it). Catch it here with the name attached.
+        for arg_expr in args.iter().chain(named.iter().map(|(_, v)| v)) {
+            // Resolve silently (lookup_opt, never check_expr: the argument
+            // was already checked above and a second pass would duplicate
+            // diagnostics).
+            let (arg_t, fname) = match arg_expr {
+                Expr::Ident { name: n, .. } => (self.lookup_opt(n), Some(n.clone())),
+                Expr::Path { parts, .. } => {
+                    let joined = parts.join(".");
+                    (self.lookup_opt(&joined), Some(joined))
+                }
+                _ => (None, None),
+            };
+            let is_func = matches!(
+                arg_t.as_ref().map(|t| self.unifier.resolve(t)),
+                Some(Type::Func(_, _))
+            ) || matches!(fname.as_deref(), Some(n)
+                if zz_checker_core::lookup_std(&self.funcs, n).is_some()
+                    && !self.is_math_const(n));
+            if !is_func {
+                continue;
+            }
+            let Some(fname) = fname else { continue };
+            let mut diag = error_at(
+                format!("cannot print function `{fname}`: call it with arguments"),
+                arg_expr.span(),
+            );
+            diag = diag.with_note(format!("did you mean `{fname}()`?"));
+            diag = diag.with_fixit(FixIt::safe(
+                Span::new(arg_expr.span().end, arg_expr.span().end),
+                "()".to_string(),
+                "call function",
+            ));
+            self.errors.push(diag);
+        }
+        Some(Type::Unit)
+    }
+
+    /// Handle a `Field` callee (`obj.method(...)`): type-check the receiver,
+    /// resolve the method signature against the receiver's type (builtins,
+    /// struct/enum impls, embedded promotion), lint HTTP route/param usage,
+    /// and delegate to `check_method_call`. Returns `Some(type)` if a method
+    /// was dispatched, `None` to fall through to direct-name handling.
+    fn check_call_field_callee(
+        &mut self,
+        obj: &Expr,
+        method: String,
+        args: &[Expr],
+        named: &[(Ident, Expr)],
+        span: Span,
+    ) -> Option<Type> {
+        let recv_t = self.check_expr(obj);
+        let recv_t = self.unifier.resolve(&recv_t);
+        // Phase 2.2: `std.http` route + param lint on typed receivers.
+        if matches!(self.unifier.resolve(&recv_t), Type::HttpServer)
+            && zz_http_routes::is_route_method(&method)
+        {
+            let root = match obj {
+                Expr::Ident { name, .. } => Some(name.clone()),
+                _ => None,
+            };
+            self.lint_http_route_method(root, &method, args, span);
+        } else if method == "param" && matches!(self.unifier.resolve(&recv_t), Type::HttpRequest) {
+            // Field-call args exclude the receiver: `req.param(name)`.
+            self.lint_http_param(args.first());
+        }
+        // Dot-call order for a `Field` callee (`makePoint().get()`):
+        // the receiver's own `impl` method (`{Type}.{method}`) wins
+        // over a same-named receiver-implicit free function (#500).
+        // The free signature is restored below when nothing matches,
+        // so its mismatch diagnostics are unchanged.
+        let impl_owned = self.receiver_impl_method(&recv_t, &method);
+        let free_sig = zz_checker_core::lookup_std(&self.funcs, &method).cloned();
+        let mut sig = if impl_owned { None } else { free_sig.clone() };
+        if sig.is_none() {
+            sig = self.resolve_method_sig(&recv_t, &method);
+        }
+        // Embedded promotion: `u.area()` dispatches to `Base.area`
+        // when `User` embeds `Base`. The runtime passes the embedded
+        // value as the receiver, so the outer type is not unified
+        // against the method's receiver below.
+        let mut promoted_recv: Option<Type> = None;
+        if sig.is_none() {
+            if let Type::Struct(sname, sargs) = self.unifier.resolve(&recv_t) {
+                if let Some((defining, psig)) = self.find_struct_method(&sname, &method) {
+                    promoted_recv = self
+                        .promoted_method_receiver(&sname, &sargs, &defining)
+                        .or_else(|| Some(Type::Struct(defining, Vec::new())));
+                    sig = Some(psig);
+                }
+            }
+        }
+        // No method matched: restore the free signature so the call
+        // reports a mismatch against it rather than falling through.
+        if sig.is_none() {
+            sig = free_sig;
+        }
+        sig.map(|sig| {
+            self.check_method_call(&MethodCall {
+                sig: &sig,
+                recv_t: &recv_t,
+                promoted_recv,
+                method: &method,
+                args,
+                named,
+                span,
+            })
+        })
+    }
+
+    /// Resolve a method signature for a typed receiver by looking up
+    /// `TypeName.method` in the stdlib table. Covers scalars, Option/Result,
+    /// Array/Bytes, Str, Response, Http*, net, json, sqlz, chan, task,
+    /// opaque tags, structs, and enums.
+    fn resolve_method_sig(&self, recv_t: &Type, method: &str) -> Option<zz_checker_core::FuncSig> {
+        match recv_t {
+            Type::Str => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("str.{method}")).cloned()
+            }
+            Type::Array(_) => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("vec.{method}")).cloned()
+            }
+            Type::Bytes => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("bytes.{method}")).cloned()
+            }
+            Type::Option(_) => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("option.{method}")).cloned()
+            }
+            Type::Result(_, _) => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("result.{method}")).cloned()
+            }
+            Type::Int => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("int.{method}")).cloned()
+            }
+            Type::Float => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("float.{method}")).cloned()
+            }
+            Type::Bool => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("bool.{method}")).cloned()
+            }
+            Type::Response => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}")).cloned()
+            }
+            Type::HttpRequest => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}")).cloned()
+            }
+            Type::TcpStream => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("net.{method}")).cloned()
+            }
+            Type::TcpListener => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("net.{method}")).cloned()
+            }
+            Type::HttpServer => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}")).cloned()
+            }
+            Type::Json => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("json.{method}")).cloned()
+            }
+            Type::Db => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("sqlz.{method}")).cloned()
+            }
+            Type::Chan => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("chan.{method}")).cloned()
+            }
+            Type::TaskJoin => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("task.{method}")).cloned()
+            }
+            Type::Opaque(tag) => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("{tag}.{method}")).cloned()
+            }
+            Type::Struct(sname, _) => {
+                let sig =
+                    zz_checker_core::lookup_std(&self.funcs, &format!("{sname}.{method}")).cloned();
+                if sig.is_some() {
+                    return sig;
+                }
+                if let Some((ns, _)) = sname.rsplit_once('.') {
+                    return zz_checker_core::lookup_std(&self.funcs, &format!("{ns}.{method}"))
+                        .cloned();
+                }
+                None
+            }
+            Type::Enum(ename, _) => {
+                let sig =
+                    zz_checker_core::lookup_std(&self.funcs, &format!("{ename}.{method}")).cloned();
+                if sig.is_some() {
+                    return sig;
+                }
+                if let Some((ns, _)) = ename.rsplit_once('.') {
+                    return zz_checker_core::lookup_std(&self.funcs, &format!("{ns}.{method}"))
+                        .cloned();
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn check_call(
         &mut self,
         callee: &Expr,
@@ -2150,202 +2397,10 @@ impl TypeCheckOps for Checker {
             Expr::Ident { name, .. } => Some(name.clone()),
             Expr::Path { parts, .. } => Some(parts.join(".")),
             Expr::Field { obj, name, .. } => {
-                let recv_t = self.check_expr(obj);
-                let recv_t = self.unifier.resolve(&recv_t);
-                let method = name.clone();
-                // Phase 2.2: `std.http` route + param lint on typed receivers.
-                if matches!(self.unifier.resolve(&recv_t), Type::HttpServer)
-                    && zz_http_routes::is_route_method(&method)
-                {
-                    let root = match obj.as_ref() {
-                        Expr::Ident { name, .. } => Some(name.clone()),
-                        _ => None,
-                    };
-                    self.lint_http_route_method(root, &method, args, span);
-                } else if method == "param"
-                    && matches!(self.unifier.resolve(&recv_t), Type::HttpRequest)
-                {
-                    // Field-call args exclude the receiver: `req.param(name)`.
-                    self.lint_http_param(args.first());
+                match self.check_call_field_callee(obj, name.clone(), args, named, span) {
+                    Some(t) => return t,
+                    None => None,
                 }
-                // Dot-call order for a `Field` callee (`makePoint().get()`):
-                // the receiver's own `impl` method (`{Type}.{method}`) wins
-                // over a same-named receiver-implicit free function (#500).
-                // The free signature is restored below when nothing matches,
-                // so its mismatch diagnostics are unchanged.
-                let impl_owned = self.receiver_impl_method(&recv_t, &method);
-                let free_sig = zz_checker_core::lookup_std(&self.funcs, &method).cloned();
-                let mut sig = if impl_owned { None } else { free_sig.clone() };
-                if sig.is_none() {
-                    match &self.unifier.resolve(&recv_t) {
-                        Type::Str => {
-                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("str.{method}"))
-                                .cloned()
-                        }
-                        Type::Array(_) => {
-                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("vec.{method}"))
-                                .cloned()
-                        }
-                        Type::Bytes => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("bytes.{method}"))
-                                    .cloned()
-                        }
-                        Type::Option(_) => {
-                            sig = zz_checker_core::lookup_std(
-                                &self.funcs,
-                                &format!("option.{method}"),
-                            )
-                            .cloned()
-                        }
-                        Type::Result(_, _) => {
-                            sig = zz_checker_core::lookup_std(
-                                &self.funcs,
-                                &format!("result.{method}"),
-                            )
-                            .cloned()
-                        }
-                        // Scalar extensions (`impl int/float/bool`) live in
-                        // the same merged table; no stdlib namespace here.
-                        Type::Int => {
-                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("int.{method}"))
-                                .cloned()
-                        }
-                        Type::Float => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("float.{method}"))
-                                    .cloned()
-                        }
-                        Type::Bool => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("bool.{method}"))
-                                    .cloned()
-                        }
-                        Type::Response => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
-                                    .cloned()
-                        }
-                        Type::HttpRequest => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
-                                    .cloned()
-                        }
-                        Type::TcpStream => {
-                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("net.{method}"))
-                                .cloned()
-                        }
-                        Type::TcpListener => {
-                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("net.{method}"))
-                                .cloned()
-                        }
-                        Type::HttpServer => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
-                                    .cloned()
-                        }
-                        Type::Json => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("json.{method}"))
-                                    .cloned()
-                        }
-                        Type::Db => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("sqlz.{method}"))
-                                    .cloned();
-                        }
-                        Type::Chan => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("chan.{method}"))
-                                    .cloned()
-                        }
-                        Type::TaskJoin => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("task.{method}"))
-                                    .cloned()
-                        }
-                        // Opaque handles dispatch on their module tag, e.g.
-                        // an `Opaque("regex")` receiver resolves
-                        // `regex.is_match`.
-                        Type::Opaque(tag) => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("{tag}.{method}"))
-                                    .cloned()
-                        }
-                        Type::Struct(sname, _) => {
-                            // Try TypeName.method (impl block methods)
-                            sig = zz_checker_core::lookup_std(
-                                &self.funcs,
-                                &format!("{sname}.{method}"),
-                            )
-                            .cloned();
-                            if sig.is_none() {
-                                // Try namespace.method (cross-module)
-                                if let Some((ns, _)) = sname.rsplit_once('.') {
-                                    sig = zz_checker_core::lookup_std(
-                                        &self.funcs,
-                                        &format!("{ns}.{method}"),
-                                    )
-                                    .cloned();
-                                }
-                            }
-                        }
-                        // Enum values erase to `Object`s, so `impl Enum`
-                        // methods dispatch exactly like struct methods.
-                        Type::Enum(ename, _) => {
-                            sig = zz_checker_core::lookup_std(
-                                &self.funcs,
-                                &format!("{ename}.{method}"),
-                            )
-                            .cloned();
-                            if sig.is_none() {
-                                if let Some((ns, _)) = ename.rsplit_once('.') {
-                                    sig = zz_checker_core::lookup_std(
-                                        &self.funcs,
-                                        &format!("{ns}.{method}"),
-                                    )
-                                    .cloned();
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                // Embedded promotion: `u.area()` dispatches to `Base.area`
-                // when `User` embeds `Base`. The runtime passes the embedded
-                // value as the receiver, so the outer type is not unified
-                // against the method's receiver below.
-                let mut promoted_recv: Option<Type> = None;
-                if sig.is_none() {
-                    if let Type::Struct(sname, sargs) = self.unifier.resolve(&recv_t) {
-                        if let Some((defining, psig)) = self.find_struct_method(&sname, &method) {
-                            // The runtime passes the embedded value itself
-                            // as the receiver (with its own arguments).
-                            promoted_recv = self
-                                .promoted_method_receiver(&sname, &sargs, &defining)
-                                .or_else(|| Some(Type::Struct(defining, Vec::new())));
-                            sig = Some(psig);
-                        }
-                    }
-                }
-                // No method matched: restore the free signature so the
-                // call reports a mismatch against it rather than falling
-                // through as an unknown callee.
-                if sig.is_none() {
-                    sig = free_sig;
-                }
-                if let Some(sig) = sig {
-                    return self.check_method_call(&MethodCall {
-                        sig: &sig,
-                        recv_t: &recv_t,
-                        promoted_recv,
-                        method: &method,
-                        args,
-                        named,
-                        span,
-                    });
-                }
-                None
             }
             _ => None,
         };
@@ -2479,54 +2534,8 @@ impl TypeCheckOps for Checker {
             // Python/JS, values render space-separated; zero args is legal.
             // A local binding shadows the builtin (`println := |x| ...`);
             // keep the normal call path for it.
-            if is_print_builtin(name) && self.local_lookup_opt(name).is_none() {
-                self.used_names.insert(name.clone());
-                for arg in args {
-                    self.check_expr(arg);
-                }
-                for (_, val) in named {
-                    self.check_expr(val);
-                }
-                // A bare function value as any print argument is always a
-                // missing `()` (`println(env.os)` would print the function
-                // itself instead of calling it). Catch it here — with the
-                // name attached — rather than letting each engine render
-                // `<func>` / `<native ...>` / empty output.
-                for arg_expr in args.iter().chain(named.iter().map(|(_, v)| v)) {
-                    // Resolve silently (lookup_opt, never check_expr: the
-                    // argument was already checked above and a second pass
-                    // would duplicate diagnostics).
-                    let (arg_t, fname) = match arg_expr {
-                        Expr::Ident { name: n, .. } => (self.lookup_opt(n), Some(n.clone())),
-                        Expr::Path { parts, .. } => {
-                            let joined = parts.join(".");
-                            (self.lookup_opt(&joined), Some(joined))
-                        }
-                        _ => (None, None),
-                    };
-                    let is_func = matches!(
-                        arg_t.as_ref().map(|t| self.unifier.resolve(t)),
-                        Some(Type::Func(_, _))
-                    ) || matches!(fname.as_deref(), Some(n)
-                            if zz_checker_core::lookup_std(&self.funcs, n).is_some()
-                                && !self.is_math_const(n));
-                    if !is_func {
-                        continue;
-                    }
-                    let Some(fname) = fname else { continue };
-                    let mut diag = error_at(
-                        format!("cannot print function `{fname}`: call it with arguments"),
-                        arg_expr.span(),
-                    );
-                    diag = diag.with_note(format!("did you mean `{fname}()`?"));
-                    diag = diag.with_fixit(FixIt::safe(
-                        Span::new(arg_expr.span().end, arg_expr.span().end),
-                        "()".to_string(),
-                        "call function",
-                    ));
-                    self.errors.push(diag);
-                }
-                return Type::Unit;
+            if let Some(t) = self.check_call_print_builtin(name, args, named, span) {
+                return t;
             }
             if !self.method_shadow_call(callee, args, named) {
                 if let Some(sig) = zz_checker_core::lookup_std(&self.funcs, name).cloned() {
