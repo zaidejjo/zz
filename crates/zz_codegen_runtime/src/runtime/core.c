@@ -4297,7 +4297,9 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
             (void)derr;
         }
         int aerr = 0;
-        out = zz_vec_push(out, row, &aerr);
+        // Move-aware push: `out` is ours and stays live as the result, so
+        // grow it in place instead of duplicating every row.
+        out = zz_vec_push_take(out, row, &aerr);
         (void)aerr;
     }
     sqlite3_finalize(st);

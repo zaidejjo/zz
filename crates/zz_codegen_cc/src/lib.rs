@@ -580,6 +580,12 @@ pub fn clang_flags_with(
         // see above; opt-in via relaxed_float / ZZ_RELAXED_FLOAT).
         flags.push("-funroll-loops".to_string());
         flags.push("-fomit-frame-pointer".to_string());
+        // SLP (basic-block) vectorizing paired scalar recurrences (e.g. the
+        // two coupled axes of a Mandelbrot iteration) emits pack/unpack
+        // shuffles every iteration and is markedly slower than the scalar
+        // schedule clang picks without it. Loop-level vectorization stays
+        // enabled; only the SLP pass is disabled.
+        flags.push("-fno-slp-vectorize".to_string());
         // Host-native codegen: `-march=native` emits AVX2/AVX-512/BMI2, etc.
         // for the CPU this build runs on. Only for host builds (no
         // `--target`) so cross-compiled/redistributed binaries stay portable

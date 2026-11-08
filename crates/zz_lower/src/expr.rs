@@ -281,6 +281,9 @@ impl Lowerer {
         // observes it — nested expressions (tuple elements, call
         // arguments, block contents) always see false.
         let stmt_direct = self.stmt_direct.replace(false);
+        // Consume the borrow hint here so only the expression it was set
+        // for observes it; nested expressions always see `false`.
+        let fmt_borrow = self.fmt_borrow.replace(false);
         match e {
             Expr::Int { value, .. } => format!("zz_int({value})"),
             Expr::Float { value, .. } => {
@@ -357,7 +360,21 @@ impl Lowerer {
                     }
                 }
                 out.push_str(&format!("    {fvar} = zz_str_freeze({fvar});\n"));
-                fvar
+                // The builder above owns one share via its scope cleanup.
+                // Consumers that *take* ownership (return, let binding,
+                // `zz_assign`, `zz_index_set`) must get their own retained
+                // share, otherwise the cleanup frees the value while the
+                // consumer still points at it (use-after-free / heap
+                // corruption). Retaining consumers — native arguments,
+                // container elements (`zz_vec_append`) and boxed struct
+                // fields (`zz_object_set_field`) — instead want the bare
+                // builder: they clone internally, so an extra retain would
+                // leak. `fmt_borrow` marks those retaining positions.
+                if fmt_borrow || self.native_call_args.get() {
+                    fvar
+                } else {
+                    format!("zz_clone({fvar})")
+                }
             }
             Expr::Ident { name, .. } => match names.lookup(name) {
                 Some(cid) => {
@@ -662,7 +679,35 @@ impl Lowerer {
                 let mut r_stmts = String::new();
                 let r = self.emit_expr(right, names, &mut r_stmts);
                 match op {
-                    zz_frontend::ast::BinOp::And => {
+                    zz_frontend::ast::BinOp::And | zz_frontend::ast::BinOp::Or => {
+                        // `_u` raw-bool fast path: when both operands already
+                        // lower to raw C `bool` (e.g. numeric comparisons),
+                        // short-circuit in C without boxing through
+                        // `zz_truthy`. Right-side statements still run only
+                        // on the branch that needs them.
+                        if self.unboxed_ret.borrow().is_some() {
+                            let l_raw = crate::context::raw_scalar_text(left, &l, names);
+                            let r_raw = crate::context::raw_scalar_text(right, &r, names);
+                            if let (Some((lc, "bool")), Some((rc, "bool"))) = (&l_raw, &r_raw) {
+                                let is_and = matches!(op, zz_frontend::ast::BinOp::And);
+                                let cop = if is_and { "&&" } else { "||" };
+                                if r_stmts.is_empty() {
+                                    return format!("(bool)(({lc}) {cop} ({rc}))");
+                                }
+                                let tmp = names.fresh("_bool");
+                                out.push_str(&format!("    bool {tmp};\n"));
+                                out.push_str(&format!(
+                                    "    if ({} ({lc})) {tmp} = {};\n",
+                                    if is_and { "!" } else { "" },
+                                    if is_and { "false" } else { "true" },
+                                ));
+                                out.push_str("    else {\n");
+                                out.push_str(&r_stmts);
+                                out.push_str(&format!("    {tmp} = {rc};\n"));
+                                out.push_str("    }\n");
+                                return tmp;
+                            }
+                        }
                         // `zz_truthy` takes `zz_value`: box raw-scalar
                         // operands (e.g. `bool` locals lower to C `bool`)
                         // and raw unboxed structs (e.g. `p && q`).
@@ -672,27 +717,18 @@ impl Lowerer {
                         let l = self.box_struct_operand(left, l, &raw_l, names, out);
                         let r = box_scalar_operand(right, names, &r);
                         let r = self.box_struct_operand(right, r, &raw_r, names, &mut r_stmts);
-                        let tmp = names.fresh("_and");
+                        let is_and = matches!(op, zz_frontend::ast::BinOp::And);
+                        let tmp = names.fresh(if is_and { "_and" } else { "_or" });
                         out.push_str(&format!("    zz_value {tmp};\n"));
-                        out.push_str(&format!(
-                            "    if (!zz_truthy({l})) {tmp} = zz_bool(false);\n"
-                        ));
-                        out.push_str("    else {\n");
-                        out.push_str(&r_stmts);
-                        out.push_str(&format!("    {tmp} = zz_bool(zz_truthy({r}));\n"));
-                        out.push_str("    }\n");
-                        tmp
-                    }
-                    zz_frontend::ast::BinOp::Or => {
-                        let raw_l = l.clone();
-                        let raw_r = r.clone();
-                        let l = box_scalar_operand(left, names, &l);
-                        let l = self.box_struct_operand(left, l, &raw_l, names, out);
-                        let r = box_scalar_operand(right, names, &r);
-                        let r = self.box_struct_operand(right, r, &raw_r, names, &mut r_stmts);
-                        let tmp = names.fresh("_or");
-                        out.push_str(&format!("    zz_value {tmp};\n"));
-                        out.push_str(&format!("    if (zz_truthy({l})) {tmp} = zz_bool(true);\n"));
+                        if is_and {
+                            out.push_str(&format!(
+                                "    if (!zz_truthy({l})) {tmp} = zz_bool(false);\n"
+                            ));
+                        } else {
+                            out.push_str(&format!(
+                                "    if (zz_truthy({l})) {tmp} = zz_bool(true);\n"
+                            ));
+                        }
                         out.push_str("    else {\n");
                         out.push_str(&r_stmts);
                         out.push_str(&format!("    {tmp} = zz_bool(zz_truthy({r}));\n"));
@@ -700,15 +736,33 @@ impl Lowerer {
                         tmp
                     }
                     zz_frontend::ast::BinOp::Elvis => {
-                        // Evaluate the left side once and store in a temp to avoid
-                        // double-evaluation (which would call side-effecting natives
-                        // like `input()` twice). Box: the temp is `zz_value`
-                        // but a raw-scalar operand lowers to its C type.
-                        // NOTE: the right side still evaluates unconditionally
-                        // (its statements were hoisted above); guarding it needs
-                        // a `zz_elvis_needs_right` runtime predicate — tracked
-                        // follow-up, same root-cause class as #239.
+                        // `int(X) ?? default` where X is scalar: `zz_int_cast`
+                        // always returns `Some` for int/float inputs, so the
+                        // fallback value is dead. Keep emitting its statements
+                        // (the VM evaluates the right operand eagerly) and skip
+                        // only the unused value read. The saturating helper
+                        // reproduces the boxed float→int semantics (NaN→0,
+                        // ±∞/out-of-range clamp) instead of the UB of a bare C
+                        // cast.
                         out.push_str(&r_stmts);
+                        if let Expr::Call { callee, args, .. } = left.as_ref() {
+                            if let Expr::Ident { name, .. } = callee.as_ref() {
+                                if (name == "int" || name == "std.int") && args.len() == 1 {
+                                    let t = scalar_operand_type(&args[0], names);
+                                    if matches!(t, Some("int64_t") | Some("double")) {
+                                        if let Some(c) = scalar_operand_c(&args[0], names) {
+                                            let c = if t == Some("int64_t") {
+                                                c
+                                            } else {
+                                                format!("(int64_t)(zz_i64_sat({c}))")
+                                            };
+                                            return c;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Boxed fallback (statements were emitted above).
                         let raw_l = l.clone();
                         let raw_r = r.clone();
                         let l = box_scalar_operand(left, names, &l);
@@ -1120,14 +1174,13 @@ impl Lowerer {
                 // function-scope locals (released by their `cleanup`
                 // attribute). Without this, a `while` body local would get
                 // both release sites and `zz_release` would double-free.
-                // Track the scope for local-cleanup decisions only. Do NOT
-                // bump `loop_depth`: the string-accumulator hoisting path
-                // assumes a single owning `for` loop whose accumulator starts
-                // empty, while a `while` body can append to a builder that
-                // already holds data (nested row loops). The non-inline
-                // `zz_str_append_str` path is already amortized O(1) once the
-                // buffer is uniquely owned, and it handles immutable inputs.
+                // Track the scope for local-cleanup decisions only.
                 self.loop_scope_depth.set(self.loop_scope_depth.get() + 1);
+                // Reset per-iteration accumulator names so redeclared
+                // accumulators (e.g. `row := ""` at loop top) get hoisted
+                // again every iteration instead of being skipped due to a
+                // stale entry from a previous iteration.
+                self.accumulated_names.borrow_mut().clear();
                 // Loop body is never a function tail.
                 for bstmt in &body.stmts {
                     self.emit_stmt(bstmt, names, out, false);
@@ -1980,6 +2033,8 @@ impl Lowerer {
                     let xcid = names.enter(&var.name);
                     out.push_str(&format!("        zz_value {xcid} = zz_int(__ci);\n"));
                     let mut body_scratch = String::new();
+                    // `zz_vec_append` below retains the element.
+                    self.fmt_borrow.set(true);
                     let bv = self.emit_expr(body, names, &mut body_scratch);
                     let bv = box_scalar_operand(body, names, &bv);
                     if let Some(c) = filter {
@@ -2551,6 +2606,124 @@ impl Lowerer {
             .and_then(|m| m.get(idx))
             .copied()
             .unwrap_or(false)
+    }
+
+    // ── Math native inlining: raw libm calls on unboxed doubles ───────────
+
+    /// Map an embedded-C math native impl name to its libm twin + arg count.
+    /// Only natives whose C twin is a pure `double → double` (or `double,double → double`)
+    /// libm function are eligible; `clamp` and `pow` are handled separately below.
+    const MATH_NATIVE_LIBM: &[(&str, &str, usize)] = &[
+        ("zz_math_sin", "sin", 1),
+        ("zz_math_cos", "cos", 1),
+        ("zz_math_tan", "tan", 1),
+        ("zz_math_asin", "asin", 1),
+        ("zz_math_acos", "acos", 1),
+        ("zz_math_atan", "atan", 1),
+        ("zz_math_log", "log", 1),
+        ("zz_math_log10", "log10", 1),
+        ("zz_math_exp", "exp", 1),
+    ];
+
+    /// Try to emit a math native call as raw C on unboxed `double`s, bypassing
+    /// the `zz_value` box/unbox round-trip through `zz_call_nativeN`.
+    ///
+    /// Returns `Some(c_expr)` when every arg is provably `int64_t` or `double`
+    /// (so `scalar_operand_c` yields a raw C expression) and the native has a
+    /// direct libm twin. Returns `None` to fall through to the boxed path.
+    fn try_emit_math_native_raw(
+        effective_name: &str,
+        args: &[Expr],
+        names: &NameCtx,
+    ) -> Option<String> {
+        // --- unary libm twins ---------------------------------------------
+        if let Some((_name, c_func, _n_args)) = Self::MATH_NATIVE_LIBM
+            .iter()
+            .find(|(n, _, _)| *n == effective_name)
+        {
+            let n_args = *_n_args;
+            if args.len() != n_args {
+                return None;
+            }
+            let mut c_args = Vec::with_capacity(n_args);
+            for arg in args {
+                let t = scalar_operand_type(arg, names)?;
+                if t != "int64_t" && t != "double" {
+                    return None;
+                }
+                let c = scalar_operand_c(arg, names)?;
+                let c = if t == "int64_t" {
+                    format!("(double)({c})")
+                } else {
+                    c
+                };
+                c_args.push(c);
+            }
+            return Some(format!("(double)({c_func}({}))", c_args.join(", ")));
+        }
+
+        // --- math.clamp(val, min, max) → ternary --------------------------
+        if effective_name == "zz_math_clamp" && args.len() == 3 {
+            let mut c_args = Vec::with_capacity(3);
+            for arg in args {
+                let t = scalar_operand_type(arg, names)?;
+                if t != "int64_t" && t != "double" {
+                    return None;
+                }
+                let c = scalar_operand_c(arg, names)?;
+                let c = if t == "int64_t" {
+                    format!("(double)({c})")
+                } else {
+                    c
+                };
+                c_args.push(c);
+            }
+            let (a, b, c) = (&c_args[0], &c_args[1], &c_args[2]);
+            // clamp(v, lo, hi) = (v < lo ? lo : (v > hi ? hi : v))
+            return Some(format!(
+                "(double)(({} < {}) ? {} : (({} > {}) ? {} : {}))",
+                a, b, b, a, c, c, a
+            ));
+        }
+
+        None
+    }
+
+    /// Cast inlining: `float(int|float)` → `(double)(x)`, `int(int|float)` →
+    /// `(int64_t)(x)`. Only fires when the argument is provably scalar
+    /// (int64_t or double). `int()` used without `??` still needs the boxed
+    /// Option path; `int(X) ?? default` is handled in the Elvis arm.
+    fn try_emit_cast_raw(effective_name: &str, args: &[Expr], names: &NameCtx) -> Option<String> {
+        if args.len() != 1 {
+            return None;
+        }
+        let arg = &args[0];
+        let t = scalar_operand_type(arg, names)?;
+        if t != "int64_t" && t != "double" {
+            return None;
+        }
+        let c = scalar_operand_c(arg, names)?;
+        match effective_name {
+            "zz_float_cast" => {
+                let c = if t == "int64_t" {
+                    format!("(double)({c})")
+                } else {
+                    c
+                };
+                Some(format!("(double)({c})"))
+            }
+            "zz_int_cast" => {
+                // int(X) where X is int64_t → just X (identity).
+                // int(X) where X is double → saturating truncation (matches
+                // `zz_int_cast`/the VM for NaN, ±∞ and out-of-range values).
+                if t == "int64_t" {
+                    Some(c)
+                } else {
+                    Some(format!("(int64_t)(zz_i64_sat({c}))"))
+                }
+            }
+            _ => None,
+        }
     }
 
     pub(crate) fn emit_call(
@@ -4148,6 +4321,21 @@ impl Lowerer {
                     }
                 }
             }
+            // Math native inlining: raw libm calls on unboxed doubles,
+            // bypassing the zz_value box/unbox round-trip through zz_call_nativeN.
+            if let Some(c_expr) = Self::try_emit_math_native_raw(effective_name, args, names) {
+                return c_expr;
+            }
+            // Cast inlining: `float(int)` → `(double)(x)`, `int(float)` →
+            // `(int64_t)(x)` — bypass the zz_value tag-dispatch + Option
+            // round-trip through zz_int_cast/zz_float_cast. Only fires when
+            // the argument is provably scalar (int64_t or double), which is
+            // the case for `float(px)`, `float(width)`, etc. in the mandel
+            // loop. `int()` used without `??` still needs the boxed Option
+            // path; `int(X) ?? default` is handled in the Elvis arm below.
+            if let Some(c_expr) = Self::try_emit_cast_raw(effective_name, args, names) {
+                return c_expr;
+            }
             return match arg_items.len() {
                 1 => {
                     let a = &arg_items[0];
@@ -4654,6 +4842,8 @@ impl Lowerer {
                 .first()
                 .or_else(|| named.first().map(|(_, v)| v))
                 .expect("enum payload expr");
+            // `zz_object_set_field` below retains the payload.
+            self.fmt_borrow.set(true);
             let raw = self.emit_expr(payload_expr, names, out);
             // Box scalars AND unboxed structs (a struct payload lowers to
             // a raw C struct — same two-step boxing as struct fields and
@@ -4804,6 +4994,8 @@ impl Lowerer {
                     ));
                     continue;
                 }
+                // `zz_object_set_field` retains the value.
+                self.fmt_borrow.set(true);
                 let fval = self.emit_expr(fexpr, names, out);
                 // Box the field value if it's a scalar type. The boxer
                 // sees the source expression (not just the emitted text)
@@ -4875,6 +5067,8 @@ impl Lowerer {
                     continue;
                 }
             }
+            // `zz_object_set_field` retains the value.
+            self.fmt_borrow.set(true);
             let fval = self.emit_expr(&access, names, out);
             let boxed = Self::box_struct_field_expr(&access, fval, fty, names);
             out.push_str(&format!(
@@ -4966,6 +5160,8 @@ impl Lowerer {
                             continue;
                         }
                     }
+                    // `zz_object_set_field` retains the value.
+                    self.fmt_borrow.set(true);
                     let fval = self.emit_expr(fexpr, names, out);
                     let boxed_fval = Self::box_struct_field_expr(fexpr, fval, fty, names);
                     out.push_str(&format!(
@@ -5763,6 +5959,9 @@ impl Lowerer {
             }
             return;
         }
+        // `zz_vec_append` retains the element, so an f-string builder stays
+        // bare (its own cleanup releases the builder share).
+        self.fmt_borrow.set(true);
         let item_val = self.emit_expr(item, names, out);
         // Auto-box if needed (historical Ident fast path, preserved).
         // For a refcounted Ident, `emit_expr` already produced `zz_clone(cid)`
@@ -6047,12 +6246,13 @@ impl Lowerer {
         if n == 0 {
             out.push_str(&format!("    zz_value {arr} = zz_array_new();\n"));
         } else {
-            // Build the binds array via zz_vec_push chain (copy-on-write
-            // safe: each push returns the new array).
+            // Build the binds array with the move-aware push: `arr` is
+            // reassigned, so it grows in place instead of duplicating on
+            // every element.
             out.push_str(&format!("    zz_value {arr} = zz_array_new();\n"));
             for bv in &bvars {
                 out.push_str(&format!(
-                    "    {{ int _e = 0; {arr} = zz_vec_push({arr}, {bv}, &_e); }}\n"
+                    "    {{ int _e = 0; {arr} = zz_vec_push_take({arr}, {bv}, &_e); }}\n"
                 ));
             }
         }

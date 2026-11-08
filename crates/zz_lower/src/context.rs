@@ -591,14 +591,14 @@ pub struct Lowerer {
     /// arguments should be passed bare instead of `zz_clone`d — a clone
     /// would bump the refcount with nothing to drop it, leaking the share.
     pub(crate) native_call_args: std::cell::Cell<bool>,
-    /// C code to emit before the next `for(...)` loop header, accumulated
-    /// by hoisting optimizations during body lowering. Consumed by
-    /// `emit_for`.
-    pub(crate) loop_pre_code: std::cell::RefCell<Vec<String>>,
-    /// C code to emit after the next `for(...)` loop closing braces,
-    /// accumulated by hoisting optimizations during body lowering.
-    /// Consumed by `emit_for`.
-    pub(crate) loop_post_code: std::cell::RefCell<Vec<String>>,
+    /// Set for the next `emit_expr` when the value is consumed by a
+    /// *retaining* runtime helper (`zz_vec_append`, `zz_object_set_field`)
+    /// rather than taking ownership. An f-string builder is a scoped local
+    /// with `cleanup(zz_release)`, so it must be passed bare here: the
+    /// helper retains its own share and the cleanup drops the builder's.
+    /// Returning an owned `zz_clone` instead would leak that share.
+    /// Consumed at `emit_expr` entry so nested expressions never see it.
+    pub(crate) fmt_borrow: std::cell::Cell<bool>,
     /// When set, flat-array push skips the per-iteration grow guard
     /// because `emit_for` pre-reserved capacity for the whole loop.
     pub(crate) skip_flat_push_grow: std::cell::Cell<bool>,
@@ -723,8 +723,7 @@ impl Lowerer {
             loop_depth: std::cell::Cell::new(0),
             loop_scope_depth: std::cell::Cell::new(0),
             native_call_args: std::cell::Cell::new(false),
-            loop_pre_code: std::cell::RefCell::new(Vec::new()),
-            loop_post_code: std::cell::RefCell::new(Vec::new()),
+            fmt_borrow: std::cell::Cell::new(false),
             skip_flat_push_grow: std::cell::Cell::new(false),
             accumulated_names: std::cell::RefCell::new(std::collections::HashSet::new()),
         };
@@ -2647,8 +2646,33 @@ pub(crate) fn scalar_operand_type(e: &Expr, names: &NameCtx) -> Option<&'static 
             // zero divisor is excluded (boxed div-by-zero guard).
             // `&`/`|`/`^` fold the same way (pure int64, no UB);
             // shifts never fold (they need the masked boxed path).
-            use zz_frontend::ast::BinOp::{Add, BitAnd, BitOr, BitXor, Mul, Rem, Sub};
+            use zz_frontend::ast::BinOp::{Add, BitAnd, BitOr, BitXor, Elvis, Mul, Rem, Sub};
             match op {
+                Elvis => {
+                    // `int(X) ?? default` with scalar X: `zz_int_cast` always
+                    // returns `Some` for int/float inputs, so the fallback is
+                    // unreachable and the result is a raw int64_t. Mirrors
+                    // the emission fast path in `emit_expr`'s Elvis arm.
+                    // The fallback expression must still have a raw int type
+                    // so the declared result type matches the raw conversion.
+                    let Expr::Call { callee, args, .. } = left.as_ref() else {
+                        return None;
+                    };
+                    let Expr::Ident { name, .. } = callee.as_ref() else {
+                        return None;
+                    };
+                    if !(name == "int" || name == "std.int") || args.len() != 1 {
+                        return None;
+                    }
+                    let t = scalar_operand_type(&args[0], names)?;
+                    if !(t == "int64_t" || t == "double") {
+                        return None;
+                    }
+                    if scalar_operand_type(right, names) != Some("int64_t") {
+                        return None;
+                    }
+                    Some("int64_t")
+                }
                 Add | Sub | Mul | Rem | BitAnd | BitOr | BitXor => {
                     if matches!(op, Rem) && matches!(right.as_ref(), Expr::Int { value: 0, .. }) {
                         return None;
@@ -3005,6 +3029,31 @@ pub(crate) fn scalar_operand_c(e: &Expr, names: &NameCtx) -> Option<String> {
         Expr::Binary {
             op, left, right, ..
         } => {
+            // `int(X) ?? default` with scalar X — mirror the type arm:
+            // truncate X to int64_t (identity when already an int).
+            if matches!(op, zz_frontend::ast::BinOp::Elvis) {
+                if scalar_operand_type(e, names) != Some("int64_t") {
+                    return None;
+                }
+                let Expr::Call { callee, args, .. } = left.as_ref() else {
+                    return None;
+                };
+                let Expr::Ident { name, .. } = callee.as_ref() else {
+                    return None;
+                };
+                if !(name == "int" || name == "std.int") || args.len() != 1 {
+                    return None;
+                }
+                let arg = &args[0];
+                let inner = scalar_operand_c(arg, names)?;
+                return match scalar_operand_type(arg, names) {
+                    Some("int64_t") => Some(inner),
+                    // Outer `(int64_t)(` keeps every raw-scalar detector in
+                    // this crate treating the result as an unboxed int.
+                    Some("double") => Some(format!("(int64_t)(zz_i64_sat({inner}))")),
+                    _ => None,
+                };
+            }
             // Must agree with scalar_operand_type's Binary fold: only
             // emit raw C when the fold classified this node.
             let t = scalar_operand_type(e, names)?;

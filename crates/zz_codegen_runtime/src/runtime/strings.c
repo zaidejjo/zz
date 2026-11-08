@@ -2689,6 +2689,19 @@ void zz_str_append_bool(zz_value *a, bool b) {
     else zz_str_append_lit(a, "false", 5);
 }
 
+// Append a double canonically into the string buffer: one grow + memcpy,
+// no zz_value temp, no arena staging, no release. Used by the
+// `s = s + ... + str(f)` append-chain fast path. Matches
+// `zz_to_str(zz_float(x))` byte for byte.
+void zz_str_append_double(zz_value *a, double x) {
+    char stack[ZZ_FLOAT_STACK];
+    char *heap = NULL;
+    size_t n = 0;
+    const char *s = zz_canonical_double(x, stack, &heap, &n);
+    zz_str_append_lit(a, s, n);
+    free(heap);
+}
+
 // typeof(v) — return type name as string.
 // zz_str(v) — cast to string (display semantics: unwraps Option).
 zz_value zz_str_cast(zz_value v, int *err) {

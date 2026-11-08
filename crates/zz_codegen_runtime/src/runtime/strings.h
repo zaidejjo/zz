@@ -192,6 +192,8 @@ void zz_str_append_lit(zz_value *a, const char *lit, size_t len);
 // Fast path for `str(i)` terms in `s = s + ...` append chains.
 void zz_str_append_int(zz_value *a, int64_t n);
 void zz_str_append_bool(zz_value *a, bool b);
+// Append a double canonically (matches `zz_to_str(zz_float(x))`).
+void zz_str_append_double(zz_value *a, double x);
 
 // ---- str natives -------------------------------------------------------
 zz_value zz_str_length(zz_value s, int *err);

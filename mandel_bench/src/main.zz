@@ -1,0 +1,67 @@
+import std.fs
+import std.math
+import std.time
+
+func mandel(cx: float, cy: float, max_iter: int) -> float {
+    zx := 0.0
+    zy := 0.0
+    i := 0
+    while i < max_iter && (zx ** 2 + zy ** 2) <= 4.0 {
+        xtemp := zx * zx - zy * zy + cx
+        zy = 2.0 * zx * zy + cy
+        zx = xtemp
+        i = i + 1
+    }
+    if i == max_iter {
+        return float(max_iter)
+    }
+    log_zn := math.log(zx * zx + zy * zy) / math.log(2.0)
+    nu := math.log(log_zn) / math.log(2.0)
+    return float(i) + 1.0 - nu
+}
+
+func main() -> Result<int, str> {
+    width := 1000
+    height := 800
+    max_iter := 255
+    t0 := time.now_ms()
+    match fs.open("mandel.ppm", "w") {
+        .ok(f) => {
+            match f.write_chunk("P3\n{width} {height}\n255\n") {
+                .ok(_) => {
+                }
+                .err(e) => return .err(e)
+            }
+            for py in 0..height {
+                row := ""
+                for px in 0..width {
+                    cx := (float(px) / float(width)) * 3.5 - 2.5
+                    cy := (float(py) / float(height)) * 2.0 - 1.0
+                    iter := mandel(cx, cy, max_iter)
+                    r := (math.sin(iter * 0.1) + 1.0) * 127.5
+                    g := (math.sin(iter * 0.1 + 2.0) + 1.0) * 127.5
+                    b := (math.sin(iter * 0.1 + 4.0) + 1.0) * 127.5
+                    r = math.clamp(r, 0.0, 255.0)
+                    g = math.clamp(g, 0.0, 255.0)
+                    b = math.clamp(b, 0.0, 255.0)
+                    row = row + "{int(r) ?? 0} {int(g) ?? 0} {int(b) ?? 0} "
+                }
+                row = row + "\n"
+                match f.write_chunk(row) {
+                    .ok(_) => {
+                    }
+                    .err(e) => {
+                        f.close()?
+                        return .err(e)
+                    }
+                }
+            }
+            f.flush()?
+            f.close()?
+        }
+        .err(e) => return .err(e)
+    }
+    t1 := time.now_ms()
+    println("wrote mandel.ppm ({width}x{height}) in {t1 - t0}ms")
+    return .ok(0)
+}
