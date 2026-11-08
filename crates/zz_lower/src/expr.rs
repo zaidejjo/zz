@@ -281,6 +281,9 @@ impl Lowerer {
         // observes it — nested expressions (tuple elements, call
         // arguments, block contents) always see false.
         let stmt_direct = self.stmt_direct.replace(false);
+        // Consume the borrow hint here so only the expression it was set
+        // for observes it; nested expressions always see `false`.
+        let fmt_borrow = self.fmt_borrow.replace(false);
         match e {
             Expr::Int { value, .. } => format!("zz_int({value})"),
             Expr::Float { value, .. } => {
@@ -357,7 +360,21 @@ impl Lowerer {
                     }
                 }
                 out.push_str(&format!("    {fvar} = zz_str_freeze({fvar});\n"));
-                fvar
+                // The builder above owns one share via its scope cleanup.
+                // Consumers that *take* ownership (return, let binding,
+                // `zz_assign`, `zz_index_set`) must get their own retained
+                // share, otherwise the cleanup frees the value while the
+                // consumer still points at it (use-after-free / heap
+                // corruption). Retaining consumers — native arguments,
+                // container elements (`zz_vec_append`) and boxed struct
+                // fields (`zz_object_set_field`) — instead want the bare
+                // builder: they clone internally, so an extra retain would
+                // leak. `fmt_borrow` marks those retaining positions.
+                if fmt_borrow || self.native_call_args.get() {
+                    fvar
+                } else {
+                    format!("zz_clone({fvar})")
+                }
             }
             Expr::Ident { name, .. } => match names.lookup(name) {
                 Some(cid) => {
@@ -2016,6 +2033,8 @@ impl Lowerer {
                     let xcid = names.enter(&var.name);
                     out.push_str(&format!("        zz_value {xcid} = zz_int(__ci);\n"));
                     let mut body_scratch = String::new();
+                    // `zz_vec_append` below retains the element.
+                    self.fmt_borrow.set(true);
                     let bv = self.emit_expr(body, names, &mut body_scratch);
                     let bv = box_scalar_operand(body, names, &bv);
                     if let Some(c) = filter {
@@ -4823,6 +4842,8 @@ impl Lowerer {
                 .first()
                 .or_else(|| named.first().map(|(_, v)| v))
                 .expect("enum payload expr");
+            // `zz_object_set_field` below retains the payload.
+            self.fmt_borrow.set(true);
             let raw = self.emit_expr(payload_expr, names, out);
             // Box scalars AND unboxed structs (a struct payload lowers to
             // a raw C struct — same two-step boxing as struct fields and
@@ -4973,6 +4994,8 @@ impl Lowerer {
                     ));
                     continue;
                 }
+                // `zz_object_set_field` retains the value.
+                self.fmt_borrow.set(true);
                 let fval = self.emit_expr(fexpr, names, out);
                 // Box the field value if it's a scalar type. The boxer
                 // sees the source expression (not just the emitted text)
@@ -5044,6 +5067,8 @@ impl Lowerer {
                     continue;
                 }
             }
+            // `zz_object_set_field` retains the value.
+            self.fmt_borrow.set(true);
             let fval = self.emit_expr(&access, names, out);
             let boxed = Self::box_struct_field_expr(&access, fval, fty, names);
             out.push_str(&format!(
@@ -5135,6 +5160,8 @@ impl Lowerer {
                             continue;
                         }
                     }
+                    // `zz_object_set_field` retains the value.
+                    self.fmt_borrow.set(true);
                     let fval = self.emit_expr(fexpr, names, out);
                     let boxed_fval = Self::box_struct_field_expr(fexpr, fval, fty, names);
                     out.push_str(&format!(
@@ -5932,6 +5959,9 @@ impl Lowerer {
             }
             return;
         }
+        // `zz_vec_append` retains the element, so an f-string builder stays
+        // bare (its own cleanup releases the builder share).
+        self.fmt_borrow.set(true);
         let item_val = self.emit_expr(item, names, out);
         // Auto-box if needed (historical Ident fast path, preserved).
         // For a refcounted Ident, `emit_expr` already produced `zz_clone(cid)`
@@ -6216,12 +6246,13 @@ impl Lowerer {
         if n == 0 {
             out.push_str(&format!("    zz_value {arr} = zz_array_new();\n"));
         } else {
-            // Build the binds array via zz_vec_push chain (copy-on-write
-            // safe: each push returns the new array).
+            // Build the binds array with the move-aware push: `arr` is
+            // reassigned, so it grows in place instead of duplicating on
+            // every element.
             out.push_str(&format!("    zz_value {arr} = zz_array_new();\n"));
             for bv in &bvars {
                 out.push_str(&format!(
-                    "    {{ int _e = 0; {arr} = zz_vec_push({arr}, {bv}, &_e); }}\n"
+                    "    {{ int _e = 0; {arr} = zz_vec_push_take({arr}, {bv}, &_e); }}\n"
                 ));
             }
         }

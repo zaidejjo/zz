@@ -591,6 +591,14 @@ pub struct Lowerer {
     /// arguments should be passed bare instead of `zz_clone`d — a clone
     /// would bump the refcount with nothing to drop it, leaking the share.
     pub(crate) native_call_args: std::cell::Cell<bool>,
+    /// Set for the next `emit_expr` when the value is consumed by a
+    /// *retaining* runtime helper (`zz_vec_append`, `zz_object_set_field`)
+    /// rather than taking ownership. An f-string builder is a scoped local
+    /// with `cleanup(zz_release)`, so it must be passed bare here: the
+    /// helper retains its own share and the cleanup drops the builder's.
+    /// Returning an owned `zz_clone` instead would leak that share.
+    /// Consumed at `emit_expr` entry so nested expressions never see it.
+    pub(crate) fmt_borrow: std::cell::Cell<bool>,
     /// When set, flat-array push skips the per-iteration grow guard
     /// because `emit_for` pre-reserved capacity for the whole loop.
     pub(crate) skip_flat_push_grow: std::cell::Cell<bool>,
@@ -715,6 +723,7 @@ impl Lowerer {
             loop_depth: std::cell::Cell::new(0),
             loop_scope_depth: std::cell::Cell::new(0),
             native_call_args: std::cell::Cell::new(false),
+            fmt_borrow: std::cell::Cell::new(false),
             skip_flat_push_grow: std::cell::Cell::new(false),
             accumulated_names: std::cell::RefCell::new(std::collections::HashSet::new()),
         };

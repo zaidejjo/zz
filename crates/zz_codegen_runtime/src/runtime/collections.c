@@ -832,11 +832,22 @@ void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err) {
     switch (obj->tag) {
     case ZZ_ARRAY:
         zz_array_set(obj->arr, idx, item, err);
-        zz_release(&item);
+        if (err && *err) {
+            // Not stored (out of bounds / bad index): drop the caller's
+            // transferred share.
+            zz_release(&item);
+            return;
+        }
+        // `zz_array_set`/`zz_dict_set` adopt string values (zz_assign
+        // moves ZZ_STR/ZZ_MUTABLE_STR without retaining); releasing the
+        // item here would free the value the container just stored.
+        // Other refcounted tags are retained by zz_assign, so the
+        // release below only drops the caller's share.
+        if (item.tag != ZZ_STR && item.tag != ZZ_MUTABLE_STR) zz_release(&item);
         return;
     case ZZ_DICT:
         zz_dict_set(obj->dict, idx, item);
-        zz_release(&item);
+        if (item.tag != ZZ_STR && item.tag != ZZ_MUTABLE_STR) zz_release(&item);
         if (err) *err = 0;
         return;
     default:
@@ -1374,12 +1385,10 @@ zz_value zz_vec_len(zz_value v, int *err) {
 // array and the original is left untouched.
 zz_value zz_vec_push(zz_value arr, zz_value item, int *err) {
     if (arr.tag != ZZ_ARRAY) return zz_unit();
-    // Uniquely owned heap buffer: push in place, return the same handle.
-    if (arr.arr && arr.arr->refs == 1) {
-        zz_array_push(arr.arr, item);
-        return arr;
-    }
-    // Shared or sentinel buffer: copy-on-write, original left untouched.
+    // Value semantics: `vec.push(a, x)` returns a *new* array and leaves
+    // `a` untouched (the VM behaves this way, and a binding may keep
+    // using `a`). The in-place fast path is `zz_vec_push_take`, used only
+    // when the caller transfers its share (`x = vec.push(x, e)`).
     zz_value out = zz_array_dup(arr.arr);
     zz_array *a = out.arr;
     if (a->len >= a->cap) {
