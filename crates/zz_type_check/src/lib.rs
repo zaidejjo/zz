@@ -443,6 +443,21 @@ pub trait TypeCheckOps {
         span: Span,
     ) -> Option<(Pattern, Type)>;
 
+    /// Handle `.some(x)` pattern: binds payload name to Option's inner type.
+    fn bind_pattern_variant_option(
+        &mut self,
+        inner: &Type,
+        arg: &Option<Box<Pattern>>,
+        span: Span,
+    ) -> Option<(Pattern, Type)>;
+
+    /// Handle `.none` pattern: rejects any argument.
+    fn bind_pattern_variant_none(
+        &mut self,
+        arg: &Option<Box<Pattern>>,
+        span: Span,
+    ) -> Option<(Pattern, Type)>;
+
     fn check_exhaustive(&mut self, st: &Type, arms: &[zz_span_ast::ast::MatchArm], span: Span);
 
     /// True if `pat` matches every value of its type (wildcard / binding /
@@ -4018,41 +4033,8 @@ impl TypeCheckOps for Checker {
         }
         let rt = self.unifier.resolve(ty);
         let inner = match (&rt, name) {
-            (Type::Option(inner), "some") => match arg {
-                Some(p) => Some((p.as_ref().clone(), (**inner).clone())),
-                None => {
-                    self.errors.push(
-                        error_at("`.some` pattern requires an argument", span)
-                            .with_note(
-                                "`.some` always carries a value — write `.some(v)` to use it or `.some(_)` to ignore it",
-                            )
-                            .with_note("run `zz fix` to rewrite this automatically")
-                            .with_fixit(FixIt::safe(
-                                span,
-                                ".some(_)",
-                                "add wildcard payload",
-                            )),
-                    );
-                    None
-                }
-            },
-            (Type::Option(_), "none") => {
-                if arg.is_some() {
-                    // The fixit only applies to a wildcard payload:
-                    // dropping `.none(x)` would orphan uses of `x`
-                    // in the arm body, so named payloads get the
-                    // error + notes and the user edits by hand.
-                    let mut diag = error_at("`.none` pattern takes no argument", span)
-                        .with_note("`.none` carries no value — write `.none`");
-                    if matches!(arg.as_deref(), Some(Pattern::Wildcard { .. })) {
-                        diag = diag
-                            .with_note("run `zz fix` to rewrite this automatically")
-                            .with_fixit(FixIt::safe(span, ".none", "drop payload"));
-                    }
-                    self.errors.push(diag);
-                }
-                None
-            }
+            (Type::Option(inner), "some") => self.bind_pattern_variant_option(inner, arg, span),
+            (Type::Option(_), "none") => self.bind_pattern_variant_none(arg, span),
             (Type::Result(t, _), "ok") => match arg {
                 Some(p) => Some((p.as_ref().clone(), (**t).clone())),
                 None => {
@@ -4204,6 +4186,56 @@ impl TypeCheckOps for Checker {
             // nothing to suppress cascades.
             None => None,
         }
+    }
+
+    /// Handle `.some(x)` pattern: binds payload name to Option's inner type.
+    fn bind_pattern_variant_option(
+        &mut self,
+        inner: &Type,
+        arg: &Option<Box<Pattern>>,
+        span: Span,
+    ) -> Option<(Pattern, Type)> {
+        match arg {
+            Some(p) => Some((p.as_ref().clone(), (*inner).clone())),
+            None => {
+                self.errors.push(
+                    error_at("`.some` pattern requires an argument", span)
+                        .with_note(
+                            "`.some` always carries a value — write `.some(v)` to use it or `.some(_)` to ignore it",
+                        )
+                        .with_note("run `zz fix` to rewrite this automatically")
+                        .with_fixit(FixIt::safe(
+                            span,
+                            ".some(_)",
+                            "add wildcard payload",
+                        )),
+                );
+                None
+            }
+        }
+    }
+
+    /// Handle `.none` pattern: rejects any argument.
+    fn bind_pattern_variant_none(
+        &mut self,
+        arg: &Option<Box<Pattern>>,
+        span: Span,
+    ) -> Option<(Pattern, Type)> {
+        if arg.is_some() {
+            // The fixit only applies to a wildcard payload:
+            // dropping `.none(x)` would orphan uses of `x`
+            // in the arm body, so named payloads get the
+            // error + notes and the user edits by hand.
+            let mut diag = error_at("`.none` pattern takes no argument", span)
+                .with_note("`.none` carries no value — write `.none`");
+            if matches!(arg.as_deref(), Some(Pattern::Wildcard { .. })) {
+                diag = diag
+                    .with_note("run `zz fix` to rewrite this automatically")
+                    .with_fixit(FixIt::safe(span, ".none", "drop payload"));
+            }
+            self.errors.push(diag);
+        }
+        None
     }
 
     fn check_exhaustive(&mut self, st: &Type, arms: &[zz_span_ast::ast::MatchArm], span: Span) {
