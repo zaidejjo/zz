@@ -433,6 +433,16 @@ pub trait TypeCheckOps {
         ty: &Type,
     );
 
+    /// Handle `.Variant` pattern on an enum scrutinee.
+    fn bind_pattern_variant_enum(
+        &mut self,
+        ename: &str,
+        vname: &str,
+        eargs: &[Type],
+        arg: &Option<Box<Pattern>>,
+        span: Span,
+    ) -> Option<(Pattern, Type)>;
+
     fn check_exhaustive(&mut self, st: &Type, arms: &[zz_span_ast::ast::MatchArm], span: Span);
 
     /// True if `pat` matches every value of its type (wildcard / binding /
@@ -4080,41 +4090,7 @@ impl TypeCheckOps for Checker {
                 }
             },
             (Type::Enum(ename, eargs), vname) => {
-                match self.enum_variant_payload(ename, vname, span) {
-                    Some(Some(pty)) => {
-                        // Substitute the scrutinee's arguments for
-                        // the enum's parameters (`Box<int>` + `T`
-                        // → `int`), exactly like generic struct
-                        // field access.
-                        let inner = self.subst_enum_payload(ename, eargs, &pty);
-                        match arg {
-                            Some(p) => Some((p.as_ref().clone(), inner)),
-                            None => {
-                                self.errors.push(error_at(
-                                    format!(
-                                        "`.{vname}` pattern requires an argument (variant `{ename}.{vname}` holds a value)"
-                                    ),
-                                    span,
-                                ));
-                                None
-                            }
-                        }
-                    }
-                    Some(None) => {
-                        if arg.is_some() {
-                            self.errors.push(error_at(
-                                format!(
-                                    "`.{vname}` pattern takes no argument (variant `{ename}.{vname}` holds no value)"
-                                ),
-                                span,
-                            ));
-                        }
-                        None
-                    }
-                    // Unknown variant: already reported; bind
-                    // nothing to suppress cascades.
-                    None => None,
-                }
+                self.bind_pattern_variant_enum(ename, vname, eargs, arg, span)
             }
             (Type::Var(_), _) => arg
                 .as_ref()
@@ -4154,9 +4130,7 @@ impl TypeCheckOps for Checker {
                     (Type::Result(_, _), _) => {
                         Some("Result patterns are `.ok(x)` / `.err(e)`".to_string())
                     }
-                    (Type::Bool, _) => {
-                        Some("use `true` / `false` patterns for `bool`".to_string())
-                    }
+                    (Type::Bool, _) => Some("use `true` / `false` patterns for `bool`".to_string()),
                     _ => None,
                 };
                 if let Some(h) = hint {
@@ -4183,6 +4157,52 @@ impl TypeCheckOps for Checker {
         };
         if let Some((p, inner)) = inner {
             self.bind_pattern(&p, &inner);
+        }
+    }
+
+    /// Handle `.Variant` pattern on an enum scrutinee.
+    fn bind_pattern_variant_enum(
+        &mut self,
+        ename: &str,
+        vname: &str,
+        eargs: &[Type],
+        arg: &Option<Box<Pattern>>,
+        span: Span,
+    ) -> Option<(Pattern, Type)> {
+        match self.enum_variant_payload(ename, vname, span) {
+            Some(Some(pty)) => {
+                // Substitute the scrutinee's arguments for
+                // the enum's parameters (`Box<int>` + `T`
+                // → `int`), exactly like generic struct
+                // field access.
+                let inner = self.subst_enum_payload(ename, eargs, &pty);
+                match arg {
+                    Some(p) => Some((p.as_ref().clone(), inner)),
+                    None => {
+                        self.errors.push(error_at(
+                            format!(
+                                "`.{vname}` pattern requires an argument (variant `{ename}.{vname}` holds a value)"
+                            ),
+                            span,
+                        ));
+                        None
+                    }
+                }
+            }
+            Some(None) => {
+                if arg.is_some() {
+                    self.errors.push(error_at(
+                        format!(
+                            "`.{vname}` pattern takes no argument (variant `{ename}.{vname}` holds no value)"
+                        ),
+                        span,
+                    ));
+                }
+                None
+            }
+            // Unknown variant: already reported; bind
+            // nothing to suppress cascades.
+            None => None,
         }
     }
 
