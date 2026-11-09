@@ -1491,31 +1491,398 @@ zz_value zz_str_length(zz_value s, int *err) {
     return (zz_value){ZZ_INT, {.i = (int64_t)zz_str_char_len(s.s)}};
 }
 
-// str.lower(s) — lowercase copy.
+// --- Unicode case folding helpers (matching VM's Rust to_lowercase/to_uppercase) ---
+
+// Decode one UTF-8 sequence from `p` (with `remain` bytes available).
+// Returns the Unicode scalar value and sets *seq_len to the byte length.
+// Invalid bytes resolve to the raw byte value (never crashes).
+static inline uint32_t zz_utf8_decode(const unsigned char *p, size_t remain, size_t *seq_len) {
+    size_t l = zz_utf8_seq_len(p, remain);
+    *seq_len = l;
+    if (l == 1) return p[0];
+    if (l == 2) {
+        return ((uint32_t)(p[0] & 0x1F) << 6) | (uint32_t)(p[1] & 0x3F);
+    }
+    if (l == 3) {
+        return ((uint32_t)(p[0] & 0x0F) << 12) |
+               ((uint32_t)(p[1] & 0x3F) << 6) |
+               (uint32_t)(p[2] & 0x3F);
+    }
+    // l == 4
+    return ((uint32_t)(p[0] & 0x07) << 18) |
+           ((uint32_t)(p[1] & 0x3F) << 12) |
+           ((uint32_t)(p[2] & 0x3F) << 6) |
+           (uint32_t)(p[3] & 0x3F);
+}
+
+// Encode Unicode scalar value `v` as UTF-8 into `buf`. Returns bytes written.
+static inline size_t zz_utf8_encode(uint32_t v, char *buf) {
+    if (v < 0x80) {
+        buf[0] = (char)v;
+        return 1;
+    }
+    if (v < 0x800) {
+        buf[0] = (char)(0xC0 | (v >> 6));
+        buf[1] = (char)(0x80 | (v & 0x3F));
+        return 2;
+    }
+    if (v < 0x10000) {
+        buf[0] = (char)(0xE0 | (v >> 12));
+        buf[1] = (char)(0x80 | ((v >> 6) & 0x3F));
+        buf[2] = (char)(0x80 | (v & 0x3F));
+        return 3;
+    }
+    buf[0] = (char)(0xF0 | (v >> 18));
+    buf[1] = (char)(0x80 | ((v >> 12) & 0x3F));
+    buf[2] = (char)(0x80 | ((v >> 6) & 0x3F));
+    buf[3] = (char)(0x80 | (v & 0x3F));
+    return 4;
+}
+
+// Case-folding entry: maps a Unicode code point to its lowercase and
+// uppercase equivalents. `lower_len`/`upper_len` are UTF-8 byte lengths
+// of the mapped result (1..3 bytes; most mappings are 1:1).
+struct case_fold {
+    uint32_t cp;
+    uint32_t lower;
+    uint8_t lower_len;
+    uint32_t upper;
+    uint8_t upper_len;
+};
+
+// Latin-1 Supplement case pairs (U+00C0-U+00FF). Mostly ±0x20, with
+// exceptions handled individually below. Index = cp - 0xC0.
+static const struct case_fold latin1_supplement[32] = {
+    {0x00C0, 0x00E0, 2, 0x00C0, 2}, {0x00C1, 0x00E1, 2, 0x00C1, 2},
+    {0x00C2, 0x00E2, 2, 0x00C2, 2}, {0x00C3, 0x00E3, 2, 0x00C3, 2},
+    {0x00C4, 0x00E4, 2, 0x00C4, 2}, {0x00C5, 0x00E5, 2, 0x00C5, 2},
+    {0x00C6, 0x00E6, 2, 0x00C6, 2}, {0x00C7, 0x00E7, 2, 0x00C7, 2},
+    {0x00C8, 0x00E8, 2, 0x00C8, 2}, {0x00C9, 0x00E9, 2, 0x00C9, 2},
+    {0x00CA, 0x00EA, 2, 0x00CA, 2}, {0x00CB, 0x00EB, 2, 0x00CB, 2},
+    {0x00CC, 0x00EC, 2, 0x00CC, 2}, {0x00CD, 0x00ED, 2, 0x00CD, 2},
+    {0x00CE, 0x00EE, 2, 0x00CE, 2}, {0x00CF, 0x00EF, 2, 0x00CF, 2},
+    {0x00D0, 0x00F0, 2, 0x00D0, 2}, {0x00D1, 0x00F1, 2, 0x00D1, 2},
+    {0x00D2, 0x00F2, 2, 0x00D2, 2}, {0x00D3, 0x00F3, 2, 0x00D3, 2},
+    {0x00D4, 0x00F4, 2, 0x00D4, 2}, {0x00D5, 0x00F5, 2, 0x00D5, 2},
+    {0x00D6, 0x00F6, 2, 0x00D6, 2}, {0x00D7, 0x00D7, 2, 0x00D7, 2}, // × no case
+    {0x00D8, 0x00F8, 2, 0x00D8, 2}, {0x00D9, 0x00F9, 2, 0x00D9, 2},
+    {0x00DA, 0x00FA, 2, 0x00DA, 2}, {0x00DB, 0x00FB, 2, 0x00DB, 2},
+    {0x00DC, 0x00FC, 2, 0x00DC, 2}, {0x00DD, 0x00FD, 2, 0x00DD, 2},
+    {0x00DE, 0x00FE, 2, 0x00DE, 2}, {0x00DF, 0x0053, 2, 0x00DF, 2}, // ß → SS (upper: 2 chars)
+    {0x00E0, 0x00E0, 2, 0x00C0, 2}, {0x00E1, 0x00E1, 2, 0x00C1, 2},
+    {0x00E2, 0x00E2, 2, 0x00C2, 2}, {0x00E3, 0x00E3, 2, 0x00E3, 2},
+};
+
+// Latin Extended-A selected case pairs (U+0100-U+017F).
+static const struct case_fold latin_extended_a[] = {
+    {0x0100, 0x0101, 2, 0x0100, 2}, {0x0102, 0x0103, 2, 0x0102, 2},
+    {0x0104, 0x0105, 2, 0x0104, 2}, {0x0106, 0x0107, 2, 0x0106, 2},
+    {0x0108, 0x0109, 2, 0x0108, 2}, {0x010A, 0x010B, 2, 0x010A, 2},
+    {0x010C, 0x010D, 2, 0x010C, 2}, {0x010E, 0x010F, 2, 0x010E, 2},
+    {0x0110, 0x0111, 2, 0x0110, 2}, {0x0112, 0x0113, 2, 0x0112, 2},
+    {0x0114, 0x0115, 2, 0x0114, 2}, {0x0116, 0x0117, 2, 0x0116, 2},
+    {0x0118, 0x0119, 2, 0x0118, 2}, {0x011A, 0x011B, 2, 0x011A, 2},
+    {0x011C, 0x011D, 2, 0x011C, 2}, {0x011E, 0x011F, 2, 0x011E, 2},
+    {0x0120, 0x0121, 2, 0x0120, 2}, {0x0122, 0x0123, 2, 0x0122, 2},
+    {0x0124, 0x0125, 2, 0x0124, 2}, {0x0126, 0x0127, 2, 0x0126, 2},
+    {0x0128, 0x0129, 2, 0x0128, 2}, {0x012A, 0x012B, 2, 0x012A, 2},
+    {0x012C, 0x012D, 2, 0x012C, 2}, {0x012E, 0x012F, 2, 0x012E, 2},
+    {0x0130, 0x0069, 1, 0x0130, 2}, // İ → i̇ (i + combining dot, 2 bytes lower)
+    {0x0132, 0x0133, 2, 0x0132, 2}, {0x0134, 0x0135, 2, 0x0134, 2},
+    {0x0136, 0x0137, 2, 0x0136, 2}, {0x0139, 0x013A, 2, 0x0139, 2},
+    {0x013B, 0x013C, 2, 0x013B, 2}, {0x013D, 0x013E, 2, 0x013D, 2},
+    {0x013F, 0x013F, 2, 0x013F, 2}, {0x0141, 0x0142, 2, 0x0141, 2},
+    {0x0143, 0x0144, 2, 0x0143, 2}, {0x0145, 0x0146, 2, 0x0145, 2},
+    {0x0147, 0x0148, 2, 0x0147, 2}, {0x0149, 0x0149, 2, 0x0149, 2}, // ļ no upper
+    {0x014C, 0x014D, 2, 0x014C, 2}, {0x014E, 0x014F, 2, 0x014E, 2},
+    {0x0150, 0x0151, 2, 0x0150, 2}, {0x0152, 0x0153, 2, 0x0152, 2},
+    {0x0154, 0x0155, 2, 0x0154, 2}, {0x0156, 0x0157, 2, 0x0156, 2},
+    {0x0158, 0x0159, 2, 0x0158, 2}, {0x015A, 0x015B, 2, 0x015A, 2},
+    {0x015C, 0x015D, 2, 0x015C, 2}, {0x015E, 0x015F, 2, 0x015E, 2},
+    {0x0160, 0x0161, 2, 0x0160, 2}, {0x0162, 0x0163, 2, 0x0162, 2},
+    {0x0164, 0x0165, 2, 0x0164, 2}, {0x0166, 0x0167, 2, 0x0166, 2},
+    {0x0168, 0x0169, 2, 0x0168, 2}, {0x016A, 0x016B, 2, 0x016A, 2},
+    {0x016C, 0x016D, 2, 0x016C, 2}, {0x016E, 0x016F, 2, 0x016E, 2},
+    {0x0170, 0x0171, 2, 0x0170, 2}, {0x0172, 0x0173, 2, 0x0172, 2},
+    {0x0174, 0x0175, 2, 0x0174, 2}, {0x0176, 0x0177, 2, 0x0176, 2},
+    {0x0178, 0x00FF, 2, 0x0178, 2}, // Ÿ → ÿ
+};
+
+// Greek case pairs (U+0391-U+03C9).
+static const struct case_fold greek[] = {
+    {0x0391, 0x03B1, 2, 0x0391, 2}, {0x0392, 0x03B2, 2, 0x0392, 2},
+    {0x0393, 0x03B3, 2, 0x0393, 2}, {0x0394, 0x03B4, 2, 0x0394, 2},
+    {0x0395, 0x03B5, 2, 0x0395, 2}, {0x0396, 0x03B6, 2, 0x0396, 2},
+    {0x0397, 0x03B7, 2, 0x0397, 2}, {0x0398, 0x03B8, 2, 0x0398, 2},
+    {0x0399, 0x03B9, 2, 0x0399, 2}, {0x039A, 0x03BA, 2, 0x039A, 2},
+    {0x039B, 0x03BB, 2, 0x039B, 2}, {0x039C, 0x03BC, 2, 0x039C, 2},
+    {0x039D, 0x03BD, 2, 0x039D, 2}, {0x039E, 0x03BE, 2, 0x039E, 2},
+    {0x039F, 0x03BF, 2, 0x039F, 2}, {0x03A0, 0x03C0, 2, 0x03A0, 2},
+    {0x03A1, 0x03C1, 2, 0x03A1, 2}, {0x03A3, 0x03C3, 2, 0x03A3, 2}, // Σ → σ
+    {0x03A4, 0x03C4, 2, 0x03A4, 2}, {0x03A5, 0x03C5, 2, 0x03A5, 2},
+    {0x03A6, 0x03C6, 2, 0x03A6, 2}, {0x03A7, 0x03C7, 2, 0x03A7, 2},
+    {0x03A8, 0x03C8, 2, 0x03A8, 2}, {0x03A9, 0x03C9, 2, 0x03A9, 2},
+    {0x03AA, 0x03CA, 2, 0x03AA, 2}, {0x03AB, 0x03BB, 2, 0x03AB, 2},
+    {0x0386, 0x03AC, 2, 0x0386, 2}, {0x0388, 0x03AD, 2, 0x0388, 2},
+    {0x0389, 0x03AE, 2, 0x0389, 2}, {0x038A, 0x03AF, 2, 0x038A, 2},
+    {0x038C, 0x03CC, 2, 0x038C, 2}, {0x038E, 0x03CD, 2, 0x038E, 2},
+    {0x038F, 0x03CF, 2, 0x038F, 2},
+    {0x03B1, 0x03B1, 2, 0x0391, 2}, {0x03B2, 0x03B2, 2, 0x0392, 2},
+    {0x03B3, 0x03B3, 2, 0x0393, 2}, {0x03B4, 0x03B4, 2, 0x0394, 2},
+    {0x03B5, 0x03B5, 2, 0x0395, 2}, {0x03B6, 0x03B6, 2, 0x0396, 2},
+    {0x03B7, 0x03B7, 2, 0x0397, 2}, {0x03B8, 0x03B8, 2, 0x0398, 2},
+    {0x03B9, 0x03B9, 2, 0x0399, 2}, {0x03BA, 0x03BA, 2, 0x039A, 2},
+    {0x03BB, 0x03BB, 2, 0x039B, 2}, {0x03BC, 0x03BC, 2, 0x039C, 2},
+    {0x03BD, 0x03BD, 2, 0x039D, 2}, {0x03BE, 0x03BE, 2, 0x039E, 2},
+    {0x03BF, 0x03BF, 2, 0x039F, 2}, {0x03C0, 0x03C0, 2, 0x03A0, 2},
+    {0x03C1, 0x03C1, 2, 0x03A1, 2}, {0x03C3, 0x03C3, 2, 0x03A3, 2}, // σ → Σ
+    {0x03C2, 0x03C2, 2, 0x03A3, 2}, // ς → Σ
+    {0x03C4, 0x03C4, 2, 0x03A4, 2}, {0x03C5, 0x03C5, 2, 0x03A5, 2},
+    {0x03C6, 0x03C6, 2, 0x03A6, 2}, {0x03C7, 0x03C7, 2, 0x03A7, 2},
+    {0x03C8, 0x03C8, 2, 0x03A8, 2}, {0x03C9, 0x03C9, 2, 0x03A9, 2},
+    {0x03CA, 0x03CA, 2, 0x03AA, 2}, {0x03CB, 0x03CB, 2, 0x03AB, 2},
+    {0x03CC, 0x03CC, 2, 0x038C, 2}, {0x03CD, 0x03CD, 2, 0x038E, 2},
+    {0x03CE, 0x03CE, 2, 0x038F, 2},
+};
+
+// Cyrillic case pairs (U+0410-U+044F).
+static const struct case_fold cyrillic[] = {
+    {0x0410, 0x0430, 2, 0x0410, 2}, {0x0411, 0x0431, 2, 0x0411, 2},
+    {0x0412, 0x0432, 2, 0x0412, 2}, {0x0413, 0x0433, 2, 0x0413, 2},
+    {0x0414, 0x0434, 2, 0x0414, 2}, {0x0415, 0x0435, 2, 0x0415, 2},
+    {0x0401, 0x0451, 2, 0x0401, 2}, // Ё ↔ ё
+    {0x0416, 0x0436, 2, 0x0416, 2}, {0x0417, 0x0437, 2, 0x0417, 2},
+    {0x0418, 0x0438, 2, 0x0418, 2}, {0x0419, 0x0439, 2, 0x0419, 2},
+    {0x041A, 0x043A, 2, 0x041A, 2}, {0x041B, 0x043B, 2, 0x041B, 2},
+    {0x041C, 0x043C, 2, 0x041C, 2}, {0x041D, 0x043D, 2, 0x041D, 2},
+    {0x041E, 0x043E, 2, 0x041E, 2}, {0x041F, 0x043F, 2, 0x041F, 2},
+    {0x0420, 0x0440, 2, 0x0420, 2}, {0x0421, 0x0441, 2, 0x0421, 2},
+    {0x0422, 0x0442, 2, 0x0422, 2}, {0x0423, 0x0443, 2, 0x0423, 2},
+    {0x0424, 0x0444, 2, 0x0424, 2}, {0x0425, 0x0445, 2, 0x0425, 2},
+    {0x0426, 0x0446, 2, 0x0426, 2}, {0x0427, 0x0447, 2, 0x0427, 2},
+    {0x0428, 0x0448, 2, 0x0428, 2}, {0x0429, 0x0449, 2, 0x0429, 2},
+    {0x042A, 0x044A, 2, 0x042A, 2}, {0x042B, 0x044B, 2, 0x042B, 2},
+    {0x042C, 0x044C, 2, 0x042C, 2}, {0x042D, 0x044D, 2, 0x042D, 2},
+    {0x042E, 0x044E, 2, 0x042E, 2}, {0x042F, 0x044F, 2, 0x042F, 2},
+    {0x0430, 0x0430, 2, 0x0410, 2}, {0x0431, 0x0431, 2, 0x0411, 2},
+    {0x0432, 0x0432, 2, 0x0412, 2}, {0x0433, 0x0433, 2, 0x0413, 2},
+    {0x0434, 0x0434, 2, 0x0414, 2}, {0x0435, 0x0435, 2, 0x0415, 2},
+    {0x0451, 0x0451, 2, 0x0401, 2}, // ё → Ё
+    {0x0436, 0x0436, 2, 0x0416, 2}, {0x0437, 0x0437, 2, 0x0417, 2},
+    {0x0438, 0x0438, 2, 0x0418, 2}, {0x0439, 0x0439, 2, 0x0419, 2},
+    {0x043A, 0x043A, 2, 0x041A, 2}, {0x043B, 0x043B, 2, 0x041B, 2},
+    {0x043C, 0x043C, 2, 0x041C, 2}, {0x043D, 0x043D, 2, 0x041D, 2},
+    {0x043E, 0x043E, 2, 0x041E, 2}, {0x043F, 0x043F, 2, 0x041F, 2},
+    {0x0440, 0x0440, 2, 0x0420, 2}, {0x0441, 0x0441, 2, 0x0421, 2},
+    {0x0442, 0x0442, 2, 0x0422, 2}, {0x0443, 0x0443, 2, 0x0423, 2},
+    {0x0444, 0x0444, 2, 0x0424, 2}, {0x0445, 0x0445, 2, 0x0425, 2},
+    {0x0446, 0x0446, 2, 0x0426, 2}, {0x0447, 0x0447, 2, 0x0427, 2},
+    {0x0448, 0x0448, 2, 0x0428, 2}, {0x0449, 0x0449, 2, 0x0429, 2},
+    {0x044A, 0x044A, 2, 0x042A, 2}, {0x044B, 0x044B, 2, 0x042B, 2},
+    {0x044C, 0x044C, 2, 0x042C, 2}, {0x044D, 0x044D, 2, 0x042D, 2},
+    {0x044E, 0x044E, 2, 0x042E, 2}, {0x044F, 0x044F, 2, 0x042F, 2},
+};
+
+// Linear search a sorted case_fold array by cp. Returns index or -1.
+static inline int case_fold_find(const struct case_fold *table, size_t n, uint32_t cp) {
+    size_t lo = 0, hi = n;
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (table[mid].cp < cp) lo = mid + 1;
+        else if (table[mid].cp > cp) hi = mid;
+        else return (int)mid;
+    }
+    return -1;
+}
+
+// Map a Unicode code point to its lowercase equivalent. Writes UTF-8
+// bytes into `out`, returns bytes written. Returns 0 if no mapping.
+static inline size_t zz_unicode_tolower(uint32_t cp, char *out) {
+    // ASCII fast path
+    if (cp >= 'A' && cp <= 'Z') { out[0] = (char)(cp + 32); return 1; }
+    // Latin-1 Supplement
+    if (cp >= 0x00C0 && cp <= 0x00FF) {
+        int idx = case_fold_find(latin1_supplement, 32, cp);
+        if (idx >= 0) {
+            return zz_utf8_encode(latin1_supplement[idx].lower, out);
+        }
+        return 0;
+    }
+    // Latin Extended-A
+    if (cp >= 0x0100 && cp <= 0x017F) {
+        int idx = case_fold_find(latin_extended_a, sizeof(latin_extended_a)/sizeof(latin_extended_a[0]), cp);
+        if (idx >= 0) {
+            return zz_utf8_encode(latin_extended_a[idx].lower, out);
+        }
+        return 0;
+    }
+    // Greek
+    if (cp >= 0x0386 && cp <= 0x03CE) {
+        int idx = case_fold_find(greek, sizeof(greek)/sizeof(greek[0]), cp);
+        if (idx >= 0) {
+            return zz_utf8_encode(greek[idx].lower, out);
+        }
+        return 0;
+    }
+    // Cyrillic
+    if (cp >= 0x0400 && cp <= 0x04FF) {
+        int idx = case_fold_find(cyrillic, sizeof(cyrillic)/sizeof(cyrillic[0]), cp);
+        if (idx >= 0) {
+            return zz_utf8_encode(cyrillic[idx].lower, out);
+        }
+        return 0;
+    }
+    return 0;
+}
+
+// Map a Unicode code point to its uppercase equivalent.
+static inline size_t zz_unicode_toupper(uint32_t cp, char *out) {
+    // ASCII fast path
+    if (cp >= 'a' && cp <= 'z') { out[0] = (char)(cp - 32); return 1; }
+    // Latin-1 Supplement
+    if (cp >= 0x00C0 && cp <= 0x00FF) {
+        int idx = case_fold_find(latin1_supplement, 32, cp);
+        if (idx >= 0) {
+            if (latin1_supplement[idx].upper_len > 1) {
+                // ß → SS (2 chars)
+                out[0] = 'S'; out[1] = 'S'; return 2;
+            }
+            return zz_utf8_encode(latin1_supplement[idx].upper, out);
+        }
+        return 0;
+    }
+    // Latin Extended-A
+    if (cp >= 0x0100 && cp <= 0x017F) {
+        int idx = case_fold_find(latin_extended_a, sizeof(latin_extended_a)/sizeof(latin_extended_a[0]), cp);
+        if (idx >= 0) {
+            return zz_utf8_encode(latin_extended_a[idx].upper, out);
+        }
+        return 0;
+    }
+    // Greek
+    if (cp >= 0x0386 && cp <= 0x03CE) {
+        int idx = case_fold_find(greek, sizeof(greek)/sizeof(greek[0]), cp);
+        if (idx >= 0) {
+            return zz_utf8_encode(greek[idx].upper, out);
+        }
+        return 0;
+    }
+    // Cyrillic
+    if (cp >= 0x0400 && cp <= 0x04FF) {
+        int idx = case_fold_find(cyrillic, sizeof(cyrillic)/sizeof(cyrillic[0]), cp);
+        if (idx >= 0) {
+            return zz_utf8_encode(cyrillic[idx].upper, out);
+        }
+        return 0;
+    }
+    return 0;
+}
+
+// str.lower(s) — lowercase copy with full Unicode case folding.
 zz_value zz_str_lower(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return s;
-    size_t len = s.s->len;
-    zz_str *out = str_alloc(len);
-    for (size_t i = 0; i < len; i++) {
-        char c = zz_str_ptr(s.s)[i];
-        zz_str_ptr(out)[i] = (c >= 'A' && c <= 'Z') ? c + 32 : c;
+    const unsigned char *src = (const unsigned char *)zz_str_ptr(s.s);
+    size_t srclen = s.s->len;
+
+    // Pass 1: compute output byte length.
+    size_t outlen = 0;
+    size_t i = 0;
+    while (i < srclen) {
+        size_t slen;
+        uint32_t cp = zz_utf8_decode(src + i, srclen - i, &slen);
+        i += slen;
+        if (cp >= 'A' && cp <= 'Z') {
+            outlen += 1;
+        } else if (cp >= 0x00C0 && cp <= 0x00FF) {
+            int idx = case_fold_find(latin1_supplement, 32, cp);
+            if (idx >= 0) outlen += latin1_supplement[idx].lower_len;
+            else outlen += slen;
+        } else if (cp >= 0x0100 && cp <= 0x017F) {
+            int idx = case_fold_find(latin_extended_a, sizeof(latin_extended_a)/sizeof(latin_extended_a[0]), cp);
+            if (idx >= 0) outlen += latin_extended_a[idx].lower_len;
+            else outlen += slen;
+        } else if (cp >= 0x0386 && cp <= 0x03CE) {
+            int idx = case_fold_find(greek, sizeof(greek)/sizeof(greek[0]), cp);
+            if (idx >= 0) outlen += greek[idx].lower_len;
+            else outlen += slen;
+        } else if (cp >= 0x0400 && cp <= 0x04FF) {
+            int idx = case_fold_find(cyrillic, sizeof(cyrillic)/sizeof(cyrillic[0]), cp);
+            if (idx >= 0) outlen += cyrillic[idx].lower_len;
+            else outlen += slen;
+        } else {
+            outlen += slen;
+        }
     }
-    zz_str_ptr(out)[len] = '\0';
+
+    zz_str *out = str_alloc(outlen);
+    char *w = zz_str_ptr(out);
+    i = 0;
+    while (i < srclen) {
+        size_t slen;
+        uint32_t cp = zz_utf8_decode(src + i, srclen - i, &slen);
+        i += slen;
+        size_t n = zz_unicode_tolower(cp, w);
+        if (n == 0) { memcpy(w, src + i - slen, slen); w += slen; }
+        else w += n;
+    }
+    w[0] = '\0';
     return (zz_value){ZZ_STR, {.s = out}};
 }
 
-// str.upper(s) — uppercase copy.
+// str.upper(s) — uppercase copy with full Unicode case folding.
 zz_value zz_str_upper(zz_value s, int *err) {
     (void)err;
     if (s.tag != ZZ_STR) return s;
-    size_t len = s.s->len;
-    zz_str *out = str_alloc(len);
-    for (size_t i = 0; i < len; i++) {
-        char c = zz_str_ptr(s.s)[i];
-        zz_str_ptr(out)[i] = (c >= 'a' && c <= 'z') ? c - 32 : c;
+    const unsigned char *src = (const unsigned char *)zz_str_ptr(s.s);
+    size_t srclen = s.s->len;
+
+    size_t outlen = 0;
+    size_t i = 0;
+    while (i < srclen) {
+        size_t slen;
+        uint32_t cp = zz_utf8_decode(src + i, srclen - i, &slen);
+        i += slen;
+        if (cp >= 'a' && cp <= 'z') {
+            outlen += 1;
+        } else if (cp == 0x00DF) {
+            outlen += 2; // ß → SS
+        } else if (cp >= 0x00C0 && cp <= 0x00FF) {
+            int idx = case_fold_find(latin1_supplement, 32, cp);
+            if (idx >= 0) outlen += latin1_supplement[idx].upper_len;
+            else outlen += slen;
+        } else if (cp >= 0x0100 && cp <= 0x017F) {
+            int idx = case_fold_find(latin_extended_a, sizeof(latin_extended_a)/sizeof(latin_extended_a[0]), cp);
+            if (idx >= 0) outlen += latin_extended_a[idx].upper_len;
+            else outlen += slen;
+        } else if (cp >= 0x0386 && cp <= 0x03CE) {
+            int idx = case_fold_find(greek, sizeof(greek)/sizeof(greek[0]), cp);
+            if (idx >= 0) outlen += greek[idx].upper_len;
+            else outlen += slen;
+        } else if (cp >= 0x0400 && cp <= 0x04FF) {
+            int idx = case_fold_find(cyrillic, sizeof(cyrillic)/sizeof(cyrillic[0]), cp);
+            if (idx >= 0) outlen += cyrillic[idx].upper_len;
+            else outlen += slen;
+        } else {
+            outlen += slen;
+        }
     }
-    zz_str_ptr(out)[len] = '\0';
+
+    zz_str *out = str_alloc(outlen);
+    char *w = zz_str_ptr(out);
+    i = 0;
+    while (i < srclen) {
+        size_t slen;
+        uint32_t cp = zz_utf8_decode(src + i, srclen - i, &slen);
+        i += slen;
+        size_t n = zz_unicode_toupper(cp, w);
+        if (n == 0) {
+            if (cp == 0x00DF) { w[0] = 'S'; w[1] = 'S'; w += 2; }
+            else { memcpy(w, src + i - slen, slen); w += slen; }
+        }
+        else w += n;
+    }
+    w[0] = '\0';
     return (zz_value){ZZ_STR, {.s = out}};
 }
 
