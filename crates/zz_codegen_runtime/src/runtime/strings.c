@@ -1700,14 +1700,15 @@ static inline int case_fold_find(const struct case_fold *table, size_t n, uint32
 static inline size_t zz_unicode_tolower(uint32_t cp, char *out) {
     // ASCII fast path
     if (cp >= 'A' && cp <= 'Z') { out[0] = (char)(cp + 32); return 1; }
-    // Latin-1 Supplement
-    if (cp >= 0x00C0 && cp <= 0x00FF) {
-        int idx = case_fold_find(latin1_supplement, 32, cp);
-        if (idx >= 0) {
-            return zz_utf8_encode(latin1_supplement[idx].lower, out);
-        }
-        return 0;
+    // Latin-1 Supplement: most uppercase→lowercase is +0x20, except
+    // × (0x00D7, no case) and ÿ (0x00FF → U+0178 Ÿ, handled below).
+    if (cp >= 0x00C0 && cp <= 0x00DE && cp != 0x00D7) {
+        out[0] = (char)(0xC0 | ((cp + 32) >> 6));
+        out[1] = (char)(0x80 | ((cp + 32) & 0x3F));
+        return 2;
     }
+    // ÿ (U+00FF) → Ÿ (U+0178)
+    if (cp == 0x00FF) { out[0] = 0xC5; out[1] = 0xB8; return 2; }
     // Latin Extended-A
     if (cp >= 0x0100 && cp <= 0x017F) {
         int idx = case_fold_find(latin_extended_a, sizeof(latin_extended_a)/sizeof(latin_extended_a[0]), cp);
@@ -1739,17 +1740,13 @@ static inline size_t zz_unicode_tolower(uint32_t cp, char *out) {
 static inline size_t zz_unicode_toupper(uint32_t cp, char *out) {
     // ASCII fast path
     if (cp >= 'a' && cp <= 'z') { out[0] = (char)(cp - 32); return 1; }
-    // Latin-1 Supplement
-    if (cp >= 0x00C0 && cp <= 0x00FF) {
-        int idx = case_fold_find(latin1_supplement, 32, cp);
-        if (idx >= 0) {
-            if (latin1_supplement[idx].upper_len > 1) {
-                // ß → SS (2 chars)
-                out[0] = 'S'; out[1] = 'S'; return 2;
-            }
-            return zz_utf8_encode(latin1_supplement[idx].upper, out);
-        }
-        return 0;
+    // Latin-1 Supplement: most lowercase→uppercase is -0x20, except
+    // ÷ (0x00F7, no case), ß (0x00DF → "SS", 2 chars), and Ÿ (U+0178, handled below).
+    if (cp >= 0x00E0 && cp <= 0x00FE && cp != 0x00F7) {
+        if (cp == 0x00DF) { out[0] = 'S'; out[1] = 'S'; return 2; } // ß → SS
+        out[0] = (char)(0xC0 | ((cp - 32) >> 6));
+        out[1] = (char)(0x80 | ((cp - 32) & 0x3F));
+        return 2;
     }
     // Latin Extended-A
     if (cp >= 0x0100 && cp <= 0x017F) {
@@ -1794,10 +1791,10 @@ zz_value zz_str_lower(zz_value s, int *err) {
         i += slen;
         if (cp >= 'A' && cp <= 'Z') {
             outlen += 1;
-        } else if (cp >= 0x00C0 && cp <= 0x00FF) {
-            int idx = case_fold_find(latin1_supplement, 32, cp);
-            if (idx >= 0) outlen += latin1_supplement[idx].lower_len;
-            else outlen += slen;
+        } else if (cp >= 0x00C0 && cp <= 0x00DE && cp != 0x00D7) {
+            outlen += 2; // Latin-1 uppercase → lowercase, 2 bytes each
+        } else if (cp == 0x00FF) {
+            outlen += 2; // ÿ → Ÿ (U+0178, 2 bytes)
         } else if (cp >= 0x0100 && cp <= 0x017F) {
             int idx = case_fold_find(latin_extended_a, sizeof(latin_extended_a)/sizeof(latin_extended_a[0]), cp);
             if (idx >= 0) outlen += latin_extended_a[idx].lower_len;
@@ -1847,10 +1844,10 @@ zz_value zz_str_upper(zz_value s, int *err) {
             outlen += 1;
         } else if (cp == 0x00DF) {
             outlen += 2; // ß → SS
-        } else if (cp >= 0x00C0 && cp <= 0x00FF) {
-            int idx = case_fold_find(latin1_supplement, 32, cp);
-            if (idx >= 0) outlen += latin1_supplement[idx].upper_len;
-            else outlen += slen;
+        } else if (cp >= 0x00E0 && cp <= 0x00FE && cp != 0x00F7) {
+            outlen += 2; // Latin-1 lowercase → uppercase (or ß→SS), 2 bytes each
+        } else if (cp == 0x00FF) {
+            outlen += 2; // ÿ → Ÿ (U+0178, 2 bytes)
         } else if (cp >= 0x0100 && cp <= 0x017F) {
             int idx = case_fold_find(latin_extended_a, sizeof(latin_extended_a)/sizeof(latin_extended_a[0]), cp);
             if (idx >= 0) outlen += latin_extended_a[idx].upper_len;
