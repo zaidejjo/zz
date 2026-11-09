@@ -1,0 +1,23 @@
+// features: dicts, locals, print
+// E2E: dict equality must be order-independent (VM vs native parity).
+
+// Same content, different insertion order -> must be equal.
+d1 := {"b": 2, "a": 1, "c": 3}
+d2 := {"a": 1, "b": 2, "c": 3}
+println("{}", d1 == d2)
+
+// Different content -> not equal.
+d3 := {"a": 1, "b": 2}
+println("{}", d1 == d3)
+
+// Empty dicts.
+println("{}", {} == {})
+
+// Same content via different construction paths.
+d4 := {}
+d4["x"] = 10
+d4["y"] = 20
+d5 := {"y": 20, "x": 10}
+println("{}", d4 == d5)
+
+println("dict_eq_ok")
