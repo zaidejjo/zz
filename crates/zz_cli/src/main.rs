@@ -444,9 +444,16 @@ fn main_inner() -> ExitCode {
                 }
             };
             let rest = check_args.as_slice();
-            // Strip the two-token `--format <value>` form before path
-            // parsing (the bare value would otherwise parse as the path);
-            // `--format=<value>` is already a single flag token.
+            // Parse --watch / --clear / --debounce / --watch-ignore before
+            // the --format / --color loop so they are stripped from the
+            // args passed to check_or_fix_path.
+            let (watch_flags, rest) = match crate::watch::parse_check_watch_flags(rest) {
+                Ok(parsed) => parsed,
+                Err(msg) => {
+                    eprintln!("zz: {msg}");
+                    return ExitCode::FAILURE;
+                }
+            };
             let mut rest_filtered: Vec<String> = Vec::with_capacity(rest.len());
             let mut rest_iter = rest.iter().peekable();
             let mut format_value: Option<String> = None;
@@ -534,20 +541,39 @@ fn main_inner() -> ExitCode {
             }
 
             let interactive = has_fix && has_interactive && !has_hard;
-            match check_or_fix_path(
-                &path,
-                has_fix,
-                interactive,
-                has_hard,
-                has_stats,
-                format_json,
-                color_mode,
-                &features,
-            ) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(msg) => {
+            if watch_flags.watch {
+                if let Err(msg) = crate::watch::check_watch(
+                    &path,
+                    has_fix,
+                    interactive,
+                    has_hard,
+                    has_stats,
+                    format_json,
+                    color_mode,
+                    &features,
+                    watch_flags,
+                ) {
                     eprintln!("zz: {msg}");
                     ExitCode::FAILURE
+                } else {
+                    ExitCode::SUCCESS
+                }
+            } else {
+                match check_or_fix_path(
+                    &path,
+                    has_fix,
+                    interactive,
+                    has_hard,
+                    has_stats,
+                    format_json,
+                    color_mode,
+                    &features,
+                ) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(msg) => {
+                        eprintln!("zz: {msg}");
+                        ExitCode::FAILURE
+                    }
                 }
             }
         }
@@ -896,6 +922,10 @@ FLAGS:
   --format json      machine-readable diagnostics on stdout
   --features <list>  enable project features (comma-separated; repeatable)
   --all-features     enable every declared [features] entry
+  --watch            re-check whenever any .zz file under PATH changes
+  --clear            clear screen before each re-check
+  --debounce <ms>    debounce delay in ms for re-checks (default: 150)
+  --watch-ignore <glob>  ignore files matching glob (repeatable)
   -h, --help         show this help
 
 PATH can be a single .zz file or a directory (recursively scans all .zz files).
@@ -3186,7 +3216,7 @@ impl CheckDedupe {
     }
 }
 
-fn check_or_fix_path(
+pub(crate) fn check_or_fix_path(
     path_arg: &Option<String>,
     do_fix: bool,
     interactive: bool,

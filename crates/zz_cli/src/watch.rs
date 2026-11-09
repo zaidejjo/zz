@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 //! `zz run --watch`: hot-reload loop for VM runs.
 //!
 //! Supervision model: the watcher is the parent, every generation of the
@@ -15,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use zz_frontend::diag::ColorMode;
 use zz_loader::find_project_root;
 
 /// Tick granularity of the watch loop.
@@ -40,16 +43,94 @@ const WALK_ENTRY_CAP: usize = 20_000;
 
 /// Parsed `--watch` family flags plus the scrubbed child argv.
 pub struct WatchFlags {
+    pub watch: bool,
     pub debounce_ms: u64,
     pub clear: bool,
     pub ignores: Vec<String>,
 }
 
 /// Parse `--watch` / `--clear` / `--debounce <ms>` / `--debounce=<ms>` /
-/// `--watch-ignore <glob>` (repeatable, `=` form too) out of a `run` arg
-/// list. Returns the flags plus the args the child `zz run` must see
-/// (watch-only flags removed, everything else — including order —
-/// preserved).
+/// `--watch-ignore <glob>` (repeatable, `=` form too) out of an arg slice.
+/// Returns the flags plus the remaining args with watch-only flags removed.
+pub fn parse_check_watch_flags(args: &[String]) -> Result<(WatchFlags, Vec<String>), String> {
+    let mut debounce_ms = 150u64;
+    let mut clear = false;
+    let mut ignores: Vec<String> = Vec::new();
+    let mut watch = false;
+    let mut child: Vec<String> = Vec::with_capacity(args.len());
+    let mut skip_next = false;
+    let mut saw_watch = false;
+    for a in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if a == "--watch" {
+            saw_watch = true;
+            watch = true;
+            continue;
+        }
+        if a == "--clear" {
+            clear = true;
+            continue;
+        }
+        if let Some(v) = a.strip_prefix("--debounce=") {
+            debounce_ms = parse_debounce(v)?;
+            continue;
+        }
+        if a == "--debounce" {
+            skip_next = true;
+            continue;
+        }
+        if let Some(v) = a.strip_prefix("--watch-ignore=") {
+            ignores.push(v.to_string());
+            continue;
+        }
+        if a == "--watch-ignore" {
+            skip_next = true;
+            continue;
+        }
+        child.push(a.clone());
+    }
+    // Second pass collects space-separated `--debounce` / `--watch-ignore`
+    // values.
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--debounce" {
+            let v = args
+                .get(i + 1)
+                .ok_or("missing value for `--debounce`\n\nhint: zz check --watch --debounce 150")?;
+            debounce_ms = parse_debounce(v)?;
+            i += 2;
+            continue;
+        }
+        if args[i] == "--watch-ignore" {
+            let v = args.get(i + 1).ok_or(
+                "missing value for `--watch-ignore`\n\nhint: zz check --watch --watch-ignore 'target/*'",
+            )?;
+            ignores.push(v.clone());
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    if !saw_watch {
+        watch = false;
+    }
+    Ok((
+        WatchFlags {
+            watch,
+            debounce_ms,
+            clear,
+            ignores,
+        },
+        child,
+    ))
+}
+
+/// Parse `--watch` family flags out of a `run` arg list (kept for
+/// `zz run --watch` compatibility). Returns the flags plus the args the
+/// child `zz run` must see (watch-only flags removed).
 pub fn parse_watch_flags(args: &[String]) -> Result<(WatchFlags, Vec<String>), String> {
     let mut debounce_ms = 150u64;
     let mut clear = false;
@@ -119,6 +200,7 @@ pub fn parse_watch_flags(args: &[String]) -> Result<(WatchFlags, Vec<String>), S
     }
     Ok((
         WatchFlags {
+            watch: true,
             debounce_ms,
             clear,
             ignores,
@@ -509,6 +591,126 @@ pub fn run_watch(
         // newer than this scan fires the next tick.
         snapshot = scan()?;
         eprintln!("zz: [watch] restarted (generation {generation})");
+    }
+}
+
+/// `zz check --watch`: re-run `zz check` whenever any `.zz` file under
+/// `path` changes. Uses the same snapshot/debounce model as `run --watch`
+/// but re-checks in-process instead of spawning child runs.
+pub fn check_watch(
+    path_arg: &Option<String>,
+    do_fix: bool,
+    interactive: bool,
+    force: bool,
+    show_stats: bool,
+    format_json: bool,
+    color_mode: ColorMode,
+    features: &zz_pm::manifest::FeatureSelection,
+    flags: WatchFlags,
+) -> Result<(), String> {
+    use crate::check_or_fix_path;
+
+    let raw = path_arg.as_deref().unwrap_or(".");
+    let base = std::path::PathBuf::from(raw);
+
+    // Discover files once to know the watch root.
+    let files =
+        zz_fmt::discover(&[base.clone()]).map_err(|e| format!("file discovery failed: {e}"))?;
+    if files.is_empty() {
+        return Err(format!("no .zz files found in `{raw}`"));
+    }
+
+    // Watch root: owning project when the entry lives in one, else the
+    // entry's own directory (standalone scripts).
+    let scan_root: std::path::PathBuf = match zz_loader::find_project_root(
+        files
+            .first()
+            .and_then(|p| p.parent())
+            .unwrap_or(std::path::Path::new(".")),
+    ) {
+        Some(root) => root,
+        None => base
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from(".")),
+    };
+
+    let term = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if signal_hook::flag::register(signal_hook::consts::SIGINT, std::sync::Arc::clone(&term))
+        .is_err()
+    {
+        return Err(
+            "cannot install SIGINT handler: refusing to watch without clean shutdown".to_string(),
+        );
+    }
+    if signal_hook::flag::register(signal_hook::consts::SIGTERM, std::sync::Arc::clone(&term))
+        .is_err()
+    {
+        eprintln!("zz: [watch] warning: no SIGTERM handler — Ctrl+C still stops cleanly");
+    }
+
+    let scan = || snapshot_all(&scan_root, None, &flags.ignores, WALK_ENTRY_CAP);
+
+    // Initial check.
+    eprintln!(
+        "zz: [watch] watching {} files under {} (Ctrl+C to stop)",
+        files.len(),
+        scan_root.display()
+    );
+    check_or_fix_path(
+        path_arg,
+        do_fix,
+        interactive,
+        force,
+        show_stats,
+        format_json,
+        color_mode,
+        features,
+    )?;
+
+    let mut snapshot = scan()?;
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(TICK_MS));
+        if term.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("zz: [watch] stopped");
+            return Ok(());
+        }
+        let current = scan()?;
+        if diff_snapshots(&snapshot, &current).is_empty() {
+            continue;
+        }
+        // Debounce.
+        let mut latest = current;
+        let mut quiet_since = std::time::Instant::now();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(TICK_MS));
+            if term.load(std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("zz: [watch] stopped");
+                return Ok(());
+            }
+            let rescan = scan()?;
+            if !diff_snapshots(&latest, &rescan).is_empty() {
+                latest = rescan;
+                quiet_since = std::time::Instant::now();
+                continue;
+            }
+            if quiet_since.elapsed() >= std::time::Duration::from_millis(flags.debounce_ms) {
+                break;
+            }
+        }
+        eprintln!("zz: [watch] change detected — rechecking...");
+        check_or_fix_path(
+            path_arg,
+            do_fix,
+            interactive,
+            force,
+            show_stats,
+            format_json,
+            color_mode,
+            features,
+        )?;
+        snapshot = scan()?;
+        eprintln!("zz: [watch] rechecked");
     }
 }
 
