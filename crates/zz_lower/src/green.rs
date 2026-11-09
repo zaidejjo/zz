@@ -362,6 +362,13 @@ impl Lowerer {
         out: &mut String,
         arena: Option<&str>,
     ) -> (String, String, usize) {
+        // Green cells live in the task/sync frame and are released
+        // individually by `zz_frame_free` / `zz_sync_frame_cleanup`. They
+        // must therefore be malloc'd: a per-invocation bump arena would be
+        // destroyed at every suspend-return while the frame still holds
+        // pointers into it, and the frame's `free(cell)` would then release
+        // arena memory. The arena path is only valid for non-green cells.
+        let arena = if self.green_active() { None } else { arena };
         let mut g = self.green.borrow_mut();
         let gx = g.as_mut().expect("green_cell outside a green closure");
         let slot = gx.next_slot;

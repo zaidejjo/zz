@@ -1864,8 +1864,16 @@ zz_value zz_chan_send(zz_value chan, zz_value val, int *err) {
     // The dup happens before publish either way (ownership transfers
     // into the cell/queue, exactly like the old queue push — the
     // receiving thread frees or keeps it without touching the sender's
-    // memory).
-    zz_value owned = zz_value_dup(val);
+    // memory). Scalars are copied by value, so skip the memo setup that
+    // `zz_value_dup` pays to deep-copy heap tags; `zz_value_dup_inner`
+    // returns them unchanged anyway.
+    zz_value owned;
+    if (val.tag == ZZ_INT || val.tag == ZZ_FLOAT || val.tag == ZZ_BOOL
+        || val.tag == ZZ_UNIT) {
+        owned = val;
+    } else {
+        owned = zz_value_dup(val);
+    }
     // Single decision point under `lock`: queued green waiters are
     // served first (they registered on empty tiers, so they predate
     // anything we could enqueue), else the value goes to the ring (or
@@ -2631,21 +2639,17 @@ static void zz_run_task(zz_task_t task) {
         }
         return;
     }
+    // First-ever run: no frame yet means the green context hasn't been
+    // created. Allocate the frame BEFORE taking `fr` — `fr->is_task = 1`
+    // below dereferences it, so it must be non-NULL on the first run.
+    int first_run = (task.frame == NULL);
+    if (!task.frame) task.frame = zz_frame_new();
     zz_task_frame *fr = task.frame;
     fr->is_task = 1;
     // Every run starts live: a recycled worker thread may carry a stale
     // suspend verdict from an earlier task. Only an actual suspend during
     // THIS run may set it (green entries do so before returning).
     zz_suspend_verdict = 0;
-    // First-ever run: no frame yet means the green context hasn't been
-    // created. A suspend here is the one-time context-setup suspend; run
-    // again immediately so the body executes and the task completes in one
-    // dispatch. A non-first-run suspend (mid-body, e.g. at task.join inside
-    // the closure) must NOT be re-run — that would restart the closure from
-    // the top and cause exponential duplication (audit au8 tree). Just
-    // re-enqueue for a worker to resume at its suspend point.
-    int first_run = (task.frame == NULL);
-    if (!task.frame) task.frame = zz_frame_new();
     zz_task_frame *saved_fr = zz_current_frame;
     zz_task_t *saved_task = zz_current_task;
     zz_current_frame = fr;
@@ -2657,22 +2661,32 @@ static void zz_run_task(zz_task_t task) {
     // corrupt this run's unwind that it legitimately overlaps (the
     // waiter queue owns the continuation from handoff on).
     if (zz_green_suspended()) {
-        if (first_run) {
-            // Context-setup suspend: run again to execute the body and
-            // complete. The second run resumes from the top with context
-            // already set up, so it does NOT re-suspend on setup.
+        if (first_run && fr->resume == 0) {
+            // Context-setup suspend only (no real resume point reached):
+            // run again to execute the body and complete. The second run
+            // resumes from the top with context already set up, so it does
+            // NOT re-suspend on setup. A real suspend — even on the first
+            // run — sets `fr->resume` to a label and MUST NOT be re-run
+            // here: that would jump to the resume label before a value was
+            // delivered and read uninitialized cells.
             zz_value result2 = zz_call_closure_raw(task.fn, args, 1);
             if (!zz_green_suspended()) {
                 zz_task_join_complete(task.join, result2);
                 zz_release(&result2);
             } else {
-                // Still suspended — re-enqueue for a worker to resume.
-                zz_enqueue_task(task);
+                // Still suspended — the task stays in the channel/join
+                // waiter list; a sender or joiner will enqueue it when it
+                // wakes it. Do NOT re-enqueue here: that would leave the
+                // task in both the waiter list and the executor queue, and
+                // an inline handoff that completes the task would free its
+                // frame while a queued copy awaits a second (double-free)
+                // run. (Found via ASan: double-free in zz_frame_free.)
                 return;
             }
         } else {
-            // Mid-body suspend: re-enqueue, do NOT restart from the top.
-            zz_enqueue_task(task);
+            // Mid-body suspend: the task stays in the channel/join waiter
+            // list; a sender or joiner will enqueue it when it wakes it.
+            // Do NOT re-enqueue here — same double-free reason as above.
             return;
         }
     } else {
