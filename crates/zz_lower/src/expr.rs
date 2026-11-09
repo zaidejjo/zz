@@ -1444,7 +1444,8 @@ impl Lowerer {
                     "    zz_value {tmp} = zz_index_get({otmp}, {itmp}, &{err_tmp});\n"
                 ));
                 out.push_str(&format!(
-                    "    if ({err_tmp}) {{ zz_index_trap({otmp}, {itmp}, \"{func}\"); }}\n"
+                    "    if ({err_tmp}) {{ zz_index_trap({otmp}, {itmp}, \"{}\"); }}\n",
+                    Self::c_escape(&func)
                 ));
                 tmp
             }
