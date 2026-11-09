@@ -350,21 +350,9 @@ impl<'a> Parser<'a> {
             );
             return inner;
         }
-        if self.peek_kind() == TokenKind::Minus && self.peek_kind_at(1) == TokenKind::Minus {
-            let tok = self.advance();
-            self.advance(); // consume second `-`
-            let inner = self.parse_unary();
-            self.push_error(
-                error_at("unexpected `--` — ZZ does not have `--`", tok.span)
-                    .with_note("write `x -= 1` instead of `--x`")
-                    .with_fixit(FixIt::safe(
-                        Span::new(tok.span.start, tok.span.end),
-                        "",
-                        "remove `--`",
-                    )),
-            );
-            return inner;
-        }
+        // `--x` is not valid in ZZ, but token-identical to double negation
+        // `-(-x)` (e.g. `- -5`), so don't treat `--` as a prefix operator — let
+        // each `-` parse as a unary negation normally.
         let op = match self.peek_kind() {
             TokenKind::Minus => UnOp::Neg,
             TokenKind::Plus => UnOp::Pos,
@@ -415,7 +403,24 @@ impl<'a> Parser<'a> {
             );
             return expr;
         }
-        if self.peek_kind() == TokenKind::Minus && self.peek_kind_at(1) == TokenKind::Minus {
+        // `x--` is not valid in ZZ, but `a - -b` (binary minus then unary
+        // minus) tokenizes identically to `a--` followed by `b`. Only treat
+        // `--` as postfix decrement when it unambiguously ends the expression
+        // (followed by `;`, `)`, `}`, `]`, `,` or EOF). Otherwise parse `a - -b`
+        // as `a - (-b)`.
+        let is_postfix_decrement = matches!(
+            self.peek_kind_at(2),
+            TokenKind::StmtEnd
+                | TokenKind::RParen
+                | TokenKind::RBrace
+                | TokenKind::RBracket
+                | TokenKind::Comma
+                | TokenKind::Eof
+        );
+        if self.peek_kind() == TokenKind::Minus
+            && self.peek_kind_at(1) == TokenKind::Minus
+            && is_postfix_decrement
+        {
             let tok = self.advance();
             self.advance(); // consume second `-`
             self.push_error(
