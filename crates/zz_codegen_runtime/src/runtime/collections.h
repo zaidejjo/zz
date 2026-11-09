@@ -217,6 +217,10 @@ zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err);
 void zz_dict_set(zz_dict *d, zz_value key, zz_value val);
 size_t zz_dict_len(const zz_dict *d);
 
+// Grow dict entries buffer to `hint` if currently smaller. Called before a
+// counted insertion loop to avoid incremental reallocations (dict_lookup).
+void zz_dict_reserve(zz_value d, size_t hint, int *err);
+
 // ---- higher-order iterators --------------------------------------------
 // map/filter/enumerate/zip — call closures per item.
 zz_value zz_iter_map(zz_value items, zz_value f, int *err);

@@ -919,6 +919,33 @@ size_t zz_dict_len(const zz_dict *d) {
     return d ? d->len : 0;
 }
 
+void zz_dict_reserve(zz_value d, size_t hint, int *err) {
+    *err = 0;
+    if (d.tag != ZZ_DICT || !d.dict) {
+        *err = 1;
+        return;
+    }
+    zz_dict *dict = d.dict;
+    // Only growable heap dicts can be resized; arena dicts have fixed
+    // capacity and must be pre-sized at construction.
+    if (dict->refs == ZZ_DICT_ARENA_MAGIC || dict->refs == 0) return;
+    if (hint <= dict->cap) { *err = 0; return; }
+    size_t nc = dict->cap == 0 ? 4 : dict->cap;
+    while (nc < hint) nc *= 2;
+    zz_dict_entry *ne = (zz_dict_entry *)realloc(dict->entries, nc * sizeof(zz_dict_entry));
+    if (!ne) { *err = 1; return; }
+    // Zero the new tail so zz_assign can safely release stale slots.
+    memset(&ne[dict->len], 0, (nc - dict->len) * sizeof(zz_dict_entry));
+    dict->entries = ne;
+    dict->cap = nc;
+    // Rebuild the key index for the larger capacity.
+    if (dict->idx && dict->idx_cap > 0) {
+        size_t cap = dict->idx_cap;
+        while (cap < nc) cap <<= 1;
+        zz_dict_idx_build(dict, NULL, cap);
+    }
+}
+
 // Materialize an array/range value into a new array of item values.
 static zz_value zz_iter_items(zz_value v) {
     if (v.tag == ZZ_ARRAY && v.arr) {

@@ -1423,6 +1423,37 @@ impl Lowerer {
                     return tmp;
                 }
 
+                // String-index fast path: skip the `zz_index_get` tag
+                // dispatch and call `zz_str_get` directly. `zz_str_get` has
+                // an ASCII fast path that returns an interned 1-char
+                // singleton (O(1), zero allocation), so a hot
+                // `s[i] == " "` loop does no UTF-8 scan and no malloc per
+                // index.
+                let is_str_index = match obj.as_ref() {
+                    Expr::Ident { name, .. } => names.lookup_type(name).is_some_and(|t| t == "Str"),
+                    _ => false,
+                };
+                if is_str_index {
+                    if let Expr::Ident { .. } = obj.as_ref() {
+                        let otmp = names.fresh("_idxo");
+                        let itmp = names.fresh("_idxi");
+                        let err_tmp = names.fresh("_idxe");
+                        let tmp = names.fresh("_idxv");
+                        let i_boxed = self.box_index_arg(index, i, names);
+                        out.push_str(&format!("    zz_value {otmp} = {o};\n"));
+                        out.push_str(&format!("    zz_value {itmp} = {i_boxed};\n"));
+                        out.push_str(&format!("    int {err_tmp} = 0;\n"));
+                        out.push_str(&format!(
+                            "    zz_value {tmp} = zz_str_get(({otmp}).s, {itmp}, &{err_tmp});\n"
+                        ));
+                        out.push_str(&format!(
+                            "    if ({err_tmp}) {{ zz_index_trap({otmp}, {itmp}, \"{}\"); }}\n",
+                            Self::c_escape(&names.current_scope.clone())
+                        ));
+                        return tmp;
+                    }
+                }
+
                 // Box a scalar index (ident/raw-arith) to a zz_value.
                 let i_boxed = self.box_index_arg(index, i, names);
                 // Hoist the read into a temp and check the error flag:
