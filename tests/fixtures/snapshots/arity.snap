@@ -1,0 +1,17 @@
+first module that broke: <path> <path>
+
+error: `add` takes 2 arguments (a: int, b: int), found 1
+
+  --> <path>
+    |
+    7 | x := add(1)
+      |      ^^^^^^
+    = missing argument for `b: int`
+warning: unused variable `x` is never read, consider prefixing with `_x`
+
+  --> <path>
+    |
+    7 | x := add(1)
+      | ^ help: replace with `_x`
+
+zz: 1 file(s) failed type-check

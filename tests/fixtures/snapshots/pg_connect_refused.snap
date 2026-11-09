@@ -1,0 +1,10 @@
+first module that broke: <path> <path>
+
+warning: unused variable `mydb` is never read, consider prefixing with `_mydb`
+
+  --> <path>
+    |
+    5 | mydb := pg.connect("host=127.0.0.1 port=1 dbname=x user=u connect_timeout=1")
+      | ^^^^ help: replace with `_mydb`
+
+help: run `zz check --fix <path> to automatically apply safe fixes

@@ -1,0 +1,21 @@
+first module that broke: <path> <path>
+
+error: closure must declare `-> Result<T, E>` to use `try`
+
+  --> <path>
+    |
+    7 | f := |x| try fetch()
+      |          ^^^^^^^^^^^
+error: type mismatch: expected `int`, found `Result<int, str>`
+
+  --> <path>
+    |
+    7 | f := |x| try fetch()
+      |          ^^^^^^^^^^^
+error: cannot infer the type of `try_closure_no_annot.f`; add a type annotation
+
+  --> <path>
+    |
+    7 | f := |x| try fetch()
+      | ^
+zz: 1 file(s) failed type-check

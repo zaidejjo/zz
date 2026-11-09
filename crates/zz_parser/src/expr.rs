@@ -334,6 +334,25 @@ impl<'a> Parser<'a> {
                 span,
             };
         }
+        // `++x` / `--x` are not valid in ZZ — use `x += 1` / `x -= 1`.
+        if self.peek_kind() == TokenKind::Plus && self.peek_kind_at(1) == TokenKind::Plus {
+            let tok = self.advance();
+            self.advance(); // consume second `+`
+            let inner = self.parse_unary();
+            self.push_error(
+                error_at("unexpected `++` — ZZ does not have `++`", tok.span)
+                    .with_note("write `x += 1` instead of `++x`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(tok.span.start, tok.span.end),
+                        "",
+                        "remove `++`",
+                    )),
+            );
+            return inner;
+        }
+        // `--x` is not valid in ZZ, but token-identical to double negation
+        // `-(-x)` (e.g. `- -5`), so don't treat `--` as a prefix operator — let
+        // each `-` parse as a unary negation normally.
         let op = match self.peek_kind() {
             TokenKind::Minus => UnOp::Neg,
             TokenKind::Plus => UnOp::Pos,
@@ -369,6 +388,52 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn parse_postfix(&mut self) -> Expr {
         let mut expr = self.parse_primary();
+        // `x++` / `x--` are not valid in ZZ — use `x += 1` / `x -= 1`.
+        if self.peek_kind() == TokenKind::Plus && self.peek_kind_at(1) == TokenKind::Plus {
+            let tok = self.advance();
+            self.advance(); // consume second `+`
+            self.push_error(
+                error_at("unexpected `++` — ZZ does not have `++`", tok.span)
+                    .with_note("write `x += 1` instead of `x++`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(tok.span.start, tok.span.end),
+                        "",
+                        "remove `++`",
+                    )),
+            );
+            return expr;
+        }
+        // `x--` is not valid in ZZ, but `a - -b` (binary minus then unary
+        // minus) tokenizes identically to `a--` followed by `b`. Only treat
+        // `--` as postfix decrement when it unambiguously ends the expression
+        // (followed by `;`, `)`, `}`, `]`, `,` or EOF). Otherwise parse `a - -b`
+        // as `a - (-b)`.
+        let is_postfix_decrement = matches!(
+            self.peek_kind_at(2),
+            TokenKind::StmtEnd
+                | TokenKind::RParen
+                | TokenKind::RBrace
+                | TokenKind::RBracket
+                | TokenKind::Comma
+                | TokenKind::Eof
+        );
+        if self.peek_kind() == TokenKind::Minus
+            && self.peek_kind_at(1) == TokenKind::Minus
+            && is_postfix_decrement
+        {
+            let tok = self.advance();
+            self.advance(); // consume second `-`
+            self.push_error(
+                error_at("unexpected `--` — ZZ does not have `--`", tok.span)
+                    .with_note("write `x -= 1` instead of `x--`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(tok.span.start, tok.span.end),
+                        "",
+                        "remove `--`",
+                    )),
+            );
+            return expr;
+        }
         loop {
             match self.peek_kind() {
                 TokenKind::LParen => {
@@ -520,10 +585,29 @@ impl<'a> Parser<'a> {
                     span: tok.span,
                 };
                 self.advance(); // consume `:` or `=`
+                let errors_before = self.errors.len();
                 let value = self.parse_expr();
                 named.push((name, value));
+                if self.errors.len() > errors_before {
+                    self.skip_to_call_arg_end();
+                    if self.at(TokenKind::Comma) {
+                        continue;
+                    }
+                    break;
+                }
             } else {
+                let errors_before = self.errors.len();
                 args.push(self.parse_expr());
+                // One bad argument must not cascade into every following
+                // token of the call: skip to the argument boundary so the
+                // user sees one error per broken argument.
+                if self.errors.len() > errors_before {
+                    self.skip_to_call_arg_end();
+                    if self.at(TokenKind::Comma) {
+                        continue;
+                    }
+                    break;
+                }
             }
             if self.eat(TokenKind::Comma) {
                 // Trailing comma: `f(a, b,)` ends the list here, matching
@@ -924,6 +1008,26 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Match => self.parse_match(),
             TokenKind::Dot => self.parse_variant(),
+            // `func` starts a function declaration, not an expression.
+            // ZZ closures use `|params| { body }` syntax; report one clear
+            // error and skip to the statement end so the orphaned `(`…`)`/
+            // `->`/`{`…`}` trailing the keyword doesn't cascade into one
+            // diagnostic per token.
+            TokenKind::Func => {
+                let tok = self.advance();
+                self.push_error(
+                    error_at(
+                        "`func` is not an expression — ZZ closures use `|params| body` syntax",
+                        tok.span,
+                    )
+                    .with_note(
+                        "write `|req: http.request| { http.response(200, \"...\") }` \
+                         instead of `func(req: ...) -> ... { ... }`",
+                    ),
+                );
+                self.skip_to_stmt_end();
+                dummy_expr(tok.span)
+            }
             _ => {
                 // A stray closing bracket in expression position (e.g. the
                 // second `]` in `[1, 2]]`): remove it and continue.
@@ -934,10 +1038,13 @@ impl<'a> Parser<'a> {
                     self.error_stray_close(tok.kind);
                     return dummy_expr(tok.span);
                 }
-                self.error_here(format!(
-                    "expected expression, found {}",
-                    tok.kind.describe()
-                ));
+                let msg = if tok.kind == TokenKind::Arrow {
+                    "expected expression, found `->` — ZZ closures use `|params| { body }` syntax"
+                        .to_string()
+                } else {
+                    format!("expected expression, found {}", tok.kind.describe())
+                };
+                self.error_here(msg);
                 dummy_expr(tok.span)
             }
         }

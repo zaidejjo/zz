@@ -888,6 +888,30 @@ parity_strict!(
     "syntax",
     "closure_fn_params.zz"
 );
+// Closure capture-by-reference parity: VM and native must agree on read/
+// write visibility, scope outliving, loops, nesting, and struct/array
+// captures (decision: capture by reference — docs/checker/decisions.md).
+parity_strict!(
+    parity_syntax_closure_mutate_captured,
+    "syntax",
+    "closure_mutate_captured.zz"
+);
+parity_strict!(
+    parity_syntax_closure_outlives_scope,
+    "syntax",
+    "closure_outlives_scope.zz"
+);
+parity_strict!(
+    parity_syntax_closure_in_loop,
+    "syntax",
+    "closure_in_loop.zz"
+);
+parity_strict!(parity_syntax_closure_nested, "syntax", "closure_nested.zz");
+parity_strict!(
+    parity_syntax_closure_capture_struct_array,
+    "syntax",
+    "closure_capture_struct_array.zz"
+);
 parity_strict!(parity_stdlib_shadow_test, "stdlib", "shadow_test.zz");
 parity_strict!(parity_syntax_destructuring, "syntax", "destructuring.zz");
 parity_strict!(
@@ -1477,6 +1501,29 @@ parity_strict_error!(parity_err_edge_rem_zero, "edge_rem_zero_err.zz");
 parity_strict_error!(parity_err_unknown_field, "unknown_field.zz");
 parity_strict_error!(parity_err_struct_init_assign, "struct_init_assign_error.zz");
 parity_strict_error!(parity_err_int_float_cmp, "int_float_cmp.zz");
+// Item 5: constant-foldable array index OOB must be rejected by both engines.
+parity_strict_error!(
+    parity_err_array_index_oob_foldable,
+    "array_index_oob_foldable.zz"
+);
+// Generic bound soundness: unconstrained / violating bound generics must be
+// rejected by both engines (deferred obligation check).
+parity_strict_error!(
+    parity_err_generic_bound_unconstrained_call,
+    "generic_bound_unconstrained_call.zz"
+);
+parity_strict_error!(
+    parity_err_generic_bound_inference_chain,
+    "generic_bound_inference_chain.zz"
+);
+parity_strict_error!(
+    parity_err_generic_bound_returned,
+    "generic_bound_returned.zz"
+);
+parity_strict_error!(
+    parity_err_generic_bound_struct_field,
+    "generic_bound_struct_field.zz"
+);
 
 // ===========================================================================
 // Known native failure tests — documented bugs

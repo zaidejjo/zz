@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tower_lsp::lsp_types::{Diagnostic, Url};
 use tower_lsp::Client;
-use zz_checker::check_program;
+use zz_checker::check_program_typed;
 
 use crate::convert::{severity_to_lsp, span_to_range};
 use crate::state::GlobalState;
@@ -81,7 +81,7 @@ pub async fn recheck_and_publish(state: Arc<GlobalState>, client: &Client, uri: 
         }
 
         let program = program?;
-        let checked = check_program(
+        let (checked, span_types) = check_program_typed(
             &program,
             init_bindings,
             init_funcs,
@@ -89,7 +89,7 @@ pub async fn recheck_and_publish(state: Arc<GlobalState>, client: &Client, uri: 
             init_aliases,
             init_enums,
         );
-        Some(checked)
+        Some((checked, span_types))
     })
     .await;
 
@@ -102,7 +102,7 @@ pub async fn recheck_and_publish(state: Arc<GlobalState>, client: &Client, uri: 
         return;
     }
 
-    let Some(checked) = result else {
+    let Some((checked, span_types)) = result else {
         // Stale. Publish only parse errors (if any).
         if !parse_errors.is_empty() {
             let diags: Vec<Diagnostic> = parse_errors
@@ -117,9 +117,11 @@ pub async fn recheck_and_publish(state: Arc<GlobalState>, client: &Client, uri: 
         return;
     };
 
-    // Persist the CheckResult in the document for hover / go-to-definition.
+    // Persist the CheckResult and span_types in the document for hover /
+    // go-to-definition.
     if let Some(mut doc) = state.documents.get_mut(&uri) {
         doc.check_result = Some(checked.clone());
+        doc.span_types = Some(span_types);
         doc.seed_bindings = Some(seed_bindings);
     }
 
@@ -207,11 +209,12 @@ mod tests {
     fn convert_diagnostic_basic_error() {
         let raw = RawDiag {
             severity: Severity::Error,
+            code: None,
             message: "unexpected token".to_string(),
             span: Some(Span::new(0, 5)),
             notes: vec![],
             fixits: vec![],
-            secondary: None,
+            secondary: Vec::new(),
         };
         let diag = convert_diagnostic("hello", &raw);
         assert_eq!(diag.range.start.line, 0);
@@ -226,6 +229,7 @@ mod tests {
     fn convert_diagnostic_with_fixit_data() {
         let raw = RawDiag {
             severity: Severity::Warning,
+            code: None,
             message: "unused variable".to_string(),
             span: Some(Span::new(4, 5)),
             notes: vec!["consider removing".to_string()],
@@ -236,7 +240,7 @@ mod tests {
                 safety: FixSafety::Safe,
                 alternatives: vec![],
             }],
-            secondary: None,
+            secondary: Vec::new(),
         };
         let diag = convert_diagnostic("x := 1", &raw);
         assert_eq!(diag.severity, Some(DiagnosticSeverity::WARNING));
@@ -253,11 +257,12 @@ mod tests {
         // Span [2, 8) covers from '\n' (byte 2) to 'f' (byte 7, exclusive of 8)
         let raw = RawDiag {
             severity: Severity::Error,
+            code: None,
             message: "type mismatch".to_string(),
             span: Some(Span::new(2, 8)),
             notes: vec![],
             fixits: vec![],
-            secondary: None,
+            secondary: Vec::new(),
         };
         let diag = convert_diagnostic("ab\ncd\ndef", &raw);
         // byte 2 is '\n' on line 0 → Position(0, 2)
@@ -310,11 +315,12 @@ mod tests {
     fn convert_diagnostic_severity_help_maps_to_hint() {
         let raw = RawDiag {
             severity: Severity::Help,
+            code: None,
             message: "try this".to_string(),
             span: Some(Span::new(0, 3)),
             notes: vec![],
             fixits: vec![],
-            secondary: None,
+            secondary: Vec::new(),
         };
         let diag = convert_diagnostic("abc", &raw);
         assert_eq!(diag.severity, Some(DiagnosticSeverity::HINT));

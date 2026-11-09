@@ -79,9 +79,20 @@ nums := [1, 2, 3]
 doubled := map(nums, |x| x * 2)
 ```
 
-Closures capture by copy (snapshot). They are values and can be passed to
+Closures capture by reference: a closure shares each captured variable with
+its enclosing scope and reads/writes its current value at call time, so a
+mutation to a captured variable is visible inside the closure **and** in the
+enclosing scope (and vice versa). They are values and can be passed to
 `map` / `filter` / `task.spawn`. A closure body's last expression is its
 return value; closures do not need `return`.
+
+```zz
+x := 1
+f := |y: int| { y + x }   // captures `x` by reference
+x = 99
+println(f(1))             // 100 — reads the current (mutated) value of `x`
+```
+
 
 Closure parameters are exempt from `unused variable` warnings: the caller
 dictates the closure's arity (`s.route("GET", "/", |req| "ok")` cannot drop

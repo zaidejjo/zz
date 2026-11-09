@@ -1,0 +1,13 @@
+first module that broke: <path> <path>
+
+error: `?` on `Result` cannot propagate through a function returning `int`
+
+  --> <path>
+    |
+    8 |     x := try fetch()
+      |          ^^^^^^^^^^^
+    = to use `?` here, change the return type to `Result<int, str>`
+warning: unused private function `try_outside_result.bad`, consider prefixing with `_try_outside_result.bad` or removing it
+
+    = function is never called or referenced
+zz: 1 file(s) failed type-check

@@ -10,7 +10,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use zz_diag_core::{error_at, RawDiag};
+use zz_diag_core::{error_at, RawDiag, SecondaryLabel};
 use zz_span_ast::ast::{Stmt, Ty};
 use zz_span_ast::span::Span;
 use zz_types::Type;
@@ -596,10 +596,136 @@ impl Checker {
             other => other.to_string(),
         };
         let mut diag = error_at(msg, span);
+        // Add secondary labels showing where each type came from, when we
+        // have span info (e.g. "expected `int` because of this annotation
+        // here", "found `str` at this variable declaration").
+        if let Some(left_span) = err.left_span {
+            diag = diag.with_secondary(SecondaryLabel {
+                span: left_span,
+                message: format!("found `{}` here", err.left),
+            });
+        }
+        if let Some(right_span) = err.right_span {
+            diag = diag.with_secondary(SecondaryLabel {
+                span: right_span,
+                message: format!("expected `{}` here", err.right),
+            });
+        }
         for note in notes {
             diag = diag.with_note(note);
         }
+        // Type-mismatch diff for generics (e.g. Box<int> vs Box<str>).
+        if err.message == "type mismatch" {
+            if let Some(diff) = Self::type_diff_note(&err.left_ty, &err.right_ty) {
+                diag = diag.with_note(diff);
+            }
+        }
         self.errors.push(diag);
+    }
+
+    /// Sherlock: returning an unwrapped `Result` where a plain value is
+    /// expected (or vice versa) is the most common ZZ beginner error.
+    /// Point at the value with the three actionable fixes (#245).
+    /// Returns true when the hint was emitted (caller skips the generic
+    /// return-type-span error to avoid a double report).
+    /// Produce a structural diff note when two types share an outer
+    /// constructor but differ at an inner level (e.g. `Box<int>` vs
+    /// `Box<str>` → "differ at inner: expected `int`, found `str`").
+    /// Returns `None` when there's no useful diff (different constructors,
+    /// primitives, or one side is a var/named type).
+    fn type_diff_note(left: &Type, right: &Type) -> Option<String> {
+        let diff = Self::diff_types(left, right, 0)?;
+        Some(format!("structural diff: {diff}"))
+    }
+
+    /// Recursively compare two types; returns a description of the first
+    /// point of difference, or `None` when the types are structurally equal
+    /// or incomparable.
+    fn diff_types(left: &Type, right: &Type, depth: usize) -> Option<String> {
+        if depth > 6 {
+            return None;
+        }
+        match (left, right) {
+            // Same constructor → recurse into inner types.
+            (Type::Option(a), Type::Option(b)) => {
+                Self::diff_types(a, b, depth + 1).map(|d| format!("Option inner: {d}"))
+            }
+            (Type::Array(a), Type::Array(b)) => {
+                Self::diff_types(a, b, depth + 1).map(|d| format!("array element: {d}"))
+            }
+            (Type::Dict(ka, va), Type::Dict(kb, vb)) => Self::diff_types(ka, kb, depth + 1)
+                .or_else(|| Self::diff_types(va, vb, depth + 1))
+                .map(|d| format!("dict: {d}")),
+            (Type::Result(a, ea), Type::Result(b, eb)) => Self::diff_types(a, b, depth + 1)
+                .or_else(|| Self::diff_types(ea, eb, depth + 1))
+                .map(|d| format!("Result: {d}")),
+            (Type::Func(pa, ra), Type::Func(pb, rb)) => {
+                let p_diff = pa
+                    .iter()
+                    .zip(pb)
+                    .find_map(|(a, b)| Self::diff_types(a, b, depth + 1));
+                let r_diff = Self::diff_types(ra, rb, depth + 1);
+                match (p_diff, r_diff) {
+                    (Some(d), None) => Some(format!("param {d}")),
+                    (None, Some(d)) => Some(format!("return {d}")),
+                    (Some(dp), Some(dr)) => Some(format!("params: {dp}; return: {dr}")),
+                    (None, None) => None,
+                }
+            }
+            (Type::Tuple(a), Type::Tuple(b)) if a.len() == b.len() => a
+                .iter()
+                .zip(b)
+                .find_map(|(x, y)| Self::diff_types(x, y, depth + 1))
+                .map(|d| format!("tuple: {d}")),
+            (Type::Range(a), Type::Range(b)) => {
+                Self::diff_types(a, b, depth + 1).map(|d| format!("range: {d}"))
+            }
+            (
+                Type::Ptr {
+                    mutable: ma,
+                    inner: ia,
+                },
+                Type::Ptr {
+                    mutable: mb,
+                    inner: ib,
+                },
+            ) => {
+                if ma != mb {
+                    return Some(format!(
+                        "mutability: expected `*{}`, found `*{}`",
+                        if *ma { "mut" } else { "const" },
+                        if *mb { "mut" } else { "const" }
+                    ));
+                }
+                Self::diff_types(ia, ib, depth + 1).map(|d| format!("pointer inner: {d}"))
+            }
+            // Primitives / named / var / error / opaque — no useful inner diff.
+            _ => None,
+        }
+        .or_else(|| {
+            // If both are the same enum/struct name but different args, diff args.
+            match (left, right) {
+                (Type::Struct(n1, args1), Type::Struct(n2, args2))
+                    if n1 == n2 && args1.len() == args2.len() =>
+                {
+                    args1
+                        .iter()
+                        .zip(args2)
+                        .find_map(|(a, b)| Self::diff_types(a, b, depth + 1))
+                        .map(|d| format!("struct `{n1}` arg: {d}"))
+                }
+                (Type::Enum(n1, args1), Type::Enum(n2, args2))
+                    if n1 == n2 && args1.len() == args2.len() =>
+                {
+                    args1
+                        .iter()
+                        .zip(args2)
+                        .find_map(|(a, b)| Self::diff_types(a, b, depth + 1))
+                        .map(|d| format!("enum `{n1}` arg: {d}"))
+                }
+                _ => None,
+            }
+        })
     }
 
     /// Sherlock: returning an unwrapped `Result` where a plain value is

@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use zz_checker::{check_program_with_consts, AliasSig, EnumSig, FuncSig, StructSig, Type};
-use zz_frontend::diag::{error_at, render_to_string, Files, RawDiag};
+use zz_frontend::diag::{error_at, render_to_string, ColorMode, Files, RawDiag};
 use zz_frontend::parse;
 use zz_runtime::{EvalError, Interp, Value};
 use zz_stdlib::{
@@ -167,7 +167,12 @@ impl Session {
             self.last_had_errors = true;
             return EvalOutput {
                 output: String::new(),
-                errors: Some(render_to_string(&self.files, self.file_id, &parsed.errors)),
+                errors: Some(render_to_string(
+                    &self.files,
+                    self.file_id,
+                    &parsed.errors,
+                    ColorMode::Auto,
+                )),
             };
         }
 
@@ -183,6 +188,7 @@ impl Session {
                     &self.files,
                     self.file_id,
                     &decorator_errors,
+                    ColorMode::Auto,
                 )),
             };
         }
@@ -214,6 +220,7 @@ impl Session {
                                 "relative imports require a file context (`zz run`)",
                                 *span,
                             )],
+                            ColorMode::Auto,
                         )),
                     };
                 }
@@ -233,6 +240,7 @@ impl Session {
                                 format!("unknown standard library module `std.{module}`"),
                                 *span,
                             )],
+                            ColorMode::Auto,
                         )),
                     };
                 }
@@ -254,6 +262,7 @@ impl Session {
                             &self.files,
                             self.file_id,
                             &[error_at(msg, *span)],
+                            ColorMode::Auto,
                         )),
                     };
                 }
@@ -298,7 +307,12 @@ impl Session {
             self.last_had_errors = true;
             return EvalOutput {
                 output: String::new(),
-                errors: Some(render_to_string(&self.files, self.file_id, &checked.errors)),
+                errors: Some(render_to_string(
+                    &self.files,
+                    self.file_id,
+                    &checked.errors,
+                    ColorMode::Auto,
+                )),
             };
         }
 
@@ -331,7 +345,12 @@ impl Session {
                 let diags = eval_error_to_diag(&e);
                 EvalOutput {
                     output: String::new(),
-                    errors: Some(render_to_string(&self.files, self.file_id, &diags)),
+                    errors: Some(render_to_string(
+                        &self.files,
+                        self.file_id,
+                        &diags,
+                        ColorMode::Auto,
+                    )),
                 }
             }
         }

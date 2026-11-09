@@ -1,0 +1,10 @@
+// features: closures, capture-by-reference, int-arith, print, string-literal
+// Mutation of a captured var is visible inside the closure and outside.
+x := 1
+f := |y: int| {
+    x = x + y
+    x
+}
+println(f(10)) // 11
+println(x) // 11
+println("closure_mutate_captured_ok")

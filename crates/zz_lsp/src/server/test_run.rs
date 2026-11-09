@@ -29,9 +29,26 @@ pub(crate) async fn handle_execute_command(
 ) -> Result<Option<serde_json::Value>> {
     if params.command == crate::project_check::CHECK_PROJECT_COMMAND {
         let root = project_root_for(backend, &params.arguments)?;
+        // Pagination args: args[1] = skip (usize), args[2] = take (usize or null).
+        let mut args_iter = params.arguments.iter().skip(1);
+        let skip: usize = args_iter
+            .next()
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(0);
+        let take: Option<usize> = args_iter
+            .next()
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
         return Ok(Some(
-            crate::project_check::run_project_check(backend.state.clone(), &backend.client, root)
-                .await,
+            crate::project_check::run_project_check_paginated(
+                backend.state.clone(),
+                &backend.client,
+                root,
+                skip,
+                take,
+            )
+            .await,
         ));
     }
     if params.command != crate::test_lens::RUN_TEST_COMMAND {

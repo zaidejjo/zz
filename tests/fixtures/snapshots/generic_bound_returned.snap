@@ -1,0 +1,21 @@
+first module that broke: <path> <path>
+
+error: type mismatch: expected `T`, found `str`
+
+  --> <path>
+    |
+    5 |     return "nope"
+      |            ^^^^^^
+error: cannot infer type for generic parameter `T`; it requires bound(s) Num
+
+  --> <path>
+    |
+    7 | x := make_bad()
+      |      ^^^^^^^^^^
+error: cannot infer the type of `generic_bound_returned.x`; add a type annotation
+
+  --> <path>
+    |
+    7 | x := make_bad()
+      | ^
+zz: 1 file(s) failed type-check

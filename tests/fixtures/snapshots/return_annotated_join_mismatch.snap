@@ -1,0 +1,16 @@
+first module that broke: <path> <path>
+
+error: type mismatch: expected `int`, found `str`
+
+  --> <path>
+    |
+    5 |     x:int = if c {
+      |       ^^^
+    = to fix: change the annotation to `str` or convert the value
+error: type mismatch: expected `int`, found `str`
+
+  --> <path>
+    |
+   10 |     return x
+      |            ^
+zz: 1 file(s) failed type-check

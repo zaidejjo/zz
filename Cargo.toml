@@ -4,7 +4,8 @@ members = ["crates/zz_span_ast", "crates/zz_diag_core", "crates/zz_diag", "crate
     "crates/zz_paths", "crates/zz_plugin",
     "crates/zz_http_routes", "crates/zz_infer", "crates/zz_lints",
     "crates/zz_scope", "crates/zz_sigs", "crates/zz_structs",
-    "crates/zz_suggest", "crates/zz_unify"]
+    "crates/zz_suggest", "crates/zz_unify",
+    "fuzz"]
 
 [workspace.package]
 version = "0.4.0"
@@ -28,6 +29,7 @@ ureq = "3"
 base64 = "0.22"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 webpki-roots = "1"
+proptest = "1"
 rustls-pki-types = "1"
 
 [profile.release]

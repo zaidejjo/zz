@@ -1,0 +1,9 @@
+first module that broke: <path> <path>
+
+error: Z0001: undefined variable `undefined_var`
+
+  --> <path>
+    |
+    3 | println(undefined_var)
+      |         ^^^^^^^^^^^^^
+zz: 1 file(s) failed type-check

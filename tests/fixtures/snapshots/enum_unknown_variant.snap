@@ -1,0 +1,9 @@
+first module that broke: <path> <path>
+
+error: unknown variant `Num` for enum `enum_unknown_variant.Token` (expected one of: Eof, IntLit)
+
+  --> <path>
+    |
+    9 |     t := Token.Num(1)
+      |          ^^^^^^^^^^^^
+zz: 1 file(s) failed type-check

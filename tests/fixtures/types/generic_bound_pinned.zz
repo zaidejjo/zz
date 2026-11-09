@@ -1,0 +1,12 @@
+// features: generics, func-call, int-arith, print, string-literal
+// bounded generics pinned to concrete types at the call site still work
+func id<T: Num>(x: T) -> T {
+    return x
+}
+
+func add<T: Num>(a: T, b: T) -> T {
+    return a + b
+}
+println(add(3, 4)) // 7
+println(id(7)) // 7
+println("generic_bound_ok")

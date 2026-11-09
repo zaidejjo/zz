@@ -1,0 +1,12 @@
+// features: closures, capture-by-reference, func-return, int-arith, print, string-literal
+// A closure outlives the scope that created it; the captured `delta` cell
+// survives `make_adder` returning.
+func make_adder(delta: int) -> func(int) -> int {
+    return |x: int| {
+        x + delta
+    }
+}
+add5 := make_adder(5)
+println(add5(3)) // 8
+println(add5(7)) // 12
+println("closure_outlives_scope_ok")

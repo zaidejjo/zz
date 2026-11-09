@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use zz_codegen::{build_options_fingerprint_with, BuildOptions, ClangProvider, PgoMode};
 use zz_frontend::ast::Stmt;
+use zz_frontend::diag::ColorMode;
 use zz_frontend::span::Span;
 use zz_hir::{merge_typed_programs, TypedProgram};
 use zz_loader::{
@@ -1275,7 +1276,7 @@ fn typed_program_for_phased(
         let id = files.add(e.name.clone(), e.source.clone());
         eprint!(
             "{}",
-            zz_frontend::diag::render_to_string(&files, id, &e.diags)
+            zz_frontend::diag::render_to_string(&files, id, &e.diags, ColorMode::Auto)
         );
     }
     if has_errors {
@@ -1399,7 +1400,7 @@ fn chunk_module_for_phased(
         let id = files.add(e.name.clone(), e.source.clone());
         eprint!(
             "{}",
-            zz_frontend::diag::render_to_string(&files, id, &e.diags)
+            zz_frontend::diag::render_to_string(&files, id, &e.diags, ColorMode::Auto)
         );
     }
     if has_errors {

@@ -1,0 +1,10 @@
+first module that broke: <path> <path>
+
+error: cannot assign to immutable variable `x`
+
+  --> <path>
+    |
+    4 | x += 2
+      | ^
+    = hint: remove `const` to make `x` mutable
+zz: 1 file(s) failed type-check

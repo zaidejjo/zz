@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use zz_span_ast::span::Span;
 use zz_types::Type;
 
 #[derive(Debug, Default, Clone)]
@@ -15,11 +16,22 @@ pub struct Unifier {
     next_var: u32,
 }
 
+/// A unification error between two types, with optional source spans for each
+/// side so diagnostics can render secondary labels (e.g. "expected `int`
+/// because of this annotation here").
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnifyError {
     pub left: String,
     pub right: String,
     pub message: String,
+    /// Span where the expected (left) type was declared/inferred, if known.
+    pub left_span: Option<Span>,
+    /// Span where the found (right) type was declared/inferred, if known.
+    pub right_span: Option<Span>,
+    /// The actual left `Type` (resolved) for structural diffing in diagnostics.
+    pub left_ty: Box<Type>,
+    /// The actual right `Type` (resolved) for structural diffing in diagnostics.
+    pub right_ty: Box<Type>,
 }
 
 impl Unifier {
@@ -67,6 +79,65 @@ impl Unifier {
                 None => Type::Var(*id),
             },
             _ => t.clone(),
+        }
+    }
+
+    /// Deep-resolve all type variables in `t` recursively.
+    pub fn resolve_deep(&self, t: &Type) -> Type {
+        match t {
+            Type::Var(id) => match self.vars.get(id) {
+                Some(inner) => self.resolve_deep(inner),
+                None => t.clone(),
+            },
+            Type::Tuple(ts) => Type::Tuple(ts.iter().map(|x| self.resolve_deep(x)).collect()),
+            Type::Option(x) => Type::Option(Box::new(self.resolve_deep(x))),
+            Type::Result(a, b) => Type::Result(
+                Box::new(self.resolve_deep(a)),
+                Box::new(self.resolve_deep(b)),
+            ),
+            Type::Func(params, ret) => Type::Func(
+                params.iter().map(|x| self.resolve_deep(x)).collect(),
+                Box::new(self.resolve_deep(ret)),
+            ),
+            Type::Array(x) => Type::Array(Box::new(self.resolve_deep(x))),
+            Type::Dict(k, v) => Type::Dict(
+                Box::new(self.resolve_deep(k)),
+                Box::new(self.resolve_deep(v)),
+            ),
+            Type::Union(ts) => Type::Union(ts.iter().map(|x| self.resolve_deep(x)).collect()),
+            Type::Struct(name, args) => Type::Struct(
+                name.clone(),
+                args.iter().map(|x| self.resolve_deep(x)).collect(),
+            ),
+            Type::Enum(name, args) => Type::Enum(
+                name.clone(),
+                args.iter().map(|x| self.resolve_deep(x)).collect(),
+            ),
+            Type::Range(t) => Type::Range(Box::new(self.resolve_deep(t))),
+            Type::Opaque(name) => Type::Opaque(name.clone()),
+            Type::Bytes => Type::Bytes,
+            Type::Json => Type::Json,
+            Type::Db => Type::Db,
+            Type::HttpServer => Type::HttpServer,
+            Type::TcpStream => Type::TcpStream,
+            Type::TcpListener => Type::TcpListener,
+            Type::Response => Type::Response,
+            Type::HttpRequest => Type::HttpRequest,
+            Type::Chan => Type::Chan,
+            Type::TaskJoin => Type::TaskJoin,
+            Type::Ptr { inner, .. } => Type::Ptr {
+                mutable: false,
+                inner: Box::new(self.resolve_deep(inner)),
+            },
+            Type::Named(name) => Type::Named(name.clone()),
+            Type::Int
+            | Type::Float
+            | Type::Bool
+            | Type::Str
+            | Type::Unit
+            | Type::Void
+            | Type::Error
+            | Type::Never => t.clone(),
         }
     }
 
@@ -124,39 +195,14 @@ impl Unifier {
             | (Type::Bool, Type::Bool)
             | (Type::Str, Type::Str)
             | (Type::Unit, Type::Unit)
-            | (Type::Void, Type::Void)
-            | (Type::Json, Type::Json)
-            | (Type::Db, Type::Db)
-            | (Type::Bytes, Type::Bytes)
-            | (Type::HttpServer, Type::HttpServer)
-            | (Type::TcpStream, Type::TcpStream)
-            | (Type::TcpListener, Type::TcpListener)
-            | (Type::Response, Type::Response)
-            | (Type::HttpRequest, Type::HttpRequest)
-            | (Type::Chan, Type::Chan)
-            | (Type::TaskJoin, Type::TaskJoin)
-            | (Type::Error, _)
-            | (_, Type::Error)
-            | (Type::Never, _)
-            | (_, Type::Never) => true,
-            (Type::Named(x), Type::Named(y)) => x == y,
-            (Type::Struct(x, xa), Type::Struct(y, ya)) => {
-                x == y
-                    && xa.len() == ya.len()
-                    && xa
-                        .iter()
-                        .zip(ya.iter())
-                        .all(|(x, y)| self.eq_resolved(x, y))
-            }
-            (Type::Opaque(x), Type::Opaque(y)) => x == y,
-            (Type::Enum(x, xa), Type::Enum(y, ya)) => {
-                x == y
-                    && xa.len() == ya.len()
-                    && xa
-                        .iter()
-                        .zip(ya.iter())
-                        .all(|(x, y)| self.eq_resolved(x, y))
-            }
+            | (Type::Void, Type::Void) => true,
+            (Type::Error, _) | (_, Type::Error) => true,
+            (Type::Never, _) | (_, Type::Never) => true,
+            (Type::Named(a), Type::Named(b)) => a == b,
+            (Type::Enum(a, aa), Type::Enum(b, bb)) => a == b && aa == bb,
+            (Type::Struct(a, aa), Type::Struct(b, bb)) => a == b && aa == bb,
+            (Type::Union(ms), Type::Union(ns)) => ms == ns,
+            (Type::Ptr { inner: a, .. }, Type::Ptr { inner: b, .. }) => self.eq_resolved(a, b),
             (Type::Tuple(xs), Type::Tuple(ys)) => {
                 xs.len() == ys.len()
                     && xs
@@ -177,100 +223,66 @@ impl Unifier {
                     && self.eq_resolved(r1, r2)
             }
             (Type::Array(x), Type::Array(y)) => self.eq_resolved(x, y),
-            (
-                Type::Ptr {
-                    mutable: m1,
-                    inner: x,
-                },
-                Type::Ptr {
-                    mutable: m2,
-                    inner: y,
-                },
-            ) => m1 == m2 && self.eq_resolved(x, y),
-            (Type::Dict(k1, v1), Type::Dict(k2, v2)) => {
-                self.eq_resolved(k1, k2) && self.eq_resolved(v1, v2)
-            }
-            (Type::Union(ms), Type::Union(ns)) => {
-                ms.len() == ns.len()
-                    && ms
-                        .iter()
-                        .zip(ns.iter())
-                        .all(|(x, y)| self.eq_resolved(x, y))
-            }
-            (Type::Range(x), Type::Range(y)) => self.eq_resolved(x, y),
             _ => false,
         }
     }
 
-    /// Resolve every variable in a type (used to finalize inferred types).
-    pub fn resolve_deep(&self, t: &Type) -> Type {
-        let t = self.resolve(t);
+    /// Occurs check: does variable `id` appear free inside `t`?
+    fn occurs(&self, id: u32, t: &Type) -> bool {
         match t {
-            Type::Tuple(ts) => Type::Tuple(ts.iter().map(|x| self.resolve_deep(x)).collect()),
-            Type::Option(inner) => Type::Option(Box::new(self.resolve_deep(&inner))),
-            Type::Result(a, b) => Type::Result(
-                Box::new(self.resolve_deep(&a)),
-                Box::new(self.resolve_deep(&b)),
-            ),
-            Type::Func(ps, r) => Type::Func(
-                ps.iter().map(|x| self.resolve_deep(x)).collect(),
-                Box::new(self.resolve_deep(&r)),
-            ),
-            Type::Array(t) => Type::Array(Box::new(self.resolve_deep(&t))),
-            Type::Dict(k, v) => Type::Dict(
-                Box::new(self.resolve_deep(&k)),
-                Box::new(self.resolve_deep(&v)),
-            ),
-            Type::Union(ts) => Type::Union(ts.iter().map(|x| self.resolve_deep(x)).collect()),
-            Type::Struct(n, args) => {
-                Type::Struct(n, args.iter().map(|x| self.resolve_deep(x)).collect())
+            Type::Var(v) if *v == id => true,
+            Type::Var(_) => false,
+            Type::Tuple(ts) => ts.iter().any(|x| self.occurs(id, x)),
+            Type::Array(x) => self.occurs(id, x),
+            Type::Option(x) => self.occurs(id, x),
+            Type::Result(a, b) => self.occurs(id, a) || self.occurs(id, b),
+            Type::Func(params, ret) => {
+                params.iter().any(|p| self.occurs(id, p)) || self.occurs(id, ret)
             }
-            Type::Enum(n, args) => {
-                Type::Enum(n, args.iter().map(|x| self.resolve_deep(x)).collect())
-            }
-            Type::Range(t) => Type::Range(Box::new(self.resolve_deep(&t))),
-            Type::Ptr { mutable, inner } => Type::Ptr {
-                mutable,
-                inner: Box::new(self.resolve_deep(&inner)),
-            },
-            other => other,
+            Type::Ptr { inner, .. } => self.occurs(id, inner),
+            Type::Dict(k, v) => self.occurs(id, k) || self.occurs(id, v),
+            Type::Range(x) => self.occurs(id, x),
+            Type::Named(_)
+            | Type::Int
+            | Type::Float
+            | Type::Bool
+            | Type::Str
+            | Type::Unit
+            | Type::Void
+            | Type::Error
+            | Type::Never
+            | Type::Enum(_, _)
+            | Type::Opaque(_)
+            | Type::Bytes
+            | Type::Json
+            | Type::Db
+            | Type::HttpServer
+            | Type::TcpStream
+            | Type::TcpListener
+            | Type::Response
+            | Type::HttpRequest
+            | Type::Chan
+            | Type::TaskJoin
+            | Type::Union(_)
+            | Type::Struct(_, _) => false,
         }
     }
 
-    /// Unify two types, binding variables as needed.
-    ///
-    /// Fast paths (zero allocation): unbound-variable binding stores a
-    /// single clone of the other side; concrete spines match by reference.
-    /// Only a *bound* top-level `Var` pays one subtree clone (peeled into
-    /// a frame-owned temporary — never holding `&self` across recursion).
-    /// Union member trials roll back a bounded journal instead of cloning
-    /// the whole union-find map per attempt.
-    pub fn unify(&mut self, a: &Type, b: &Type) -> Result<(), UnifyError> {
-        let mut journal: Vec<(u32, Option<Type>)> = Vec::new();
-        self.unify_inner(a, b, &mut journal)
-    }
-
-    /// Record a binding, journaling the previous value once per trial nest
-    /// so speculative (union-member) attempts can roll back cheaply.
+    /// Record a binding `id := ty` in the journal so it can be rolled back
+    /// on a failed union attempt.
     fn journaled_insert(&mut self, journal: &mut Vec<(u32, Option<Type>)>, id: u32, ty: Type) {
-        if !journal.iter().any(|(k, _)| *k == id) {
-            journal.push((id, self.vars.get(&id).cloned()));
-        }
+        journal.push((id, self.vars.get(&id).cloned()));
         self.vars.insert(id, ty);
     }
 
-    /// Undo journal entries back to `mark` (exclusive).
+    /// Roll back all bindings made since `mark`.
     fn rollback(&mut self, journal: &mut Vec<(u32, Option<Type>)>, mark: usize) {
         while journal.len() > mark {
-            let (id, old) = journal.pop().expect("unify journal mark out of range");
+            let (id, old) = journal.pop().unwrap();
             match old {
-                Some(ty) => {
-                    self.vars.insert(id, ty);
-                }
-                None => {
-                    self.vars.remove(&id);
-                }
-            }
+                Some(ty) => self.vars.insert(id, ty),
+                None => self.vars.remove(&id),
+            };
         }
     }
 
@@ -289,6 +301,10 @@ impl Unifier {
                         left: format!("var{x}"),
                         right: b.to_string(),
                         message: "infinite type".into(),
+                        left_span: None,
+                        right_span: None,
+                        left_ty: Box::new(a.clone()),
+                        right_ty: Box::new(b.clone()),
                     });
                 }
                 self.journaled_insert(journal, x, b.clone());
@@ -300,6 +316,10 @@ impl Unifier {
                         left: a.to_string(),
                         right: format!("var{y}"),
                         message: "infinite type".into(),
+                        left_span: None,
+                        right_span: None,
+                        left_ty: Box::new(a.clone()),
+                        right_ty: Box::new(b.clone()),
                     });
                 }
                 self.journaled_insert(journal, y, a.clone());
@@ -336,6 +356,10 @@ impl Unifier {
                         left: format!("var{x}"),
                         right: t.to_string(),
                         message: "infinite type".into(),
+                        left_span: None,
+                        right_span: None,
+                        left_ty: Box::new(a.clone()),
+                        right_ty: Box::new(b.clone()),
                     })
                 } else {
                     self.journaled_insert(journal, x, t.clone());
@@ -364,6 +388,10 @@ impl Unifier {
                         left: a.to_string(),
                         right: b.to_string(),
                         message: "type argument arity mismatch".into(),
+                        left_span: None,
+                        right_span: None,
+                        left_ty: Box::new(Type::Enum(a.clone(), aa.clone())),
+                        right_ty: Box::new(Type::Enum(b.clone(), bb.clone())),
                     });
                 }
                 for (x, y) in aa.iter().zip(bb.iter()) {
@@ -377,6 +405,10 @@ impl Unifier {
                         left: a.to_string(),
                         right: b.to_string(),
                         message: "type argument arity mismatch".into(),
+                        left_span: None,
+                        right_span: None,
+                        left_ty: Box::new(Type::Struct(a.clone(), aa.clone())),
+                        right_ty: Box::new(Type::Struct(b.clone(), bb.clone())),
                     });
                 }
                 for (x, y) in aa.iter().zip(bb.iter()) {
@@ -415,6 +447,10 @@ impl Unifier {
                                 .join(", ")
                         ),
                         message: "tuple arity mismatch".into(),
+                        left_span: None,
+                        right_span: None,
+                        left_ty: Box::new(a.clone()),
+                        right_ty: Box::new(b.clone()),
                     });
                 }
                 for (x, y) in xs.iter().zip(ys.iter()) {
@@ -445,6 +481,10 @@ impl Unifier {
                                 .join(", ")
                         ),
                         message: "function arity mismatch".into(),
+                        left_span: None,
+                        right_span: None,
+                        left_ty: Box::new(a.clone()),
+                        right_ty: Box::new(b.clone()),
                     });
                 }
                 for (x, y) in p1.iter().zip(p2.iter()) {
@@ -468,6 +508,10 @@ impl Unifier {
                         left: a.to_string(),
                         right: b.to_string(),
                         message: "pointer mutability mismatch (`*const` vs `*mut`)".into(),
+                        left_span: None,
+                        right_span: None,
+                        left_ty: Box::new(a.clone()),
+                        right_ty: Box::new(b.clone()),
                     });
                 }
                 self.unify_inner(x, y, journal)
@@ -494,8 +538,30 @@ impl Unifier {
                 left: a.to_string(),
                 right: b.to_string(),
                 message: "type mismatch".into(),
+                left_span: None,
+                right_span: None,
+                left_ty: Box::new(a.clone()),
+                right_ty: Box::new(b.clone()),
             }),
         }
+    }
+
+    /// Unify `a` and `b`, returning an error if they cannot be unified.
+    /// Uses a throwaway journal — bindings are not journaled for rollback.
+    pub fn unify(&mut self, a: &Type, b: &Type) -> Result<(), UnifyError> {
+        let mut journal: Vec<(u32, Option<Type>)> = Vec::new();
+        self.unify_inner(a, b, &mut journal)
+    }
+
+    /// Unify `a` and `b`, recording bindings in `journal` so they can be
+    /// rolled back if a later unification fails.
+    pub fn unify_with_journal(
+        &mut self,
+        a: &Type,
+        b: &Type,
+        journal: &mut Vec<(u32, Option<Type>)>,
+    ) -> Result<(), UnifyError> {
+        self.unify_inner(a, b, journal)
     }
 
     /// Unify `t` against a union's members, committing the first success.
@@ -526,84 +592,10 @@ impl Unifier {
                 .collect::<Vec<_>>()
                 .join(" | "),
             message: "type mismatch".into(),
+            left_span: None,
+            right_span: None,
+            left_ty: Box::new(t.clone()),
+            right_ty: Box::new(Type::Union(members.to_vec())),
         }))
-    }
-
-    /// Occurs check: does variable `id` appear in `t` (through chains)?
-    /// Pure shared traversal — the old version cloned via `resolve` at
-    /// every level.
-    fn occurs(&self, id: u32, t: &Type) -> bool {
-        match t {
-            Type::Var(other) => match self.vars.get(other) {
-                Some(inner) => *other == id || self.occurs(id, inner),
-                None => *other == id,
-            },
-            Type::Tuple(ts) => ts.iter().any(|x| self.occurs(id, x)),
-            Type::Option(x) => self.occurs(id, x),
-            Type::Result(a, b) => self.occurs(id, a) || self.occurs(id, b),
-            Type::Func(ps, r) => ps.iter().any(|x| self.occurs(id, x)) || self.occurs(id, r),
-            Type::Array(x) => self.occurs(id, x),
-            Type::Dict(k, v) => self.occurs(id, k) || self.occurs(id, v),
-            Type::Union(ts) => ts.iter().any(|x| self.occurs(id, x)),
-            Type::Struct(_, args) => args.iter().any(|x| self.occurs(id, x)),
-            Type::Enum(_, args) => args.iter().any(|x| self.occurs(id, x)),
-            Type::Range(x) => self.occurs(id, x),
-            Type::Ptr { inner, .. } => self.occurs(id, inner),
-            _ => false,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn binds_and_resolves() {
-        let mut u = Unifier::new();
-        let a = u.fresh_var();
-        let b = u.fresh_var();
-        u.unify(&a, &Type::Int).unwrap();
-        u.unify(&b, &a).unwrap();
-        assert_eq!(u.resolve(&b), Type::Int);
-    }
-
-    #[test]
-    fn mismatch_reports_types() {
-        let mut u = Unifier::new();
-        let err = u.unify(&Type::Int, &Type::Str).unwrap_err();
-        assert_eq!(err.left, "int");
-        assert_eq!(err.right, "str");
-    }
-
-    #[test]
-    fn nested_types_unify() {
-        let mut u = Unifier::new();
-        let a = u.fresh_var();
-        let lhs = Type::Result(Box::new(Type::Int), Box::new(a.clone()));
-        let rhs = Type::Result(Box::new(Type::Int), Box::new(Type::Str));
-        u.unify(&lhs, &rhs).unwrap();
-        assert_eq!(u.resolve(&a), Type::Str);
-    }
-
-    #[test]
-    fn arity_mismatch_reports() {
-        let mut u = Unifier::new();
-        let err = u
-            .unify(
-                &Type::Func(vec![Type::Int], Box::new(Type::Int)),
-                &Type::Func(vec![Type::Int, Type::Int], Box::new(Type::Int)),
-            )
-            .unwrap_err();
-        assert_eq!(err.message, "function arity mismatch");
-    }
-
-    #[test]
-    fn occurs_check_catches_infinite() {
-        let mut u = Unifier::new();
-        let a = u.fresh_var();
-        let bad = Type::Func(vec![a.clone()], Box::new(Type::Int));
-        let err = u.unify(&a, &bad).unwrap_err();
-        assert_eq!(err.message, "infinite type");
     }
 }

@@ -22,7 +22,9 @@ mod vm_disasm;
 mod watch;
 
 use zz_arena::ScopedBump;
-use zz_frontend::diag::{error_at, render_to_string, Files};
+use zz_frontend::diag::{
+    error_at, error_code_lookup, render_to_string, ColorMode, ErrorCode, Files, ALL_ERROR_CODES,
+};
 use zz_frontend::span::Span;
 use zz_runtime::{Interp, Value};
 
@@ -405,6 +407,12 @@ fn main_inner() -> ExitCode {
                 }
             }
         }
+        Some("explain") => {
+            if rest.is_empty() {
+                return explain_list_command();
+            }
+            explain_command(rest)
+        }
         Some("build") => match build_cmd(rest) {
             Ok(()) => ExitCode::SUCCESS,
             Err(msg) => {
@@ -436,12 +444,20 @@ fn main_inner() -> ExitCode {
                 }
             };
             let rest = check_args.as_slice();
-            // Strip the two-token `--format <value>` form before path
-            // parsing (the bare value would otherwise parse as the path);
-            // `--format=<value>` is already a single flag token.
+            // Parse --watch / --clear / --debounce / --watch-ignore before
+            // the --format / --color loop so they are stripped from the
+            // args passed to check_or_fix_path.
+            let (watch_flags, rest) = match crate::watch::parse_check_watch_flags(rest) {
+                Ok(parsed) => parsed,
+                Err(msg) => {
+                    eprintln!("zz: {msg}");
+                    return ExitCode::FAILURE;
+                }
+            };
             let mut rest_filtered: Vec<String> = Vec::with_capacity(rest.len());
             let mut rest_iter = rest.iter().peekable();
             let mut format_value: Option<String> = None;
+            let mut color_mode: ColorMode = ColorMode::Auto;
             while let Some(a) = rest_iter.next() {
                 if a == "--format" {
                     if let Some(v) = rest_iter.next() {
@@ -452,6 +468,41 @@ fn main_inner() -> ExitCode {
                 if let Some(v) = a.strip_prefix("--format=") {
                     format_value = Some(v.to_string());
                     rest_filtered.push(a.clone());
+                    continue;
+                }
+                if a == "--color" {
+                    if let Some(v) = rest_iter.next() {
+                        color_mode = match v.to_string().as_str() {
+                            "auto" => ColorMode::Auto,
+                            "always" => ColorMode::Always,
+                            "never" => ColorMode::Never,
+                            other => {
+                                eprintln!(
+                                    "zz: unknown `--color` value `{}` (expected `auto`, `always`, or `never`)\n",
+                                    other
+                                );
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                    } else {
+                        eprintln!("zz: `--color` requires a value (`auto`, `always`, or `never`)");
+                        return ExitCode::FAILURE;
+                    }
+                    continue;
+                }
+                if let Some(v) = a.strip_prefix("--color=") {
+                    color_mode = match v.to_string().as_str() {
+                        "auto" => ColorMode::Auto,
+                        "always" => ColorMode::Always,
+                        "never" => ColorMode::Never,
+                        other => {
+                            eprintln!(
+                                "zz: unknown `--color` value `{}` (expected `auto`, `always`, or `never`)\n",
+                                other
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    };
                     continue;
                 }
                 rest_filtered.push(a.clone());
@@ -490,19 +541,39 @@ fn main_inner() -> ExitCode {
             }
 
             let interactive = has_fix && has_interactive && !has_hard;
-            match check_or_fix_path(
-                &path,
-                has_fix,
-                interactive,
-                has_hard,
-                has_stats,
-                format_json,
-                &features,
-            ) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(msg) => {
+            if watch_flags.watch {
+                if let Err(msg) = crate::watch::check_watch(
+                    &path,
+                    has_fix,
+                    interactive,
+                    has_hard,
+                    has_stats,
+                    format_json,
+                    color_mode,
+                    &features,
+                    watch_flags,
+                ) {
                     eprintln!("zz: {msg}");
                     ExitCode::FAILURE
+                } else {
+                    ExitCode::SUCCESS
+                }
+            } else {
+                match check_or_fix_path(
+                    &path,
+                    has_fix,
+                    interactive,
+                    has_hard,
+                    has_stats,
+                    format_json,
+                    color_mode,
+                    &features,
+                ) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(msg) => {
+                        eprintln!("zz: {msg}");
+                        ExitCode::FAILURE
+                    }
                 }
             }
         }
@@ -518,6 +589,45 @@ fn main_inner() -> ExitCode {
             let has_hard = flags.contains(&"--hard".to_string());
             let has_interactive = flags.contains(&"--interactive".to_string());
             let interactive = has_interactive && !has_hard;
+            let mut rest_iter = flags.iter().peekable();
+            let mut color_mode = ColorMode::Auto;
+            while let Some(a) = rest_iter.next() {
+                if a == "--color" {
+                    if let Some(v) = rest_iter.next() {
+                        color_mode = match v.to_string().as_str() {
+                            "auto" => ColorMode::Auto,
+                            "always" => ColorMode::Always,
+                            "never" => ColorMode::Never,
+                            other => {
+                                eprintln!(
+                                    "zz: unknown `--color` value `{}` (expected `auto`, `always`, or `never`)\n",
+                                    other
+                                );
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                    } else {
+                        eprintln!("zz: `--color` requires a value (`auto`, `always`, or `never`)");
+                        return ExitCode::FAILURE;
+                    }
+                    continue;
+                }
+                if let Some(v) = a.strip_prefix("--color=") {
+                    color_mode = match v.to_string().as_str() {
+                        "auto" => ColorMode::Auto,
+                        "always" => ColorMode::Always,
+                        "never" => ColorMode::Never,
+                        other => {
+                            eprintln!(
+                                "zz: unknown `--color` value `{}` (expected `auto`, `always`, or `never`)\n",
+                                other
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    };
+                    continue;
+                }
+            }
             match check_or_fix_path(
                 &path,
                 true,
@@ -525,6 +635,7 @@ fn main_inner() -> ExitCode {
                 has_hard,
                 false,
                 false,
+                color_mode,
                 &zz_pm::manifest::FeatureSelection::default(),
             ) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -811,6 +922,10 @@ FLAGS:
   --format json      machine-readable diagnostics on stdout
   --features <list>  enable project features (comma-separated; repeatable)
   --all-features     enable every declared [features] entry
+  --watch            re-check whenever any .zz file under PATH changes
+  --clear            clear screen before each re-check
+  --debounce <ms>    debounce delay in ms for re-checks (default: 150)
+  --watch-ignore <glob>  ignore files matching glob (repeatable)
   -h, --help         show this help
 
 PATH can be a single .zz file or a directory (recursively scans all .zz files).
@@ -869,6 +984,61 @@ FLAGS:
         _ => USAGE,
     };
     print!("{text}");
+}
+
+/// Print the explanation of an error code for `zz explain <code>`.
+fn explain_command(args: &[String]) -> ExitCode {
+    let code_str = args.first().map(|s| s.as_str()).unwrap_or("");
+    let code = if let Some(s) = code_str.strip_prefix('Z') {
+        match s.parse::<u32>() {
+            Ok(n) => ErrorCode(n),
+            Err(_) => {
+                eprintln!("zz explain: invalid code `{code_str}` (expected format like Z0001)");
+                eprintln!("Run `zz explain` without arguments to list all codes.");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        eprintln!("zz explain: invalid code `{code_str}` (expected format like Z0001)");
+        eprintln!("Run `zz explain` without arguments to list all codes.");
+        return ExitCode::FAILURE;
+    };
+
+    match error_code_lookup(code) {
+        Some(entry) => {
+            println!("{} — {}", code, entry.title);
+            println!();
+            println!("{}", entry.description);
+            println!();
+            println!("Bad:");
+            for line in entry.bad_example.lines() {
+                println!("  {line}");
+            }
+            println!();
+            println!("Fixed:");
+            for line in entry.fixed_example.lines() {
+                println!("  {line}");
+            }
+            ExitCode::SUCCESS
+        }
+        None => {
+            eprintln!("zz explain: unknown code `{code_str}`");
+            eprintln!("Run `zz explain` without arguments to list all codes.");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// List all error codes for `zz explain` (no arguments).
+fn explain_list_command() -> ExitCode {
+    println!("ZZ error codes:");
+    println!();
+    for entry in ALL_ERROR_CODES {
+        println!("  {} — {}", entry.code, entry.title);
+    }
+    println!();
+    println!("Run `zz explain <CODE>` for details, e.g. `zz explain Z0001`.");
+    ExitCode::SUCCESS
 }
 
 /// Convert a byte offset into a 1-based `(line, column)` pair.
@@ -1101,7 +1271,10 @@ pub(crate) fn prepare_run_with_features(
     for e in &loaded.errors {
         let mut files = Files::new();
         let id = files.add(e.name.clone(), e.source.clone());
-        eprint!("{}", render_to_string(&files, id, &e.diags));
+        eprint!(
+            "{}",
+            render_to_string(&files, id, &e.diags, ColorMode::Auto)
+        );
         if e.diags
             .iter()
             .any(|d| d.severity == zz_frontend::diag::Severity::Error)
@@ -1291,7 +1464,7 @@ pub(crate) fn render_eval_error(e: &zz_runtime::EvalError, name: &str, source: &
         diag = diag.with_note(note.clone());
     }
     let diags = vec![diag];
-    eprint!("{}", render_to_string(&files, id, &diags));
+    eprint!("{}", render_to_string(&files, id, &diags, ColorMode::Auto));
     // The trailing `zz: ...` line is what survives when stderr is captured
     // and only the tail is read, so make it name the failure instead of the
     // opaque "program failed".
@@ -1575,12 +1748,12 @@ fn emit_ir_cmd(args: &[String]) -> Result<(), String> {
                 skip_next = false;
                 return false;
             }
-            if a.as_str() == "--output"
-                || a.as_str() == "-o"
-                || a.as_str() == "--embed"
-                || a.as_str() == "--target"
-                || a.as_str() == "--cc"
-                || a.as_str() == "--emit-ir"
+            if a.to_string().as_str() == "--output"
+                || a.to_string().as_str() == "-o"
+                || a.to_string().as_str() == "--embed"
+                || a.to_string().as_str() == "--target"
+                || a.to_string().as_str() == "--cc"
+                || a.to_string().as_str() == "--emit-ir"
             {
                 if !a.starts_with("--emit-ir") {
                     skip_next = true;
@@ -2176,11 +2349,11 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
                 skip_next = false;
                 return false;
             }
-            if a.as_str() == "--target"
-                || a.as_str() == "--cc"
-                || a.as_str() == "--embed"
-                || a.as_str() == "-o"
-                || a.as_str() == "--output"
+            if a.to_string().as_str() == "--target"
+                || a.to_string().as_str() == "--cc"
+                || a.to_string().as_str() == "--embed"
+                || a.to_string().as_str() == "-o"
+                || a.to_string().as_str() == "--output"
             {
                 skip_next = true;
                 return false;
@@ -2652,7 +2825,7 @@ fn help_before_entry(args: &[String]) -> bool {
         }
         if a.starts_with('-') {
             // `--flag=value` carries its value inline.
-            if !a.contains('=') && VALUE_FLAGS.contains(&a.as_str()) {
+            if !a.contains('=') && VALUE_FLAGS.contains(&a.to_string().as_str()) {
                 skip_next = true;
             }
             continue;
@@ -2702,7 +2875,7 @@ fn strip_output_flag(args: &[String]) -> Vec<String> {
             skip_next = false;
             continue;
         }
-        if FLAGS.contains(&a.as_str()) {
+        if FLAGS.contains(&a.to_string().as_str()) {
             skip_next = true;
             continue;
         }
@@ -3043,13 +3216,15 @@ impl CheckDedupe {
     }
 }
 
-fn check_or_fix_path(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_or_fix_path(
     path_arg: &Option<String>,
     do_fix: bool,
     interactive: bool,
     force: bool,
     show_stats: bool,
     format_json: bool,
+    color_mode: ColorMode,
     features: &zz_pm::manifest::FeatureSelection,
 ) -> Result<(), String> {
     use zz_frontend::diag::{FixSafety, Severity};
@@ -3193,7 +3368,7 @@ fn check_or_fix_path(
                 for e in &loaded.errors {
                     let mut files_ctx = Files::new();
                     let id = files_ctx.add(e.name.clone(), e.source.clone());
-                    eprint!("{}", render_to_string(&files_ctx, id, &e.diags));
+                    eprint!("{}", render_to_string(&files_ctx, id, &e.diags, color_mode));
                 }
             }
             if !safe_fixits.is_empty() {
@@ -3393,7 +3568,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{check_or_fix_path, CheckDedupe};
-    use zz_frontend::diag::warning_at;
+    use zz_frontend::diag::{warning_at, ColorMode};
     use zz_frontend::span::Span;
 
     fn write_temp(src: &str) -> PathBuf {
@@ -3412,7 +3587,7 @@ mod tests {
     /// Run `zz check` (check-only) under the isolated cache env: sharing the
     /// process-global cache env with the loader's cache-counting tests
     /// otherwise pollutes their entry counts mid-flight.
-    fn check_isolated(path: &str) -> Result<(), String> {
+    fn check_isolated(path: &str, color_mode: ColorMode) -> Result<(), String> {
         zz_loader::cache::with_isolated_cache(|| {
             check_or_fix_path(
                 &Some(path.to_string()),
@@ -3421,13 +3596,14 @@ mod tests {
                 false,
                 false,
                 false,
+                color_mode,
                 &zz_pm::manifest::FeatureSelection::default(),
             )
         })
     }
 
     /// Run `zz check --fix` (fix mode) under the isolated cache env.
-    fn fix_isolated(path: &str) -> Result<(), String> {
+    fn fix_isolated(path: &str, color_mode: ColorMode) -> Result<(), String> {
         zz_loader::cache::with_isolated_cache(|| {
             check_or_fix_path(
                 &Some(path.to_string()),
@@ -3436,6 +3612,7 @@ mod tests {
                 false,
                 false,
                 false,
+                color_mode,
                 &zz_pm::manifest::FeatureSelection::default(),
             )
         })
@@ -3472,7 +3649,7 @@ mod tests {
     fn fix_inserts_missing_match_comma() {
         // Zero-width insertion fixits must apply, not silently skip.
         let path = write_temp("match .ok(1) { .ok(n) => { n } .err(_) => { 0 } }\n");
-        let result = fix_isolated(&path.to_string_lossy());
+        let result = fix_isolated(&path.to_string_lossy(), ColorMode::Auto);
         assert!(result.is_ok(), "expected fix ok, got {result:?}");
         let fixed = fs::read_to_string(&path).unwrap();
         assert!(fixed.contains(", .err"), "comma not inserted: {fixed:?}");
@@ -3482,7 +3659,7 @@ mod tests {
     #[test]
     fn check_ok_on_valid_file() {
         let path = write_temp("x := 1 + 2\nprintln(x)\n");
-        let result = check_isolated(&path.to_string_lossy());
+        let result = check_isolated(&path.to_string_lossy(), ColorMode::Auto);
         assert!(result.is_ok(), "expected ok, got {result:?}");
         let _ = fs::remove_file(&path);
     }
@@ -3492,7 +3669,7 @@ mod tests {
         let path = write_temp(
             "scores := [10, 20, 30]\ny := scores[1]\nz := scores[1:3]\nfunc dbl(a: int, b: int) -> int { return a * b }\nw := 5 |> dbl(3)\nt := typeof(w)\n",
         );
-        let result = check_isolated(&path.to_string_lossy());
+        let result = check_isolated(&path.to_string_lossy(), ColorMode::Auto);
         assert!(result.is_ok(), "expected ok, got {result:?}");
         let _ = fs::remove_file(&path);
     }
@@ -3500,7 +3677,7 @@ mod tests {
     #[test]
     fn check_rejects_type_error() {
         let path = write_temp("x := 1 + \"a\"\n");
-        let result = check_isolated(&path.to_string_lossy());
+        let result = check_isolated(&path.to_string_lossy(), ColorMode::Auto);
         assert!(result.is_err(), "expected type error");
         let _ = fs::remove_file(&path);
     }
@@ -3508,7 +3685,7 @@ mod tests {
     #[test]
     fn check_rejects_index_error() {
         let path = write_temp("x := 5\nx[0]\n");
-        let result = check_isolated(&path.to_string_lossy());
+        let result = check_isolated(&path.to_string_lossy(), ColorMode::Auto);
         assert!(result.is_err(), "expected index type error");
         let _ = fs::remove_file(&path);
     }
@@ -3518,7 +3695,7 @@ mod tests {
         // #292: an error carrying auto-fix suggestions (typo fixit) must
         // still fail `zz check` — only warnings exit 0.
         let path = write_temp("func main() {\n    count := 1\n    println(cout)\n}\n");
-        let result = check_isolated(&path.to_string_lossy());
+        let result = check_isolated(&path.to_string_lossy(), ColorMode::Auto);
         assert!(result.is_err(), "expected fixable typo error to fail check");
         let _ = fs::remove_file(&path);
     }
@@ -3527,7 +3704,7 @@ mod tests {
     fn check_ok_on_warnings_only() {
         // #292: warnings alone (unused variable) must stay exit 0.
         let path = write_temp("func main() {\n    unused_xyz := 1\n}\n");
-        let result = check_isolated(&path.to_string_lossy());
+        let result = check_isolated(&path.to_string_lossy(), ColorMode::Auto);
         assert!(
             result.is_ok(),
             "expected warnings-only to pass, got {result:?}"
@@ -3537,7 +3714,7 @@ mod tests {
 
     #[test]
     fn check_missing_file_errors() {
-        let result = check_isolated("/tmp/zz_no_such_file_zz.zz");
+        let result = check_isolated("/tmp/zz_no_such_file_zz.zz", ColorMode::Auto);
         assert!(result.is_err(), "expected error for missing file");
     }
     #[test]
@@ -3555,7 +3732,7 @@ mod tests {
         src.push_str("func main() {\n    println(zz_perf_fn_0(1))\n}\n");
         let path = write_temp(&src);
         let start = std::time::Instant::now();
-        let result = check_isolated(&path.to_string_lossy());
+        let result = check_isolated(&path.to_string_lossy(), ColorMode::Auto);
         let elapsed = start.elapsed();
         let _ = fs::remove_file(&path);
         assert!(result.is_ok(), "expected ok, got {result:?}");
@@ -3590,7 +3767,7 @@ mod tests {
             if !path.is_file() {
                 continue;
             }
-            let result = check_isolated(&path.display().to_string());
+            let result = check_isolated(&path.display().to_string(), ColorMode::Auto);
             match &result {
                 Err(msg) if msg.contains("does not exist") || msg.contains("no .zz files") => {
                     panic!("scan should find files: {msg}");

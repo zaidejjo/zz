@@ -1,0 +1,16 @@
+first module that broke: <path> <path>
+
+error: cyclic type alias `alias_cycle.A`: alias_cycle.A -> alias_cycle.B
+
+  --> <path>
+    |
+    3 | type A = B
+      |          ^
+error: type mismatch: expected `unit`, found `int`
+
+  --> <path>
+    |
+    7 |     x: A = 1
+      |        ^
+    = to fix: change the annotation to `int` or convert the value
+zz: 1 file(s) failed type-check

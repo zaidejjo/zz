@@ -134,12 +134,17 @@ pub fn suggest_all<'a>(name: &str, candidates: &[&'a str]) -> Vec<(&'a str, u32)
         results.push((cand, dist, effective));
     }
 
-    // Sort by effective distance, then by length descending, then by
-    // name: candidate order inherits HashMap iteration (per-process
-    // random), so ties need a total order for deterministic diagnostics.
+    // Sort by effective distance, then by shared prefix length (longer first
+    // so `pritn` → `print` beats `pritn` → `pid` or `pritn` → `println`),
+    // then shorter, then alphabetical for determinism.
     results.sort_by(|a, b| {
         a.2.cmp(&b.2)
-            .then_with(|| b.0.len().cmp(&a.0.len()))
+            .then_with(|| {
+                let pa = common_prefix_len(name, a.0);
+                let pb = common_prefix_len(name, b.0);
+                pb.cmp(&pa)
+            })
+            .then_with(|| a.0.len().cmp(&b.0.len()))
             .then_with(|| a.0.cmp(b.0))
     });
     results
@@ -178,12 +183,13 @@ pub fn suggest_confident<'a>(name: &str, candidates: &[&'a str]) -> Option<&'a s
 }
 
 /// Up to three confident suggestions for ambiguous "did you mean" display.
-/// Each shares a leading character and is within one edit; ties are broken
-/// by `suggest_all`'s deterministic ordering.
+/// Each shares a leading character and is within the max edit distance for
+/// the name length (transpositions like `pritn` → `print` are distance 2).
 pub fn suggest_top3<'a>(name: &str, candidates: &[&'a str]) -> Vec<&'a str> {
+    let threshold = max_distance(name);
     suggest_all(name, candidates)
         .into_iter()
-        .filter(|(_, dist)| *dist <= 1)
+        .filter(|(_, dist)| *dist <= threshold)
         .filter(|(cand, _)| common_prefix_len(name, cand) >= 1)
         .take(3)
         .map(|(cand, _)| cand)
@@ -406,8 +412,10 @@ mod tests {
     #[test]
     fn suggest_top3_returns_confident_candidates() {
         // "printn" → confident candidates sharing a prefix, dist 1 each.
+        // Longer shared prefix ("print" with 5 shared chars) ranks before
+        // shorter shared prefix ("println" with 4 shared chars).
         let top = suggest_top3("printn", &["println", "print", "plntln", "format", "panic"]);
-        assert_eq!(top, vec!["println", "print"]);
+        assert_eq!(top, vec!["print", "println"]);
         // Nothing confident when all matches are far / prefix-less.
         let empty = suggest_top3("zzzzz", &["alpha", "bravo"]);
         assert!(empty.is_empty());

@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use zz_frontend::diag::{error_code_lookup, ErrorCode, ALL_ERROR_CODES};
 
 /// Monotonically increasing sweep token handed out to every `run_zz` call
 /// (dedicated per-fixture tests and the discovery sweep share one process,
@@ -26,6 +27,132 @@ fn fixtures_dir() -> PathBuf {
     // When running `cargo test -p zz_cli`, CARGO_MANIFEST_DIR is crates/zz_cli/.
     // fixtures/ is at ../../tests/fixtures relative to that.
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
+}
+
+/// Normalize stderr for cross-platform snapshot comparison.
+///
+/// Handles:
+/// - CRLF → LF line endings (Windows console output)
+/// - BOM and zero-width Unicode characters (invisible but byte-different)
+/// - Trailing whitespace per line (Windows programs emit trailing spaces)
+/// - All path formats: Unix (`/...`), Windows absolute (`C:\...`,
+///   `C:/...`), UNC (`\\...`), relative paths, paths embedded in tokens
+/// - Tokens matching `name:line:col` or `name:line` patterns
+/// - Collapses all internal whitespace runs to a single space
+///
+/// Returns a canonical form so snapshots are identical regardless of
+/// checkout location, path-separator conventions, or host OS.
+fn normalize_stderr(stderr: &str) -> String {
+    // Strip BOM, zero-width spaces/joiners, and other invisible Unicode
+    // that can differ between platforms without being visible.
+    let stderr: String = stderr
+        .replace("\r\n", "\n")
+        .replace('\r', "")
+        .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '\u{FEFF}' | '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{200E}' | '\u{200F}'
+            )
+        })
+        .collect();
+
+    let mut out = String::with_capacity(stderr.len());
+
+    for line in stderr.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            out.push('\n');
+            continue;
+        }
+
+        // Split into whitespace-delimited tokens, normalize each, rejoin
+        // with single spaces. This absorbs any spacing differences between
+        // platforms (e.g. Windows vs Linux terminal rendering).
+        let mut tokens: Vec<&str> = Vec::new();
+        let mut start: Option<usize> = None;
+
+        for (i, ch) in trimmed.char_indices() {
+            if ch.is_whitespace() {
+                if let Some(s) = start.take() {
+                    tokens.push(&trimmed[s..i]);
+                }
+            } else if start.is_none() {
+                start = Some(i);
+            }
+        }
+        if let Some(s) = start {
+            tokens.push(&trimmed[s..]);
+        }
+
+        for (i, token) in tokens.iter().enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            if is_path_like(token) {
+                out.push_str("<path>");
+            } else {
+                out.push_str(token);
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Returns true when `word` looks like a file path or a path:line:col
+/// diagnostic marker, so it should be replaced with `<path>`.
+fn is_path_like(word: &str) -> bool {
+    if word.contains('/') || word.contains('\\') {
+        return true;
+    }
+    // `file.zz:6:8` or `file.zz:6` — file:line(:col) without directory
+    // separator. Contains a colon followed by digits.
+    let colon_pos = word.find(':');
+    if let Some(pos) = colon_pos {
+        let rest = &word[pos + 1..];
+        return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
+    }
+    false
+}
+
+/// Hex dump `s` for byte-level diagnostics of snapshot mismatches.
+fn hex_dump(s: &str, label: &str) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("--- {} hex dump ---\n", label));
+    for (i, chunk) in s.as_bytes().chunks(16).enumerate() {
+        out.push_str(&format!("{:08x}: ", i * 16));
+        for b in chunk {
+            out.push_str(&format!("{:02x} ", b));
+        }
+        // Pad to aligned width
+        for _ in chunk.len()..16 {
+            out.push_str("   ");
+        }
+        out.push_str("  ");
+        for b in chunk {
+            if (32..127).contains(b) {
+                out.push(*b as char);
+            } else {
+                out.push('.');
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Compare normalized stderr against a committed snapshot. Returns None on
+/// match, or Some((actual, expected)) on mismatch for detailed diagnostics.
+fn compare_snapshot(stderr: &str, expected: &str) -> Option<(String, String)> {
+    if stderr == expected {
+        None
+    } else {
+        Some((
+            format!("{}\n{}", stderr, hex_dump(stderr, "ACTUAL")),
+            format!("{}\n{}", expected, hex_dump(expected, "EXPECTED")),
+        ))
+    }
 }
 
 /// Run `zz run <file>` and return (exit_code, stdout, stderr).
@@ -699,6 +826,11 @@ e2e_success_test!(e2e_types_enum_generics, "types", "enum_generics.zz");
 e2e_success_test!(e2e_types_struct_embedding, "types", "struct_embedding.zz");
 e2e_success_test!(e2e_types_generics, "types", "generics.zz");
 e2e_success_test!(e2e_types_generic_bounds, "types", "generic_bounds.zz");
+e2e_success_test!(
+    e2e_types_generic_bound_pinned,
+    "types",
+    "generic_bound_pinned.zz"
+);
 e2e_success_test!(e2e_types_variants, "types", "variants.zz");
 e2e_success_test!(e2e_types_type_inference, "types", "type_inference.zz");
 e2e_success_test!(e2e_types_smart_try, "types", "smart_try.zz");
@@ -2368,6 +2500,139 @@ fn e2e_fix_report_uses_real_line_numbers() {
         assert!(
             (1..=line_count).contains(&num),
             "reported line {num} is outside the file's {line_count} lines:\n{line}"
+        );
+    }
+}
+
+/// Every error code in the catalog must have a description, bad example,
+/// and fixed example, and `zz explain <code>` must print them.
+#[test]
+fn error_codes_have_explanations() {
+    for entry in ALL_ERROR_CODES {
+        assert!(
+            !entry.title.is_empty(),
+            "code {} has empty title",
+            entry.code
+        );
+        assert!(
+            !entry.description.is_empty(),
+            "code {} has empty description",
+            entry.code
+        );
+        assert!(
+            !entry.bad_example.is_empty(),
+            "code {} has empty bad_example",
+            entry.code
+        );
+        assert!(
+            !entry.fixed_example.is_empty(),
+            "code {} has empty fixed_example",
+            entry.code
+        );
+    }
+
+    // Every code from Z0001 to Z0010 must be explainable via the CLI.
+    for n in 1..=ALL_ERROR_CODES.len() {
+        let code = ErrorCode(n as u32);
+        let entry =
+            error_code_lookup(code).unwrap_or_else(|| panic!("code {code} missing from catalog"));
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_zz"))
+            .arg("explain")
+            .arg(code.to_string())
+            .output()
+            .expect("failed to run `zz explain`");
+        assert!(
+            output.status.success(),
+            "`zz explain {}` failed:\nstderr: {}",
+            code,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(&code.to_string()),
+            "`zz explain {}` output missing code: {stdout}",
+            code
+        );
+        assert!(
+            stdout.contains(entry.title),
+            "`zz explain {}` output missing title `{}`: {stdout}",
+            code,
+            entry.title
+        );
+    }
+}
+
+/// Snapshot tests for diagnostic output.
+///
+/// Runs `zz check` on each error fixture and compares stderr to a snapshot
+/// file under `tests/fixtures/snapshots/<stem>.snap`.
+///
+/// Set `UPDATE_SNAPSHOTS=1` to regenerate all snapshots.
+#[test]
+fn snapshot_error_diagnostics() {
+    use std::fs;
+
+    let errors_dir = fixtures_dir().join("errors");
+    let snapshots_dir = errors_dir.parent().unwrap().join("snapshots");
+
+    // Collect all .zz files in the errors directory
+    let mut fixtures: Vec<_> = std::fs::read_dir(&errors_dir)
+        .expect("read fixture dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("zz"))
+        .collect();
+    fixtures.sort();
+
+    let update = std::env::var("UPDATE_SNAPSHOTS").is_ok();
+
+    let mut mismatches: Vec<String> = Vec::new();
+
+    for fixture in &fixtures {
+        let stem = fixture.file_stem().unwrap().to_string_lossy().to_string();
+        let snap_path = snapshots_dir.join(format!("{stem}.snap"));
+
+        // Run `zz check` on the fixture
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_zz"))
+            .arg("check")
+            .arg(fixture)
+            .output()
+            .expect("failed to run `zz check`");
+
+        let stderr = normalize_stderr(&String::from_utf8_lossy(&output.stderr));
+
+        // If update mode, write the snapshot and continue
+        if update {
+            fs::write(&snap_path, &stderr).unwrap_or_else(|e| {
+                panic!("failed to write snapshot {}: {}", snap_path.display(), e)
+            });
+            continue;
+        }
+
+        // Otherwise, compare against the snapshot
+        let expected = normalize_stderr(&fs::read_to_string(&snap_path).unwrap_or_else(|e| {
+            panic!(
+                "snapshot not found for {}: {}. Run with UPDATE_SNAPSHOTS=1 to generate.",
+                fixture.display(),
+                e
+            )
+        }));
+
+        if let Some((actual, expected)) = compare_snapshot(&stderr, &expected) {
+            eprintln!(
+                "\n--- SNAPSHOT MISMATCH for {} ---\nACTUAL:\n{}\nEXPECTED:\n{}\n--- END MISMATCH ---\n",
+                stem, actual, expected
+            );
+            mismatches.push(stem);
+        }
+    }
+
+    if !mismatches.is_empty() {
+        panic!(
+            "Snapshot mismatch for {} fixture(s): {:?}\n\
+             Run with UPDATE_SNAPSHOTS=1 to regenerate snapshots.",
+            mismatches.len(),
+            mismatches
         );
     }
 }

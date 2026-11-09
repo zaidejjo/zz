@@ -1,0 +1,9 @@
+first module that broke: <path> <path>
+
+error: cannot infer type for generic parameter `T`; it requires bound(s) Num
+
+  --> <path>
+    |
+    8 | x := make()
+      |      ^^^^^^
+zz: 1 file(s) failed type-check

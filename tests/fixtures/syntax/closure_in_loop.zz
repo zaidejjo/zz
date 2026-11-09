@@ -1,0 +1,12 @@
+// features: closures, loops, capture-by-reference, int-arith, print, string-literal
+// Closures created in a loop capture the loop var by reference (current
+// iteration value).
+total := 0
+for i in 0..3 {
+    f := |x: int| {
+        x + i
+    }
+    total = total + f(1)
+}
+println(total) // (1+0)+(1+1)+(1+2) = 6
+println("closure_in_loop_ok")

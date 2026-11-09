@@ -1,0 +1,15 @@
+first module that broke: <path> <path>
+
+error: duplicate definition of enum `enum_dup.Token`
+
+  --> <path>
+    |
+    7 | enum Token {
+      | ^^^^^^^^^^^^^^^^^^^^^^^
+error: previous definition here
+
+  --> <path>
+    |
+    3 | enum Token {
+      | ^^^^^^^^^^^^^^^^^^^^^^^
+zz: 1 file(s) failed type-check

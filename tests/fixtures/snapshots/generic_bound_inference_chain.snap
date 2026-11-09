@@ -1,0 +1,9 @@
+first module that broke: <path> <path>
+
+error: type `str` does not satisfy bound `Num` for generic parameter `T`
+
+  --> <path>
+    |
+   10 | x := unwrap_default(.some("nope"), "fallback")
+      |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+zz: 1 file(s) failed type-check

@@ -4,7 +4,7 @@ use zz_diag::{error_at, FixIt};
 use zz_lexer::token::TokenKind;
 use zz_span_ast::ast::{
     BinOp, Block, Decorator, ExternFunc, Ident, ImportItem, Param, Pattern, Stmt, TraitBound,
-    TypeParam,
+    TyKind, TypeParam,
 };
 use zz_span_ast::Span;
 use zz_suggest::suggest_all;
@@ -196,6 +196,203 @@ impl<'a> Parser<'a> {
                     expr: Box::new(expr),
                     span,
                 }
+            }
+            // `let x := 5` or `let x = 5` — `let` is not a ZZ keyword; use `:=`
+            TokenKind::Ident if self.peek().text == "let" => {
+                let let_tok = self.advance();
+                self.push_error(
+                    error_at(
+                        "unexpected `let` — ZZ does not use `let` declarations",
+                        let_tok.span,
+                    )
+                    .with_note("write `x := 5` instead of `let x := 5`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(let_tok.span.start, let_tok.span.end),
+                        "",
+                        "remove `let`",
+                    )),
+                );
+                self.parse_stmt()
+            }
+            // `var x := 5` — `var` is not a ZZ keyword; use `:=`
+            TokenKind::Ident if self.peek().text == "var" => {
+                let var_tok = self.advance();
+                self.push_error(
+                    error_at(
+                        "unexpected `var` — ZZ does not use `var` declarations",
+                        var_tok.span,
+                    )
+                    .with_note("write `x := 5` instead of `var x := 5`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(var_tok.span.start, var_tok.span.end),
+                        "",
+                        "remove `var`",
+                    )),
+                );
+                self.parse_stmt()
+            }
+            // `end` — ZZ uses `}` to close blocks, not `end`
+            TokenKind::Ident if self.peek().text == "end" => {
+                let end_tok = self.advance();
+                self.push_error(
+                    error_at(
+                        "unexpected `end` — ZZ uses `}` to close blocks, not `end`",
+                        end_tok.span,
+                    )
+                    .with_note("write `}` instead of `end`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(end_tok.span.start, end_tok.span.end),
+                        "}",
+                        "replace `end` with `}`",
+                    )),
+                );
+                self.parse_stmt()
+            }
+            // `def` / `fn` / `function` are not ZZ keywords; use `func`
+            TokenKind::Ident
+                if self.peek().text == "def"
+                    || self.peek().text == "fn"
+                    || self.peek().text == "function" =>
+            {
+                let kw_tok = self.advance();
+                // Look ahead for the real function name so the hint says
+                // `func foo(...)` instead of `func def(...)`.
+                let suggested_name = if self.at(TokenKind::Ident) {
+                    self.peek().text.clone().into_owned()
+                } else {
+                    kw_tok.text.clone().into_owned()
+                };
+                self.push_error(
+                    error_at(
+                        format!(
+                            "unexpected `{}` — ZZ does not use `{}` to declare functions",
+                            kw_tok.text, kw_tok.text
+                        ),
+                        kw_tok.span,
+                    )
+                    .with_note(format!(
+                        "write `func {}(...) {{ ... }}` instead",
+                        suggested_name
+                    ))
+                    .with_fixit(FixIt::safe(
+                        Span::new(kw_tok.span.start, kw_tok.span.end),
+                        "func",
+                        "replace with `func`",
+                    )),
+                );
+                // Recovery: parse the rest as if `func` was written, so the
+                // body and closing `}` are consumed properly and we don't
+                // emit cascading "unexpected `}`" errors on subsequent
+                // lines. The type checker will then flag `pritn` as
+                // undefined and suggest `print`/`println`.
+                // Recovery: consume tokens through the matching `}` so we
+                // don't emit cascading "unexpected `}`" errors on subsequent
+                // lines. The body inside is skipped; the user still gets the
+                // "use `func` instead of `def`" hint above.
+                let mut depth = 0u32;
+                loop {
+                    match self.peek_kind() {
+                        TokenKind::LBrace => {
+                            depth += 1;
+                            self.advance();
+                        }
+                        TokenKind::RBrace => {
+                            if depth == 0 {
+                                self.advance();
+                                break;
+                            }
+                            depth -= 1;
+                            self.advance();
+                        }
+                        TokenKind::Eof => break,
+                        _ => {
+                            self.advance();
+                        }
+                    }
+                }
+                // Return a placeholder so parse_stmt_list can continue
+                // parsing whatever follows the `}` (e.g. `greet("Zaid")`).
+                // We don't advance pos here; parse_stmt_list will advance
+                // past one token on the next iteration if we made no
+                // progress, avoiding an EOF error.
+                Stmt::Return {
+                    value: None,
+                    span: self.peek().span,
+                }
+            }
+            // `public` is not a ZZ keyword; use `pub`
+            TokenKind::Ident if self.peek().text == "public" => {
+                let pub_tok = self.advance();
+                self.push_error(
+                    error_at(
+                        "unexpected `public` — ZZ does not use `public`",
+                        pub_tok.span,
+                    )
+                    .with_note("write `pub` instead of `public`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(pub_tok.span.start, pub_tok.span.end),
+                        "pub",
+                        "replace with `pub`",
+                    )),
+                );
+                self.parse_stmt()
+            }
+            // `class` is not a ZZ keyword; use `struct` + `impl`
+            TokenKind::Ident if self.peek().text == "class" => {
+                let class_tok = self.advance();
+                self.push_error(
+                    error_at(
+                        "unexpected `class` — ZZ does not have classes",
+                        class_tok.span,
+                    )
+                    .with_note("write `struct Name { ... }` instead of `class Name { ... }`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(class_tok.span.start, class_tok.span.end),
+                        "struct",
+                        "replace with `struct`",
+                    )),
+                );
+                self.parse_stmt()
+            }
+            // `new` is not a ZZ keyword; use struct literal syntax
+            TokenKind::Ident if self.peek().text == "new" => {
+                let new_tok = self.advance();
+                self.push_error(
+                    error_at("unexpected `new` — ZZ does not use `new`", new_tok.span)
+                        .with_note("write `TypeName { ... }` instead of `new TypeName(...)`")
+                        .with_fixit(FixIt::safe(
+                            Span::new(new_tok.span.start, new_tok.span.end),
+                            "",
+                            "remove `new`",
+                        )),
+                );
+                self.parse_stmt()
+            }
+            // `switch` is not a ZZ keyword; use `match`
+            TokenKind::Ident if self.peek().text == "switch" => {
+                let switch_tok = self.advance();
+                self.push_error(
+                    error_at(
+                        "unexpected `switch` — ZZ does not have `switch`",
+                        switch_tok.span,
+                    )
+                    .with_note("write `match` instead of `switch`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(switch_tok.span.start, switch_tok.span.end),
+                        "match",
+                        "replace with `match`",
+                    )),
+                );
+                self.parse_stmt()
+            }
+            // `goto` is not a ZZ keyword
+            TokenKind::Ident if self.peek().text == "goto" => {
+                let goto_tok = self.advance();
+                self.push_error(error_at(
+                    "unexpected `goto` — ZZ does not have `goto`",
+                    goto_tok.span,
+                ));
+                self.parse_stmt()
             }
             _ => {
                 // Try `IDENT: TYPE = expr` (explicit declaration). Backtrack
@@ -710,6 +907,26 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn parse_import(&mut self, pub_: bool) -> Stmt {
         let import_tok = self.advance();
+        // `import "std.str"` — quotes are not used on import paths in ZZ.
+        if self.at(TokenKind::Str) {
+            let str_tok = self.advance();
+            self.push_error(
+                error_at("unexpected string literal after `import`", str_tok.span)
+                    .with_note("write `import std.str` instead of `import \"std.str\"`")
+                    .with_fixit(FixIt::safe(
+                        Span::new(str_tok.span.start, str_tok.span.end),
+                        "",
+                        "remove quotes",
+                    )),
+            );
+            return Stmt::Import {
+                path: vec!["".to_string()],
+                alias: None,
+                items: Vec::new(),
+                span: import_tok.span.join(str_tok.span),
+                pub_,
+            };
+        }
         let mut path = Vec::new();
         if let Some((seg, _)) = self.parse_import_segment() {
             path.push(seg);
@@ -1133,7 +1350,47 @@ impl<'a> Parser<'a> {
         }
         // Then a type.
         let ty = self.parse_type();
-        // Then `=`.
+        // Then `=`. But `:=` here is a common mistake from other languages.
+        if self.at(TokenKind::ColonEq) {
+            let colon_eq_tok = self.advance(); // `:=`
+            let value = self.parse_expr();
+            let span = name.span.join(value.span());
+            let type_name = match &ty.kind {
+                TyKind::Int => "int",
+                TyKind::Float => "float",
+                TyKind::Bool => "bool",
+                TyKind::Str => "str",
+                TyKind::Unit => "unit",
+                TyKind::Named(n, _) => n.as_str(),
+                _ => "type",
+            };
+            let decl = format!("{}: {}", name.text, type_name);
+            self.push_error(
+                error_at(
+                    format!(
+                        "invalid declaration: use `{decl} = expr` or `{name} := expr`",
+                        name = name.text,
+                    ),
+                    colon_eq_tok.span,
+                )
+                .with_fixit(FixIt::safe(
+                    Span::new(colon_eq_tok.span.start, colon_eq_tok.span.end),
+                    "=",
+                    "replace `:=` with `=`",
+                )),
+            );
+            return Some(Stmt::Decl {
+                ty: Some(ty),
+                name: Ident {
+                    name: name.text.into_owned(),
+                    span: name.span,
+                },
+                value,
+                span,
+                pub_,
+                is_const,
+            });
+        }
         if !self.eat(TokenKind::Assign) {
             return None;
         }

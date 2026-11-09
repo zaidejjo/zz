@@ -1,17 +1,19 @@
 //! Core type-checking logic: statements, expressions, patterns.
 
-use std::sync::Arc;
 use zz_checker_core::{Checker, FuncSig};
-use zz_diag_core::{error_at, warning_at, FixIt};
-use zz_infer::{contains_var, default_variant_vars, InferOps};
-use zz_lints::http_lint::HttpLintOps;
+use zz_diag_core::{error_at, warning_at, ErrorCode, FixIt};
+use zz_infer::InferOps;
 use zz_scope::ScopeOps;
 use zz_sigs::enums::EnumOps;
 use zz_span_ast::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, Param, Pattern, Stmt, Ty, UnOp};
 use zz_span_ast::span::Span;
 use zz_structs::StructOps;
-use zz_suggest::suggest_all;
 use zz_types::Type;
+
+mod check_call;
+mod check_call_args;
+mod check_stmt;
+mod definite_assignment;
 
 /// Cheap static sanity check over the literal SQL text: balanced
 /// single/double quotes and parens. Returns an error message when the
@@ -68,6 +70,49 @@ fn index_range_hint(len: usize) -> String {
     }
 }
 
+/// Fold an integer literal expression to a constant i64. Handles int
+/// literals, negated literals, and binary add/sub/mul/div/rem of int
+/// literals. Returns `None` for anything that can't be folded at check
+/// time (leaving the runtime bounds-check to handle it — zero false
+/// positives).
+fn const_eval_int(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Int { value, .. } => Some(*value),
+        Expr::Unary {
+            op: UnOp::Neg,
+            expr,
+            ..
+        } => const_eval_int(expr).and_then(|v| v.checked_neg()),
+        Expr::Binary {
+            op, left, right, ..
+        } => {
+            let a = const_eval_int(left)?;
+            let b = const_eval_int(right)?;
+            match op {
+                BinOp::Add => a.checked_add(b),
+                BinOp::Sub => a.checked_sub(b),
+                BinOp::Mul => a.checked_mul(b),
+                BinOp::Div => {
+                    if b == 0 {
+                        None // div-by-zero handled by check_arith
+                    } else {
+                        a.checked_div(b)
+                    }
+                }
+                BinOp::Rem => {
+                    if b == 0 {
+                        None
+                    } else {
+                        a.checked_rem(b)
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// A method invocation: resolved signature plus receiver, args, and span.
 pub struct MethodCall<'a> {
     pub sig: &'a FuncSig,
@@ -81,7 +126,7 @@ pub struct MethodCall<'a> {
 }
 
 /// Every name a pattern binds, in source order (#518).
-fn pattern_bindings(pat: &Pattern) -> Vec<(String, Span)> {
+pub(crate) fn pattern_bindings(pat: &Pattern) -> Vec<(String, Span)> {
     fn walk(pat: &Pattern, out: &mut Vec<(String, Span)>) {
         match pat {
             Pattern::Binding { name } => out.push((name.name.clone(), name.span)),
@@ -113,6 +158,9 @@ pub trait TypeCheckOps {
     /// an assignment — so the note points at the two-step split instead.
     fn warn_if_shadowed_destructure(&mut self, mark: usize);
 
+    /// Type-check one statement, dispatching to per-statement helpers in
+    /// `check_stmt` module. Returns the statement's value type (`Unit` for
+    /// most statements, `Never` for `return`).
     fn check_stmt(&mut self, stmt: &Stmt) -> Type;
 
     /// Type of an assignment target: a variable, a qualified name, or a
@@ -220,6 +268,10 @@ pub trait TypeCheckOps {
 
     fn check_arith(&mut self, op: BinOp, left: &Expr, right: &Expr, span: Span) -> Type;
 
+    /// Type-check array concatenation `[T] + [U]`: element types must match
+    /// exactly, or one side can be unified with the other.
+    fn check_array_concat(&mut self, a: &Type, b: &Type, span: Span) -> Type;
+
     /// True when a `head.method(args)` call must be read as a method call
     /// even though `head.method` also names a seeded free function: the
     /// head is a genuine local value, the direct reading is already
@@ -245,6 +297,15 @@ pub trait TypeCheckOps {
     /// name, so neither form is lost.
     fn receiver_impl_method(&self, recv: &Type, method: &str) -> bool;
 
+    /// Table-driven removed/renamed stdlib API check (see [`REMOVED_APIS`]).
+    fn check_removed_api(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        named: &[(Ident, Expr)],
+        span: Span,
+    ) -> Option<Type>;
+
     fn check_call(
         &mut self,
         callee: &Expr,
@@ -252,6 +313,33 @@ pub trait TypeCheckOps {
         named: &[(Ident, Expr)],
         span: Span,
     ) -> Type;
+
+    /// Handle a `Field` callee (`obj.method(...)`): resolve the method
+    /// signature against the receiver's type and delegate to
+    /// `check_method_call`. Returns `Some(type)` if dispatched, `None`
+    /// to fall through to direct-name handling.
+    fn check_call_field_callee(
+        &mut self,
+        obj: &Expr,
+        method: String,
+        args: &[Expr],
+        named: &[(Ident, Expr)],
+        span: Span,
+    ) -> Option<Type>;
+
+    /// Handle `print`/`println` builtin calls. Returns `Some(Unit)` if
+    /// `name` is a print builtin and no local shadows it, `None` otherwise.
+    fn check_call_print_builtin(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        named: &[(Ident, Expr)],
+        span: Span,
+    ) -> Option<Type>;
+
+    /// Resolve a method signature for a typed receiver by looking up
+    /// `TypeName.method` in the stdlib table.
+    fn resolve_method_sig(&self, recv_t: &Type, method: &str) -> Option<FuncSig>;
 
     /// Check that the given positional and named arguments match the parameter
     /// types.  `has_default` indicates which trailing parameters have defaults;
@@ -334,14 +422,57 @@ pub trait TypeCheckOps {
     fn find_converts(&self, from: &Type, to: &Type) -> Vec<Option<Span>>;
 
     fn bind_pattern(&mut self, pat: &Pattern, ty: &Type);
+    /// Bind a `.Variant` pattern: constrains the scrutinee type, then binds payload names.
+    fn bind_pattern_variant(
+        &mut self,
+        name: &str,
+        arg: &Option<Box<Pattern>>,
+        span: Span,
+        ty: &Type,
+    );
+
+    /// Handle `.Variant` pattern on an enum scrutinee.
+    fn bind_pattern_variant_enum(
+        &mut self,
+        ename: &str,
+        vname: &str,
+        eargs: &[Type],
+        arg: &Option<Box<Pattern>>,
+        span: Span,
+    ) -> Option<(Pattern, Type)>;
+
+    /// Handle `.some(x)` pattern: binds payload name to Option's inner type.
+    fn bind_pattern_variant_option(
+        &mut self,
+        inner: &Type,
+        arg: &Option<Box<Pattern>>,
+        span: Span,
+    ) -> Option<(Pattern, Type)>;
+
+    /// Handle `.none` pattern: rejects any argument.
+    fn bind_pattern_variant_none(
+        &mut self,
+        arg: &Option<Box<Pattern>>,
+        span: Span,
+    ) -> Option<(Pattern, Type)>;
 
     fn check_exhaustive(&mut self, st: &Type, arms: &[zz_span_ast::ast::MatchArm], span: Span);
-}
 
-/// `print`/`println` accept any number of values (#713): like other
-/// languages, positional arguments render space-separated.
-fn is_print_builtin(name: &str) -> bool {
-    matches!(name, "print" | "println")
+    /// True if `pat` matches every value of its type (wildcard / binding /
+    /// catch-all or-pattern / all-catch-all tuple).
+    fn pat_covers_all(&self, pat: &Pattern) -> bool;
+
+    /// Constructors of `ty` not covered by `pats` (Maranget specialization).
+    fn missing_patterns(&self, pats: &[&Pattern], ty: &Type) -> Option<Vec<String>>;
+
+    /// Check missing patterns for an enum type.
+    fn missing_patterns_enum(&self, ename: &str, flat: &[&Pattern]) -> Option<Vec<String>>;
+
+    /// Flatten an `or`-pattern into its alternatives.
+    fn or_alt<'a>(&self, pat: &'a Pattern) -> Vec<&'a Pattern>;
+
+    /// Argument pattern of a variant pattern `.V(arg)`, or wildcard if none.
+    fn variant_arg(&self, pat: &Pattern) -> Pattern;
 }
 
 impl TypeCheckOps for Checker {
@@ -404,581 +535,7 @@ impl TypeCheckOps for Checker {
     }
 
     fn check_stmt(&mut self, stmt: &Stmt) -> Type {
-        self.had_undefined_var = false;
-        match stmt {
-            Stmt::Decl {
-                name,
-                ty,
-                value,
-                span: _,
-                pub_: _,
-                is_const,
-            } => {
-                // #518: `x := x + 1` inside a nested block declares a *new*
-                // `x` scoped to that block — the outer binding never advances.
-                // The initializer is checked before the new binding exists, so
-                // a read of `name` below resolves to the shadowed binding.
-                let probe = self.begin_shadow_probe(name.name.clone(), name.span);
-                // Pre-bind closures so recursive references resolve.
-                if matches!(value, Expr::Closure { .. }) {
-                    let fv = self.unifier.fresh_var();
-                    self.define_var_at(&name.name, fv, name.span, *is_const);
-                }
-                let vt = self.check_expr(value);
-                self.warn_if_shadowed_decl(probe, value, ty.is_some(), *is_const);
-                // Phase 2.2: inherit `std.http` route tables across server
-                // builder chains (`s2 := s.route_get(...)`, `s2 := s`).
-                self.propagate_http_routes(&name.name, value);
-                if let Some(ann) = ty {
-                    let gens = self.current_generics.clone();
-                    let at = self.ast_to_type(ann, &gens);
-                    if let Err(e) = self.unifier.unify(&vt, &at) {
-                        // Sherlock: point at the fix direction. Skip the
-                        // note while the value type is still uninferred
-                        // (`?0` helps nobody).
-                        let mut notes = Vec::new();
-                        let vt_r = self.unifier.resolve(&vt);
-                        if !matches!(vt_r, Type::Var(_)) {
-                            notes.push(format!(
-                                "to fix: change the annotation to `{vt_r}` or convert the value"
-                            ));
-                        }
-                        self.report_mismatch_with_notes(e, ann.span, notes);
-                    }
-                }
-                let rt = self.unifier.resolve_deep(&vt);
-                if contains_var(&rt) {
-                    let mut d = rt.clone();
-                    default_variant_vars(&mut d);
-                    if contains_var(&d) {
-                        // Empty collections like `[]` or `{}` get a fresh var for
-                        // element/key/value types. Defer inference — the var may be
-                        // resolved later by usage context (e.g. function calls).
-                        let may_defer = matches!(
-                            &d,
-                            Type::Array(inner) if matches!(inner.as_ref(), Type::Var(_))
-                        ) || matches!(
-                            &d,
-                            Type::Dict(k, v) if matches!(k.as_ref(), Type::Var(_)) || matches!(v.as_ref(), Type::Var(_))
-                        );
-                        if !may_defer {
-                            self.errors.push(error_at(
-                                format!(
-                                    "cannot infer the type of `{}`; add a type annotation",
-                                    name.name
-                                ),
-                                name.span,
-                            ));
-                        }
-                    } else {
-                        self.define_var_at(&name.name, d.clone(), name.span, *is_const);
-                        if self.env.len() == 1 {
-                            self.new_bindings.insert(name.name.clone(), d.clone());
-                        }
-                        return d;
-                    }
-                }
-                if self.env.len() == 1 {
-                    self.new_bindings.insert(name.name.clone(), vt.clone());
-                }
-                self.define_var_at(&name.name, rt.clone(), name.span, *is_const);
-                rt
-            }
-            Stmt::Import {
-                path,
-                alias,
-                items,
-                span,
-                pub_: _,
-            } => {
-                if items.is_empty() {
-                    // Full module import: track namespace for unused-import warnings.
-                    let ns = alias
-                        .as_ref()
-                        .cloned()
-                        .or_else(|| path.last().cloned())
-                        .unwrap_or_default();
-                    self.imports.push((ns.clone(), *span));
-                    // Remember the module behind an aliased head (`m` →
-                    // `std.math`) for const/call diagnostics.
-                    self.module_aliases
-                        .entry(ns.clone())
-                        .or_insert_with(|| path.join("."));
-                    // Full-path uses (`std.chan.send` under
-                    // `import std.chan`) must count for unused-import
-                    // tracking too — see scope.rs.
-                    self.import_aliases
-                        .entry(ns)
-                        .or_insert_with(|| path.join("."));
-                } else {
-                    // Selective/wildcard import: track each imported name.
-                    // Record bare→qualified aliases for call-site fallback
-                    // (generic functions have no value binding to find).
-                    let eff_ns = alias
-                        .as_ref()
-                        .cloned()
-                        .or_else(|| path.last().cloned())
-                        .unwrap_or_default();
-                    for item in items {
-                        let name = match item {
-                            zz_span_ast::ast::ImportItem::Wildcard { .. } => {
-                                // Wildcard: track the module namespace.
-                                for k in self.funcs.keys().cloned().collect::<Vec<_>>() {
-                                    if let Some(bare) = k.strip_prefix(&format!("{eff_ns}.")) {
-                                        if !bare.is_empty() && !bare.contains('.') {
-                                            self.import_aliases
-                                                .entry(bare.to_string())
-                                                .or_insert(k);
-                                        }
-                                    }
-                                }
-                                eff_ns.clone()
-                            }
-                            zz_span_ast::ast::ImportItem::Named {
-                                name,
-                                alias: item_alias,
-                                ..
-                            } => {
-                                let target = item_alias.clone().unwrap_or_else(|| name.clone());
-                                self.import_aliases
-                                    .entry(target.clone())
-                                    .or_insert_with(|| format!("{eff_ns}.{name}"));
-                                target
-                            }
-                        };
-                        self.imports.push((name, *span));
-                    }
-                }
-                Type::Unit
-            }
-            Stmt::Func { span, .. } => {
-                let fname = Self::func_name(stmt);
-                let sig = match zz_checker_core::lookup_std(&self.funcs, &fname) {
-                    Some(s) => s.clone(),
-                    None => {
-                        self.errors.push(zz_diag_core::error_at(
-                            format!(
-                                "nested function `{}` is not supported; use a closure (`|params| body`) instead",
-                                fname
-                            ),
-                            *span,
-                        ));
-                        return Type::Unit;
-                    }
-                };
-                // Extern functions have no ZZ body — already registered in Pass 1d.
-                if sig.is_extern {
-                    return Type::Unit;
-                }
-                // Scope span recording to this function: spans repeat
-                // across modules, so the typed map keys (scope, span).
-                self.scope.push(Arc::from(fname));
-                self.check_func_body(stmt, &sig);
-                self.scope.pop();
-                Type::Unit
-            }
-            Stmt::ExternBlock { .. } => Type::Unit,
-            Stmt::Link { lib, span } => {
-                if lib.trim().is_empty() {
-                    self.errors
-                        .push(error_at("`@link` requires a non-empty library name", *span));
-                } else if !self.link_libs.iter().any(|l| l == lib) {
-                    self.link_libs.push(lib.clone());
-                }
-                Type::Unit
-            }
-            Stmt::Impl { name, methods, .. } => {
-                let type_name = name.join(".");
-                for method in methods {
-                    if let Stmt::Func { .. } = method {
-                        let method_name = Self::func_name(method);
-                        let full_name = format!("{}.{}", type_name, method_name);
-                        let sig = zz_checker_core::lookup_std(&self.funcs, &full_name)
-                            .unwrap()
-                            .clone();
-                        self.scope.push(Arc::from(full_name));
-                        self.check_func_body(method, &sig);
-                        self.scope.pop();
-                    }
-                }
-                Type::Unit
-            }
-            Stmt::Return { value, span } => {
-                let ret = match self.current_ret.clone() {
-                    Some(r) => r,
-                    None => {
-                        self.errors
-                            .push(error_at("`return` outside of a function", *span));
-                        Type::Unit
-                    }
-                };
-                match value {
-                    Some(v) => {
-                        let vt = self.check_expr(v);
-                        if let Err(e) = self.unifier.unify(&vt, &ret) {
-                            if !self.report_result_return_hint(&vt, &ret, v.span()) {
-                                self.report_mismatch(e, v.span());
-                            }
-                        }
-                        // A `return` diverges: it never yields a value to the
-                        // enclosing block. Its statement type is `Never`
-                        // (bottom): it vanishes from if/match joins without
-                        // constraining sibling arms, while the function's
-                        // fall-through type is still verified against its
-                        // signature in `check_func_body` — so divergent
-                        // arms can never mask a wrong-typed value path.
-                        Type::Never
-                    }
-                    None => {
-                        if let Err(e) = self.unifier.unify(&Type::Unit, &ret) {
-                            self.report_mismatch(e, *span);
-                        }
-                        Type::Unit
-                    }
-                }
-            }
-            Stmt::Expr(e) => {
-                // A bare `match` statement discards the match value: tell
-                // `check_match` so bare `Result`/`Option` arm bodies warn
-                // (they never pass through this arm themselves). Tails
-                // are values, not discards.
-                let prev_discard = std::mem::replace(
-                    &mut self.direct_discard,
-                    matches!(e, Expr::Match { .. }) && !self.tail_is_value,
-                );
-                let t = self.check_expr(e);
-                self.direct_discard = prev_discard;
-                // Sherlock: a discarded `Result`/`Option` silently drops
-                // errors — unless this tail is the block's value.
-                if !self.tail_is_value {
-                    self.warn_if_discarded(e, &t);
-                }
-                t
-            }
-            Stmt::Struct { .. } => Type::Unit,
-            // Aliases are collected and resolved in pass 1a; checking
-            // the declaration itself is a no-op (uses resolve on demand).
-            Stmt::TypeAlias { .. } => Type::Unit,
-            // Enums are collected in pass 1b; the declaration itself is
-            // a no-op (construction and patterns resolve on demand).
-            Stmt::Enum { .. } => Type::Unit,
-            Stmt::For {
-                vars,
-                iter,
-                body,
-                span,
-            } => {
-                let it = self.check_expr(iter);
-                let it = self.unifier.resolve(&it);
-                match vars.len() {
-                    0 => {
-                        self.errors
-                            .push(error_at("internal: for-loop with no variables", *span));
-                    }
-                    1 => {
-                        // `for x in collection` — single variable
-                        let elem = match it {
-                            Type::Array(elem) => *elem,
-                            Type::Bytes => Type::Int,
-                            Type::Range(elem) => *elem,
-                            Type::Dict(_k, _v) => {
-                                // for x in dict → iterates keys
-                                *_k
-                            }
-                            Type::Var(_) => {
-                                self.errors.push(error_at(
-                                    "cannot iterate a value whose type could not be inferred",
-                                    *span,
-                                ));
-                                Type::Unit
-                            }
-                            other => {
-                                self.errors.push(error_at(
-                                    format!("cannot iterate a value of type `{other}`"),
-                                    *span,
-                                ));
-                                Type::Unit
-                            }
-                        };
-                        self.push_scope();
-                        self.define_binding_at(&vars[0].name, elem, vars[0].span, false);
-                        self.loop_depth += 1;
-                        self.check_block_discarded(body);
-                        self.loop_depth -= 1;
-                        self.pop_scope();
-                    }
-                    2 => {
-                        // `for k, v in dict` — key-value pair — or
-                        // `for i, x in xs.enumerate()` — index + element
-                        // over an array of 2-tuples.
-                        match it {
-                            Type::Dict(k, v) => {
-                                self.push_scope();
-                                self.define_binding_at(&vars[0].name, *k, vars[0].span, false);
-                                self.define_binding_at(&vars[1].name, *v, vars[1].span, false);
-                                self.loop_depth += 1;
-                                self.check_block_discarded(body);
-                                self.loop_depth -= 1;
-                                self.pop_scope();
-                            }
-                            Type::Array(elem) => {
-                                match self.unifier.resolve(&elem) {
-                                    Type::Tuple(pair) if pair.len() == 2 => {
-                                        self.push_scope();
-                                        self.define_binding_at(
-                                            &vars[0].name,
-                                            pair[0].clone(),
-                                            vars[0].span,
-                                            false,
-                                        );
-                                        self.define_binding_at(
-                                            &vars[1].name,
-                                            pair[1].clone(),
-                                            vars[1].span,
-                                            false,
-                                        );
-                                        self.loop_depth += 1;
-                                        self.check_block_discarded(body);
-                                        self.loop_depth -= 1;
-                                        self.pop_scope();
-                                    }
-                                    Type::Var(_) => {
-                                        // Element type not yet inferred
-                                        // (e.g. generic): fresh vars; body
-                                        // usage constrains them later.
-                                        let k_var = self.unifier.fresh_var();
-                                        let v_var = self.unifier.fresh_var();
-                                        self.push_scope();
-                                        self.define_binding_at(
-                                            &vars[0].name,
-                                            k_var,
-                                            vars[0].span,
-                                            false,
-                                        );
-                                        self.define_binding_at(
-                                            &vars[1].name,
-                                            v_var,
-                                            vars[1].span,
-                                            false,
-                                        );
-                                        self.loop_depth += 1;
-                                        self.check_block_discarded(body);
-                                        self.loop_depth -= 1;
-                                        self.pop_scope();
-                                    }
-                                    other => {
-                                        self.errors.push(error_at(
-                                            format!(
-                                                "expected a dictionary or an array of tuples for `for k, v in ...`, got `{other}`"
-                                            ),
-                                            *span,
-                                        ));
-                                        self.push_scope();
-                                        self.define_binding_at(
-                                            &vars[0].name,
-                                            Type::Unit,
-                                            vars[0].span,
-                                            false,
-                                        );
-                                        self.define_binding_at(
-                                            &vars[1].name,
-                                            Type::Unit,
-                                            vars[1].span,
-                                            false,
-                                        );
-                                        self.loop_depth += 1;
-                                        self.check_block_discarded(body);
-                                        self.loop_depth -= 1;
-                                        self.pop_scope();
-                                    }
-                                }
-                            }
-                            Type::Var(_) => {
-                                self.errors.push(error_at(
-                                    "cannot iterate a value whose type could not be inferred",
-                                    *span,
-                                ));
-                                self.push_scope();
-                                self.define_binding_at(
-                                    &vars[0].name,
-                                    Type::Unit,
-                                    vars[0].span,
-                                    false,
-                                );
-                                self.define_binding_at(
-                                    &vars[1].name,
-                                    Type::Unit,
-                                    vars[1].span,
-                                    false,
-                                );
-                                self.loop_depth += 1;
-                                self.check_block_discarded(body);
-                                self.loop_depth -= 1;
-                                self.pop_scope();
-                            }
-                            other => {
-                                self.errors.push(error_at(
-                                    format!(
-                                        "expected a dictionary for `for k, v in ...`, got `{other}`"
-                                    ),
-                                    *span,
-                                ));
-                                self.push_scope();
-                                self.define_binding_at(
-                                    &vars[0].name,
-                                    Type::Unit,
-                                    vars[0].span,
-                                    false,
-                                );
-                                self.define_binding_at(
-                                    &vars[1].name,
-                                    Type::Unit,
-                                    vars[1].span,
-                                    false,
-                                );
-                                self.loop_depth += 1;
-                                self.check_block_discarded(body);
-                                self.loop_depth -= 1;
-                                self.pop_scope();
-                            }
-                        }
-                    }
-                    _ => {
-                        self.errors.push(error_at(
-                            "for loop supports at most 2 variables (e.g. `for k, v in dict` or `for i, x in xs.enumerate()`)",
-                            *span,
-                        ));
-                    }
-                }
-                Type::Unit
-            }
-            Stmt::Break { span } => {
-                if self.loop_depth == 0 {
-                    self.errors
-                        .push(error_at("`break` outside of a loop", *span));
-                }
-                Type::Unit
-            }
-            Stmt::Continue { span } => {
-                if self.loop_depth == 0 {
-                    self.errors
-                        .push(error_at("`continue` outside of a loop", *span));
-                }
-                Type::Unit
-            }
-            Stmt::Defer { expr, span } => {
-                if self.current_ret.is_none() {
-                    self.errors
-                        .push(error_at("`defer` outside of a function", *span));
-                }
-                let prev_discard = std::mem::replace(
-                    &mut self.direct_discard,
-                    matches!(expr.as_ref(), Expr::Match { .. }),
-                );
-                let t = self.check_expr(expr);
-                self.direct_discard = prev_discard;
-                // Deferred results still vanish — same must-use rule.
-                self.warn_if_discarded(expr, &t);
-                Type::Unit
-            }
-            Stmt::Destructure {
-                pat,
-                value,
-                span: _,
-            } => {
-                fn has_or(pat: &Pattern) -> bool {
-                    match pat {
-                        Pattern::Or { .. } => true,
-                        Pattern::Variant { arg: Some(a), .. } => has_or(a),
-                        Pattern::Tuple { pats, .. } => pats.iter().any(has_or),
-                        _ => false,
-                    }
-                }
-                if has_or(pat) {
-                    self.errors.push(error_at(
-                        "or-patterns (`|`) are only allowed in match arms",
-                        pat.span(),
-                    ));
-                }
-                // #518: `a, b := f(b)` re-declares the body-scoped `b` from
-                // the untouched outer value every iteration, exactly like the
-                // single-binding form above.
-                let mark = self.shadow_probes.len();
-                for (bound, bound_span) in pattern_bindings(pat) {
-                    self.begin_shadow_probe(bound, bound_span);
-                }
-                let vt = self.check_expr(value);
-                self.warn_if_shadowed_destructure(mark);
-                let vt = self.unifier.resolve(&vt);
-                self.bind_pattern(pat, &vt);
-                Type::Unit
-            }
-            Stmt::Assign {
-                target,
-                value,
-                span,
-            } => {
-                // `_ = expr` — evaluate `expr` for effect, drop the value.
-                // `_` is never a real binding, so there is nothing to assign
-                // to: type-check the RHS and return unit without const-checking
-                // or unifying against a target type.
-                if let Expr::Ident { name, .. } = target {
-                    if name == "_" {
-                        let _ = self.check_expr(value);
-                        return Type::Unit;
-                    }
-                }
-
-                // Reject assignment to immutable (`const`) variables. The target is an
-                // `Ident` in plain programs and a `Path` (e.g. `ns.x`) after
-                // the loader namespaces top-level bindings.
-                self.reject_const_target(target);
-                let errors_before = self.errors.len();
-                let tt = self.check_assign_target(target);
-                let vt = self.check_expr(value);
-                // Phase 2.2: `s = s.route_get(...)` keeps the same root, but
-                // `t = s.route_get(...)` must inherit `s`'s table under `t`.
-                match target {
-                    Expr::Ident { name, .. } => self.propagate_http_routes(name, value),
-                    Expr::Path { parts, .. } => self.propagate_http_routes(&parts.join("."), value),
-                    _ => {}
-                }
-                if self.errors.len() == errors_before {
-                    if let Err(e) = self.unifier.unify(&vt, &tt) {
-                        self.report_mismatch(e, *span);
-                    }
-                }
-                Type::Unit
-            }
-            Stmt::CompoundAssign {
-                target,
-                op,
-                value,
-                span,
-            } => {
-                // `target OP= value` checks exactly like
-                // `target = target OP value`: same const rule, same
-                // target rules, same binary-op rules (check_binary
-                // re-checks both sides, so float promotion, int-only
-                // bitwise, and error messages are identical).
-                self.reject_const_target(target);
-                let errors_before = self.errors.len();
-                let tt = self.check_assign_target(target);
-                let bt = self.check_binary(*op, target, value, *span);
-                // Phase 2.2: same route-table propagation as `=`.
-                match target {
-                    Expr::Ident { name, .. } => self.propagate_http_routes(name, value),
-                    Expr::Path { parts, .. } => self.propagate_http_routes(&parts.join("."), value),
-                    _ => {}
-                }
-                if self.errors.len() == errors_before {
-                    if let Err(e) = self.unifier.unify(&bt, &tt) {
-                        self.report_mismatch(e, *span);
-                    }
-                }
-                Type::Unit
-            }
-        }
+        check_stmt::check_stmt(self, stmt)
     }
 
     /// Type of an assignment target: a variable, a qualified name, or a
@@ -1132,15 +689,18 @@ impl TypeCheckOps for Checker {
         match pos {
             Some(i) if i < elems.len() => elems[i].clone(),
             _ => {
-                self.errors.push(error_at(
-                    format!(
-                        "tuple index out of bounds for length {}\n\
+                self.errors.push(
+                    error_at(
+                        format!(
+                            "tuple index out of bounds for length {}\n\
                          hint: {}",
-                        elems.len(),
-                        index_range_hint(elems.len())
-                    ),
-                    index.span(),
-                ));
+                            elems.len(),
+                            index_range_hint(elems.len())
+                        ),
+                        index.span(),
+                    )
+                    .with_code(ErrorCode(8)),
+                );
                 Type::Error
             }
         }
@@ -1150,20 +710,9 @@ impl TypeCheckOps for Checker {
     /// report the out-of-bounds before the program runs (the runtime would
     /// trap on it anyway), with the valid range as the hint.
     fn check_literal_array_index(&mut self, len: usize, index: &Expr) {
-        let raw: i64 = match index {
-            Expr::Int { value, .. } => *value,
-            Expr::Unary {
-                op: UnOp::Neg,
-                expr,
-                ..
-            } => match expr.as_ref() {
-                Expr::Int { value, .. } => match value.checked_neg() {
-                    Some(v) => v,
-                    None => return,
-                },
-                _ => return,
-            },
-            _ => return, // not a literal: runtime bounds-check handles it
+        let raw: i64 = match const_eval_int(index) {
+            Some(v) => v,
+            None => return,
         };
         let in_bounds = if raw < 0 {
             (len as i64).checked_add(raw).is_some_and(|i| i >= 0)
@@ -1173,14 +722,17 @@ impl TypeCheckOps for Checker {
         if in_bounds {
             return;
         }
-        self.errors.push(error_at(
-            format!(
-                "index {raw} out of bounds for length {len}\n\
+        self.errors.push(
+            error_at(
+                format!(
+                    "index {raw} out of bounds for length {len}\n\
                  hint: {}",
-                index_range_hint(len)
-            ),
-            index.span(),
-        ));
+                    index_range_hint(len)
+                ),
+                index.span(),
+            )
+            .with_code(ErrorCode(8)),
+        );
     }
 
     /// Whether a loop body can leave through a `break` that targets this
@@ -2105,13 +1657,25 @@ impl TypeCheckOps for Checker {
                 // Reject int/float mixed comparisons with a helpful message.
                 match (&lt, &rt) {
                     (Type::Int, Type::Float) | (Type::Float, Type::Int) => {
-                        self.errors.push(error_at(
+                        let (from, to, cast_fn) = if matches!(&lt, Type::Int) {
+                            (lt.clone(), rt.clone(), "float")
+                        } else {
+                            (lt.clone(), rt.clone(), "int")
+                        };
+                        let mut diag = error_at(
                             format!(
-                                "cannot compare `{}` with `{}`. Use `float(x)` to cast",
+                                "cannot compare `{}` with `{}`. Use `{cast_fn}(x)` to cast",
                                 lt, rt
                             ),
                             span,
+                        );
+                        // Suggest casting the left operand; the fixit points at the left
+                        // expression span via `left.span` which is available as `lt`'s origin.
+                        // We point at the comparison span; the note tells which side to cast.
+                        diag = diag.with_note(format!(
+                            "cast `{from}` to `{to}` with `{cast_fn}(...)` on the mismatched side"
                         ));
+                        self.errors.push(diag);
                         Type::Bool
                     }
                     // Generic operands: allowed only when the parameter
@@ -2207,14 +1771,24 @@ impl TypeCheckOps for Checker {
                     (&lt, &rt),
                     (Type::Error, _) | (_, Type::Error) | (Type::Never, _) | (_, Type::Never)
                 ) {
-                    self.errors.push(error_at(
+                    let mut diag = error_at(
                         format!(
                             "bitwise `{}` requires `int` operands, found `{lt}` and `{rt}`\n\
                              hint: use `int(x)` to cast, `&&`/`||` for boolean logic",
                             op.symbol()
                         ),
                         span,
-                    ));
+                    );
+                    let left_not_int = !matches!(&lt, Type::Int | Type::Var(_));
+                    let right_not_int = !matches!(&rt, Type::Int | Type::Var(_));
+                    if left_not_int && right_not_int {
+                        diag = diag.with_note("cast both operands to `int` with `int(...)`");
+                    } else if left_not_int {
+                        diag = diag.with_note("cast the left operand to `int` with `int(...)`");
+                    } else if right_not_int {
+                        diag = diag.with_note("cast the right operand to `int` with `int(...)`");
+                    }
+                    self.errors.push(diag);
                 }
                 Type::Error
             }
@@ -2253,33 +1827,7 @@ impl TypeCheckOps for Checker {
             // exactly ([int] + [str] is a hard error; cast one side first).
             // An inference-var element (`[]`) unifies with the concrete side.
             (Type::Array(a), Type::Array(b)) if op == BinOp::Add => {
-                let ea = self.unifier.resolve(a);
-                let eb = self.unifier.resolve(b);
-                match (&ea, &eb) {
-                    (Type::Var(_), Type::Var(_)) => {
-                        // Both sides unknown — can't pin element type yet.
-                        Type::Array(Box::new(self.unifier.fresh_var()))
-                    }
-                    (Type::Var(_), concrete) => {
-                        self.unifier.bind_var(a, concrete.clone());
-                        Type::Array(Box::new(concrete.clone()))
-                    }
-                    (concrete, Type::Var(_)) => {
-                        self.unifier.bind_var(b, concrete.clone());
-                        Type::Array(Box::new(concrete.clone()))
-                    }
-                    (_, _) if ea == eb => Type::Array(Box::new(ea)),
-                    (a2, b2) => {
-                        self.errors.push(error_at(
-                            format!(
-                                "cannot apply `+` to `[{a2}]` and `[{b2}]`: element types differ\n\
-                                 hint: cast one side so both arrays share an element type",
-                            ),
-                            span,
-                        ));
-                        Type::Error
-                    }
-                }
+                self.check_array_concat(a, b, span)
             }
             (Type::Int, Type::Float) | (Type::Float, Type::Int) | (Type::Float, Type::Float) => {
                 Type::Float
@@ -2297,7 +1845,8 @@ impl TypeCheckOps for Checker {
                             op.symbol()
                         ),
                         span,
-                    ));
+                    )
+                    .with_code(ErrorCode(3)));
                     Type::Error
                 }
             }
@@ -2349,7 +1898,8 @@ impl TypeCheckOps for Checker {
                     let mut diag = error_at(
                         format!("cannot apply `{}` to `{}` and `{}`", op.symbol(), a, b),
                         span,
-                    );
+                    )
+                    .with_code(ErrorCode(2));
                     // Suggest the conversion matching the other operand (#247).
                     let conv = match (&a, &b) {
                         (Type::Str, Type::Int) | (Type::Int, Type::Str) => Some("str"),
@@ -2364,6 +1914,43 @@ impl TypeCheckOps for Checker {
                     }
                     self.errors.push(diag);
                 }
+                Type::Error
+            }
+        }
+    }
+
+    /// Type-check array concatenation `[T] + [U]`: element types must match
+    /// exactly, or one side can be unified with the other. Reports an error
+    /// with cast hints when element types differ.
+    fn check_array_concat(&mut self, a: &Type, b: &Type, span: Span) -> Type {
+        let ea = self.unifier.resolve(a);
+        let eb = self.unifier.resolve(b);
+        match (&ea, &eb) {
+            (Type::Var(_), Type::Var(_)) => {
+                // Both sides unknown — can't pin element type yet.
+                Type::Array(Box::new(self.unifier.fresh_var()))
+            }
+            (Type::Var(_), concrete) => {
+                self.unifier.bind_var(a, concrete.clone());
+                Type::Array(Box::new(concrete.clone()))
+            }
+            (concrete, Type::Var(_)) => {
+                self.unifier.bind_var(b, concrete.clone());
+                Type::Array(Box::new(concrete.clone()))
+            }
+            (_, _) if ea == eb => Type::Array(Box::new(ea)),
+            (a2, b2) => {
+                let mut diag = error_at(
+                    format!(
+                        "cannot apply `+` to `[{a2}]` and `[{b2}]`: element types differ\n\
+                         hint: cast one side so both arrays share an element type",
+                    ),
+                    span,
+                );
+                diag = diag.with_note(format!(
+                    "cast `[{a2}]` to `[{b2}]` or `[{b2}]` to `[{a2}]` with `{b2}(...)` / `{a2}(...)`"
+                ));
+                self.errors.push(diag);
                 Type::Error
             }
         }
@@ -2455,6 +2042,137 @@ impl TypeCheckOps for Checker {
         }
     }
 
+    /// Table-driven removed/renamed stdlib API check (see [`REMOVED_APIS`]).
+    /// Returns `Some(type)` when `name` is a removed API — after checking its
+    /// args (so nested errors surface) and reporting the rename hint — else
+    /// `None`, so normal unknown-callee diagnostics proceed.
+    fn check_removed_api(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        named: &[(Ident, Expr)],
+        span: Span,
+    ) -> Option<Type> {
+        check_call::check_call_removed_api(self, name, args, named, span)
+    }
+
+    /// Handle `print`/`println` builtin calls: variadic, checks each argument,
+    /// warns about bare function values passed as arguments. Returns `Some(Unit)`
+    /// if `name` is a print builtin and no local shadows it, `None` otherwise.
+    fn check_call_print_builtin(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        named: &[(Ident, Expr)],
+        _span: Span,
+    ) -> Option<Type> {
+        check_call::check_call_print_builtin(self, name, args, named, _span)
+    }
+
+    /// Handle a `Field` callee (`obj.method(...)`): type-check the receiver,
+    /// resolve the method signature against the receiver's type (builtins,
+    /// struct/enum impls, embedded promotion), lint HTTP route/param usage,
+    /// and delegate to `check_method_call`. Returns `Some(type)` if a method
+    /// was dispatched, `None` to fall through to direct-name handling.
+    fn check_call_field_callee(
+        &mut self,
+        obj: &Expr,
+        method: String,
+        args: &[Expr],
+        named: &[(Ident, Expr)],
+        span: Span,
+    ) -> Option<Type> {
+        check_call::check_call_field_callee(self, obj, method, args, named, span)
+    }
+
+    /// Resolve a method signature for a typed receiver by looking up
+    /// `TypeName.method` in the stdlib table. Covers scalars, Option/Result,
+    /// Array/Bytes, Str, Response, Http*, net, json, sqlz, chan, task,
+    /// opaque tags, structs, and enums.
+    fn resolve_method_sig(&self, recv_t: &Type, method: &str) -> Option<zz_checker_core::FuncSig> {
+        match recv_t {
+            Type::Str => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("str.{method}")).cloned()
+            }
+            Type::Array(_) => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("vec.{method}")).cloned()
+            }
+            Type::Bytes => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("bytes.{method}")).cloned()
+            }
+            Type::Option(_) => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("option.{method}")).cloned()
+            }
+            Type::Result(_, _) => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("result.{method}")).cloned()
+            }
+            Type::Int => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("int.{method}")).cloned()
+            }
+            Type::Float => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("float.{method}")).cloned()
+            }
+            Type::Bool => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("bool.{method}")).cloned()
+            }
+            Type::Response => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}")).cloned()
+            }
+            Type::HttpRequest => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}")).cloned()
+            }
+            Type::TcpStream => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("net.{method}")).cloned()
+            }
+            Type::TcpListener => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("net.{method}")).cloned()
+            }
+            Type::HttpServer => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}")).cloned()
+            }
+            Type::Json => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("json.{method}")).cloned()
+            }
+            Type::Db => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("sqlz.{method}")).cloned()
+            }
+            Type::Chan => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("chan.{method}")).cloned()
+            }
+            Type::TaskJoin => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("task.{method}")).cloned()
+            }
+            Type::Opaque(tag) => {
+                zz_checker_core::lookup_std(&self.funcs, &format!("{tag}.{method}")).cloned()
+            }
+            Type::Struct(sname, _) => {
+                let sig =
+                    zz_checker_core::lookup_std(&self.funcs, &format!("{sname}.{method}")).cloned();
+                if sig.is_some() {
+                    return sig;
+                }
+                if let Some((ns, _)) = sname.rsplit_once('.') {
+                    return zz_checker_core::lookup_std(&self.funcs, &format!("{ns}.{method}"))
+                        .cloned();
+                }
+                None
+            }
+            Type::Enum(ename, _) => {
+                let sig =
+                    zz_checker_core::lookup_std(&self.funcs, &format!("{ename}.{method}")).cloned();
+                if sig.is_some() {
+                    return sig;
+                }
+                if let Some((ns, _)) = ename.rsplit_once('.') {
+                    return zz_checker_core::lookup_std(&self.funcs, &format!("{ns}.{method}"))
+                        .cloned();
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn check_call(
         &mut self,
         callee: &Expr,
@@ -2462,1219 +2180,36 @@ impl TypeCheckOps for Checker {
         named: &[(Ident, Expr)],
         span: Span,
     ) -> Type {
-        // Selective-import alias, resolved FIRST so the result flows
-        // through the direct generic-instantiation path below: a bare
-        // `squared` from `import m(squared)` becomes `m.squared` — but
-        // ONLY on total miss. Locals, seed entries and synthetic Decls
-        // all take precedence; this path exists for generic functions,
-        // which have no value binding to find. Bare *uses* still error.
-        let rewritten;
-        let callee: &Expr = match callee {
-            Expr::Ident { name, span }
-                if !self.funcs.contains_key(name)
-                    && !self.env.iter().any(|s| s.contains_key(name)) =>
-            {
-                match self.import_aliases.get(name).cloned() {
-                    Some(qualified) => {
-                        self.used_names.insert(name.clone());
-                        rewritten = Expr::Path {
-                            parts: qualified.split('.').map(str::to_string).collect(),
-                            span: *span,
-                        };
-                        &rewritten
-                    }
-                    None => callee,
-                }
-            }
-            c => c,
-        };
+        let callee = check_call::check_call_resolve_alias(self, callee);
         // Direct call of a named function: bypass `lookup` so generic
         // functions are instantiated here rather than rejected as values.
-        let direct_name = match callee {
+        let direct_name = match &callee {
             Expr::Ident { name, .. } => Some(name.clone()),
             Expr::Path { parts, .. } => Some(parts.join(".")),
             Expr::Field { obj, name, .. } => {
-                let recv_t = self.check_expr(obj);
-                let recv_t = self.unifier.resolve(&recv_t);
-                let method = name.clone();
-                // Phase 2.2: `std.http` route + param lint on typed receivers.
-                if matches!(self.unifier.resolve(&recv_t), Type::HttpServer)
-                    && zz_http_routes::is_route_method(&method)
-                {
-                    let root = match obj.as_ref() {
-                        Expr::Ident { name, .. } => Some(name.clone()),
-                        _ => None,
-                    };
-                    self.lint_http_route_method(root, &method, args, span);
-                } else if method == "param"
-                    && matches!(self.unifier.resolve(&recv_t), Type::HttpRequest)
-                {
-                    // Field-call args exclude the receiver: `req.param(name)`.
-                    self.lint_http_param(args.first());
+                match check_call::check_call_field_callee(
+                    self,
+                    obj,
+                    name.clone(),
+                    args,
+                    named,
+                    span,
+                ) {
+                    Some(t) => return t,
+                    None => None,
                 }
-                // Dot-call order for a `Field` callee (`makePoint().get()`):
-                // the receiver's own `impl` method (`{Type}.{method}`) wins
-                // over a same-named receiver-implicit free function (#500).
-                // The free signature is restored below when nothing matches,
-                // so its mismatch diagnostics are unchanged.
-                let impl_owned = self.receiver_impl_method(&recv_t, &method);
-                let free_sig = zz_checker_core::lookup_std(&self.funcs, &method).cloned();
-                let mut sig = if impl_owned { None } else { free_sig.clone() };
-                if sig.is_none() {
-                    match &self.unifier.resolve(&recv_t) {
-                        Type::Str => {
-                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("str.{method}"))
-                                .cloned()
-                        }
-                        Type::Array(_) => {
-                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("vec.{method}"))
-                                .cloned()
-                        }
-                        Type::Bytes => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("bytes.{method}"))
-                                    .cloned()
-                        }
-                        Type::Option(_) => {
-                            sig = zz_checker_core::lookup_std(
-                                &self.funcs,
-                                &format!("option.{method}"),
-                            )
-                            .cloned()
-                        }
-                        Type::Result(_, _) => {
-                            sig = zz_checker_core::lookup_std(
-                                &self.funcs,
-                                &format!("result.{method}"),
-                            )
-                            .cloned()
-                        }
-                        // Scalar extensions (`impl int/float/bool`) live in
-                        // the same merged table; no stdlib namespace here.
-                        Type::Int => {
-                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("int.{method}"))
-                                .cloned()
-                        }
-                        Type::Float => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("float.{method}"))
-                                    .cloned()
-                        }
-                        Type::Bool => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("bool.{method}"))
-                                    .cloned()
-                        }
-                        Type::Response => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
-                                    .cloned()
-                        }
-                        Type::HttpRequest => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
-                                    .cloned()
-                        }
-                        Type::TcpStream => {
-                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("net.{method}"))
-                                .cloned()
-                        }
-                        Type::TcpListener => {
-                            sig = zz_checker_core::lookup_std(&self.funcs, &format!("net.{method}"))
-                                .cloned()
-                        }
-                        Type::HttpServer => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
-                                    .cloned()
-                        }
-                        Type::Json => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("json.{method}"))
-                                    .cloned()
-                        }
-                        Type::Db => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("sqlz.{method}"))
-                                    .cloned();
-                        }
-                        Type::Chan => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("chan.{method}"))
-                                    .cloned()
-                        }
-                        Type::TaskJoin => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("task.{method}"))
-                                    .cloned()
-                        }
-                        // Opaque handles dispatch on their module tag, e.g.
-                        // an `Opaque("regex")` receiver resolves
-                        // `regex.is_match`.
-                        Type::Opaque(tag) => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("{tag}.{method}"))
-                                    .cloned()
-                        }
-                        Type::Struct(sname, _) => {
-                            // Try TypeName.method (impl block methods)
-                            sig = zz_checker_core::lookup_std(
-                                &self.funcs,
-                                &format!("{sname}.{method}"),
-                            )
-                            .cloned();
-                            if sig.is_none() {
-                                // Try namespace.method (cross-module)
-                                if let Some((ns, _)) = sname.rsplit_once('.') {
-                                    sig = zz_checker_core::lookup_std(
-                                        &self.funcs,
-                                        &format!("{ns}.{method}"),
-                                    )
-                                    .cloned();
-                                }
-                            }
-                        }
-                        // Enum values erase to `Object`s, so `impl Enum`
-                        // methods dispatch exactly like struct methods.
-                        Type::Enum(ename, _) => {
-                            sig = zz_checker_core::lookup_std(
-                                &self.funcs,
-                                &format!("{ename}.{method}"),
-                            )
-                            .cloned();
-                            if sig.is_none() {
-                                if let Some((ns, _)) = ename.rsplit_once('.') {
-                                    sig = zz_checker_core::lookup_std(
-                                        &self.funcs,
-                                        &format!("{ns}.{method}"),
-                                    )
-                                    .cloned();
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                // Embedded promotion: `u.area()` dispatches to `Base.area`
-                // when `User` embeds `Base`. The runtime passes the embedded
-                // value as the receiver, so the outer type is not unified
-                // against the method's receiver below.
-                let mut promoted_recv: Option<Type> = None;
-                if sig.is_none() {
-                    if let Type::Struct(sname, sargs) = self.unifier.resolve(&recv_t) {
-                        if let Some((defining, psig)) = self.find_struct_method(&sname, &method) {
-                            // The runtime passes the embedded value itself
-                            // as the receiver (with its own arguments).
-                            promoted_recv = self
-                                .promoted_method_receiver(&sname, &sargs, &defining)
-                                .or_else(|| Some(Type::Struct(defining, Vec::new())));
-                            sig = Some(psig);
-                        }
-                    }
-                }
-                // No method matched: restore the free signature so the
-                // call reports a mismatch against it rather than falling
-                // through as an unknown callee.
-                if sig.is_none() {
-                    sig = free_sig;
-                }
-                if let Some(sig) = sig {
-                    return self.check_method_call(&MethodCall {
-                        sig: &sig,
-                        recv_t: &recv_t,
-                        promoted_recv,
-                        method: &method,
-                        args,
-                        named,
-                        span,
-                    });
-                }
-                None
             }
             _ => None,
         };
-        if let Some(name) = &direct_name {
-            // Mark the callee as used so the unused-private-function warning
-            // doesn't fire on legitimately-called functions.
-            if self.funcs.contains_key(name) {
-                self.used_names.insert(name.clone());
-            }
-            // Removed push spellings: `vec.append` / `std.vec.append` and the
-            // bare `append` builtin are gone — `vec.push` plus the method form
-            // `xs.push(x)` is the only spelling. Hard error with a hint
-            // (no silent redirect: the old bare form fused to an in-place
-            // statement op, so a quiet rewrite could change behavior).
-            if !self.funcs.contains_key(name)
-                && (name.as_str() == "vec.append"
-                    || name.as_str() == "std.vec.append"
-                    || name.as_str() == "append")
-            {
-                // Still check the args so nested errors inside them surface,
-                // then stop: the name no longer resolves, and letting lookup
-                // run on would add a confusing second error (e.g. suggesting
-                // `import std.fs` for the unrelated file `fs.append` API).
-                for arg in args {
-                    self.check_expr(arg);
-                }
-                for (_, val) in named {
-                    self.check_expr(val);
-                }
-                self.errors.push(error_at(
-                    "removed: `append` is gone — use `vec.push(v, x)` or the method form `xs.push(x)`",
-                    span,
-                ));
-                return Type::Array(Box::new(self.unifier.fresh_var()));
-            }
-            // Bare `pg.*` / `my.*` / `postgres.*` / `mysql.*` never resolve:
-            // postgres/mysql live nested inside sqlz. Guide to the import.
-            // (Skipped when the name resolves — e.g. `pg.query` after
-            // `import std.sqlz.postgres as pg` copies real sigs there.)
-            if !self.funcs.contains_key(name)
-                && (name.as_str() == "pg.query"
-                    || name.as_str() == "pg.exec"
-                    || name.as_str() == "postgres.query"
-                    || name.as_str() == "postgres.exec"
-                    || name.as_str() == "my.query"
-                    || name.as_str() == "my.exec"
-                    || name.as_str() == "mysql.query"
-                    || name.as_str() == "mysql.exec")
-            {
-                // Still check the args so nested errors surface, then stop:
-                // these names never resolve (nested modules need an import),
-                // and falling through would add a bare "undefined variable".
-                for arg in args {
-                    self.check_expr(arg);
-                }
-                for (_, val) in named {
-                    self.check_expr(val);
-                }
-                self.errors.push(error_at(
-                    "unknown module: postgres/mysql live inside `sqlz` — `import std.sqlz.postgres` (optionally `as pg`) or `import std.sqlz.mysql` (`as my`), then call `pg.query(..)` / `my.query(..)`",
-                    span,
-                ));
-                if name.as_str().ends_with(".exec") {
-                    return Type::Int;
-                }
-                return Type::Array(Box::new(self.unifier.fresh_var()));
-            }
-            // Removed stdlib aliases: one spelling per op survived (see
-            // `zz_stdlib`). Each arm checks the args (nested errors
-            // surface), reports a rename hint, and returns the
-            // replacement's type so downstream checking stays quiet.
-            // `std.env.unset` → `std.env.remove` (bare `env.unset` after
-            // `import std.env` routes here too: same dotted name).
-            if !self.funcs.contains_key(name)
-                && (name.as_str() == "std.env.unset" || name.as_str() == "env.unset")
-            {
-                for arg in args {
-                    self.check_expr(arg);
-                }
-                for (_, val) in named {
-                    self.check_expr(val);
-                }
-                self.errors.push(error_at(
-                    "removed: `env.unset` is gone — use `env.remove(key)`",
-                    span,
-                ));
-                return Type::Unit;
-            }
-            // `std.fs.read_file` / `std.fs.read_to_string` → `std.fs.read`;
-            // `std.fs.write_file` → `std.fs.write`; `std.fs.remove_file` →
-            // `std.fs.remove`; `std.fs.readdir` → `std.fs.read_dir`
-            // (bare `fs.*` spellings after `import std.fs` route here too).
-            if let Some(replacement) = match !self.funcs.contains_key(name) {
-                true => match name.as_str() {
-                    "std.fs.read_file"
-                    | "fs.read_file"
-                    | "std.fs.read_to_string"
-                    | "fs.read_to_string" => Some((
-                        "std.fs.read",
-                        Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
-                    )),
-                    "std.fs.write_file" | "fs.write_file" => Some((
-                        "std.fs.write",
-                        Type::Result(Box::new(Type::Unit), Box::new(Type::Str)),
-                    )),
-                    "std.fs.remove_file" | "fs.remove_file" => Some((
-                        "std.fs.remove",
-                        Type::Result(Box::new(Type::Unit), Box::new(Type::Str)),
-                    )),
-                    "std.fs.readdir" | "fs.readdir" => Some((
-                        "std.fs.read_dir",
-                        Type::Result(
-                            Box::new(Type::Array(Box::new(Type::Str))),
-                            Box::new(Type::Str),
-                        ),
-                    )),
-                    _ => None,
-                },
-                false => None,
-            } {
-                for arg in args {
-                    self.check_expr(arg);
-                }
-                for (_, val) in named {
-                    self.check_expr(val);
-                }
-                self.errors.push(error_at(
-                    format!(
-                        "removed: `{name}` is gone — use `{}` instead",
-                        replacement.0
-                    ),
-                    span,
-                ));
-                return replacement.1;
-            }
-            // `std.fs.rename` (identical to `move`) → `std.fs.move`.
-            if !self.funcs.contains_key(name)
-                && (name.as_str() == "std.fs.rename" || name.as_str() == "fs.rename")
-            {
-                for arg in args {
-                    self.check_expr(arg);
-                }
-                for (_, val) in named {
-                    self.check_expr(val);
-                }
-                self.errors.push(error_at(
-                    "removed: `fs.rename` is gone — use `fs.move(src, dst)`",
-                    span,
-                ));
-                return Type::Result(Box::new(Type::Unit), Box::new(Type::Str));
-            }
-            // `std.net.tcp_close` (legacy no-op) → `close` / `shutdown`.
-            if !self.funcs.contains_key(name)
-                && (name.as_str() == "std.net.tcp_close"
-                    || name.as_str() == "net.tcp_close"
-                    || name.as_str() == "tcp_close")
-            {
-                for arg in args {
-                    self.check_expr(arg);
-                }
-                for (_, val) in named {
-                    self.check_expr(val);
-                }
-                self.errors.push(error_at(
-                    "removed: `tcp_close` is gone — use `stream.close()` / `stream.shutdown()` for a real shutdown",
-                    span,
-                ));
-                return Type::Result(Box::new(Type::Unit), Box::new(Type::Str));
-            }
-            // Math constants are values, not functions: `math.PI()` is
-            // always an error — use bare `math.PI`.
-            if self.is_math_const(name) && self.funcs.contains_key(name) {
-                self.used_names.insert(name.clone());
-                // Still check the args so nested errors inside them surface.
-                for arg in args {
-                    self.check_expr(arg);
-                }
-                for (_, val) in named {
-                    self.check_expr(val);
-                }
-                self.errors.push(error_at(
-                    format!(
-                        "cannot call `{name}`: it is a numeric constant value, remove the `()`"
-                    ),
-                    span,
-                ));
-                return Type::Float;
-            }
-            // sqlz foundation: `sqlz.query(sql)` / `sqlz.exec(sql)` take an
-            // interpolated SQL string. `{expr}` segments are extracted as
-            // bound parameters (never inlined), so verification here is:
-            // receiver is `db`, SQL arg is `str`, each bound expr is a
-            // scalar (int/float/str/bool). Return type unifies with the
-            // caller's annotation (`let users: [User] = sqlz.query(...)`).
-            //
-            // `pg.query(db, sql)` / `pg.exec(db, sql)` (+ `postgres.*` and
-            // `std.sqlz.postgres.*` spellings) and `my.query(db, sql)` /
-            // `my.exec(db, sql)` (+ `mysql.*`, `std.sqlz.mysql.*`) are the
-            // explicit-receiver free-function forms: the SQL is the SECOND
-            // user arg.
-            //
-            // NOTE: this direct-name path only fires for qualified calls
-            // where the leading component is the module namespace (not a
-            // local). The common method form (`mydb.query(...)` on a
-            // handle) is handled in the Path-method branch below, which
-            // treats the receiver as implicit.
-            let is_pg_call = name == "pg.query"
-                || name == "pg.exec"
-                || name == "postgres.query"
-                || name == "postgres.exec"
-                || name == "std.sqlz.postgres.query"
-                || name == "std.sqlz.postgres.exec"
-                || name == "my.query"
-                || name == "my.exec"
-                || name == "mysql.query"
-                || name == "mysql.exec"
-                || name == "std.sqlz.mysql.query"
-                || name == "std.sqlz.mysql.exec";
-            if name == "sqlz.query"
-                || name == "std.sqlz.query"
-                || name == "sqlz.exec"
-                || name == "std.sqlz.exec"
-                || name == "sqlz.transaction"
-                || name == "std.sqlz.transaction"
-                || is_pg_call
-            {
-                if let Some(sig) = zz_checker_core::lookup_std(&self.funcs, name).cloned() {
-                    // Only take this path when the leading component really
-                    // is the module namespace (NOT a local variable).
-                    // Otherwise fall through to method dispatch.
-                    let recv_is_module = match callee {
-                        Expr::Path { parts, .. } => {
-                            parts.len() >= 2 && self.lookup_opt(&parts[0]).is_none()
-                        }
-                        _ => false,
-                    };
-                    if recv_is_module {
-                        self.used_names.insert(name.clone());
-                        let (ps, ret, subs) = self.instantiate(&sig);
-                        let pnames: Vec<String> =
-                            sig.params.iter().map(|(n, _)| n.clone()).collect();
-                        self.check_args_against(
-                            Some(Self::short_name(name)),
-                            &pnames,
-                            &ps,
-                            &sig.has_default,
-                            args,
-                            named,
-                            span,
-                        );
-                        // Explicit-receiver forms (`pg.query(db, sql)`,
-                        // `sqlz.query(db, sql)`) carry the SQL second;
-                        // the bare method-namespace form carries it first.
-                        // Skip for transaction — second arg is a closure, not SQL.
-                        let is_tx_call =
-                            name == "sqlz.transaction" || name == "std.sqlz.transaction";
-                        if !is_tx_call {
-                            let sql_idx = if is_pg_call || args.len() >= 2 { 1 } else { 0 };
-                            if let Some(sql_arg) = args.get(sql_idx) {
-                                self.verify_sql_params(sql_arg, span);
-                            }
-                        }
-                        self.validate_bounds(&sig, &subs, span);
-                        return ret;
-                    }
-                }
-            }
-            // Phase 2.2: `std.http` route + param lint for qualified calls.
-            // Runs before generic arg checking so the route's own params are
-            // registered before handler bodies are checked. `s.route(...)`
-            // arrives as a Path callee (receiver-implicit); `http.route...`
-            // as a module call — `lint_http_path_call` sorts out the form.
-            if let Expr::Path { parts, .. } = callee {
-                self.lint_http_path_call(parts, args, span);
-            }
-            // NOTE: bare-`Ident` callees are deliberately NOT linted here:
-            // genuine selective imports (`import std.http(route)`) are
-            // rewritten to qualified `Path` callees at the top of
-            // `check_call`, so a bare `route`/`param` reaching this point
-            // is user code (e.g. a `@route` decorator) — linting it would
-            // false-positive (see `syntax/decorators.zz`).
-            // `print`/`println` are variadic (#713): accept any number of
-            // positional or named values and check each expression. Like
-            // Python/JS, values render space-separated; zero args is legal.
-            // A local binding shadows the builtin (`println := |x| ...`);
-            // keep the normal call path for it.
-            if is_print_builtin(name) && self.local_lookup_opt(name).is_none() {
-                self.used_names.insert(name.clone());
-                for arg in args {
-                    self.check_expr(arg);
-                }
-                for (_, val) in named {
-                    self.check_expr(val);
-                }
-                // A bare function value as any print argument is always a
-                // missing `()` (`println(env.os)` would print the function
-                // itself instead of calling it). Catch it here — with the
-                // name attached — rather than letting each engine render
-                // `<func>` / `<native ...>` / empty output.
-                for arg_expr in args.iter().chain(named.iter().map(|(_, v)| v)) {
-                    // Resolve silently (lookup_opt, never check_expr: the
-                    // argument was already checked above and a second pass
-                    // would duplicate diagnostics).
-                    let (arg_t, fname) = match arg_expr {
-                        Expr::Ident { name: n, .. } => (self.lookup_opt(n), Some(n.clone())),
-                        Expr::Path { parts, .. } => {
-                            let joined = parts.join(".");
-                            (self.lookup_opt(&joined), Some(joined))
-                        }
-                        _ => (None, None),
-                    };
-                    let is_func = matches!(
-                        arg_t.as_ref().map(|t| self.unifier.resolve(t)),
-                        Some(Type::Func(_, _))
-                    ) || matches!(fname.as_deref(), Some(n)
-                            if zz_checker_core::lookup_std(&self.funcs, n).is_some()
-                                && !self.is_math_const(n));
-                    if !is_func {
-                        continue;
-                    }
-                    let Some(fname) = fname else { continue };
-                    let mut diag = error_at(
-                        format!("cannot print function `{fname}`: call it with arguments"),
-                        arg_expr.span(),
-                    );
-                    diag = diag.with_note(format!("did you mean `{fname}()`?"));
-                    diag = diag.with_fixit(FixIt::safe(
-                        Span::new(arg_expr.span().end, arg_expr.span().end),
-                        "()".to_string(),
-                        "call function",
-                    ));
-                    self.errors.push(diag);
-                }
-                return Type::Unit;
-            }
-            if !self.method_shadow_call(callee, args, named) {
-                if let Some(sig) = zz_checker_core::lookup_std(&self.funcs, name).cloned() {
-                    self.used_names.insert(name.clone());
-                    let (ps, ret, subs) = self.instantiate(&sig);
-                    if name == "input" {
-                        if args.len() + named.len() > 1 {
-                            self.errors.push(error_at(
-                                format!(
-                                    "expected 0 or 1 arguments, found {}",
-                                    args.len() + named.len()
-                                ),
-                                span,
-                            ));
-                        } else if args.len() + named.len() == 1 {
-                            let arg_expr = if !args.is_empty() {
-                                &args[0]
-                            } else {
-                                &named[0].1
-                            };
-                            let at = self.check_expr(arg_expr);
-                            if let Err(e) = self.unifier.unify(&at, &Type::Str) {
-                                self.report_mismatch(e, arg_expr.span());
-                            }
-                        }
-                        return ret;
-                    }
-                    if name == "range" {
-                        let total = args.len() + named.len();
-                        if total == 0 || total > 3 {
-                            self.errors.push(error_at(
-                                format!("range expects 1, 2, or 3 arguments, found {total}"),
-                                span,
-                            ));
-                        } else {
-                            for arg in args {
-                                let at = self.check_expr(arg);
-                                if let Err(e) = self.unifier.unify(&at, &Type::Int) {
-                                    self.report_mismatch(e, arg.span());
-                                }
-                            }
-                            for (_, val) in named {
-                                let at = self.check_expr(val);
-                                if let Err(e) = self.unifier.unify(&at, &Type::Int) {
-                                    self.report_mismatch(e, val.span());
-                                }
-                            }
-                        }
-                        return ret;
-                    }
-                    let pnames: Vec<String> = sig.params.iter().map(|(n, _)| n.clone()).collect();
-                    self.check_args_against(
-                        Some(Self::short_name(name)),
-                        &pnames,
-                        &ps,
-                        &sig.has_default,
-                        args,
-                        named,
-                        span,
-                    );
-                    self.validate_bounds(&sig, &subs, span);
-                    return ret;
-                }
-            }
-            // Smart suggestion for unknown qualified function calls with a
-            // one-edit fixit when unambiguous (e.g. std.env.get_var → std.env.get).
-            // Only applies to qualified paths — bare identifiers go to Sherlock
-            // below (note only, no fixit). Skips when the head segment is a
-            // local variable, so method dispatch gets first crack at
-            // `arr.push()`-style calls.
-            let head = name.split('.').next().unwrap_or(name);
-            let head_is_local = self.env.iter().rev().any(|s| s.contains_key(head));
-            if !self.funcs.contains_key(name)
-                && matches!(callee, Expr::Path { .. })
-                && name.starts_with("std.")
-                && !head_is_local
-            {
-                let candidates: Vec<String> = self
-                    .funcs
-                    .keys()
-                    .flat_map(|k| {
-                        let mut v = vec![k.clone()];
-                        if let Some(bare) = k.rsplit('.').next() {
-                            if bare != k {
-                                v.push(bare.to_string());
-                            }
-                        }
-                        v
-                    })
-                    .collect();
-                let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
-                let all = suggest_all(name, &refs);
-                if !all.is_empty() {
-                    let is_unambiguous = all.len() == 1 && all[0].1 <= 1;
-                    let callee_span = match callee {
-                        Expr::Path { span, .. } => *span,
-                        _ => span,
-                    };
-                    if is_unambiguous {
-                        self.errors.push(
-                            error_at(format!("unknown function `{name}`"), callee_span)
-                                .with_note(format!("did you mean `{}`?", all[0].0))
-                                .with_fixit(FixIt::safe(
-                                    callee_span,
-                                    all[0].0.to_string(),
-                                    "replace with suggested function",
-                                )),
-                        );
-                    } else {
-                        self.errors.push(
-                            error_at(format!("unknown function `{name}`"), callee_span)
-                                .with_note(format!("did you mean `{}`?", all[0].0)),
-                        );
-                    }
-                    return Type::Unit;
-                }
-            }
+        if let Some(t) =
+            check_call::check_call_direct_name(self, &direct_name, &callee, args, named, span)
+        {
+            return t;
         }
-        // Method call: `p.dist()` resolves to `dist(p, ...)`.
-        if let Expr::Path { parts, span: pspan } = callee {
-            if parts.len() >= 2 {
-                // First check if the full path resolves as a variable
-                // (e.g. module-level closure `ns.f`). If so, treat it as
-                // a regular call, not a method call.
-                let joined = parts.join(".");
-                // Enum construction (`Token.IntLit(1)`) reads as a call
-                // but builds a value, not a function invocation. Takes
-                // priority over method dispatch (no receiver exists) but
-                // yields to real functions and locals: an exact `funcs`
-                // entry or a shadowing value keeps its meaning.
-                let enum_head = parts[..parts.len() - 1].join(".");
-                let canonical_head = self.canonical_enum_name(&enum_head);
-                if self.enums.contains_key(&canonical_head)
-                    && !self.funcs.contains_key(&joined)
-                    && self.lookup_opt(&enum_head).is_none()
-                {
-                    let variant = parts.last().cloned().unwrap_or_default();
-                    if let Some(t) =
-                        self.check_enum_construction(&canonical_head, &variant, args, named, span)
-                    {
-                        return t;
-                    }
-                }
-                // Method on a constructed variant (`Token.Eof.is_eof()`
-                // parses as a 3+-part path): the call arguments split —
-                // the first fills a payload variant, the rest go to the
-                // method (`Token.IntLit(1).add(2)` constructs with `1`,
-                // calls `add` with `2`). Unit variants delegate to the
-                // Field branch with a synthetic receiver.
-                if parts.len() >= 3 {
-                    let enum_head2 = parts[..parts.len() - 2].join(".");
-                    let canonical_head2 = self.canonical_enum_name(&enum_head2);
-                    if self.enums.contains_key(&canonical_head2)
-                        && !self.funcs.contains_key(&joined)
-                        && self.lookup_opt(&enum_head2).is_none()
-                    {
-                        let variant2 = parts[parts.len() - 2].clone();
-                        let method2 = parts.last().cloned().unwrap_or_default();
-                        let _pv = self.enum_variant_payload(&canonical_head2, &variant2, *pspan);
-                        match _pv {
-                            Some(Some(pty)) => {
-                                if args.is_empty() {
-                                    self.errors.push(error_at(
-                                        format!(
-                                            "variant `{canonical_head2}.{variant2}` holds a value: pass it before the method arguments (e.g. `{canonical_head2}.{variant2}(v).{method2}(...)`)"
-                                        ),
-                                        span,
-                                    ));
-                                    let (gen_vars, _) = self.fresh_enum_vars(&canonical_head2);
-                                    return Type::Enum(canonical_head2, gen_vars);
-                                }
-                                // First argument fills the payload; the
-                                // rest are the method's. Generic parameters
-                                // instantiate fresh, as in construction.
-                                let (gen_vars, gen_map) = self.fresh_enum_vars(&canonical_head2);
-                                let at = self.check_expr(&args[0]);
-                                let exp = zz_infer::subst(&pty, &gen_map);
-                                if let Err(e) = self.unifier.unify(&at, &exp) {
-                                    self.report_mismatch(e, args[0].span());
-                                }
-                                let recv_args: Vec<Type> = gen_vars
-                                    .iter()
-                                    .map(|v| self.unifier.resolve_deep(v))
-                                    .collect();
-                                let recv_t = Type::Enum(canonical_head2.clone(), recv_args);
-                                let mut sig = self
-                                    .funcs
-                                    .get(&format!("{canonical_head2}.{method2}"))
-                                    .cloned();
-                                if sig.is_none() {
-                                    if let Some((ns, _)) = canonical_head2.rsplit_once('.') {
-                                        sig = zz_checker_core::lookup_std(
-                                            &self.funcs,
-                                            &format!("{ns}.{method2}"),
-                                        )
-                                        .cloned();
-                                    }
-                                }
-                                if let Some(sig) = sig {
-                                    self.used_names
-                                        .insert(format!("{canonical_head2}.{method2}"));
-                                    return self.check_method_call(&MethodCall {
-                                        sig: &sig,
-                                        recv_t: &recv_t,
-                                        promoted_recv: None,
-                                        method: &method2,
-                                        args: &args[1..],
-                                        named,
-                                        span,
-                                    });
-                                }
-                                self.errors.push(error_at(
-                                    format!(
-                                        "unknown method `{method2}` for enum `{canonical_head2}`"
-                                    ),
-                                    span,
-                                ));
-                                let (gen_vars, _) = self.fresh_enum_vars(&canonical_head2);
-                                return Type::Enum(canonical_head2, gen_vars);
-                            }
-                            Some(None) => {
-                                let recv = Expr::Path {
-                                    parts: parts[..parts.len() - 1].to_vec(),
-                                    span: *pspan,
-                                };
-                                let field_callee = Expr::Field {
-                                    obj: Box::new(recv),
-                                    name: parts.last().cloned().unwrap_or_default(),
-                                    span: *pspan,
-                                };
-                                return self.check_call(&field_callee, args, named, span);
-                            }
-                            // Unknown variant: already reported inside.
-                            None => {
-                                let (gen_vars, _) = self.fresh_enum_vars(&canonical_head2);
-                                return Type::Enum(canonical_head2, gen_vars);
-                            }
-                        }
-                    }
-                }
-                // A `head.method` call on a genuine local value reads as
-                // a method call when the free-function reading is already
-                // impossible (see `method_shadow_call`) — e.g. `db.exec`
-                // on a local `db`, never the seeded free function.
-                let shadowed = self.method_shadow_call(callee, args, named);
-                if !shadowed {
-                    if let Some(var_ty) = self.lookup_opt(&joined) {
-                        let callee_t = self.unifier.resolve(&var_ty);
-                        // If the var is still an unresolved inference var, or is
-                        // already known to be a Func/Named, treat as a variable
-                        // call — not a method call on the first path component.
-                        match &callee_t {
-                            Type::Func(..) | Type::Named(..) => {
-                                let pnames: Vec<String> =
-                                    (0..args.len()).map(|i| format!("_{i}")).collect();
-                                match callee_t {
-                                    Type::Func(ps, ret) => {
-                                        self.check_args_against(
-                                            None,
-                                            &pnames,
-                                            &ps,
-                                            &[],
-                                            args,
-                                            named,
-                                            span,
-                                        );
-                                        return *ret;
-                                    }
-                                    Type::Named(ref nname) => {
-                                        if let Some(sig) =
-                                            zz_checker_core::lookup_std(&self.funcs, nname).cloned()
-                                        {
-                                            let (ps, ret, subs) = self.instantiate(&sig);
-                                            let pnames: Vec<String> =
-                                                sig.params.iter().map(|(n, _)| n.clone()).collect();
-                                            self.check_args_against(
-                                                Some(Self::short_name(nname)),
-                                                &pnames,
-                                                &ps,
-                                                &sig.has_default,
-                                                args,
-                                                named,
-                                                span,
-                                            );
-                                            self.validate_bounds(&sig, &subs, span);
-                                            return ret;
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            Type::Var(_) => {
-                                // Fresh var from recursive closure pre-binding.
-                                // Build a Func type from the args and unify.
-                                let arg_types: Vec<Type> =
-                                    args.iter().map(|a| self.check_expr(a)).collect();
-                                let ret_var = self.unifier.fresh_var();
-                                let func_ty = Type::Func(arg_types, Box::new(ret_var.clone()));
-                                if let Err(e) = self.unifier.unify(&var_ty, &func_ty) {
-                                    self.report_mismatch(e, span);
-                                }
-                                return self.unifier.resolve(&ret_var);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                let method = parts.last().unwrap();
-                let recv_t = self.lookup_path(&parts[..parts.len() - 1], *pspan);
-                let recv_t_resolved = self.unifier.resolve(&recv_t);
-                // Dot-call order for `recv.method(...)`:
-                //   1. the receiver's own `impl` method (`{Type}.{method}`);
-                //   2. the receiver-implicit free function `method`
-                //      (`p.dist()` ≡ `dist(p)`);
-                //   3. the receiver-typed stdlib namespace (`str.`/`vec.`/…)
-                //      and the cross-module `{ns}.{method}` fallback below.
-                // (1) keeps a same-named free function from silently making
-                // the method unreachable (#500); the free signature is
-                // restored at the end when nothing matches, so its mismatch
-                // diagnostics are unchanged.
-                let impl_owned = self.receiver_impl_method(&recv_t_resolved, method);
-                let free_sig = zz_checker_core::lookup_std(&self.funcs, method).cloned();
-                let mut sig = if impl_owned { None } else { free_sig.clone() };
-                if sig.is_none() {
-                    match &recv_t_resolved {
-                        Type::Str => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("str.{method}"))
-                                    .cloned();
-                        }
-                        Type::Array(_) => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("vec.{method}"))
-                                    .cloned();
-                        }
-                        Type::Option(_) => {
-                            sig = zz_checker_core::lookup_std(
-                                &self.funcs,
-                                &format!("option.{method}"),
-                            )
-                            .cloned();
-                        }
-                        Type::Result(_, _) => {
-                            sig = zz_checker_core::lookup_std(
-                                &self.funcs,
-                                &format!("result.{method}"),
-                            )
-                            .cloned();
-                        }
-                        Type::Int => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("int.{method}"))
-                                    .cloned();
-                        }
-                        Type::Float => {
-                            sig = zz_checker_core::lookup_std(
-                                &self.funcs,
-                                &format!("float.{method}"),
-                            )
-                            .cloned();
-                        }
-                        Type::Bool => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("bool.{method}"))
-                                    .cloned();
-                        }
-                        Type::Response => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
-                                    .cloned();
-                        }
-                        Type::HttpRequest => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
-                                    .cloned();
-                        }
-                        Type::TcpStream => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("net.{method}"))
-                                    .cloned();
-                        }
-                        Type::TcpListener => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("net.{method}"))
-                                    .cloned();
-                        }
-                        Type::HttpServer => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("http.{method}"))
-                                    .cloned();
-                        }
-                        Type::Json => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("json.{method}"))
-                                    .cloned();
-                        }
-                        Type::Db => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("sqlz.{method}"))
-                                    .cloned();
-                        }
-                        Type::Chan => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("chan.{method}"))
-                                    .cloned();
-                        }
-                        Type::TaskJoin => {
-                            sig =
-                                zz_checker_core::lookup_std(&self.funcs, &format!("task.{method}"))
-                                    .cloned();
-                        }
-                        Type::Opaque(tag) => {
-                            sig = zz_checker_core::lookup_std(
-                                &self.funcs,
-                                &format!("{tag}.{method}"),
-                            )
-                            .cloned();
-                        }
-                        Type::Struct(sname, _) => {
-                            // Try TypeName.method (impl block methods)
-                            sig = zz_checker_core::lookup_std(
-                                &self.funcs,
-                                &format!("{sname}.{method}"),
-                            )
-                            .cloned();
-                            if sig.is_none() {
-                                // Try namespace.method (cross-module)
-                                if let Some((ns, _)) = sname.rsplit_once('.') {
-                                    sig = zz_checker_core::lookup_std(
-                                        &self.funcs,
-                                        &format!("{ns}.{method}"),
-                                    )
-                                    .cloned();
-                                }
-                            }
-                        }
-                        // Enum values erase to `Object`s, so `impl Enum`
-                        // methods dispatch exactly like struct methods.
-                        Type::Enum(ename, _) => {
-                            sig = zz_checker_core::lookup_std(
-                                &self.funcs,
-                                &format!("{ename}.{method}"),
-                            )
-                            .cloned();
-                            if sig.is_none() {
-                                if let Some((ns, _)) = ename.rsplit_once('.') {
-                                    sig = zz_checker_core::lookup_std(
-                                        &self.funcs,
-                                        &format!("{ns}.{method}"),
-                                    )
-                                    .cloned();
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                // Embedded promotion (see the `Field`-callee branch above).
-                let mut promoted_recv: Option<Type> = None;
-                if sig.is_none() {
-                    if let Type::Struct(sname, sargs) = self.unifier.resolve(&recv_t) {
-                        if let Some((defining, psig)) = self.find_struct_method(&sname, method) {
-                            // The runtime passes the embedded value itself
-                            // as the receiver (with its own arguments).
-                            promoted_recv = self
-                                .promoted_method_receiver(&sname, &sargs, &defining)
-                                .or_else(|| Some(Type::Struct(defining, Vec::new())));
-                            sig = Some(psig);
-                        }
-                    }
-                }
-                if sig.is_none() {
-                    sig = free_sig;
-                }
-                if let Some(sig) = sig {
-                    // sqlz method form: `db.exec(sql)`, `db.query(sql)`,
-                    // `db.transaction(fn(tx) { ... })` — receiver is
-                    // implicit, so user args are matched against sig[1..].
-                    if (*method == "query" || *method == "exec" || *method == "transaction")
-                        && matches!(self.unifier.resolve(&recv_t), Type::Db)
-                    {
-                        let (ps, ret, subs) = self.instantiate(&sig);
-                        if !ps.is_empty() {
-                            if let Err(e) = self.unifier.unify(&recv_t, &ps[0]) {
-                                self.report_mismatch(e, *pspan);
-                            }
-                        }
-                        let expected = ps.len().saturating_sub(1);
-                        let actual = args.len() + named.len();
-                        if actual != expected {
-                            self.errors.push(error_at(
-                                format!("expected {expected} argument(s), found {actual}"),
-                                span,
-                            ));
-                        } else if expected >= 1 {
-                            // Verify each user arg against sig[1..].
-                            for (i, arg) in args.iter().enumerate() {
-                                if ps.len() >= 2 + i {
-                                    // Propagate expected types into
-                                    // closures so their bodies can
-                                    // resolve method calls on known
-                                    // param types (e.g. `tx.exec`
-                                    // when `tx: Db`).
-                                    if let Expr::Closure {
-                                        params,
-                                        ret_ty,
-                                        body,
-                                        span: cspan,
-                                    } = arg
-                                    {
-                                        let expected_t = self.unifier.resolve(&ps[1 + i]);
-                                        let ep = if let Type::Func(ep, _) = &expected_t {
-                                            Some(ep.as_slice())
-                                        } else {
-                                            None
-                                        };
-                                        let at = self.check_closure(
-                                            params,
-                                            ret_ty.as_ref(),
-                                            body,
-                                            *cspan,
-                                            ep,
-                                        );
-                                        if let Err(e) = self.unifier.unify(&at, &ps[1 + i]) {
-                                            self.report_mismatch(e, arg.span());
-                                        }
-                                    } else {
-                                        let at = self.check_expr(arg);
-                                        if let Err(e) = self.unifier.unify(&at, &ps[1 + i]) {
-                                            self.report_mismatch(e, arg.span());
-                                        }
-                                    }
-                                }
-                            }
-                            if *method == "query" || *method == "exec" {
-                                self.verify_sql_params(&args[0], span);
-                            }
-                        }
-                        self.validate_bounds(&sig, &subs, span);
-                        return ret;
-                    }
-                    let (ps, ret, subs) = self.instantiate(&sig);
-                    if ps.is_empty() {
-                        self.errors.push(error_at(
-                            format!("method `{method}` takes no arguments"),
-                            span,
-                        ));
-                        return Type::Unit;
-                    }
-                    if let Some(promoted) = promoted_recv {
-                        if let Err(e) = self.unifier.unify(&promoted, &ps[0]) {
-                            self.report_mismatch(e, *pspan);
-                        }
-                    } else if let Err(e) = self.unifier.unify(&recv_t, &ps[0]) {
-                        self.report_mismatch(e, *pspan);
-                    }
-                    self.check_args_against(
-                        None,
-                        &sig.params[1..]
-                            .iter()
-                            .map(|(n, _)| n.clone())
-                            .collect::<Vec<_>>(),
-                        &ps[1..],
-                        &[],
-                        args,
-                        named,
-                        span,
-                    );
-                    self.validate_bounds(&sig, &subs, span);
-                    return ret;
-                }
-            }
+        if let Some(t) = check_call::check_call_path_method(self, &callee, args, named, span) {
+            return t;
         }
-        let callee_t = self.check_expr(callee);
-        let callee_t = self.unifier.resolve(&callee_t);
-        match callee_t {
-            Type::Func(ps, ret) => {
-                let pnames: Vec<String> = (0..ps.len()).map(|i| format!("_{i}")).collect();
-                self.check_args_against(None, &pnames, &ps, &[], args, named, span);
-                *ret
-            }
-            Type::Named(name) => match zz_checker_core::lookup_std(&self.funcs, &name).cloned() {
-                Some(sig) => {
-                    let (ps, ret, subs) = self.instantiate(&sig);
-                    let param_names: Vec<String> =
-                        sig.params.iter().map(|(n, _)| n.clone()).collect();
-                    self.check_args_against(
-                        Some(Self::short_name(&name)),
-                        &param_names,
-                        &ps,
-                        &sig.has_default,
-                        args,
-                        named,
-                        span,
-                    );
-                    self.validate_bounds(&sig, &subs, span);
-                    ret
-                }
-                None => {
-                    // Sherlock: suggest the closest known function so a typo
-                    // (`lenght`, `get_var`) points at the fix instead of a dead end.
-                    let mut diag = error_at(format!("unknown function `{name}`"), span);
-                    let candidates: Vec<String> = self
-                        .funcs
-                        .keys()
-                        .flat_map(|k| {
-                            let mut v = vec![k.clone()];
-                            if let Some(bare) = k.rsplit('.').next() {
-                                if bare != k {
-                                    v.push(bare.to_string());
-                                }
-                            }
-                            v
-                        })
-                        .collect();
-                    let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
-                    let all = suggest_all(&name, &refs);
-                    if let Some((suggestion, _)) = all.first() {
-                        // Note only, deliberately: the suggestion names the
-                        // *type* (`name`), not the callee value, and the
-                        // span covers the whole call — replacing the callee
-                        // with the function would silently drop a receiver,
-                        // so no fixit is offered.
-                        diag = diag.with_note(format!(
-                            "did you mean to call `{suggestion}` instead of calling a value of type `{name}`?"
-                        ));
-                    }
-                    self.errors.push(diag);
-                    Type::Unit
-                }
-            },
-            Type::Var(_) => {
-                if !self.had_undefined_var {
-                    self.errors.push(error_at(
-                        "cannot call a value whose type could not be inferred",
-                        span,
-                    ));
-                }
-                Type::Error
-            }
-            Type::Error => Type::Error,
-            other => {
-                if !self.had_undefined_var {
-                    self.errors.push(error_at(
-                        format!("cannot call a value of type `{other}`"),
-                        span,
-                    ));
-                }
-                Type::Error
-            }
-        }
+        check_call::check_call_callee_type(self, &callee, args, named, span)
     }
 
     /// Check that the given positional and named arguments match the parameter
@@ -3743,174 +2278,31 @@ impl TypeCheckOps for Checker {
         named: &[(Ident, Expr)],
         span: Span,
     ) {
-        let total_provided = args.len() + named.len();
-        let total_params = ps.len();
-        let allowed_min = total_params - has_default.iter().filter(|&&d| d).count();
-
-        if total_provided < allowed_min || total_provided > total_params {
-            let sig = param_names
-                .iter()
-                .zip(ps.iter())
-                .map(|(n, t)| format!("{n}: {t}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let count = if allowed_min == total_params {
-                if total_params == 1 {
-                    "takes 1 argument".to_string()
-                } else {
-                    format!("takes {total_params} arguments")
-                }
-            } else {
-                format!("takes {allowed_min} to {total_params} arguments")
-            };
-            let head = match callee.filter(|c| !c.is_empty()) {
-                Some(name) => format!("`{name}` {count}"),
-                None => count,
-            };
-            let mut diag = error_at(format!("{head} ({sig}), found {total_provided}"), span);
-            // Name the missing parameters when too few were given. A named
-            // argument covers its parameter wherever it sits, so only
-            // report slots filled by neither position nor name.
-            if total_provided < allowed_min {
-                let missing: Vec<String> = param_names
-                    .iter()
-                    .zip(ps.iter())
-                    .enumerate()
-                    .filter(|(i, (n, _))| {
-                        *i >= args.len() && !named.iter().any(|(an, _)| an.name == **n)
-                    })
-                    .map(|(_, (n, t))| format!("{n}: {t}"))
-                    .collect();
-                if let Some(first) = missing.first() {
-                    diag = diag.with_note(format!("missing argument for `{first}`"));
-                }
-            }
-            self.errors.push(diag);
+        if check_call_args::check_arg_count(
+            self,
+            callee,
+            param_names,
+            ps,
+            has_default,
+            args,
+            named,
+            span,
+        ) {
             return;
         }
 
+        let total_params = ps.len();
         let mut slots: Vec<Option<&Expr>> = vec![None; total_params];
 
-        for (i, arg) in args.iter().enumerate() {
-            if i >= total_params {
-                self.errors.push(error_at(
-                    format!("too many positional arguments (max {})", total_params),
-                    arg.span(),
-                ));
-                return;
-            }
-            if slots[i].is_some() {
-                self.errors.push(error_at(
-                    format!("positional argument `{}` conflicts with named argument", i),
-                    arg.span(),
-                ));
-                return;
-            }
-            slots[i] = Some(arg);
+        if check_call_args::assign_positional_slots(self, total_params, args, &mut slots) {
+            return;
         }
 
-        for (name, val) in named {
-            let pos = param_names.iter().position(|pn| pn == &name.name);
-            match pos {
-                Some(i) => {
-                    if slots[i].is_some() {
-                        self.errors.push(error_at(
-                            format!("argument `{}` already provided positionally", name.name),
-                            val.span(),
-                        ));
-                        return;
-                    }
-                    slots[i] = Some(val);
-                }
-                None => {
-                    // Sherlock: typo'd named argument (`nmae:`) suggests
-                    // the real parameter with a fix — the name span now
-                    // rides the AST, so the error points at the typo
-                    // itself instead of the value.
-                    let mut diag =
-                        error_at(format!("unknown parameter `{}`", name.name), name.span);
-                    let refs: Vec<&str> = param_names.iter().map(|s| s.as_str()).collect();
-                    let all = suggest_all(&name.name, &refs);
-                    if let Some((suggestion, _)) = all.first() {
-                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
-                        let alts: Vec<String> = all.iter().map(|(s, _)| s.to_string()).collect();
-                        let fixit = if alts.len() == 1 {
-                            FixIt::safe(name.span, suggestion.to_string(), "replace parameter")
-                        } else {
-                            FixIt::ambiguous(
-                                name.span,
-                                suggestion.to_string(),
-                                "replace parameter",
-                                alts,
-                            )
-                        };
-                        diag = diag.with_fixit(fixit);
-                    }
-                    self.errors.push(diag);
-                    return;
-                }
-            }
+        if check_call_args::check_named_args(self, param_names, named, &mut slots) {
+            return;
         }
 
-        for (i, slot) in slots.iter().enumerate() {
-            if let Some(arg) = slot {
-                // When passing a closure to a function with a known
-                // signature, propagate expected param types so the body
-                // can resolve method calls on known types (e.g. `tx.exec`
-                // when `tx: Db`).  Without this, unannotated params get
-                // fresh vars and method dispatch fails on `?0`.
-                if let Expr::Closure {
-                    params,
-                    ret_ty,
-                    body,
-                    span,
-                } = arg
-                {
-                    let expected = self.unifier.resolve(&ps[i]);
-                    let ep = if let Type::Func(ep, _) = &expected {
-                        Some(ep.as_slice())
-                    } else {
-                        None
-                    };
-                    let at = self.check_closure(params, ret_ty.as_ref(), body, *span, ep);
-                    if let Err(e) = self.unifier.unify(&at, &ps[i]) {
-                        self.report_mismatch_with_notes(
-                            e,
-                            arg.span(),
-                            Self::param_mismatch_notes(param_names, ps, i),
-                        );
-                    }
-                } else {
-                    let at = self.check_expr(arg);
-                    let at = self.unifier.resolve(&at);
-                    let expected = self.unifier.resolve(&ps[i]);
-                    // A named function passed where a `func(...)` value is
-                    // expected (e.g. decorator application `dec(target)` or
-                    // HOFs like `map(xs, double)`): expand the signature so
-                    // structural unification applies instead of failing on
-                    // `Named` vs `Func`.
-                    let at = match (&at, &expected) {
-                        (Type::Named(n), Type::Func(_, _)) => {
-                            match zz_checker_core::lookup_std(&self.funcs, n).cloned() {
-                                Some(sig) => {
-                                    let (sps, sret, _) = self.instantiate(&sig);
-                                    Type::Func(sps, Box::new(sret))
-                                }
-                                None => at,
-                            }
-                        }
-                        _ => at,
-                    };
-                    if let Err(e) = self.unifier.unify(&at, &expected) {
-                        self.report_mismatch_with_notes(
-                            e,
-                            arg.span(),
-                            Self::param_mismatch_notes(param_names, ps, i),
-                        );
-                    }
-                }
-            }
-        }
+        check_call_args::check_filled_slots(self, param_names, ps, &slots);
     }
 
     /// Compile-time SQL verification for `db.query(sql)` / `db.exec(sql)`.
@@ -4495,202 +2887,7 @@ impl TypeCheckOps for Checker {
                 }
             }
             Pattern::Variant { name, arg, span } => {
-                // Sherlock: a builtin pattern constrains an uninferred
-                // scrutinee — `.ok`/`.err` proves `Result`, `.some`/`.none`
-                // proves `Option`. A later arm from the other family then
-                // reports a real mismatch instead of passing silently, and
-                // payloads bind to known types instead of fresh vars.
-                if let Type::Var(id) = self.unifier.resolve(ty) {
-                    let constrained = match name.as_str() {
-                        "ok" | "err" => Some(Type::Result(
-                            Box::new(self.unifier.fresh_var()),
-                            Box::new(self.unifier.fresh_var()),
-                        )),
-                        "some" | "none" => Some(Type::Option(Box::new(self.unifier.fresh_var()))),
-                        _ => None,
-                    };
-                    if let Some(ct) = constrained {
-                        self.unifier.bind(id, ct);
-                    }
-                }
-                let rt = self.unifier.resolve(ty);
-                let inner = match (&rt, name.as_str()) {
-                    (Type::Option(inner), "some") => match arg {
-                        Some(p) => Some((p.as_ref().clone(), (**inner).clone())),
-                        None => {
-                            self.errors.push(
-                                error_at("`.some` pattern requires an argument", *span)
-                                    .with_note(
-                                        "`.some` always carries a value — write `.some(v)` to use it or `.some(_)` to ignore it",
-                                    )
-                                    .with_note("run `zz fix` to rewrite this automatically")
-                                    .with_fixit(FixIt::safe(
-                                        *span,
-                                        ".some(_)",
-                                        "add wildcard payload",
-                                    )),
-                            );
-                            None
-                        }
-                    },
-                    (Type::Option(_), "none") => {
-                        if arg.is_some() {
-                            // The fixit only applies to a wildcard payload:
-                            // dropping `.none(x)` would orphan uses of `x`
-                            // in the arm body, so named payloads get the
-                            // error + notes and the user edits by hand.
-                            let mut diag = error_at("`.none` pattern takes no argument", *span)
-                                .with_note("`.none` carries no value — write `.none`");
-                            if matches!(arg.as_deref(), Some(Pattern::Wildcard { .. })) {
-                                diag = diag
-                                    .with_note("run `zz fix` to rewrite this automatically")
-                                    .with_fixit(FixIt::safe(*span, ".none", "drop payload"));
-                            }
-                            self.errors.push(diag);
-                        }
-                        None
-                    }
-                    (Type::Result(t, _), "ok") => match arg {
-                        Some(p) => Some((p.as_ref().clone(), (**t).clone())),
-                        None => {
-                            self.errors.push(
-                                error_at("`.ok` pattern requires an argument", *span)
-                                .with_note(
-                                    "`.ok` always carries a value — write `.ok(v)` to use it or `.ok(_)` to ignore it",
-                                )
-                                .with_note("run `zz fix` to rewrite this automatically")
-                                .with_fixit(FixIt::safe(
-                                    *span,
-                                    ".ok(_)",
-                                    "add wildcard payload",
-                                )),
-                            );
-                            None
-                        }
-                    },
-                    (Type::Result(_, e), "err") => match arg {
-                        Some(p) => Some((p.as_ref().clone(), (**e).clone())),
-                        None => {
-                            self.errors.push(
-                                error_at("`.err` pattern requires an argument", *span)
-                                .with_note(
-                                    "`.err` always carries a value — write `.err(e)` to use it or `.err(_)` to ignore it",
-                                )
-                                .with_note("run `zz fix` to rewrite this automatically")
-                                .with_fixit(FixIt::safe(
-                                    *span,
-                                    ".err(_)",
-                                    "add wildcard payload",
-                                )),
-                            );
-                            None
-                        }
-                    },
-                    (Type::Enum(ename, eargs), vname) => {
-                        match self.enum_variant_payload(ename, vname, *span) {
-                            Some(Some(pty)) => {
-                                // Substitute the scrutinee's arguments for
-                                // the enum's parameters (`Box<int>` + `T`
-                                // → `int`), exactly like generic struct
-                                // field access.
-                                let inner = self.subst_enum_payload(ename, eargs, &pty);
-                                match arg {
-                                    Some(p) => Some((p.as_ref().clone(), inner)),
-                                    None => {
-                                        self.errors.push(error_at(
-                                            format!(
-                                                "`.{vname}` pattern requires an argument (variant `{ename}.{vname}` holds a value)"
-                                            ),
-                                            *span,
-                                        ));
-                                        None
-                                    }
-                                }
-                            }
-                            Some(None) => {
-                                if arg.is_some() {
-                                    self.errors.push(error_at(
-                                        format!(
-                                            "`.{vname}` pattern takes no argument (variant `{ename}.{vname}` holds no value)"
-                                        ),
-                                        *span,
-                                    ));
-                                }
-                                None
-                            }
-                            // Unknown variant: already reported; bind
-                            // nothing to suppress cascades.
-                            None => None,
-                        }
-                    }
-                    (Type::Var(_), _) => arg
-                        .as_ref()
-                        .map(|p| (p.as_ref().clone(), self.unifier.fresh_var())),
-                    (Type::Error, _) => {
-                        // Poisoned scrutinee: bind names as Error silently
-                        // so follow-on uses don't cascade (#246).
-                        if let Some(p) = arg {
-                            self.bind_pattern(p, &Type::Error);
-                        }
-                        None
-                    }
-                    (other, vname) => {
-                        let mut diag = error_at(
-                            format!("pattern `.{vname}` does not match a value of type `{other}`"),
-                            *span,
-                        );
-                        // Sherlock hints: point at the right variant family
-                        // for the scrutinee type (#247 follow-up).
-                        let hint: Option<String> = match (other, vname) {
-                            (Type::Option(_), "ok") => {
-                                Some("use `.some(x)` for the Option value".to_string())
-                            }
-                            (Type::Option(_), "err") => {
-                                Some("Option has no `.err`; use `.some(x)` / `.none`".to_string())
-                            }
-                            (Type::Option(_), _) => {
-                                Some("Option patterns are `.some(x)` / `.none`".to_string())
-                            }
-                            (Type::Result(_, _), "some") => {
-                                Some("use `.ok(x)` for the Result value".to_string())
-                            }
-                            (Type::Result(_, _), "none") => Some(
-                                "use `.err(e)` for the Result error; `.none` is an Option pattern"
-                                    .to_string(),
-                            ),
-                            (Type::Result(_, _), _) => {
-                                Some("Result patterns are `.ok(x)` / `.err(e)`".to_string())
-                            }
-                            (Type::Bool, _) => {
-                                Some("use `true` / `false` patterns for `bool`".to_string())
-                            }
-                            _ => None,
-                        };
-                        if let Some(h) = hint {
-                            diag = diag.with_note(h);
-                        }
-                        // Mismatch-first help when variant arms meet a plain
-                        // scalar scrutinee (user assumed Result/Option) (#247).
-                        if matches!(
-                            other,
-                            Type::Int | Type::Float | Type::Str | Type::Unit | Type::Bool
-                        ) {
-                            diag = diag.with_note(format!(
-                                "match on plain `{other}` needs no `.ok`/`.err` arms"
-                            ));
-                        }
-                        self.errors.push(diag);
-                        // Bind the payload names as Error so their uses
-                        // don't cascade into `undefined variable` noise (#246).
-                        if let Some(p) = arg {
-                            self.bind_pattern(p, &Type::Error);
-                        }
-                        None
-                    }
-                };
-                if let Some((p, inner)) = inner {
-                    self.bind_pattern(&p, &inner);
-                }
+                self.bind_pattern_variant(name, arg, *span, ty);
             }
             Pattern::Or { pats, span } => {
                 if pats.is_empty() {
@@ -4781,15 +2978,252 @@ impl TypeCheckOps for Checker {
         }
     }
 
+    /// Bind a `.Variant` pattern: constrains the scrutinee type for
+    /// builtin variants (`.ok`/`.err` → `Result`, `.some`/`.none` → `Option`),
+    /// then binds payload names to the resolved inner type.
+    fn bind_pattern_variant(
+        &mut self,
+        name: &str,
+        arg: &Option<Box<Pattern>>,
+        span: Span,
+        ty: &Type,
+    ) {
+        // Sherlock: a builtin pattern constrains an uninferred
+        // scrutinee — `.ok`/`.err` proves `Result`, `.some`/`.none`
+        // proves `Option`. A later arm from the other family then
+        // reports a real mismatch instead of passing silently, and
+        // payloads bind to known types instead of fresh vars.
+        if let Type::Var(id) = self.unifier.resolve(ty) {
+            let constrained = match name {
+                "ok" | "err" => Some(Type::Result(
+                    Box::new(self.unifier.fresh_var()),
+                    Box::new(self.unifier.fresh_var()),
+                )),
+                "some" | "none" => Some(Type::Option(Box::new(self.unifier.fresh_var()))),
+                _ => None,
+            };
+            if let Some(ct) = constrained {
+                self.unifier.bind(id, ct);
+            }
+        }
+        let rt = self.unifier.resolve(ty);
+        let inner = match (&rt, name) {
+            (Type::Option(inner), "some") => self.bind_pattern_variant_option(inner, arg, span),
+            (Type::Option(_), "none") => self.bind_pattern_variant_none(arg, span),
+            (Type::Result(t, _), "ok") => match arg {
+                Some(p) => Some((p.as_ref().clone(), (**t).clone())),
+                None => {
+                    self.errors.push(
+                        error_at("`.ok` pattern requires an argument", span)
+                        .with_note(
+                            "`.ok` always carries a value — write `.ok(v)` to use it or `.ok(_)` to ignore it",
+                        )
+                        .with_note("run `zz fix` to rewrite this automatically")
+                        .with_fixit(FixIt::safe(
+                            span,
+                            ".ok(_)",
+                            "add wildcard payload",
+                        )),
+                    );
+                    None
+                }
+            },
+            (Type::Result(_, e), "err") => match arg {
+                Some(p) => Some((p.as_ref().clone(), (**e).clone())),
+                None => {
+                    self.errors.push(
+                        error_at("`.err` pattern requires an argument", span)
+                        .with_note(
+                            "`.err` always carries a value — write `.err(e)` to use it or `.err(_)` to ignore it",
+                        )
+                        .with_note("run `zz fix` to rewrite this automatically")
+                        .with_fixit(FixIt::safe(
+                            span,
+                            ".err(_)",
+                            "add wildcard payload",
+                        )),
+                    );
+                    None
+                }
+            },
+            (Type::Enum(ename, eargs), vname) => {
+                self.bind_pattern_variant_enum(ename, vname, eargs, arg, span)
+            }
+            (Type::Var(_), _) => arg
+                .as_ref()
+                .map(|p| (p.as_ref().clone(), self.unifier.fresh_var())),
+            (Type::Error, _) => {
+                // Poisoned scrutinee: bind names as Error silently
+                // so follow-on uses don't cascade (#246).
+                if let Some(p) = arg {
+                    self.bind_pattern(p, &Type::Error);
+                }
+                None
+            }
+            (other, vname) => {
+                let mut diag = error_at(
+                    format!("pattern `.{vname}` does not match a value of type `{other}`"),
+                    span,
+                );
+                // Sherlock hints: point at the right variant family
+                // for the scrutinee type (#247 follow-up).
+                let hint: Option<String> = match (other, vname) {
+                    (Type::Option(_), "ok") => {
+                        Some("use `.some(x)` for the Option value".to_string())
+                    }
+                    (Type::Option(_), "err") => {
+                        Some("Option has no `.err`; use `.some(x)` / `.none`".to_string())
+                    }
+                    (Type::Option(_), _) => {
+                        Some("Option patterns are `.some(x)` / `.none`".to_string())
+                    }
+                    (Type::Result(_, _), "some") => {
+                        Some("use `.ok(x)` for the Result value".to_string())
+                    }
+                    (Type::Result(_, _), "none") => Some(
+                        "use `.err(e)` for the Result error; `.none` is an Option pattern"
+                            .to_string(),
+                    ),
+                    (Type::Result(_, _), _) => {
+                        Some("Result patterns are `.ok(x)` / `.err(e)`".to_string())
+                    }
+                    (Type::Bool, _) => Some("use `true` / `false` patterns for `bool`".to_string()),
+                    _ => None,
+                };
+                if let Some(h) = hint {
+                    diag = diag.with_note(h);
+                }
+                // Mismatch-first help when variant arms meet a plain
+                // scalar scrutinee (user assumed Result/Option) (#247).
+                if matches!(
+                    other,
+                    Type::Int | Type::Float | Type::Str | Type::Unit | Type::Bool
+                ) {
+                    diag = diag.with_note(format!(
+                        "match on plain `{other}` needs no `.ok`/`.err` arms"
+                    ));
+                }
+                self.errors.push(diag);
+                // Bind the payload names as Error so their uses
+                // don't cascade into `undefined variable` noise (#246).
+                if let Some(p) = arg {
+                    self.bind_pattern(p, &Type::Error);
+                }
+                None
+            }
+        };
+        if let Some((p, inner)) = inner {
+            self.bind_pattern(&p, &inner);
+        }
+    }
+
+    /// Handle `.Variant` pattern on an enum scrutinee.
+    fn bind_pattern_variant_enum(
+        &mut self,
+        ename: &str,
+        vname: &str,
+        eargs: &[Type],
+        arg: &Option<Box<Pattern>>,
+        span: Span,
+    ) -> Option<(Pattern, Type)> {
+        match self.enum_variant_payload(ename, vname, span) {
+            Some(Some(pty)) => {
+                // Substitute the scrutinee's arguments for
+                // the enum's parameters (`Box<int>` + `T`
+                // → `int`), exactly like generic struct
+                // field access.
+                let inner = self.subst_enum_payload(ename, eargs, &pty);
+                match arg {
+                    Some(p) => Some((p.as_ref().clone(), inner)),
+                    None => {
+                        self.errors.push(error_at(
+                            format!(
+                                "`.{vname}` pattern requires an argument (variant `{ename}.{vname}` holds a value)"
+                            ),
+                            span,
+                        ));
+                        None
+                    }
+                }
+            }
+            Some(None) => {
+                if arg.is_some() {
+                    self.errors.push(error_at(
+                        format!(
+                            "`.{vname}` pattern takes no argument (variant `{ename}.{vname}` holds no value)"
+                        ),
+                        span,
+                    ));
+                }
+                None
+            }
+            // Unknown variant: already reported; bind
+            // nothing to suppress cascades.
+            None => None,
+        }
+    }
+
+    /// Handle `.some(x)` pattern: binds payload name to Option's inner type.
+    fn bind_pattern_variant_option(
+        &mut self,
+        inner: &Type,
+        arg: &Option<Box<Pattern>>,
+        span: Span,
+    ) -> Option<(Pattern, Type)> {
+        match arg {
+            Some(p) => Some((p.as_ref().clone(), (*inner).clone())),
+            None => {
+                self.errors.push(
+                    error_at("`.some` pattern requires an argument", span)
+                        .with_note(
+                            "`.some` always carries a value — write `.some(v)` to use it or `.some(_)` to ignore it",
+                        )
+                        .with_note("run `zz fix` to rewrite this automatically")
+                        .with_fixit(FixIt::safe(
+                            span,
+                            ".some(_)",
+                            "add wildcard payload",
+                        )),
+                );
+                None
+            }
+        }
+    }
+
+    /// Handle `.none` pattern: rejects any argument.
+    fn bind_pattern_variant_none(
+        &mut self,
+        arg: &Option<Box<Pattern>>,
+        span: Span,
+    ) -> Option<(Pattern, Type)> {
+        if arg.is_some() {
+            // The fixit only applies to a wildcard payload:
+            // dropping `.none(x)` would orphan uses of `x`
+            // in the arm body, so named payloads get the
+            // error + notes and the user edits by hand.
+            let mut diag = error_at("`.none` pattern takes no argument", span)
+                .with_note("`.none` carries no value — write `.none`");
+            if matches!(arg.as_deref(), Some(Pattern::Wildcard { .. })) {
+                diag = diag
+                    .with_note("run `zz fix` to rewrite this automatically")
+                    .with_fixit(FixIt::safe(span, ".none", "drop payload"));
+            }
+            self.errors.push(diag);
+        }
+        None
+    }
+
     fn check_exhaustive(&mut self, st: &Type, arms: &[zz_span_ast::ast::MatchArm], span: Span) {
         // Poisoned scrutinee: the root error is already reported; skip
         // exhaustiveness noise (#246).
         if matches!(self.unifier.resolve(st), Type::Error) {
             return;
         }
+        // A wildcard or binding pattern matches every value, so either makes
+        // the match exhaustive (a binding binds whatever the scrutinee holds).
         fn pat_is_wildcard(pat: &Pattern) -> bool {
             match pat {
-                Pattern::Wildcard { .. } => true,
+                Pattern::Wildcard { .. } | Pattern::Binding { .. } => true,
                 Pattern::Or { pats, .. } => pats.iter().any(pat_is_wildcard),
                 _ => false,
             }
@@ -4817,15 +3251,40 @@ impl TypeCheckOps for Checker {
             }
             let missing: Vec<&String> = needs.iter().filter(|n| !have.contains(n)).collect();
             if !missing.is_empty() {
-                let missing = missing
+                let missing_str = missing
                     .iter()
                     .map(|m| format!("`.{m}`"))
                     .collect::<Vec<_>>()
                     .join(" or ");
-                self.errors.push(error_at(
-                    format!("non-exhaustive match: missing {missing} (or add a `_` arm)"),
+                let mut diag = error_at(
+                    format!("non-exhaustive match: missing {missing_str} (or add a `_` arm)"),
                     span,
+                )
+                .with_code(ErrorCode(4));
+                // Add a fixit for each missing arm, plus a wildcard arm.
+                let mut alts: Vec<String> = Vec::new();
+                for m in &missing {
+                    alts.push(format!("`{m} => ()`"));
+                }
+                alts.push("`_ => ()`".to_string());
+                if alts.len() == 1 {
+                    diag = diag.with_fixit(FixIt::safe(
+                        span,
+                        format!("{} => () {{}}", missing[0]),
+                        "add missing arm",
+                    ));
+                } else {
+                    diag = diag.with_fixit(FixIt::ambiguous(
+                        span,
+                        format!("{} => () {{}}", missing[0]),
+                        "add missing arm",
+                        alts,
+                    ));
+                }
+                diag = diag.with_note(format!(
+                    "add arm(s) for {missing_str} or a `_` wildcard arm"
                 ));
+                self.errors.push(diag);
             }
             return;
         }
@@ -4892,6 +3351,208 @@ impl TypeCheckOps for Checker {
                 format!("non-exhaustive match: missing {missing} (or add a `_` arm)"),
                 span,
             ));
+        }
+    }
+
+    /// True if `pat` matches every value of its type: a wildcard, a binding,
+    /// or an `or`-pattern containing one, or a tuple whose every element is
+    /// itself a catch-all.
+    fn pat_covers_all(&self, pat: &Pattern) -> bool {
+        match pat {
+            Pattern::Wildcard { .. } | Pattern::Binding { .. } => true,
+            Pattern::Or { pats, .. } => pats.iter().any(|p| self.pat_covers_all(p)),
+            Pattern::Tuple { pats, .. } => pats.iter().all(|p| self.pat_covers_all(p)),
+            _ => false,
+        }
+    }
+
+    /// Determine which top-level constructors of `ty` are NOT covered by
+    /// `pats` (a list of unguarded patterns). Returns `None` when `ty` can't
+    /// be analyzed conservatively (assume covered), or `Some(missing)` when
+    /// constructors are provably absent. Nested constructors are checked
+    /// recursively (Maranget-style specialization).
+    fn missing_patterns(&self, pats: &[&Pattern], ty: &Type) -> Option<Vec<String>> {
+        use zz_span_ast::ast::Lit;
+        // Flatten `or`-patterns: `a | b` covers whatever `a` or `b` covers.
+        let flat: Vec<&Pattern> = pats.iter().copied().flat_map(|p| self.or_alt(p)).collect();
+        // Catch-all present → nothing missing.
+        if flat.iter().any(|p| self.pat_covers_all(p)) {
+            return Some(Vec::new());
+        }
+        match ty {
+            Type::Enum(ename, _) => self.missing_patterns_enum(ename, &flat),
+            Type::Option(inner) => {
+                let has_none = flat
+                    .iter()
+                    .any(|p| matches!(p, Pattern::Variant { name, .. } if name == "none"));
+                let some_sub: Vec<&Pattern> = flat
+                    .iter()
+                    .filter(|p| matches!(p, Pattern::Variant { name, .. } if name == "some"))
+                    .copied()
+                    .collect();
+                let mut missing = Vec::new();
+                if !has_none {
+                    missing.push(".none".to_string());
+                }
+                if !some_sub.is_empty() {
+                    let inner_ty = &**inner;
+                    let args: Vec<Pattern> = some_sub.iter().map(|p| self.variant_arg(p)).collect();
+                    let args: Vec<&Pattern> = args.iter().collect();
+                    if let Some(m) = self.missing_patterns(&args, inner_ty) {
+                        if !m.is_empty() {
+                            missing.push(format!(".some ({})", m.join(", ")));
+                        }
+                    }
+                } else if missing.is_empty() {
+                    // `.none` present but no `.some` at all → missing .some.
+                    missing.push(".some".to_string());
+                }
+                Some(missing)
+            }
+            Type::Result(ok, _err) => {
+                let has_err = flat
+                    .iter()
+                    .any(|p| matches!(p, Pattern::Variant { name, .. } if name == "err"));
+                let ok_sub: Vec<&Pattern> = flat
+                    .iter()
+                    .filter(|p| matches!(p, Pattern::Variant { name, .. } if name == "ok"))
+                    .copied()
+                    .collect();
+                let mut missing = Vec::new();
+                if !has_err {
+                    missing.push(".err".to_string());
+                }
+                if !ok_sub.is_empty() {
+                    let args: Vec<Pattern> = ok_sub.iter().map(|p| self.variant_arg(p)).collect();
+                    let args: Vec<&Pattern> = args.iter().collect();
+                    if let Some(m) = self.missing_patterns(&args, ok) {
+                        if !m.is_empty() {
+                            missing.push(format!(".ok ({})", m.join(", ")));
+                        }
+                    }
+                } else if missing.is_empty() {
+                    missing.push(".ok".to_string());
+                }
+                Some(missing)
+            }
+            Type::Bool => {
+                let has_true = flat.iter().any(|p| {
+                    matches!(
+                        p,
+                        Pattern::Literal {
+                            value: Lit::Bool(b),
+                            ..
+                        } if *b
+                    )
+                });
+                let has_false = flat.iter().any(|p| {
+                    matches!(
+                        p,
+                        Pattern::Literal {
+                            value: Lit::Bool(b),
+                            ..
+                        } if !*b
+                    )
+                });
+                let mut missing = Vec::new();
+                if !has_true {
+                    missing.push("true".to_string());
+                }
+                if !has_false {
+                    missing.push("false".to_string());
+                }
+                Some(missing)
+            }
+            Type::Tuple(_ts) => {
+                // A tuple domain is covered only if a catch-all pattern is
+                // present (handled by `pat_covers_all` above, which returns
+                // early). Without one, literal tuple patterns cover only
+                // finitely many points of an open domain, so the match is
+                // non-exhaustive.
+                Some(vec!["tuple pattern".to_string()])
+            }
+            Type::Int
+            | Type::Float
+            | Type::Str
+            | Type::Unit
+            | Type::Never
+            | Type::Var(_)
+            | Type::Named(_) => {
+                let has_literal = flat.iter().any(|p| matches!(p, Pattern::Literal { .. }));
+                if has_literal {
+                    Some(vec!["`_` wildcard arm".to_string()])
+                } else {
+                    Some(Vec::new())
+                }
+            }
+            _ => Some(Vec::new()), // opaque / function / etc.: assume covered
+        }
+    }
+
+    /// Check missing patterns for an enum type: list variants with no
+    /// matching arm, recursing into payload types.
+    fn missing_patterns_enum(&self, ename: &str, flat: &[&Pattern]) -> Option<Vec<String>> {
+        let variants: Vec<(String, Option<Type>)> = self
+            .enums
+            .get(ename)
+            .map(|s| {
+                s.variants
+                    .iter()
+                    .map(|(v, p)| (v.clone(), p.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if variants.is_empty() {
+            // Unknown enum: can't verify, assume covered.
+            return Some(Vec::new());
+        }
+        let mut missing = Vec::new();
+        for (vname, payload) in &variants {
+            let sub: Vec<&Pattern> = flat
+                .iter()
+                .filter(|p| matches!(p, Pattern::Variant { name, .. } if name == vname))
+                .copied()
+                .collect();
+            if sub.is_empty() {
+                missing.push(format!(".{vname}"));
+                continue;
+            }
+            // Recurse: variant arms must cover the payload type.
+            let payload_ty = payload.clone().unwrap_or(Type::Unit);
+            let args: Vec<Pattern> = sub.iter().map(|p| self.variant_arg(p)).collect();
+            let args: Vec<&Pattern> = args.iter().collect();
+            if let Some(m) = self.missing_patterns(&args, &payload_ty) {
+                if !m.is_empty() {
+                    missing.push(format!(".{vname} ({})", m.join(", ")));
+                }
+            }
+        }
+        Some(missing)
+    }
+
+    /// Flatten an `or`-pattern into its alternatives (non-or patterns pass
+    /// through unchanged).
+    fn or_alt<'a>(&self, pat: &'a Pattern) -> Vec<&'a Pattern> {
+        match pat {
+            Pattern::Or { pats, .. } => {
+                let mut out = Vec::new();
+                for p in pats {
+                    out.extend(self.or_alt(p));
+                }
+                out
+            }
+            p => vec![p],
+        }
+    }
+
+    /// Extract the argument pattern of a variant pattern `.V(arg)`, or a
+    /// wildcard if the variant has no payload.
+    fn variant_arg(&self, pat: &Pattern) -> Pattern {
+        match pat {
+            Pattern::Variant { arg: Some(a), .. } => (**a).clone(),
+            _ => Pattern::Wildcard {
+                span: Span::new(0, 0),
+            },
         }
     }
 
@@ -5011,7 +3672,14 @@ impl TypeCheckOps for Checker {
             // diagnostics, e.g. the module-namespace shadow lint); the
             // signature table itself carries no spans.
             match params.get(i) {
-                Some(p) => self.define_var_at(&p.name.name, pty.clone(), p.name.span, false),
+                Some(p) => {
+                    // The `self` receiver of an impl method may legitimately
+                    // go unread (e.g. a constant method); don't flag it as an
+                    // unused variable. Named-function parameters keep the
+                    // warning.
+                    let warn_unused = p.name.name != "self";
+                    self.define_binding_at(&p.name.name, pty.clone(), p.name.span, warn_unused);
+                }
                 None => self.define(pname, pty.clone()),
             }
         }
@@ -5084,6 +3752,7 @@ impl TypeCheckOps for Checker {
         if let Err(e) = self.unifier.unify(&fallthrough, &sig.ret) {
             self.report_mismatch(e, body.span);
         }
+        definite_assignment::analyze_function_body(self, body);
     }
 
     /// Report a missing-return diagnostic with improved diagnostics:
@@ -5128,7 +3797,8 @@ impl TypeCheckOps for Checker {
             format!("function returns `{ret_ty}` but its body can fall through; add `return `"),
             span,
         )
-        .with_note("named functions return a value only through `return`; the last expression is discarded");
+        .with_note("named functions return a value only through `return`; the last expression is discarded")
+        .with_code(ErrorCode(6));
         if let Some(insert_at) = value_tail {
             diag = diag.with_fixit(FixIt::safe(insert_at, "return ", "add `return`"));
         }

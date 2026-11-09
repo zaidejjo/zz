@@ -1,0 +1,9 @@
+first module that broke: <path> <path>
+
+error: extension method `str.length` conflicts with an existing method defined in the standard library
+
+  --> <path>
+    |
+    4 |     func length(self) -> int {
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+zz: 1 file(s) failed type-check

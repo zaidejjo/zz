@@ -1,0 +1,11 @@
+first module that broke: <path> <path>
+
+error: Z0004: non-exhaustive match: missing `.IntLit` (or add a `_` arm)
+
+  --> <path>
+    |
+   10 |     match t {
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace with `IntLit => () {}`
+
+    = add arm(s) for `.IntLit` or a `_` wildcard arm
+zz: 1 file(s) failed type-check

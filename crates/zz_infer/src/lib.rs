@@ -141,8 +141,11 @@ impl InferOps for Checker {
 
     /// Validate that every generic parameter with a bound was instantiated
     /// with a concrete type satisfying that bound. Called at call sites after
-    /// argument unification. Unresolved generics (never pinned by the call)
-    /// are skipped — the body's operator checks already validated them.
+    /// argument unification. A bound-carrying generic that is never pinned to
+    /// a concrete type (missing from `subs`, or still an inference `Var`) is
+    /// reported as an unconstrained-generic error rather than silently
+    /// producing an opaque type whose bound can never be verified — a deferred
+    /// obligation checked once unification has finished.
     fn validate_bounds(
         &mut self,
         sig: &zz_checker_core::FuncSig,
@@ -150,9 +153,33 @@ impl InferOps for Checker {
         span: Span,
     ) {
         for (gen, bounds) in &sig.bounds {
-            let Some(sub) = subs.get(gen) else { continue };
+            // Unbounded generics (`func f<T>`) carry no obligations; only
+            // bound-carrying generics (`func f<T: Num>`) are checked.
+            if bounds.is_empty() {
+                continue;
+            }
+            let bound_list = bounds
+                .iter()
+                .map(|b| b.name())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let Some(sub) = subs.get(gen) else {
+                self.errors.push(error_at(
+                    format!(
+                        "cannot infer type for generic parameter `{gen}`; it requires bound(s) {bound_list}",
+                    ),
+                    span,
+                ));
+                continue;
+            };
             let rt = self.unifier.resolve(sub);
             if matches!(rt, Type::Var(_)) {
+                self.errors.push(error_at(
+                    format!(
+                        "cannot infer type for generic parameter `{gen}`; it requires bound(s) {bound_list}",
+                    ),
+                    span,
+                ));
                 continue;
             }
             for b in bounds {

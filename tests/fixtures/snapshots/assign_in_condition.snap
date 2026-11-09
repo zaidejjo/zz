@@ -1,0 +1,10 @@
+first module that broke: <path> <path>
+
+error: `=` in condition does assignment; use `==` to compare
+
+  --> <path>
+    |
+    5 |     if countr = 5 {
+      |               ^ help: replace with `==`
+
+zz: 1 file(s) failed type-check

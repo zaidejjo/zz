@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use zz_frontend::ast::Stmt;
 use zz_frontend::bench_attr::{self, BenchMeta};
-use zz_frontend::diag::{render_to_string, Files};
+use zz_frontend::diag::{render_to_string, ColorMode, Files};
 use zz_frontend::span::Span;
 use zz_runtime::{Interp, Value};
 
@@ -620,7 +620,10 @@ fn discover_benches(path: &Path) -> Result<Vec<BenchInfo>, String> {
     for e in &loaded.errors {
         let mut files = Files::new();
         let id = files.add(e.name.clone(), e.source.clone());
-        eprint!("{}", render_to_string(&files, id, &e.diags));
+        eprint!(
+            "{}",
+            render_to_string(&files, id, &e.diags, ColorMode::Auto)
+        );
         if e.diags
             .iter()
             .any(|d| d.severity == zz_frontend::diag::Severity::Error)

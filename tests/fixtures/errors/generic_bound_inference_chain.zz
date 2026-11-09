@@ -1,0 +1,11 @@
+// features: generics, option-result, error-case, func-call, print, string-literal
+// bound failing through inference chain: T: Num pinned to `str` via both
+// arguments — str does not satisfy Num, must be a bound error.
+func unwrap_default<T: Num>(opt: Option<T>, def: T) -> T {
+    match opt {
+        .some(v) => return v
+        .none => return def
+    }
+}
+x := unwrap_default(.some("nope"), "fallback")
+println(x)

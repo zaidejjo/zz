@@ -1,0 +1,22 @@
+// features: error-case, func-call, int-arith, print, string-literal
+// E2E: Error recovery - multiple independent errors should not cascade.
+// Each error should be reported exactly once (no cascading follow-up errors).
+func nonexistent_func() -> int {
+    return 42
+}
+
+func main() -> int {
+    // Error 1: undefined variable
+    println(undefined_var_1)
+    // Error 2: type mismatch - adding int to str
+    x := "hello" + 1
+    // Error 3: non-existent method on int
+    y := 5
+    y.nonexistent_method()
+    // Error 4: calling undefined function
+    nonexistent_func_call()
+    // Error 5: undefined variable in expression
+    println(another_undefined_var)
+    println("done")
+    return 0
+}

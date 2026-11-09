@@ -1,0 +1,17 @@
+first module that broke: <path> <path>
+
+error: type mismatch: expected `str`, found `int`
+
+  --> <path>
+    |
+    4 | s: Box<str> = Box{ v: 1 }
+      |    ^^^
+    = to fix: change the annotation to `generic_struct_mismatch.Box<int>` or convert the value
+warning: unused variable `s` is never read, consider prefixing with `_s`
+
+  --> <path>
+    |
+    4 | s: Box<str> = Box{ v: 1 }
+      | ^ help: replace with `_s`
+
+zz: 1 file(s) failed type-check

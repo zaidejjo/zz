@@ -1,0 +1,10 @@
+first module that broke: <path> <path>
+
+error: cannot use `pub` on `impl`
+hint: impl methods are always public, remove the `pub` keyword
+
+  --> <path>
+    |
+    5 | pub impl Point {
+      |     ^^^^
+zz: 1 file(s) failed type-check

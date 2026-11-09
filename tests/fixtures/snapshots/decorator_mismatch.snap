@@ -1,0 +1,26 @@
+first module that broke: <path> <path>
+
+error: type mismatch: expected `int`, found `str`
+
+  --> <path>
+    |
+    7 | @bad
+      | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = parameter `f` expects `func(int) -> int`
+error: type mismatch: expected `int`, found `str`
+
+  --> <path>
+    |
+    8 | func hello(name: str) -> str {
+      |            ^^^^
+    = parameter `_0` expects `int`
+error: type mismatch: expected `str`, found `int`
+
+  --> <path>
+    |
+    7 | @bad
+      | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+warning: unused private function `decorator_mismatch.hello`, consider prefixing with `_decorator_mismatch.hello` or removing it
+
+    = function is never called or referenced
+zz: 1 file(s) failed type-check

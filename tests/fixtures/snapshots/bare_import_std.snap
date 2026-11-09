@@ -1,0 +1,17 @@
+first module that broke: <path> <path>
+
+error: `import std` names no module
+hint: import a concrete module, e.g. `import std.str`
+
+  --> <path>
+    |
+    1 | <path> features: error-case, imports
+      | ^
+warning: unused import `std`
+
+  --> <path>
+    |
+    3 | import std
+      | ^^^^^^^^^^
+    = remove this import or use it in the program
+zz: 1 file(s) failed type-check

@@ -62,7 +62,7 @@ impl RawDiagBind for RawDiag {
         if let Some(span) = self.span {
             labels.push(Label::primary(file_id, span.to_range()));
         }
-        if let Some(sec) = &self.secondary {
+        for sec in &self.secondary {
             labels.push(
                 Label::secondary(file_id, sec.span.to_range()).with_message(sec.message.clone()),
             );
@@ -155,7 +155,8 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
         Severity::Warning => "warning".yellow().bold(),
         Severity::Help => "help".cyan().bold(),
     };
-    let _ = write!(out, "{}: {}", tag, raw.message.bold());
+    let code_str = raw.code.map(|c| format!("{}: ", c)).unwrap_or_default();
+    let _ = write!(out, "{}: {}{}", tag, code_str, raw.message.bold());
 
     // When the secondary span points outside the current source (e.g. a const
     // defined in an earlier REPL snippet), we emit it as a note instead.
@@ -185,7 +186,7 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
                 // Gutter width must fit the widest line number shown (the
                 // secondary label may sit on a different line than the primary).
                 let mut gutter = format!("{line_num:>4}").len();
-                if let Some(sec) = &raw.secondary {
+                for sec in &raw.secondary {
                     if sec.span.end as usize <= source.len() {
                         let (sec_line_num, _) = line_col_for(source, sec.span.start as usize);
                         gutter = gutter.max(format!("{sec_line_num:>4}").len());
@@ -193,10 +194,11 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
                 }
                 let _ = write!(out, "\n    |");
 
-                // Secondary label first: source line + `-` carets + message.
+                // Secondary labels first: source line + `-` carets + message.
                 // When the span points outside the current source (e.g. a const
                 // defined in an earlier REPL snippet), fall back to a note.
-                if let Some(sec) = &raw.secondary {
+                let mut secondary_notes: Vec<String> = Vec::new();
+                for sec in &raw.secondary {
                     if sec.span.end as usize <= source.len() {
                         let (sec_line_num, _) = line_col_for(source, sec.span.start as usize);
                         let sec_lstart = line_start_for(source, sec.span.start as usize);
@@ -216,8 +218,11 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
                             width = gutter,
                         );
                     } else {
-                        secondary_note = Some(sec.message.clone());
+                        secondary_notes.push(sec.message.clone());
                     }
+                }
+                if !secondary_notes.is_empty() {
+                    secondary_note = Some(secondary_notes.join("; "));
                 }
 
                 // Source line
@@ -292,23 +297,111 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
         );
     }
 
+    out.push('\n');
     out
 }
 
+/// Color mode for diagnostic output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColorMode {
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+impl ColorMode {
+    /// Resolve whether to use color, honoring NO_COLOR env var.
+    fn color_enabled(self) -> bool {
+        if self == ColorMode::Never {
+            return false;
+        }
+        if self == ColorMode::Always {
+            return true;
+        }
+        // Auto: respect NO_COLOR env var, otherwise use terminal detection
+        if std::env::var("NO_COLOR").is_ok() {
+            return false;
+        }
+        std::io::IsTerminal::is_terminal(&std::io::stderr())
+    }
+}
+
 /// Render diagnostics to an in-memory string (tests, REPL capture).
-/// Returns ANSI-colored output.
-pub fn render_to_string(files: &Files, file_id: FileId, diags: &[RawDiag]) -> String {
+/// Returns ANSI-colored output when color_mode is not Never.
+pub fn render_to_string(
+    files: &Files,
+    file_id: FileId,
+    diags: &[RawDiag],
+    color_mode: ColorMode,
+) -> String {
+    use std::fmt::Write;
     let mut out = String::new();
     for raw in diags {
-        out.push_str(&render_one_colored(files, file_id, raw));
-        out.push('\n');
+        if color_mode.color_enabled() {
+            out.push_str(&render_one_colored(files, file_id, raw));
+        } else {
+            // Plain text without ANSI codes
+            let _ = writeln!(
+                out,
+                "{}: {}{}",
+                match raw.severity {
+                    Severity::Error => "error",
+                    Severity::Warning => "warning",
+                    Severity::Help => "help",
+                },
+                raw.code.map(|c| format!("{c}: ")).unwrap_or_default(),
+                raw.message
+            );
+            if let Some(span) = raw.span {
+                if let Ok(file) = files.get(file_id) {
+                    let name = file.name();
+                    let source: &str = file.source().as_ref();
+                    let (ln, col) = line_col_for(source, span.start as usize);
+                    let _ = write!(out, "\n  --> {name}:{ln}:{}", col + 1);
+                    let _ = write!(out, "\n    |");
+                    let lstart = line_start_for(source, span.start as usize);
+                    let lend = line_end_for(source, span.start as usize);
+                    let line_text = &source[lstart..lend];
+                    let _ = write!(out, "\n {:>4} | {line_text}", ln);
+                    let col_off = span.start as usize - lstart;
+                    let len = ((span.end - span.start).max(1)) as usize;
+                    let _ = write!(out, "\n {:>4} |", "");
+                    let _ = write!(out, " {}{}", " ".repeat(col_off), "^".repeat(len));
+                    // Inline the first fixit hint under the carets so plain
+                    // output carries the same help as the colored renderer.
+                    if let Some(fixit) = raw.fixits.first() {
+                        let hint = if fixit.replacement.is_empty() {
+                            " help: remove this".to_string()
+                        } else {
+                            format!(
+                                " help: replace with {}",
+                                render_replacement(&fixit.replacement)
+                            )
+                        };
+                        let _ = writeln!(out, "{hint}");
+                    }
+                    for fixit in raw.fixits.iter().skip(1) {
+                        let _ = writeln!(
+                            out,
+                            "    = help: replace with {}",
+                            render_replacement(&fixit.replacement)
+                        );
+                    }
+                }
+            }
+            for note_text in &raw.notes {
+                let _ = write!(out, "\n    = {note_text}");
+            }
+            out.push('\n');
+        }
     }
     out
 }
 
-/// Render diagnostics to stderr with ANSI colors (when stderr is a tty).
-pub fn render_to_stderr(files: &Files, file_id: FileId, diags: &[RawDiag]) {
-    let use_color = std::io::IsTerminal::is_terminal(&std::io::stderr());
+/// Render diagnostics to stderr with color control.
+pub fn render_to_stderr(files: &Files, file_id: FileId, diags: &[RawDiag], color_mode: ColorMode) {
+    let use_color = color_mode.color_enabled();
     let mut writer = std::io::stderr();
 
     for raw in diags {
@@ -324,7 +417,8 @@ pub fn render_to_stderr(files: &Files, file_id: FileId, diags: &[RawDiag]) {
                 Severity::Help => "help",
             };
             use std::fmt::Write;
-            let _ = write!(line, "{prefix}: {}", raw.message);
+            let code_str = raw.code.map(|c| format!("{c}: ")).unwrap_or_default();
+            let _ = write!(line, "{prefix}: {code_str}{}", raw.message);
             if let Some(span) = raw.span {
                 if let Ok(file) = files.get(file_id) {
                     let name = file.name();
@@ -332,30 +426,32 @@ pub fn render_to_stderr(files: &Files, file_id: FileId, diags: &[RawDiag]) {
                     let (ln, col) = line_col_for(source, span.start as usize);
                     let _ = write!(line, "\n  --> {name}:{ln}:{}", col + 1);
                     let _ = write!(line, "\n    |");
-                    // Secondary label first (source line + `-` carets).
-                    if let Some(sec) = &raw.secondary {
-                        if sec.span.end as usize <= source.len() {
-                            let (sec_ln, _) = line_col_for(source, sec.span.start as usize);
-                            let sec_lstart = line_start_for(source, sec.span.start as usize);
-                            let sec_lend = line_end_for(source, sec.span.start as usize);
-                            let sec_line_text = &source[sec_lstart..sec_lend];
-                            let _ = write!(line, "\n {:>4} | {sec_line_text}", sec_ln);
-                            let sec_col_off = sec.span.start as usize - sec_lstart;
-                            let sec_len = (sec.span.end - sec.span.start) as usize;
-                            let _ = write!(line, "\n {:>4} |", "");
-                            let _ = write!(
-                                line,
-                                " {}{} {}",
-                                " ".repeat(sec_col_off),
-                                "-".repeat(sec_len),
-                                sec.message,
-                            );
-                        } else {
-                            let _ = write!(
-                                line,
-                                "\n    = {} (defined in a previous snippet)",
-                                sec.message,
-                            );
+                    // Secondary labels first (source line + `-` carets).
+                    if !raw.secondary.is_empty() {
+                        for sec in &raw.secondary {
+                            if sec.span.end as usize <= source.len() {
+                                let (sec_ln, _) = line_col_for(source, sec.span.start as usize);
+                                let sec_lstart = line_start_for(source, sec.span.start as usize);
+                                let sec_lend = line_end_for(source, sec.span.start as usize);
+                                let sec_line_text = &source[sec_lstart..sec_lend];
+                                let _ = write!(line, "\n {:>4} | {sec_line_text}", sec_ln);
+                                let sec_col_off = sec.span.start as usize - sec_lstart;
+                                let sec_len = (sec.span.end - sec.span.start) as usize;
+                                let _ = write!(line, "\n {:>4} |", "");
+                                let _ = write!(
+                                    line,
+                                    " {}{} {}",
+                                    " ".repeat(sec_col_off),
+                                    "-".repeat(sec_len),
+                                    sec.message,
+                                );
+                            } else {
+                                let _ = write!(
+                                    line,
+                                    "\n    = {} (defined in a previous snippet)",
+                                    sec.message,
+                                );
+                            }
                         }
                     }
                     let lstart = line_start_for(source, span.start as usize);
@@ -399,7 +495,7 @@ mod tests {
         let mut files = Files::new();
         let id = files.add("test.zz".to_string(), "x := 1 +\n".to_string());
         let diag = error_at("expected expression", Span::new(8, 9));
-        let out = render_to_string(&files, id, &[diag]);
+        let out = render_to_string(&files, id, &[diag], ColorMode::default());
         assert!(out.contains("error"), "missing error keyword: {out}");
         assert!(
             out.contains("expected expression"),
@@ -415,7 +511,7 @@ mod tests {
         let diag = warning_at("unused variable `y`", Span::new(7, 8))
             .with_note("consider prefixing with `_`")
             .with_fixit(FixIt::safe(Span::new(7, 8), "_y", "rename to"));
-        let out = render_to_string(&files, id, &[diag]);
+        let out = render_to_string(&files, id, &[diag], ColorMode::default());
         assert!(out.contains("warning"), "missing warning keyword: {out}");
         assert!(out.contains("unused variable"), "missing message: {out}");
         // Fixit should be inlined under the caret
@@ -430,7 +526,7 @@ mod tests {
         let mut files = Files::new();
         let id = files.add("test.zz".to_string(), "x\n".to_string());
         let diag = warning_at("unused variable `x`", Span::new(0, 1));
-        let out = render_to_string(&files, id, &[diag]);
+        let out = render_to_string(&files, id, &[diag], ColorMode::default());
         assert!(out.contains("warning"), "missing warning keyword: {out}");
     }
 
@@ -439,7 +535,7 @@ mod tests {
         let mut files = Files::new();
         let id = files.add("test.zz".to_string(), "x\n".to_string());
         let diag = note("did you mean `y`?");
-        let out = render_to_string(&files, id, &[diag]);
+        let out = render_to_string(&files, id, &[diag], ColorMode::default());
         assert!(out.contains("help"), "missing help keyword: {out}");
     }
 
@@ -451,7 +547,7 @@ mod tests {
             "line 1\nline 2\nx := bad\nline 4\n".to_string(),
         );
         let diag = error_at("undefined variable", Span::new(14, 17));
-        let out = render_to_string(&files, id, &[diag]);
+        let out = render_to_string(&files, id, &[diag], ColorMode::default());
         assert!(out.contains("3"), "missing line number: {out}");
         assert!(out.contains("bad"), "missing source text: {out}");
     }

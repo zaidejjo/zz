@@ -1,0 +1,17 @@
+first module that broke: <path> <path>
+
+error: type mismatch: expected `func(_) -> _`, found `int`
+
+  --> <path>
+    |
+    6 |     h := task.spawn(42)
+      |                     ^^
+    = parameter `f` expects `func(_) -> _`
+warning: unused variable `h` is never read, consider prefixing with `_h`
+
+  --> <path>
+    |
+    6 |     h := task.spawn(42)
+      |     ^ help: replace with `_h`
+
+zz: 1 file(s) failed type-check

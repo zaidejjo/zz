@@ -1,0 +1,9 @@
+first module that broke: <path> <path>
+
+error: type `str` does not satisfy bound `Num` for generic parameter `T`
+
+  --> <path>
+    |
+   11 | x := process(Wrapper{v: "nope"})
+      |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+zz: 1 file(s) failed type-check
