@@ -262,7 +262,17 @@ fn origins(code: &[Op], resolve: &dyn Fn(StrId, usize) -> Callee) -> Vec<Vec<Cal
         return out;
     }
     state[0] = Some(Vec::new());
+    // Cap total fixpoint iterations to guarantee termination on
+    // adversarial chunks with many join points (worst-case O(n²) without
+    // this). Unreached blocks keep empty origins — safe over-approximation
+    // for Call dispatch (callee unknown → conservative handling).
+    let mut iterations = 0usize;
+    const MAX_ITERATIONS: usize = 50_000;
     while let Some(pc) = work.pop() {
+        iterations += 1;
+        if iterations > MAX_ITERATIONS {
+            break;
+        }
         let st = match state[pc].clone() {
             Some(st) => st,
             None => continue,
@@ -1822,10 +1832,15 @@ fn cell_id(depth: usize, name: &str) -> String {
 }
 
 /// Allocate (or find) the cell for `name` in the innermost scope.
+///
+/// Uses HashSet membership (O(1)) alongside the Vecs (insertion order) to
+/// avoid O(cells²) linear dedup when a function has many env cells.
 fn bind_cell(
     frames: &mut [HashMap<String, String>],
     decls: &mut Vec<String>,
+    decl_set: &mut HashSet<String>,
     names: &mut Vec<String>,
+    name_set: &mut HashSet<String>,
     name: &str,
 ) -> String {
     let depth = frames.len() - 1;
@@ -1835,10 +1850,10 @@ fn bind_cell(
     }
     let id = cell_id(depth, name);
     frame.insert(name.to_string(), id.clone());
-    if !decls.iter().any(|d| d == &id) {
+    if decl_set.insert(id.clone()) {
         decls.push(id.clone());
     }
-    if !names.iter().any(|n| n == name) {
+    if name_set.insert(name.to_string()) {
         names.push(name.to_string());
     }
     id
@@ -1857,7 +1872,9 @@ fn env_layout(
     let mut frames: Vec<HashMap<String, String>> = vec![HashMap::new()];
     let mut arm_scopes: HashMap<usize, Vec<(String, String)>> = HashMap::new();
     let mut decls: Vec<String> = Vec::new();
+    let mut decl_set: HashSet<String> = HashSet::new();
     let mut names: Vec<String> = Vec::new();
+    let mut name_set: HashSet<String> = HashSet::new();
     for (pc, op) in f.code.iter().enumerate() {
         match op {
             Op::DefineVar(id) | Op::StoreVar(id) => {
@@ -1868,7 +1885,14 @@ fn env_layout(
                     continue;
                 }
                 let name = name.clone();
-                bind_cell(&mut frames, &mut decls, &mut names, &name);
+                bind_cell(
+                    &mut frames,
+                    &mut decls,
+                    &mut decl_set,
+                    &mut names,
+                    &mut name_set,
+                    &name,
+                );
             }
             Op::EnterScope => frames.push(HashMap::new()),
             Op::ExitScope => {
@@ -1888,7 +1912,14 @@ fn env_layout(
                 frames.push(HashMap::new());
                 let mut cells = Vec::new();
                 for name in bound {
-                    let id = bind_cell(&mut frames, &mut decls, &mut names, &name);
+                    let id = bind_cell(
+                        &mut frames,
+                        &mut decls,
+                        &mut decl_set,
+                        &mut names,
+                        &mut name_set,
+                        &name,
+                    );
                     cells.push((name, id));
                 }
                 arm_scopes.insert(pc, cells);
