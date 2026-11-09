@@ -1377,6 +1377,7 @@ parity_strict!(parity_types_type_inference, "types", "type_inference.zz");
 
 // Stdlib
 parity_strict!(parity_stdlib_strings, "stdlib", "strings.zz");
+parity_strict!(parity_stdlib_replace_empty, "stdlib", "replace_empty.zz");
 parity_strict!(
     parity_stdlib_selective_calls,
     "stdlib",

@@ -1,0 +1,11 @@
+// features: locals, print, string-ops
+// E2E: str.replace with empty search string matches Rust semantics
+// (insert separator before each char and at the end) in both VM and AOT.
+
+println("{}", str.replace("abc", "", "x"))
+println("{}", str.replace("", "", "x"))
+println("{}", str.replace("abc", "", ""))
+println("{}", str.replace("héllo", "", "-"))
+println("{}", str.replace("hello", "l", "L"))
+
+println("replace_empty_ok")

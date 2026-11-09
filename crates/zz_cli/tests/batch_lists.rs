@@ -46,6 +46,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("types", "generics.zz", false),
     ("types", "type_inference.zz", false),
     ("stdlib", "strings.zz", false),
+    ("stdlib", "replace_empty.zz", false),
     ("stdlib", "str_utf8_parity.zz", true),
     ("stdlib", "vec_nested_str_parity.zz", true),
     ("stdlib", "console.zz", false),
