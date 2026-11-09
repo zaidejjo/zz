@@ -1,4 +1,4 @@
-// features: closures, nested closures, capture-by-reference, int-arith, print, string-literal
+// features: closures, nested-closures, capture-by-reference, int-arith, print, string-literal
 // Nested closures: inner captures the outer closure's parameter.
 base := |x: int| {
     inner := |y: int| {
