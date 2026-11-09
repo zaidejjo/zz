@@ -1090,8 +1090,19 @@ impl<'a> IntoIterator for &'a DictData {
 impl PartialEq for DictData {
     // The index is a pure cache: equality compares entries only, so two
     // dicts with identical pairs are equal however each was built.
+    // Order-independent: every (key, value) in self must exist in other.
+    // Uses other's index for O(1) key lookup when available.
     fn eq(&self, other: &Self) -> bool {
-        self.entries == other.entries
+        if self.entries.len() != other.entries.len() {
+            return false;
+        }
+        for (k, v) in &self.entries {
+            match other.get(k) {
+                Some(other_v) if other_v == v => {}
+                _ => return false,
+            }
+        }
+        true
     }
 }
 
