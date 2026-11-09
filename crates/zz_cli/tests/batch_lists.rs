@@ -20,6 +20,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("syntax", "fstring_ctrl_chars.zz", false),
     ("syntax", "dicts.zz", false),
     ("syntax", "dict_eq_order.zz", false),
+    ("syntax", "struct_debug_fwd.zz", false),
     ("syntax", "string_blocks.zz", false),
     ("syntax", "pipe_elvis.zz", false),
     ("syntax", "scalar_copy.zz", false),

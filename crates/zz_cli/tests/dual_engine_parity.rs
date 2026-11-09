@@ -1584,6 +1584,11 @@ parity_strict!(parity_syntax_hof, "syntax", "hof.zz");
 parity_strict!(parity_syntax_arrays, "syntax", "arrays.zz");
 parity_strict!(parity_syntax_array_sum, "syntax", "array_sum.zz");
 parity_strict!(parity_syntax_struct_access, "syntax", "struct_access.zz");
+parity_strict!(
+    parity_syntax_struct_debug_fwd,
+    "syntax",
+    "struct_debug_fwd.zz"
+);
 parity_strict!(parity_syntax_string_build, "syntax", "string_build.zz");
 parity_strict!(parity_syntax_flat_arrays, "syntax", "flat_arrays.zz");
 parity_strict!(parity_syntax_defer, "syntax", "defer.zz");

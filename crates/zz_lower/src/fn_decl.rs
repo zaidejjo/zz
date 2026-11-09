@@ -428,6 +428,16 @@ impl Lowerer {
             return out;
         }
         out.push_str("// ---- struct debug_string functions (VM-identical display) ----\n");
+        // Forward declarations first so any debug fn can call another
+        // (e.g. struct A's debug fn calls zz_struct_debug_B for an embedded
+        // struct B field) regardless of alphabetical emission order.
+        for name in &names {
+            let m = mangle(name);
+            out.push_str(&format!(
+                "__attribute__((unused)) static zz_value zz_struct_debug_{m}(const zz_struct_{m} *self);\n"
+            ));
+        }
+        out.push('\n');
         for name in &names {
             let Some(sig) = self.tp.structs.get(name) else {
                 continue;
