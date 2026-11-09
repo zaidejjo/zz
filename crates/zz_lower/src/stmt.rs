@@ -2630,7 +2630,7 @@ impl Lowerer {
                 // Any boxed use site auto-boxes the raw value through the
                 // normal `auto_box` paths.
                 let elem_ctype_for_body = if raw_elem {
-                    self.struct_c_type(&elem_ctype)
+                    format!("zz_struct_{}", elem_ctype)
                 } else {
                     elem_ctype.to_string()
                 };
