@@ -7,6 +7,7 @@
 
 pub mod ast;
 pub mod span;
+pub mod visitor;
 
 pub use ast::{
     BinOp, Block, Decorator, Expr, ExternFunc, FmtPart, Ident, ImportItem, Lit, MatchArm, Param,
