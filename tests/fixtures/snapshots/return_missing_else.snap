@@ -1,4 +1,4 @@
-first module that broke: <path> (<path>
+first module that broke: <path> <path>
 
 error: Z0006: function returns `int` but its body can fall through; add `return `
 

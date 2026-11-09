@@ -1,4 +1,4 @@
-first module that broke: <path> (<path>
+first module that broke: <path> <path>
 
 error: tuple index must be an integer literal
 hint: destructure with `(a, b) := t` for dynamic access

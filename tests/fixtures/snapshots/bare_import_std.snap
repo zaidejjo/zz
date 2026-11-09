@@ -1,4 +1,4 @@
-first module that broke: <path> (<path>
+first module that broke: <path> <path>
 
 error: `import std` names no module
 hint: import a concrete module, e.g. `import std.str`

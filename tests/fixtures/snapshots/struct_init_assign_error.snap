@@ -1,12 +1,12 @@
-first module that broke: <path> (<path>
+first module that broke: <path> <path>
 
-error: expected `:` in struct initialization, found `=` â did you mean `:`?
+error: expected `:` in struct initialization, found `=` — did you mean `:`?
 
   --> <path>
     |
     5 |     u := User{name = "Alice", age = 30}
       |                    ^
-error: expected `:` in struct initialization, found `=` â did you mean `:`?
+error: expected `:` in struct initialization, found `=` — did you mean `:`?
 
   --> <path>
     |

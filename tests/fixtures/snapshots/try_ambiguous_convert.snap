@@ -1,4 +1,4 @@
-first module that broke: <path> (<path>
+first module that broke: <path> <path>
 
 error: ambiguous conversion from `try_ambiguous_convert.ErrA`: already converts to `ErrB`
 

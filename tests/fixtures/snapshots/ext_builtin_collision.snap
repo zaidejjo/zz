@@ -1,4 +1,4 @@
-first module that broke: <path> (<path>
+first module that broke: <path> <path>
 
 error: extension method `str.length` conflicts with an existing method defined in the standard library
 

@@ -1,16 +1,16 @@
-first module that broke: <path> (<path>
+first module that broke: <path> <path>
 
 error: route handler must take exactly 2 argument(s) (the request and the socket), found 1
 
   --> <path>
     |
-    7 |     s = http.hijack(s, "<path> |req| "wrong-arity")
+    7 |     s = http.hijack(s, <path> |req| "wrong-arity")
       |                                 ^^^^^^^^^^^^^^^^^^^
 error: function arity mismatch
 
   --> <path>
     |
-    7 |     s = http.hijack(s, "<path> |req| "wrong-arity")
+    7 |     s = http.hijack(s, <path> |req| "wrong-arity")
       |                                 ^^^^^^^^^^^^^^^^^^^
     = parameter `handler` expects `func(http.request, tcp.stream) -> str | unit`
 zz: 1 file(s) failed type-check

@@ -1,4 +1,4 @@
-first module that broke: <path> (<path>
+first module that broke: <path> <path>
 
 error: duplicate definition of type alias `alias_dup.Tokens`
 

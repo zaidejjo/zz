@@ -1,4 +1,4 @@
-first module that broke: <path> (<path>
+first module that broke: <path> <path>
 
 error: no conversion path for `try`: error type `try_no_convert.ErrA` cannot convert to `try_no_convert.ErrB`
 hint: add `impl try_no_convert.ErrA { func convert_to_try_no_convert.ErrB(self) -> try_no_convert.ErrB { ... } }`

@@ -29,42 +29,41 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
 }
 
-/// Strip absolute file paths from stderr so snapshots are
-/// environment-independent. Handles Unix (`/...`) and Windows
-/// (`C:\...` / `C:/...` / `c:\...`) paths without depending on the
-/// exact workspace-root string matching CARGO_MANIFEST_DIR (which can
-/// differ in separator or case across machines).
-fn strip_absolute_paths(stderr: &str) -> String {
+/// Normalize stderr for cross-platform snapshot comparison.
+///
+/// Strips every token containing a path separator (`/` or `\`) so that
+/// absolute and relative paths — Unix (`/...`), Windows (`C:\...`,
+/// `C:/...`), UNC (`\\...`) — all become `<path>`, regardless of the
+/// checkout location or path-separator conventions of the host machine.
+/// Also normalizes CRLF → LF so Windows console output matches
+/// `\n`-terminated committed snapshots.
+fn normalize_stderr(stderr: &str) -> String {
+    let stderr = stderr.replace("\r\n", "\n").replace('\r', "");
     let mut out = String::with_capacity(stderr.len());
-    let bytes = stderr.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        // Windows absolute path: `X:\` or `X:/`
-        if i + 2 < bytes.len()
-            && bytes[i].is_ascii_alphabetic()
-            && bytes[i + 1] == b':'
-            && (bytes[i + 2] == b'\\' || bytes[i + 2] == b'/')
-        {
-            let mut end = i;
-            while end < bytes.len() && !bytes[end].is_ascii_whitespace() {
-                end += 1;
+    let mut word_start: Option<usize> = None;
+
+    for (i, ch) in stderr.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(start) = word_start.take() {
+                let word = &stderr[start..i];
+                if word.contains('/') || word.contains('\\') {
+                    out.push_str("<path>");
+                } else {
+                    out.push_str(word);
+                }
             }
-            out.push_str("<path>");
-            i = end;
-            continue;
+            out.push(ch);
+        } else if word_start.is_none() {
+            word_start = Some(i);
         }
-        // Unix absolute path: `/...`
-        if bytes[i] == b'/' {
-            let mut end = i;
-            while end < bytes.len() && !bytes[end].is_ascii_whitespace() {
-                end += 1;
-            }
+    }
+    if let Some(start) = word_start {
+        let word = &stderr[start..];
+        if word.contains('/') || word.contains('\\') {
             out.push_str("<path>");
-            i = end;
-            continue;
+        } else {
+            out.push_str(word);
         }
-        out.push(bytes[i] as char);
-        i += 1;
     }
     out
 }
@@ -2508,7 +2507,7 @@ fn snapshot_error_diagnostics() {
             .output()
             .expect("failed to run `zz check`");
 
-        let stderr = strip_absolute_paths(String::from_utf8_lossy(&output.stderr).as_ref());
+        let stderr = normalize_stderr(&String::from_utf8_lossy(&output.stderr));
 
         // If update mode, write the snapshot and continue
         if update {

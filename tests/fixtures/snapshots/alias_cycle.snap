@@ -1,4 +1,4 @@
-first module that broke: <path> (<path>
+first module that broke: <path> <path>
 
 error: cyclic type alias `alias_cycle.A`: alias_cycle.A -> alias_cycle.B
 

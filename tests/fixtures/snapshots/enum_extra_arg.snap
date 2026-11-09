@@ -1,4 +1,4 @@
-first module that broke: <path> (<path>
+first module that broke: <path> <path>
 
 error: variant `enum_extra_arg.Token.Eof` takes no arguments but 1 given
 

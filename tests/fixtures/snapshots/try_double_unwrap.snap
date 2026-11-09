@@ -1,4 +1,4 @@
-first module that broke: <path> (<path>
+first module that broke: <path> <path>
 
 error: cannot use `?` on a value of type `int`
 
@@ -6,7 +6,7 @@ error: cannot use `?` on a value of type `int`
     |
    10 |     x := try fetch()?
       |          ^^^^^^^^^^^^
-    = `?` unwraps `Result`<path> `int` is neither â remove the `?`
+    = `?` unwraps <path> `int` is neither — remove the `?`
 warning: unused private function `try_double_unwrap.load`, consider prefixing with `_try_double_unwrap.load` or removing it
 
     = function is never called or referenced

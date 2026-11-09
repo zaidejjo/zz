@@ -1,4 +1,4 @@
-first module that broke: <path> (<path>
+first module that broke: <path> <path>
 
 error: closure must declare `-> Result<T, E>` to use `try`
 

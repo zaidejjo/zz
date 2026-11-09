@@ -1,4 +1,4 @@
-first module that broke: <path> (<path>
+first module that broke: <path> <path>
 
 error: unknown variant `Num` for enum `enum_unknown_variant.Token` (expected one of: Eof, IntLit)
 

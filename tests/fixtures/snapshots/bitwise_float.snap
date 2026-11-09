@@ -1,7 +1,7 @@
-first module that broke: <path> (<path>
+first module that broke: <path> <path>
 
 error: bitwise `&` requires `int` operands, found `float` and `int`
-hint: use `int(x)` to cast, `&&`<path> for boolean logic
+hint: use `int(x)` to cast, <path> for boolean logic
 
   --> <path>
     |

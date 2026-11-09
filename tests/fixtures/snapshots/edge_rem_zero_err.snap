@@ -1,4 +1,4 @@
-first module that broke: <path> (<path>
+first module that broke: <path> <path>
 
 error: integer remainder by zero (divisor is literal `0`)
 
