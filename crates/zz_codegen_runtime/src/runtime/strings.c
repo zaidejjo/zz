@@ -148,6 +148,7 @@ zz_str *str_alloc(size_t need) {
     s->interned = 0;
     s->mutable = 0;
     s->len = need;
+    s->charlen = ZZ_STR_CHARLEN_UNKNOWN;
     if (need <= ZZ_SSO_MAX) {
         s->cap = 0;   // SSO sentinel
         s->sso[need] = '\0';
@@ -201,6 +202,71 @@ zz_str *str_grow(zz_str *s, size_t new_len) {
     return s;
 }
 
+// Compute and cache the char count of `s`. Scans once; pure-ASCII strings
+// end up with charlen == len. Mutable strings are not cached (bytes may
+// change), so they always rescan. Called only on a cache miss.
+size_t zz_str_char_len_compute(const zz_str *s) {
+    if (!s) return 0;
+    const unsigned char *p = (const unsigned char *)zz_str_cptr(s);
+    size_t n = s->len;
+    size_t i = 0;
+    const size_t WS = sizeof(size_t);
+    const size_t LO = ((size_t)-1) / (size_t)0xFF;
+    const size_t HI = LO * (size_t)0x80;
+    int ascii = 1;
+    while (i < n && (((uintptr_t)(p + i)) & (WS - 1)) != 0) {
+        if (p[i] >= 0x80) { ascii = 0; break; }
+        i++;
+    }
+    if (ascii) {
+        for (; i + WS <= n; i += WS) {
+            size_t w;
+            memcpy(&w, p + i, WS);
+            if ((w & HI) != 0) { ascii = 0; break; }
+        }
+    }
+    if (ascii) {
+        for (; i < n; i++) {
+            if (p[i] >= 0x80) { ascii = 0; break; }
+        }
+    }
+    size_t count;
+    if (ascii) {
+        count = n;
+    } else {
+        count = 0;
+        i = 0;
+        while (i < n) {
+            i += zz_utf8_seq_len(p + i, n - i);
+            count++;
+        }
+    }
+    // Cache on the (heap) object. Cast away const: zz_str values are
+    // malloc'd, never truly const, and immutable strings are never mutated
+    // in place, so the cached value stays valid for the object's life.
+    if (!s->mutable)
+        ((zz_str *)s)->charlen = count;
+    return count;
+}
+
+// Lazily interned 1-char singleton per byte value (0-255). Immortal:
+// refs==1 + interned==1, so zz_release skips it. Used by zz_str_get's
+// ASCII fast path so `s[i]` allocates nothing.
+static zz_str *zz_str_byte_tab[256] = { NULL };
+
+zz_str *zz_str_byte_singleton(unsigned char c) {
+    zz_str *s = zz_str_byte_tab[c];
+    if (!s) {
+        s = str_alloc(1);
+        s->interned = 1;
+        s->charlen = 1;
+        zz_str_ptr(s)[0] = (char)c;
+        zz_str_ptr(s)[1] = '\0';
+        zz_str_byte_tab[c] = s;
+    }
+    return s;
+}
+
 zz_value zz_str_new(const char *src, size_t len) {
     zz_str *s = str_alloc(len);
     memcpy(zz_str_ptr(s), src, len);
@@ -222,6 +288,7 @@ zz_value zz_str_new_mut(size_t cap) {
     s->interned = 0;
     s->mutable = 1;
     s->len = 0;
+    s->charlen = ZZ_STR_CHARLEN_UNKNOWN; // mutable strings never cache
     if (cap == 0 || cap <= ZZ_SSO_MAX) {
         s->cap = 0;   // SSO sentinel
         s->sso[0] = '\0';
@@ -394,6 +461,7 @@ zz_value zz_str_new_arena(const char *src, size_t len, zz_arena *arena) {
         s->refs = 0;  // sentinel: arena-allocated
         s->interned = 0;
         s->len = len;
+        s->charlen = ZZ_STR_CHARLEN_UNKNOWN;
         if (len <= ZZ_SSO_MAX) {
             // Small string: store inline in SSO buffer — zero extra alloc.
             s->cap = 0;
@@ -1348,6 +1416,7 @@ zz_value zz_binop_cat(zz_value a, zz_value b) {
             out = a.s;
             memcpy(zz_str_ptr(out) + la, zz_str_ptr(b.s), lb);
             out->len = need;
+            out->charlen = ZZ_STR_CHARLEN_UNKNOWN; // bytes changed in place
             zz_str_ptr(out)[need] = '\0';
             zz_release(&b);
             zz_value v;
@@ -1436,6 +1505,7 @@ void zz_str_append_str(zz_value *a, zz_value b) {
         if (a->s->cap < need) {
             a->s = str_grow(a->s, need);
         }
+        a->s->charlen = ZZ_STR_CHARLEN_UNKNOWN; // bytes changed in place
         memcpy(zz_str_ptr(a->s) + la, zz_str_ptr(b.s), lb);
         a->s->len = need;
         zz_str_ptr(a->s)[need] = '\0';
@@ -1467,6 +1537,7 @@ void zz_str_append_lit(zz_value *a, const char *lit, size_t lit_len) {
         if (a->s->cap < need) {
             a->s = str_grow(a->s, need);
         }
+        a->s->charlen = ZZ_STR_CHARLEN_UNKNOWN; // bytes changed in place
         memcpy(zz_str_ptr(a->s) + la, lit, lit_len);
         a->s->len = need;
         zz_str_ptr(a->s)[need] = '\0';

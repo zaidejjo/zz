@@ -160,13 +160,18 @@ typedef struct zz_bytes zz_bytes;
 //
 // Use ZZ_STR_PTR(s) to get a usable char* in either mode.
 #define ZZ_SSO_MAX 23
+// Sentinel for zz_str.charlen when the char count has not been computed yet.
+// Once computed, charlen == len implies the string is pure ASCII (one byte
+// per char), so char indexing is O(1) with no UTF-8 scan.
+#define ZZ_STR_CHARLEN_UNKNOWN ((size_t)-1)
 
 typedef struct {
     size_t refs;
     int interned;
     int mutable;      // non-zero: mutable string, never shared, in-place append
     size_t cap;     // 0 = SSO, >0 = heap capacity
-    size_t len;
+    size_t len;     // payload length in bytes
+    size_t charlen; // cached Unicode scalar count (ZZ_STR_CHARLEN_UNKNOWN = unknown)
     union {
         char sso[ZZ_SSO_MAX + 1]; // 24 bytes: inline data (cap == 0)
         char *heap;                // 8 bytes:  heap pointer  (cap > 0)
