@@ -410,17 +410,225 @@ pub struct NoopSink;
 
 impl CodegenSink for NoopSink {}
 
-/// Mangle a dotted ZZ name into a C identifier: replace `.` with `__` and
-/// any non-alphanumeric/underscore character with `_`.
+/// C reserved keywords that must not be emitted as bare symbol name
+/// suffixes (they would collide with the language itself).
+const C_KEYWORDS: &[&str] = &[
+    "auto",
+    "break",
+    "case",
+    "char",
+    "const",
+    "continue",
+    "default",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "extern",
+    "float",
+    "for",
+    "goto",
+    "if",
+    "inline",
+    "int",
+    "long",
+    "register",
+    "restrict",
+    "return",
+    "short",
+    "signed",
+    "sizeof",
+    "static",
+    "struct",
+    "switch",
+    "typedef",
+    "union",
+    "unsigned",
+    "void",
+    "volatile",
+    "while",
+    "_Alignas",
+    "_Alignof",
+    "_Atomic",
+    "_Bool",
+    "_Complex",
+    "_Generic",
+    "_Imaginary",
+    "_Noreturn",
+    "_Static_assert",
+    "_Thread_local",
+    "main",
+];
+
+/// Runtime symbol prefixes reserved for the embedded C runtime. User
+/// symbols already carry `zz_g_`, `zz_chunk_`, or `zz_e_` prefixes, so this
+/// guards the mangled suffix against colliding with runtime helpers like
+/// `zz_int`, `zz_float`, `zz_arena`, etc.
+const RUNTIME_SYMBOLS: &[&str] = &[
+    "zz_int",
+    "zz_float",
+    "zz_bool",
+    "zz_str",
+    "zz_array",
+    "zz_dict",
+    "zz_arena",
+    "zz_value",
+    "zz_str_new",
+    "zz_str_static",
+    "zz_str_get",
+    "zz_str_set",
+    "zz_str_len",
+    "zz_str_char_len",
+    "zz_str_ptr",
+    "zz_array_new",
+    "zz_array_push",
+    "zz_array_get",
+    "zz_array_set",
+    "zz_dict_new",
+    "zz_dict_get",
+    "zz_dict_set",
+    "zz_index_get",
+    "zz_index_trap",
+    "zz_to_str",
+    "zz_to_str_fmt",
+    "zz_binop_cat",
+    "zz_clone",
+    "zz_release",
+    "zz_unimplemented_native",
+    "zz_float_format_raw",
+    "zz_str_lower",
+    "zz_str_upper",
+    "zz_str_replace",
+];
+
+/// Check whether `symbol` collides with a C keyword or reserved runtime
+/// symbol. Returns `true` if a suffix `_` should be appended to avoid the
+/// collision.
+fn is_reserved_symbol(symbol: &str) -> bool {
+    if C_KEYWORDS.contains(&symbol) {
+        return true;
+    }
+    if RUNTIME_SYMBOLS.contains(&symbol) {
+        return true;
+    }
+    // C reserves identifiers beginning with `_` followed by an uppercase
+    // letter or another underscore, and identifiers beginning with `__`.
+    let bytes = symbol.as_bytes();
+    if bytes.len() >= 2 && bytes[0] == b'_' && (bytes[1] == b'_' || bytes[1].is_ascii_uppercase()) {
+        return true;
+    }
+    false
+}
+
+/// Append `_` to `symbol` until it no longer collides with a reserved
+/// symbol. This guarantees user-defined names never shadow C keywords or
+/// runtime helpers.
+fn reserve_symbol(mut symbol: String) -> String {
+    while is_reserved_symbol(&symbol) {
+        if symbol.starts_with('_') {
+            // Insert a character at the front to break the reserved `__` or
+            // `_<uppercase>` prefix that C reserves in all scopes.
+            symbol.insert(0, 'z');
+        } else {
+            symbol.push('_');
+        }
+    }
+    symbol
+}
+
+/// Mangle a dotted ZZ name into a C identifier.
+///
+/// The mapping is invertible:
+/// - `_` → `__` (escape underscore)
+/// - `.` → `_` (dot becomes single underscore)
+/// - ASCII alphanumeric → itself
+/// - any other char → `_u{HEX}_` (reversible hex escape)
+///
+/// This guarantees `mangle("a.b") != mangle("a__b")`, preventing C symbol
+/// collisions between dotted paths and bare names containing underscores.
+/// The result is also checked against C keywords and runtime symbols so
+/// that user-defined names never shadow reserved identifiers.
 pub fn mangle(name: &str) -> String {
-    name.replace('.', "__")
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        match c {
+            '_' => out.push_str("__"),
+            '.' => out.push('_'),
+            c if c.is_ascii_alphanumeric() => out.push(c),
+            c => {
+                out.push('_');
+                out.push('u');
+                out.push_str(&format!("{:04x}", c as u32));
+                out.push('_');
             }
-        })
-        .collect()
+        }
+    }
+    reserve_symbol(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mangle_is_invertible_for_dotted_vs_underscore_names() {
+        // The core bug: `a.b` and `a__b` must not collide.
+        assert_ne!(mangle("a.b"), mangle("a__b"));
+        assert_ne!(mangle("a.b.c"), mangle("a__b__c"));
+        assert_ne!(mangle("foo.bar.baz"), mangle("foo__bar__baz"));
+    }
+
+    #[test]
+    fn mangle_preserves_alphanumeric_names() {
+        assert_eq!(mangle("hello"), "hello");
+        assert_eq!(mangle("hello123"), "hello123");
+        // A lone `_` mangles to `__` which C reserves, so it gets prefixed.
+        assert_eq!(mangle("_"), "z__");
+        assert_eq!(mangle("__"), "z____");
+    }
+
+    #[test]
+    fn mangle_dots_become_single_underscore() {
+        assert_eq!(mangle("a.b"), "a_b");
+        assert_eq!(mangle("a.b.c"), "a_b_c");
+        assert_eq!(mangle("mod.Type.method"), "mod_Type_method");
+    }
+
+    #[test]
+    fn mangle_underscores_become_double() {
+        assert_eq!(mangle("a_b"), "a__b");
+        assert_eq!(mangle("a__b"), "a____b");
+        assert_eq!(mangle("a_b_c"), "a__b__c");
+    }
+
+    #[test]
+    fn mangle_reserved_symbols_get_suffix() {
+        // C keywords get a trailing `_` after mangling.
+        assert_eq!(mangle("main"), "main_");
+        assert_eq!(mangle("int"), "int_");
+        assert_eq!(mangle("struct"), "struct_");
+        // Runtime symbols with underscores get the underscore escaped to `__`,
+        // which already avoids collision (e.g. `zz__int` != `zz_int`).
+        assert_eq!(mangle("zz_int"), "zz__int");
+        assert_eq!(mangle("zz_float"), "zz__float");
+    }
+
+    #[test]
+    fn mangle_non_ascii_gets_hex_escape() {
+        // Non-ASCII characters get a reversible `_u{HEX}_` escape.
+        let mangled = mangle("café");
+        assert!(mangled.contains("_u00e9_"));
+        assert_ne!(mangled, "café");
+    }
+
+    #[test]
+    fn mangle_no_double_underscore_prefix() {
+        // C reserves identifiers starting with `__` or `_` + uppercase.
+        // Mangling `__foo` → `____foo`, which starts with `__`; reserve_symbol
+        // prefixes with `z` to break the reserved pattern.
+        let mangled = mangle("__foo");
+        assert!(!mangled.starts_with("__"));
+        let mangled = mangle("_Foo");
+        assert!(!mangled.starts_with("_F"));
+    }
 }
