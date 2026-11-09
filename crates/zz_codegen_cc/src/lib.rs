@@ -113,7 +113,10 @@ fn static_syslibs_probe(clang: &Clang, need_curl: bool, need_sqlite: bool) -> bo
     if !need_curl && !need_sqlite {
         return true;
     }
-    let dir = std::env::temp_dir().join(format!("zz-static-probe-{}", std::process::id()));
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let uniq = PROBE_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("zz-static-probe-{}-{}", std::process::id(), uniq));
     if std::fs::create_dir_all(&dir).is_err() {
         return true;
     }
