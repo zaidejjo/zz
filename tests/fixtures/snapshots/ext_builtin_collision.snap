@@ -1,8 +1,8 @@
-first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/ext_builtin_collision.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/ext_builtin_collision.zz)
+first module that broke: <root>/tests/fixtures/errors/ext_builtin_collision.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/ext_builtin_collision.zz)
 
 error: extension method `str.length` conflicts with an existing method defined in the standard library
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/ext_builtin_collision.zz:4:5
+  --> <root>/tests/fixtures/errors/ext_builtin_collision.zz:4:5
     |
     4 |     func length(self) -> int {
       |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

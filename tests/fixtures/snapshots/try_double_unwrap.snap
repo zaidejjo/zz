@@ -1,8 +1,8 @@
-first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/try_double_unwrap.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/try_double_unwrap.zz)
+first module that broke: <root>/tests/fixtures/errors/try_double_unwrap.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/try_double_unwrap.zz)
 
 error: cannot use `?` on a value of type `int`
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/try_double_unwrap.zz:10:10
+  --> <root>/tests/fixtures/errors/try_double_unwrap.zz:10:10
     |
    10 |     x := try fetch()?
       |          ^^^^^^^^^^^^

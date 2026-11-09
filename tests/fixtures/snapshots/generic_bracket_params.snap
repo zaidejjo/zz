@@ -1,8 +1,8 @@
-first module that broke: /home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/generic_bracket_params.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/generic_bracket_params.zz)
+first module that broke: <root>/crates/zz_cli/../../tests/fixtures/errors/generic_bracket_params.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/generic_bracket_params.zz)
 
 error: generic parameters are declared with `<T>`, not `[T]`
 
-  --> /home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/generic_bracket_params.zz:3:11
+  --> <root>/crates/zz_cli/../../tests/fixtures/errors/generic_bracket_params.zz:3:11
     |
     3 | func first[T](x: T) -> T {
       |           ^^^ help: replace with `<T>`

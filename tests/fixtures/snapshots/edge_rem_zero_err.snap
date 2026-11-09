@@ -1,8 +1,8 @@
-first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/edge_rem_zero_err.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/edge_rem_zero_err.zz)
+first module that broke: <root>/tests/fixtures/errors/edge_rem_zero_err.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/edge_rem_zero_err.zz)
 
 error: integer remainder by zero (divisor is literal `0`)
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/edge_rem_zero_err.zz:3:13
+  --> <root>/tests/fixtures/errors/edge_rem_zero_err.zz:3:13
     |
     3 | println(5 % 0)
       |             ^

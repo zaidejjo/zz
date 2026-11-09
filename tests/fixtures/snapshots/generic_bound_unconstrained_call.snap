@@ -1,8 +1,8 @@
-first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_bound_unconstrained_call.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/generic_bound_unconstrained_call.zz)
+first module that broke: <root>/tests/fixtures/errors/generic_bound_unconstrained_call.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/generic_bound_unconstrained_call.zz)
 
 error: cannot infer type for generic parameter `T`; it requires bound(s) Num
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_bound_unconstrained_call.zz:8:6
+  --> <root>/tests/fixtures/errors/generic_bound_unconstrained_call.zz:8:6
     |
     8 | x := make()
       |      ^^^^^^

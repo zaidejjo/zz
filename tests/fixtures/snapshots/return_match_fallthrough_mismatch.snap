@@ -1,8 +1,8 @@
-first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/return_match_fallthrough_mismatch.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/return_match_fallthrough_mismatch.zz)
+first module that broke: <root>/tests/fixtures/errors/return_match_fallthrough_mismatch.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/return_match_fallthrough_mismatch.zz)
 
 error: type mismatch: expected `int`, found `str`
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/return_match_fallthrough_mismatch.zz:5:12
+  --> <root>/tests/fixtures/errors/return_match_fallthrough_mismatch.zz:5:12
     |
     5 |     return match x {
       |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

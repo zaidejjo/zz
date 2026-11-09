@@ -1,8 +1,8 @@
-first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/try_outside_result.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/try_outside_result.zz)
+first module that broke: <root>/tests/fixtures/errors/try_outside_result.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/try_outside_result.zz)
 
 error: `?` on `Result` cannot propagate through a function returning `int`
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/try_outside_result.zz:8:10
+  --> <root>/tests/fixtures/errors/try_outside_result.zz:8:10
     |
     8 |     x := try fetch()
       |          ^^^^^^^^^^^

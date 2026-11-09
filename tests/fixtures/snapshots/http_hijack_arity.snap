@@ -1,14 +1,14 @@
-first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/http_hijack_arity.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/http_hijack_arity.zz)
+first module that broke: <root>/tests/fixtures/errors/http_hijack_arity.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/http_hijack_arity.zz)
 
 error: route handler must take exactly 2 argument(s) (the request and the socket), found 1
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/http_hijack_arity.zz:7:33
+  --> <root>/tests/fixtures/errors/http_hijack_arity.zz:7:33
     |
     7 |     s = http.hijack(s, "/chat", |req| "wrong-arity")
       |                                 ^^^^^^^^^^^^^^^^^^^
 error: function arity mismatch
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/http_hijack_arity.zz:7:33
+  --> <root>/tests/fixtures/errors/http_hijack_arity.zz:7:33
     |
     7 |     s = http.hijack(s, "/chat", |req| "wrong-arity")
       |                                 ^^^^^^^^^^^^^^^^^^^

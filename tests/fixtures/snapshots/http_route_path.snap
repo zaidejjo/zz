@@ -1,8 +1,8 @@
-first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/http_route_path.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/http_route_path.zz)
+first module that broke: <root>/tests/fixtures/errors/http_route_path.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/http_route_path.zz)
 
 error: route path `/files/:p.../x`: greedy `:name...` must be the last segment
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/http_route_path.zz:7:24
+  --> <root>/tests/fixtures/errors/http_route_path.zz:7:24
     |
     7 |     s = s.route("GET", "/files/:p.../x", |_req| "bad-tail")
       |                        ^^^^^^^^^^^^^^^^

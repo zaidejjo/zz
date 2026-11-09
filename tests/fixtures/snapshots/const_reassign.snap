@@ -1,8 +1,8 @@
-first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/const_reassign.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/const_reassign.zz)
+first module that broke: <root>/tests/fixtures/errors/const_reassign.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/const_reassign.zz)
 
 error: cannot assign to immutable variable `x`
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/const_reassign.zz:4:1
+  --> <root>/tests/fixtures/errors/const_reassign.zz:4:1
     |
     4 | x = 20
       | ^

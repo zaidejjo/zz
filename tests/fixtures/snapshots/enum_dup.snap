@@ -1,14 +1,14 @@
-first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/enum_dup.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/enum_dup.zz)
+first module that broke: <root>/tests/fixtures/errors/enum_dup.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/enum_dup.zz)
 
 error: duplicate definition of enum `enum_dup.Token`
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/enum_dup.zz:7:1
+  --> <root>/tests/fixtures/errors/enum_dup.zz:7:1
     |
     7 | enum Token {
       | ^^^^^^^^^^^^^^^^^^^^^^^
 error: previous definition here
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/enum_dup.zz:3:1
+  --> <root>/tests/fixtures/errors/enum_dup.zz:3:1
     |
     3 | enum Token {
       | ^^^^^^^^^^^^^^^^^^^^^^^

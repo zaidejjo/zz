@@ -1,20 +1,20 @@
-first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_bound_returned.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/generic_bound_returned.zz)
+first module that broke: <root>/tests/fixtures/errors/generic_bound_returned.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/generic_bound_returned.zz)
 
 error: type mismatch: expected `T`, found `str`
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_bound_returned.zz:5:12
+  --> <root>/tests/fixtures/errors/generic_bound_returned.zz:5:12
     |
     5 |     return "nope"
       |            ^^^^^^
 error: cannot infer type for generic parameter `T`; it requires bound(s) Num
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_bound_returned.zz:7:6
+  --> <root>/tests/fixtures/errors/generic_bound_returned.zz:7:6
     |
     7 | x := make_bad()
       |      ^^^^^^^^^^
 error: cannot infer the type of `generic_bound_returned.x`; add a type annotation
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/generic_bound_returned.zz:7:1
+  --> <root>/tests/fixtures/errors/generic_bound_returned.zz:7:1
     |
     7 | x := make_bad()
       | ^

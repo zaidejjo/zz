@@ -1,9 +1,9 @@
-first module that broke: /home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/pub_impl.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/pub_impl.zz)
+first module that broke: <root>/crates/zz_cli/../../tests/fixtures/errors/pub_impl.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/pub_impl.zz)
 
 error: cannot use `pub` on `impl`
 hint: impl methods are always public, remove the `pub` keyword
 
-  --> /home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/pub_impl.zz:5:5
+  --> <root>/crates/zz_cli/../../tests/fixtures/errors/pub_impl.zz:5:5
     |
     5 | pub impl Point {
       |     ^^^^

@@ -1,16 +1,16 @@
-first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/bitwise_float.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/bitwise_float.zz)
+first module that broke: <root>/tests/fixtures/errors/bitwise_float.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/bitwise_float.zz)
 
 error: bitwise `&` requires `int` operands, found `float` and `int`
 hint: use `int(x)` to cast, `&&`/`||` for boolean logic
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/bitwise_float.zz:3:6
+  --> <root>/tests/fixtures/errors/bitwise_float.zz:3:6
     |
     3 | x := 1.5 & 2
       |      ^^^^^^^
     = cast the left operand to `int` with `int(...)`
 warning: unused variable `x` is never read, consider prefixing with `_x`
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/bitwise_float.zz:3:1
+  --> <root>/tests/fixtures/errors/bitwise_float.zz:3:1
     |
     3 | x := 1.5 & 2
       | ^ help: replace with `_x`

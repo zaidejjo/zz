@@ -29,6 +29,20 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
 }
 
+/// Replace the workspace root absolute path in stderr with `<root>` so
+/// snapshots are environment-independent: CI and dev machines check out the
+/// repo at different absolute paths, but the relative structure under root is
+/// identical.
+fn normalize_snapshot(stderr: &str) -> String {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_string_lossy();
+    stderr.replace(root.as_ref(), "<root>")
+}
+
 /// Run `zz run <file>` and return (exit_code, stdout, stderr).
 /// Stdin comes from the `<stem>.stdin` sibling file when present,
 /// otherwise closed (EOF): fixtures calling `input()` behave
@@ -2468,7 +2482,7 @@ fn snapshot_error_diagnostics() {
             .output()
             .expect("failed to run `zz check`");
 
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stderr = normalize_snapshot(String::from_utf8_lossy(&output.stderr).as_ref());
 
         // If update mode, write the snapshot and continue
         if update {

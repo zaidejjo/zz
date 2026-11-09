@@ -1,15 +1,15 @@
-first module that broke: /home/zaid/Projects/zz_lang/tests/fixtures/errors/arity.zz (/home/zaid/Projects/zz_lang/crates/zz_cli/../../tests/fixtures/errors/arity.zz)
+first module that broke: <root>/tests/fixtures/errors/arity.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/arity.zz)
 
 error: `add` takes 2 arguments (a: int, b: int), found 1
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/arity.zz:7:6
+  --> <root>/tests/fixtures/errors/arity.zz:7:6
     |
     7 | x := add(1)
       |      ^^^^^^
     = missing argument for `b: int`
 warning: unused variable `x` is never read, consider prefixing with `_x`
 
-  --> /home/zaid/Projects/zz_lang/tests/fixtures/errors/arity.zz:7:1
+  --> <root>/tests/fixtures/errors/arity.zz:7:1
     |
     7 | x := add(1)
       | ^ help: replace with `_x`
