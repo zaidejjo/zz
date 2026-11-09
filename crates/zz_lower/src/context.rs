@@ -772,7 +772,7 @@ impl Lowerer {
                         if let Some(sname) =
                             self.flat_array_from_ptr(names.lookup_type(arr_name).unwrap_or(""))
                         {
-                            let ctype_str = self.struct_c_type(&sname);
+                            let ctype_str = format!("zz_struct_{}", sname);
                             if let Some(ft) = self.field_type_from_struct(&ctype_str, name) {
                                 let t = match ft {
                                     "int64_t" => "int64_t",

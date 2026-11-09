@@ -1521,7 +1521,7 @@ impl Lowerer {
                         let arr_cid = names.lookup(&arr_name).unwrap().to_string();
                         let idx_raw = self.flat_index_expr(index, names, out);
                         let field_ctype =
-                            self.field_type_from_struct(&self.struct_c_type(&sname), name);
+                            self.field_type_from_struct(&format!("zz_struct_{}", sname), name);
                         let raw = format!("({arr_cid})[{idx_raw}].{name}");
                         return auto_box(&raw, field_ctype);
                     }
@@ -3751,7 +3751,7 @@ impl Lowerer {
                             return "zz_unit()".to_string();
                         };
                         let arg_val = self.emit_expr(arg, names, out);
-                        let elem = self.struct_c_type(&sname);
+                        let elem = format!("zz_struct_{}", sname);
                         let cid = names
                             .lookup(&recv_name)
                             .map(str::to_string)
