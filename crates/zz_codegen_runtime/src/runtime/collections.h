@@ -264,8 +264,14 @@ static inline zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
             if (a->items != NULL) free(a->items);
             a->items = new_items;
             // Mark migration to heap so `zz_release_array` frees the items
-            // buffer when this arena array is released (refs==0 path).
-            if (a->refs == ZZ_ARRAY_ARENA_MAGIC) a->refs = 0;
+            // buffer when this array is released (refs==0 path). Applies to
+            // every sentinel type whose items buffer just moved to heap
+            // malloc; without this, `zz_release_array` returns early for
+            // LIT_MAGIC/STACK_MAGIC/ARENA_MAGIC and leaks the items buffer.
+            if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_STACK_MAGIC
+                || a->refs == ZZ_ARRAY_ARENA_MAGIC) {
+                a->refs = 0;
+            }
         } else {
             a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));
         }
