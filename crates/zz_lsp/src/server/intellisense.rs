@@ -1,7 +1,10 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
+use zz_checker::{SpanKey, TOP_SCOPE, Type};
+use zz_hir::TypedProgram;
 
 use super::Backend;
 
@@ -149,12 +152,13 @@ pub(crate) async fn handle_hover(backend: &Backend, params: HoverParams) -> Resu
 
     let name = match &node.name {
         Some(n) => n.clone(),
-        None => return Ok(None),
+        None => String::new(),
     };
 
     let mut contents = String::new();
 
-    if let Some(sig) = zz_checker::lookup_std(&check_result.funcs, &name) {
+    if !name.is_empty() {
+        if let Some(sig) = zz_checker::lookup_std(&check_result.funcs, &name) {
         contents.push_str(&format!("**func** `{name}`\n\n"));
         contents.push_str("```zz\n");
         contents.push_str(&format!("func {name}("));
@@ -191,16 +195,88 @@ pub(crate) async fn handle_hover(backend: &Backend, params: HoverParams) -> Resu
             }
         }
     }
-
-    if contents.is_empty() {
-        return Ok(None);
     }
 
-    Ok(Some(Hover {
-        contents: HoverContents::Markup(MarkupContent {
-            kind: MarkupKind::Markdown,
-            value: contents,
-        }),
-        range: None,
-    }))
+    if !contents.is_empty() {
+        return Ok(Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: contents,
+            }),
+            range: None,
+        }));
+    }
+
+    // 2. Arbitrary expressions: resolve the type via the scope-qualified
+    //    `span_types` map (`TypedProgram::type_at`). Covers literals,
+    //    calls, binaries, arrays, closures, and every other expression
+    //    kind the checker assigned a type to.
+    if let Some(expr) = node.expr {
+        if let Some(ty_str) = expression_type_at(doc.span_types.as_ref(), program, expr, offset) {
+            return Ok(Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: format!("**expr**: `{ty_str}`\n"),
+                }),
+                range: None,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+/// The qualified name of the function (or [`TOP_SCOPE`]) enclosing the
+/// expression at `offset`. Used to build the `SpanKey` for type lookup.
+fn enclosing_function(program: &zz_frontend::ast::Program, offset: u32) -> Arc<str> {
+    for stmt in &program.stmts {
+        if let Some(name) = func_containing_offset(stmt, offset) {
+            return name;
+        }
+    }
+    Arc::from(TOP_SCOPE)
+}
+
+fn func_containing_offset(stmt: &zz_frontend::ast::Stmt, offset: u32) -> Option<Arc<str>> {
+    let span = stmt.span();
+    if offset < span.start || offset >= span.end {
+        return None;
+    }
+    match stmt {
+        zz_frontend::ast::Stmt::Func { name, body, .. } => {
+            for s in &body.stmts {
+                if let Some(n) = func_containing_offset(s, offset) {
+                    return Some(n);
+                }
+            }
+            Some(Arc::from(name.join(".")))
+        }
+        _ => None,
+    }
+}
+
+/// Resolve the type of an arbitrary expression via the
+/// scope-qualified `span_types` map (`TypedProgram::type_at`).
+fn expression_type_at(
+    span_types: Option<&std::collections::HashMap<SpanKey, Type>>,
+    program: &zz_frontend::ast::Program,
+    expr: &zz_frontend::ast::Expr,
+    offset: u32,
+) -> Option<String> {
+    let Some(span_types) = span_types else {
+        return None;
+    };
+    let tp = TypedProgram {
+        program: program.clone(),
+        types: span_types.clone(),
+        bindings: HashMap::new(),
+        funcs: HashMap::new(),
+        structs: HashMap::new(),
+        enums: HashMap::new(),
+        try_converts: HashMap::new(),
+        module_origins: HashMap::new(),
+    };
+    let func = enclosing_function(program, offset);
+    let ty = tp.type_at(&func, expr.span())?;
+    Some(format!("{ty}"))
 }

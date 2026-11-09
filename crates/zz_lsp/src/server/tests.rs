@@ -723,6 +723,7 @@ async fn rename_to_same_name_is_noop() {
 fn undefined_diag_for(message: &str) -> Diagnostic {
     let raw = zz_frontend::diag::RawDiag {
         severity: zz_frontend::diag::Severity::Error,
+        code: None,
         message: message.to_string(),
         span: Some(zz_frontend::span::Span::new(0, 1)),
         notes: vec![],

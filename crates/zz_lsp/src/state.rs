@@ -13,7 +13,7 @@ use crate::convert::LineIndex;
 use crate::cross_file::ModuleIndex;
 use dashmap::DashMap;
 use tower_lsp::lsp_types::{Diagnostic, Url};
-use zz_checker::{AliasSig, CheckResult, EnumSig, FuncSig, StructSig, Type};
+use zz_checker::{AliasSig, CheckResult, EnumSig, FuncSig, SpanKey, StructSig, Type};
 use zz_frontend::ast::Program;
 use zz_frontend::diag::RawDiag;
 use zz_stdlib::stdlib_funcs;
@@ -95,6 +95,9 @@ pub struct DocumentState {
     pub program: Option<Program>,
     /// Checker output from the last successful type-check of this file.
     pub check_result: Option<CheckResult>,
+    /// Span-keyed resolved types from `check_program_typed`, used for
+    /// expression type-on-hover (`TypedProgram::type_at`).
+    pub span_types: Option<std::collections::HashMap<SpanKey, Type>>,
     /// Seed bindings visible to the last check (dep + workspace globals).
     /// `CheckResult.bindings` carries only the file's own lets by design,
     /// so hover/completion read seeded globals from here instead.
@@ -230,6 +233,7 @@ impl GlobalState {
             parse_errors: parsed.errors,
             program: Some(parsed.program),
             check_result: None,
+            span_types: None,
             seed_bindings: None,
             file_defs: None,
             line_index,
