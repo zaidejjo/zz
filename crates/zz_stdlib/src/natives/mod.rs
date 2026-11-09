@@ -2066,6 +2066,20 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: concurrency::chan_try_recv,
         },
     );
+    m.insert(
+        "std.chan.send_batch".into(),
+        NativeEntry {
+            arity: 2,
+            f: concurrency::chan_send_batch,
+        },
+    );
+    m.insert(
+        "std.chan.recv_batch".into(),
+        NativeEntry {
+            arity: 2,
+            f: concurrency::chan_recv_batch,
+        },
+    );
 
     // std.task — spawn and join
     m.insert(
@@ -2597,7 +2611,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // table without the other will fail CI here rather than at runtime.
     assert_eq!(
         m.len(),
-        463,
+        465,
         "natives registry count drifted; update this assertion"
     );
 

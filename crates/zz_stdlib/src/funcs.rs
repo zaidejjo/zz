@@ -3547,6 +3547,23 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         "std.chan.try_recv".into(),
         sig_t(vec![("ch", Type::Chan)], Type::Option(Box::new(t.clone()))),
     );
+    m.insert(
+        "std.chan.send_batch".into(),
+        sig_t(
+            vec![
+                ("ch", Type::Chan),
+                ("arr", Type::Array(Box::new(t.clone()))),
+            ],
+            Type::Unit,
+        ),
+    );
+    m.insert(
+        "std.chan.recv_batch".into(),
+        sig_t(
+            vec![("ch", Type::Chan), ("n", Type::Int)],
+            Type::Array(Box::new(t.clone())),
+        ),
+    );
 
     // std.task — spawn and join
     m.insert(
@@ -4163,7 +4180,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 685);
+        assert_eq!(funcs.len(), 687);
     }
 
     #[test]

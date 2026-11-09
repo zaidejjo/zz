@@ -2064,6 +2064,105 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
     }
 }
 
+zz_value zz_chan_send_batch(zz_value chan, zz_value arr, int *err) {
+    if (chan.tag != ZZ_CHAN) { *err = 1; return zz_unit(); }
+    if (arr.tag != ZZ_ARRAY || !arr.arr) { *err = 1; return zz_unit(); }
+    zz_chan *ch = chan.chan;
+    zz_array *a = arr.arr;
+    // Lock-free fast path: enqueue every item into the ring, tracking
+    // how many succeeded.
+    size_t enqueued = 0;
+    for (; enqueued < a->len; enqueued++) {
+        if (!zz_ring_try_enqueue(ch, a->items[enqueued])) break;
+    }
+    if (enqueued == a->len
+        && __atomic_load_n(&ch->green_waiters, __ATOMIC_ACQUIRE) == 0
+        && __atomic_load_n(&ch->sleepers, __ATOMIC_ACQUIRE) == 0) {
+        // All enqueued lock-free, no waiter can be racing.
+        *err = 0;
+        return zz_unit();
+    }
+    // Mutex path: enqueue remaining items (ring or spill), serve waiters.
+    pthread_mutex_lock(&ch->lock);
+    for (size_t i = enqueued; i < a->len; i++) {
+        if (!zz_ring_try_enqueue(ch, a->items[i])) {
+            // Ring full — spill this and all remaining items.
+            if (ch->len == ch->cap) {
+                size_t new_cap = ch->cap * 2;
+                zz_value *new_queue = (zz_value *)malloc(sizeof(zz_value) * new_cap);
+                if (!new_queue) { pthread_mutex_unlock(&ch->lock); *err = 1; return zz_unit(); }
+                for (size_t j = 0; j < ch->len; j++)
+                    new_queue[j] = ch->queue[(ch->head + j) % ch->cap];
+                free(ch->queue);
+                ch->queue = new_queue;
+                ch->cap = new_cap;
+                ch->head = 0;
+                ch->tail = ch->len;
+            }
+            ch->queue[ch->tail] = a->items[i];
+            ch->tail = (ch->tail + 1) % ch->cap;
+            ch->len++;
+            __atomic_add_fetch(&ch->spill_count, 1, __ATOMIC_RELEASE);
+        }
+    }
+    // Serve any green waiters from the ring (values already enqueued).
+    {
+        zz_task_t wt;
+        int wis_task = 0;
+        if (zz_chan_handoff_locked(ch, zz_unit(), &wt, &wis_task)) {
+            int gparked = __atomic_load_n(&ch->gparked, __ATOMIC_ACQUIRE) > 0;
+            pthread_mutex_unlock(&ch->lock);
+            if (wis_task && !zz_handoff_run_inline(wt)) zz_enqueue_task(wt);
+            if (gparked) {
+                pthread_mutex_lock(&ch->lock);
+                pthread_cond_broadcast(&ch->cond);
+                pthread_mutex_unlock(&ch->lock);
+            }
+            *err = 0;
+            return zz_unit();
+        }
+    }
+    int wspill = __atomic_load_n(&ch->sleepers, __ATOMIC_ACQUIRE) > 0
+        || __atomic_load_n(&ch->gparked, __ATOMIC_ACQUIRE) > 0;
+    if (wspill) pthread_cond_signal(&ch->cond);
+    pthread_mutex_unlock(&ch->lock);
+    *err = 0;
+    return zz_unit();
+}
+
+zz_value zz_chan_recv_batch(zz_value chan, zz_value n, int *err) {
+    if (chan.tag != ZZ_CHAN) { *err = 1; return zz_unit(); }
+    if (n.tag != ZZ_INT) { *err = 1; return zz_unit(); }
+    zz_chan *ch = chan.chan;
+    size_t want = (size_t)n.i;
+    if (want == 0) { *err = 0; return zz_array_new(); }
+    zz_value out = zz_array_new();
+    if (out.tag != ZZ_ARRAY || !out.arr) { *err = 1; return zz_unit(); }
+    // Lock-free fast path: pop up to `want` from the ring.
+    while (out.arr->len < want) {
+        zz_value v;
+        if (!zz_ring_try_dequeue(ch, &v)) break;
+        zz_array_push(out.arr, v);
+    }
+    if (out.arr->len == want) { *err = 0; return out; }
+    // Slow path: drain spill (older), then ring, under one mutex.
+    pthread_mutex_lock(&ch->lock);
+    while (out.arr->len < want && ch->len > 0) {
+        zz_array_push(out.arr, ch->queue[ch->head]);
+        ch->head = (ch->head + 1) % ch->cap;
+        ch->len--;
+        __atomic_sub_fetch(&ch->spill_count, 1, __ATOMIC_RELEASE);
+    }
+    while (out.arr->len < want) {
+        zz_value v;
+        if (!zz_ring_try_dequeue(ch, &v)) break;
+        zz_array_push(out.arr, v);
+    }
+    pthread_mutex_unlock(&ch->lock);
+    *err = 0;
+    return out;
+}
+
 zz_value zz_chan_try_recv(zz_value chan, int *err) {
     if (chan.tag != ZZ_CHAN) { *err = 1; return zz_unit(); }
     zz_chan *ch = chan.chan;
