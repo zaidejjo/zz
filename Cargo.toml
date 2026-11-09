@@ -28,6 +28,7 @@ ureq = "3"
 base64 = "0.22"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 webpki-roots = "1"
+proptest = "1"
 rustls-pki-types = "1"
 
 [profile.release]
