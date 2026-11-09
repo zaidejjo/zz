@@ -930,6 +930,11 @@ parity_strict!(
     "generic_structs.zz"
 );
 parity_strict!(parity_syntax_fstrings, "syntax", "fstrings.zz");
+parity_strict!(
+    parity_syntax_fstring_ctrl_chars,
+    "syntax",
+    "fstring_ctrl_chars.zz"
+);
 parity_strict!(parity_syntax_brace_escapes, "syntax", "brace_escapes.zz");
 parity_strict!(parity_syntax_raw_strings, "syntax", "raw_strings.zz");
 parity_strict!(

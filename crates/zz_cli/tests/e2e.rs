@@ -408,6 +408,11 @@ e2e_success_test!(e2e_syntax_frame_slots, "syntax", "frame_slots.zz");
 e2e_success_test!(e2e_syntax_operators, "syntax", "operators.zz");
 e2e_success_test!(e2e_syntax_short_circuit, "syntax", "short_circuit.zz");
 e2e_success_test!(e2e_syntax_fstrings, "syntax", "fstrings.zz");
+e2e_success_test!(
+    e2e_syntax_fstring_ctrl_chars,
+    "syntax",
+    "fstring_ctrl_chars.zz"
+);
 e2e_success_test!(e2e_syntax_brace_escapes, "syntax", "brace_escapes.zz");
 e2e_success_test!(e2e_syntax_raw_strings, "syntax", "raw_strings.zz");
 e2e_success_test!(

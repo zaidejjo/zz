@@ -17,6 +17,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("syntax", "compound_assign.zz", true),
     ("syntax", "generic_structs.zz", true),
     ("syntax", "fstrings.zz", false),
+    ("syntax", "fstring_ctrl_chars.zz", false),
     ("syntax", "dicts.zz", false),
     ("syntax", "string_blocks.zz", false),
     ("syntax", "pipe_elvis.zz", false),
