@@ -1,8 +1,8 @@
-first module that broke: <root>/tests/fixtures/errors/try_outside_result.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/try_outside_result.zz)
+first module that broke: <path> (<path>
 
 error: `?` on `Result` cannot propagate through a function returning `int`
 
-  --> <root>/tests/fixtures/errors/try_outside_result.zz:8:10
+  --> <path>
     |
     8 |     x := try fetch()
       |          ^^^^^^^^^^^

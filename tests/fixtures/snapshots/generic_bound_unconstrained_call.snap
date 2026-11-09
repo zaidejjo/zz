@@ -1,8 +1,8 @@
-first module that broke: <root>/tests/fixtures/errors/generic_bound_unconstrained_call.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/generic_bound_unconstrained_call.zz)
+first module that broke: <path> (<path>
 
 error: cannot infer type for generic parameter `T`; it requires bound(s) Num
 
-  --> <root>/tests/fixtures/errors/generic_bound_unconstrained_call.zz:8:6
+  --> <path>
     |
     8 | x := make()
       |      ^^^^^^

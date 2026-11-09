@@ -1,14 +1,14 @@
-first module that broke: <root>/tests/fixtures/errors/alias_arity.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/alias_arity.zz)
+first module that broke: <path> (<path>
 
 error: type alias `alias_arity.Pair` takes 1 type argument but 2 given
 
-  --> <root>/tests/fixtures/errors/alias_arity.zz:6:8
+  --> <path>
     |
     6 |     p: Pair<int, str> = (1, "a")
       |        ^^^^
 error: type mismatch: expected `int`, found `str`
 
-  --> <root>/tests/fixtures/errors/alias_arity.zz:6:8
+  --> <path>
     |
     6 |     p: Pair<int, str> = (1, "a")
       |        ^^^^

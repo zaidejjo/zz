@@ -1,8 +1,8 @@
-first module that broke: <root>/tests/fixtures/errors/enum_nonexhaustive.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/enum_nonexhaustive.zz)
+first module that broke: <path> (<path>
 
 error: Z0004: non-exhaustive match: missing `.IntLit` (or add a `_` arm)
 
-  --> <root>/tests/fixtures/errors/enum_nonexhaustive.zz:10:5
+  --> <path>
     |
    10 |     match t {
       |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace with `IntLit => () {}`

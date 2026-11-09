@@ -1,8 +1,8 @@
-first module that broke: <root>/tests/fixtures/errors/chan_send_non_chan.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/chan_send_non_chan.zz)
+first module that broke: <path> (<path>
 
 error: type mismatch: expected `chan`, found `int`
 
-  --> <root>/tests/fixtures/errors/chan_send_non_chan.zz:6:19
+  --> <path>
     |
     6 |     std.chan.send(1, 2)
       |                   ^

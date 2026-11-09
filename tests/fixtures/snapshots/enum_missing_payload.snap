@@ -1,8 +1,8 @@
-first module that broke: <root>/tests/fixtures/errors/enum_missing_payload.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/enum_missing_payload.zz)
+first module that broke: <path> (<path>
 
 error: variant `enum_missing_payload.Token.IntLit` holds a value: construct it as `enum_missing_payload.Token.IntLit(...)`
 
-  --> <root>/tests/fixtures/errors/enum_missing_payload.zz:9:16
+  --> <path>
     |
     9 |     t: Token = Token.IntLit
       |                ^^^^^^^^^^^^

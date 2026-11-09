@@ -1,8 +1,8 @@
-first module that broke: <root>/tests/fixtures/errors/generic_unbound.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/generic_unbound.zz)
+first module that broke: <path> (<path>
 
 error: Z0003: generic parameter `T` needs a `Num` bound for `+`; write `func ...<T: Num>`
 
-  --> <root>/tests/fixtures/errors/generic_unbound.zz:4:5
+  --> <path>
     |
     4 |     x + y
       |     ^^^^^

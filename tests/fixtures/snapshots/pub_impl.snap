@@ -1,9 +1,9 @@
-first module that broke: <root>/crates/zz_cli/../../tests/fixtures/errors/pub_impl.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/pub_impl.zz)
+first module that broke: <path> (<path>
 
 error: cannot use `pub` on `impl`
 hint: impl methods are always public, remove the `pub` keyword
 
-  --> <root>/crates/zz_cli/../../tests/fixtures/errors/pub_impl.zz:5:5
+  --> <path>
     |
     5 | pub impl Point {
       |     ^^^^

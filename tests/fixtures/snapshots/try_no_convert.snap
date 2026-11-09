@@ -1,9 +1,9 @@
-first module that broke: <root>/tests/fixtures/errors/try_no_convert.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/try_no_convert.zz)
+first module that broke: <path> (<path>
 
 error: no conversion path for `try`: error type `try_no_convert.ErrA` cannot convert to `try_no_convert.ErrB`
 hint: add `impl try_no_convert.ErrA { func convert_to_try_no_convert.ErrB(self) -> try_no_convert.ErrB { ... } }`
 
-  --> <root>/tests/fixtures/errors/try_no_convert.zz:11:10
+  --> <path>
     |
    11 |     x := try fetch()
       |          ^^^^^^^^^^^

@@ -1,8 +1,8 @@
-first module that broke: <root>/tests/fixtures/errors/int_float_cmp.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/int_float_cmp.zz)
+first module that broke: <path> (<path>
 
 error: cannot compare `int` with `float`. Use `float(x)` to cast
 
-  --> <root>/tests/fixtures/errors/int_float_cmp.zz:5:4
+  --> <path>
     |
     5 | if x == y {
       |    ^^^^^^

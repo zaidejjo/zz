@@ -1,22 +1,22 @@
-first module that broke: <root>/tests/fixtures/errors/decorator_mismatch.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/decorator_mismatch.zz)
+first module that broke: <path> (<path>
 
 error: type mismatch: expected `int`, found `str`
 
-  --> <root>/tests/fixtures/errors/decorator_mismatch.zz:7:1
+  --> <path>
     |
     7 | @bad
       | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
     = parameter `f` expects `func(int) -> int`
 error: type mismatch: expected `int`, found `str`
 
-  --> <root>/tests/fixtures/errors/decorator_mismatch.zz:8:12
+  --> <path>
     |
     8 | func hello(name: str) -> str {
       |            ^^^^
     = parameter `_0` expects `int`
 error: type mismatch: expected `str`, found `int`
 
-  --> <root>/tests/fixtures/errors/decorator_mismatch.zz:7:1
+  --> <path>
     |
     7 | @bad
       | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

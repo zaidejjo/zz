@@ -1,9 +1,9 @@
-first module that broke: <root>/tests/fixtures/errors/http_route_path.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/http_route_path.zz)
+first module that broke: <path> (<path>
 
-error: route path `/files/:p.../x`: greedy `:name...` must be the last segment
+error: route path `<path> greedy `:name...` must be the last segment
 
-  --> <root>/tests/fixtures/errors/http_route_path.zz:7:24
+  --> <path>
     |
-    7 |     s = s.route("GET", "/files/:p.../x", |_req| "bad-tail")
+    7 |     s = s.route("GET", "<path> |_req| "bad-tail")
       |                        ^^^^^^^^^^^^^^^^
 zz: 1 file(s) failed type-check

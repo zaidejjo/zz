@@ -1,20 +1,20 @@
-first module that broke: <root>/tests/fixtures/errors/generic_bound_returned.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/generic_bound_returned.zz)
+first module that broke: <path> (<path>
 
 error: type mismatch: expected `T`, found `str`
 
-  --> <root>/tests/fixtures/errors/generic_bound_returned.zz:5:12
+  --> <path>
     |
     5 |     return "nope"
       |            ^^^^^^
 error: cannot infer type for generic parameter `T`; it requires bound(s) Num
 
-  --> <root>/tests/fixtures/errors/generic_bound_returned.zz:7:6
+  --> <path>
     |
     7 | x := make_bad()
       |      ^^^^^^^^^^
 error: cannot infer the type of `generic_bound_returned.x`; add a type annotation
 
-  --> <root>/tests/fixtures/errors/generic_bound_returned.zz:7:1
+  --> <path>
     |
     7 | x := make_bad()
       | ^

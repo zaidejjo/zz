@@ -1,14 +1,14 @@
-first module that broke: <root>/tests/fixtures/errors/alias_cycle.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/alias_cycle.zz)
+first module that broke: <path> (<path>
 
 error: cyclic type alias `alias_cycle.A`: alias_cycle.A -> alias_cycle.B
 
-  --> <root>/tests/fixtures/errors/alias_cycle.zz:3:10
+  --> <path>
     |
     3 | type A = B
       |          ^
 error: type mismatch: expected `unit`, found `int`
 
-  --> <root>/tests/fixtures/errors/alias_cycle.zz:7:8
+  --> <path>
     |
     7 |     x: A = 1
       |        ^

@@ -1,8 +1,8 @@
-first module that broke: <root>/tests/fixtures/errors/generic_bound_inference_chain.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/generic_bound_inference_chain.zz)
+first module that broke: <path> (<path>
 
 error: type `str` does not satisfy bound `Num` for generic parameter `T`
 
-  --> <root>/tests/fixtures/errors/generic_bound_inference_chain.zz:10:6
+  --> <path>
     |
    10 | x := unwrap_default(.some("nope"), "fallback")
       |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

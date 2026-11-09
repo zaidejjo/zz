@@ -1,16 +1,16 @@
-first module that broke: <root>/tests/fixtures/errors/div_by_zero.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/div_by_zero.zz)
+first module that broke: <path> (<path>
 
 error: integer division by zero (divisor is literal `0`)
 
-  --> <root>/tests/fixtures/errors/div_by_zero.zz:3:10
+  --> <path>
     |
-    3 | x := 1 / 0
+    3 | x := 1 <path> 0
       |          ^
 warning: unused variable `x` is never read, consider prefixing with `_x`
 
-  --> <root>/tests/fixtures/errors/div_by_zero.zz:3:1
+  --> <path>
     |
-    3 | x := 1 / 0
+    3 | x := 1 <path> 0
       | ^ help: replace with `_x`
 
 zz: 1 file(s) failed type-check

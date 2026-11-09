@@ -1,14 +1,14 @@
-first module that broke: <root>/crates/zz_cli/../../tests/fixtures/errors/struct_init_assign_error.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/struct_init_assign_error.zz)
+first module that broke: <path> (<path>
 
-error: expected `:` in struct initialization, found `=` — did you mean `:`?
+error: expected `:` in struct initialization, found `=` â did you mean `:`?
 
-  --> <root>/crates/zz_cli/../../tests/fixtures/errors/struct_init_assign_error.zz:5:20
+  --> <path>
     |
     5 |     u := User{name = "Alice", age = 30}
       |                    ^
-error: expected `:` in struct initialization, found `=` — did you mean `:`?
+error: expected `:` in struct initialization, found `=` â did you mean `:`?
 
-  --> <root>/crates/zz_cli/../../tests/fixtures/errors/struct_init_assign_error.zz:5:35
+  --> <path>
     |
     5 |     u := User{name = "Alice", age = 30}
       |                                   ^

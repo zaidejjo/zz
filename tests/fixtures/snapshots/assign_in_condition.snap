@@ -1,8 +1,8 @@
-first module that broke: <root>/crates/zz_cli/../../tests/fixtures/errors/assign_in_condition.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/assign_in_condition.zz)
+first module that broke: <path> (<path>
 
 error: `=` in condition does assignment; use `==` to compare
 
-  --> <root>/crates/zz_cli/../../tests/fixtures/errors/assign_in_condition.zz:5:15
+  --> <path>
     |
     5 |     if countr = 5 {
       |               ^ help: replace with `==`

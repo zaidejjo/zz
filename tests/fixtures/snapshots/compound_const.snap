@@ -1,8 +1,8 @@
-first module that broke: <root>/tests/fixtures/errors/compound_const.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/compound_const.zz)
+first module that broke: <path> (<path>
 
 error: cannot assign to immutable variable `x`
 
-  --> <root>/tests/fixtures/errors/compound_const.zz:4:1
+  --> <path>
     |
     4 | x += 2
       | ^

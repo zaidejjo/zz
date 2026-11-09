@@ -1,8 +1,8 @@
-first module that broke: <root>/tests/fixtures/errors/enum_extra_arg.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/enum_extra_arg.zz)
+first module that broke: <path> (<path>
 
 error: variant `enum_extra_arg.Token.Eof` takes no arguments but 1 given
 
-  --> <root>/tests/fixtures/errors/enum_extra_arg.zz:9:10
+  --> <path>
     |
     9 |     t := Token.Eof(1)
       |          ^^^^^^^^^^^^

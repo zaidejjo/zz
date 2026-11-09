@@ -1,8 +1,8 @@
-first module that broke: <root>/tests/fixtures/errors/enum_generic_mismatch.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/enum_generic_mismatch.zz)
+first module that broke: <path> (<path>
 
 error: type mismatch: expected `int`, found `str`
 
-  --> <root>/tests/fixtures/errors/enum_generic_mismatch.zz:10:13
+  --> <path>
     |
    10 |     println(a == s)
       |             ^^^^^^

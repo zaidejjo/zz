@@ -1,8 +1,8 @@
-first module that broke: <root>/crates/zz_cli/../../tests/fixtures/errors/parse_error.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/parse_error.zz)
+first module that broke: <path> (<path>
 
 error: expected expression, found end of input
 
-  --> <root>/crates/zz_cli/../../tests/fixtures/errors/parse_error.zz:4:1
+  --> <path>
     |
     4 | 
       | ^

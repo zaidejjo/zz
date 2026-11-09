@@ -1,8 +1,8 @@
-first module that broke: <root>/tests/fixtures/errors/unknown_field.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/unknown_field.zz)
+first module that broke: <path> (<path>
 
 error: struct `unknown_field.Point` has no field `z`
 
-  --> <root>/tests/fixtures/errors/unknown_field.zz:6:9
+  --> <path>
     |
     6 | println(p.z)
       |         ^^^ help: replace with `x`

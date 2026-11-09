@@ -1,14 +1,14 @@
-first module that broke: <root>/tests/fixtures/errors/enum_dup.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/enum_dup.zz)
+first module that broke: <path> (<path>
 
 error: duplicate definition of enum `enum_dup.Token`
 
-  --> <root>/tests/fixtures/errors/enum_dup.zz:7:1
+  --> <path>
     |
     7 | enum Token {
       | ^^^^^^^^^^^^^^^^^^^^^^^
 error: previous definition here
 
-  --> <root>/tests/fixtures/errors/enum_dup.zz:3:1
+  --> <path>
     |
     3 | enum Token {
       | ^^^^^^^^^^^^^^^^^^^^^^^

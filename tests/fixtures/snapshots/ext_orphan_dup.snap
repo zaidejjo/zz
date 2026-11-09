@@ -1,14 +1,14 @@
-first module that broke: <root>/tests/fixtures/errors/ext_orphan_dup.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/ext_orphan_dup.zz)
+first module that broke: <path> (<path>
 
 error: duplicate definition of method `str.shout`
 
-  --> <root>/tests/fixtures/errors/ext_orphan_dup.zz:10:5
+  --> <path>
     |
    10 |     func shout(self) -> str {
       |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 error: previous definition here
 
-  --> <root>/tests/fixtures/errors/ext_orphan_dup.zz:4:5
+  --> <path>
     |
     4 |     func shout(self) -> str {
       |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,20 +1,20 @@
-first module that broke: <root>/tests/fixtures/errors/try_closure_no_annot.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/try_closure_no_annot.zz)
+first module that broke: <path> (<path>
 
 error: closure must declare `-> Result<T, E>` to use `try`
 
-  --> <root>/tests/fixtures/errors/try_closure_no_annot.zz:7:10
+  --> <path>
     |
     7 | f := |x| try fetch()
       |          ^^^^^^^^^^^
 error: type mismatch: expected `int`, found `Result<int, str>`
 
-  --> <root>/tests/fixtures/errors/try_closure_no_annot.zz:7:10
+  --> <path>
     |
     7 | f := |x| try fetch()
       |          ^^^^^^^^^^^
 error: cannot infer the type of `try_closure_no_annot.f`; add a type annotation
 
-  --> <root>/tests/fixtures/errors/try_closure_no_annot.zz:7:1
+  --> <path>
     |
     7 | f := |x| try fetch()
       | ^

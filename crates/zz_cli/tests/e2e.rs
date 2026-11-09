@@ -29,18 +29,44 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
 }
 
-/// Replace the workspace root absolute path in stderr with `<root>` so
-/// snapshots are environment-independent: CI and dev machines check out the
-/// repo at different absolute paths, but the relative structure under root is
-/// identical.
-fn normalize_snapshot(stderr: &str) -> String {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_string_lossy();
-    stderr.replace(root.as_ref(), "<root>")
+/// Strip absolute file paths from stderr so snapshots are
+/// environment-independent. Handles Unix (`/...`) and Windows
+/// (`C:\...` / `C:/...` / `c:\...`) paths without depending on the
+/// exact workspace-root string matching CARGO_MANIFEST_DIR (which can
+/// differ in separator or case across machines).
+fn strip_absolute_paths(stderr: &str) -> String {
+    let mut out = String::with_capacity(stderr.len());
+    let bytes = stderr.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Windows absolute path: `X:\` or `X:/`
+        if i + 2 < bytes.len()
+            && bytes[i].is_ascii_alphabetic()
+            && bytes[i + 1] == b':'
+            && (bytes[i + 2] == b'\\' || bytes[i + 2] == b'/')
+        {
+            let mut end = i;
+            while end < bytes.len() && !bytes[end].is_ascii_whitespace() {
+                end += 1;
+            }
+            out.push_str("<path>");
+            i = end;
+            continue;
+        }
+        // Unix absolute path: `/...`
+        if bytes[i] == b'/' {
+            let mut end = i;
+            while end < bytes.len() && !bytes[end].is_ascii_whitespace() {
+                end += 1;
+            }
+            out.push_str("<path>");
+            i = end;
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
 }
 
 /// Run `zz run <file>` and return (exit_code, stdout, stderr).
@@ -2482,7 +2508,7 @@ fn snapshot_error_diagnostics() {
             .output()
             .expect("failed to run `zz check`");
 
-        let stderr = normalize_snapshot(String::from_utf8_lossy(&output.stderr).as_ref());
+        let stderr = strip_absolute_paths(String::from_utf8_lossy(&output.stderr).as_ref());
 
         // If update mode, write the snapshot and continue
         if update {

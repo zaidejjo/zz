@@ -1,15 +1,15 @@
-first module that broke: <root>/tests/fixtures/errors/spawn_non_closure.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/spawn_non_closure.zz)
+first module that broke: <path> (<path>
 
 error: type mismatch: expected `func(_) -> _`, found `int`
 
-  --> <root>/tests/fixtures/errors/spawn_non_closure.zz:6:21
+  --> <path>
     |
     6 |     h := task.spawn(42)
       |                     ^^
     = parameter `f` expects `func(_) -> _`
 warning: unused variable `h` is never read, consider prefixing with `_h`
 
-  --> <root>/tests/fixtures/errors/spawn_non_closure.zz:6:5
+  --> <path>
     |
     6 |     h := task.spawn(42)
       |     ^ help: replace with `_h`

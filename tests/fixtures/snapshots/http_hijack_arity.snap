@@ -1,16 +1,16 @@
-first module that broke: <root>/tests/fixtures/errors/http_hijack_arity.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/http_hijack_arity.zz)
+first module that broke: <path> (<path>
 
 error: route handler must take exactly 2 argument(s) (the request and the socket), found 1
 
-  --> <root>/tests/fixtures/errors/http_hijack_arity.zz:7:33
+  --> <path>
     |
-    7 |     s = http.hijack(s, "/chat", |req| "wrong-arity")
+    7 |     s = http.hijack(s, "<path> |req| "wrong-arity")
       |                                 ^^^^^^^^^^^^^^^^^^^
 error: function arity mismatch
 
-  --> <root>/tests/fixtures/errors/http_hijack_arity.zz:7:33
+  --> <path>
     |
-    7 |     s = http.hijack(s, "/chat", |req| "wrong-arity")
+    7 |     s = http.hijack(s, "<path> |req| "wrong-arity")
       |                                 ^^^^^^^^^^^^^^^^^^^
     = parameter `handler` expects `func(http.request, tcp.stream) -> str | unit`
 zz: 1 file(s) failed type-check

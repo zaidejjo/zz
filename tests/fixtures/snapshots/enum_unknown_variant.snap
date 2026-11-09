@@ -1,8 +1,8 @@
-first module that broke: <root>/tests/fixtures/errors/enum_unknown_variant.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/enum_unknown_variant.zz)
+first module that broke: <path> (<path>
 
 error: unknown variant `Num` for enum `enum_unknown_variant.Token` (expected one of: Eof, IntLit)
 
-  --> <root>/tests/fixtures/errors/enum_unknown_variant.zz:9:10
+  --> <path>
     |
     9 |     t := Token.Num(1)
       |          ^^^^^^^^^^^^

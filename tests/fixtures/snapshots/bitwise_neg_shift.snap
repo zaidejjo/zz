@@ -1,10 +1,10 @@
-first module that broke: <root>/tests/fixtures/errors/bitwise_neg_shift.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/bitwise_neg_shift.zz)
+first module that broke: <path> (<path>
 
 warning: unused variable `x` is never read, consider prefixing with `_x`
 
-  --> <root>/tests/fixtures/errors/bitwise_neg_shift.zz:3:1
+  --> <path>
     |
     3 | x := 1 << -1
       | ^ help: replace with `_x`
 
-help: run `zz check --fix <root>/crates/zz_cli/../../tests/fixtures/errors/bitwise_neg_shift.zz` to automatically apply safe fixes
+help: run `zz check --fix <path> to automatically apply safe fixes

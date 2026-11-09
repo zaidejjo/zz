@@ -1,8 +1,8 @@
-first module that broke: <root>/tests/fixtures/errors/undefined_var.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/undefined_var.zz)
+first module that broke: <path> (<path>
 
 error: Z0001: undefined variable `undefined_var`
 
-  --> <root>/tests/fixtures/errors/undefined_var.zz:3:9
+  --> <path>
     |
     3 | println(undefined_var)
       |         ^^^^^^^^^^^^^

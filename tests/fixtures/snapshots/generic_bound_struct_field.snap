@@ -1,8 +1,8 @@
-first module that broke: <root>/tests/fixtures/errors/generic_bound_struct_field.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/generic_bound_struct_field.zz)
+first module that broke: <path> (<path>
 
 error: type `str` does not satisfy bound `Num` for generic parameter `T`
 
-  --> <root>/tests/fixtures/errors/generic_bound_struct_field.zz:11:6
+  --> <path>
     |
    11 | x := process(Wrapper{v: "nope"})
       |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^

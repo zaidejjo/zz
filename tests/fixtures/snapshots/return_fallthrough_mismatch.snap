@@ -1,8 +1,8 @@
-first module that broke: <root>/tests/fixtures/errors/return_fallthrough_mismatch.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/return_fallthrough_mismatch.zz)
+first module that broke: <path> (<path>
 
 error: type mismatch: expected `int`, found `str`
 
-  --> <root>/tests/fixtures/errors/return_fallthrough_mismatch.zz:5:12
+  --> <path>
     |
     5 |     return if c {
       |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

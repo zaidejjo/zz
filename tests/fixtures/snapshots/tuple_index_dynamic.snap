@@ -1,9 +1,9 @@
-first module that broke: <root>/tests/fixtures/errors/tuple_index_dynamic.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/tuple_index_dynamic.zz)
+first module that broke: <path> (<path>
 
 error: tuple index must be an integer literal
 hint: destructure with `(a, b) := t` for dynamic access
 
-  --> <root>/tests/fixtures/errors/tuple_index_dynamic.zz:5:11
+  --> <path>
     |
     5 | println(t[i])
       |           ^

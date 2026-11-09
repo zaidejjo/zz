@@ -1,8 +1,8 @@
-first module that broke: <root>/tests/fixtures/errors/return_missing_else.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/return_missing_else.zz)
+first module that broke: <path> (<path>
 
 error: Z0006: function returns `int` but its body can fall through; add `return `
 
-  --> <root>/tests/fixtures/errors/return_missing_else.zz:5:5
+  --> <path>
     |
     5 |     if c {
       |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,21 +1,21 @@
-first module that broke: <root>/tests/fixtures/errors/generic_struct_arity.zz (<root>/crates/zz_cli/../../tests/fixtures/errors/generic_struct_arity.zz)
+first module that broke: <path> (<path>
 
 error: struct `generic_struct_arity.Box` takes 1 type argument (e.g. `generic_struct_arity.Box<T>`)
 
-  --> <root>/tests/fixtures/errors/generic_struct_arity.zz:4:4
+  --> <path>
     |
     4 | b: Box = Box{ v: 1 }
       |    ^^^
 error: type argument arity mismatch
 
-  --> <root>/tests/fixtures/errors/generic_struct_arity.zz:4:4
+  --> <path>
     |
     4 | b: Box = Box{ v: 1 }
       |    ^^^
     = to fix: change the annotation to `generic_struct_arity.Box<int>` or convert the value
 warning: unused variable `b` is never read, consider prefixing with `_b`
 
-  --> <root>/tests/fixtures/errors/generic_struct_arity.zz:4:1
+  --> <path>
     |
     4 | b: Box = Box{ v: 1 }
       | ^ help: replace with `_b`
