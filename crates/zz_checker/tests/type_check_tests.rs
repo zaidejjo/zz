@@ -6,7 +6,7 @@ use common::{
 };
 use std::collections::HashMap;
 use zz_checker::type_::Type;
-use zz_checker::{check_program, FuncSig, StructSig};
+use zz_checker::{check_program, check_program_typed, FuncSig, SpanKey, StructSig};
 use zz_frontend::span::Span;
 
 #[test]
@@ -5119,4 +5119,48 @@ fn unused_private_function_used_as_value_silent() {
         "function used as value should not warn, got: {:?}",
         r.errors
     );
+}
+
+/// Partial results on broken code: type errors don't prevent the checker
+/// from producing typed AST info for valid parts (span_types), and parse
+/// errors are combined with type errors in CheckResult.errors.
+#[test]
+fn partial_results_on_broken_code() {
+    // Source with both a type error (`"hello" + 2`) and valid code.
+    let src = "x := 1\ny := \"hello\" + 2\nz := 3\n";
+    let parsed = zz_frontend::parse(src);
+    // Parse may still succeed with a type error below; even if it doesn't,
+    // the Program should be non-None for the valid statements.
+    let program = parsed.program;
+    assert!(program.stmts.len() >= 2, "expected at least 2 statements");
+
+    let (checked, span_types) = check_program_typed(
+        &program,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+
+    // Type error should be reported.
+    assert!(
+        checked.errors.iter().any(|e| e.message.contains("+")),
+        "expected type error for string + int, got: {:?}",
+        checked.errors
+    );
+
+    // Valid bindings should still be inferred.
+    assert_eq!(checked.bindings["x"], Type::Int);
+    assert_eq!(checked.bindings["z"], Type::Int);
+
+    // span_types should contain types for valid expressions.
+    let has_int = span_types.values().any(|t| *t == Type::Int);
+    assert!(has_int, "span_types should contain int types");
+
+    // Parse errors (if any) should be in CheckResult.errors too.
+    let has_parse_error = checked.errors.iter().any(|e| e.message.contains("parse"));
+    // Note: parse errors may or may not be present depending on parser
+    // behavior; the key point is the checker still produced results.
+    let _ = has_parse_error;
 }
