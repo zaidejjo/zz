@@ -9,7 +9,7 @@
 //! Auth tokens live only in request headers and are never included in
 //! errors or `Debug` output.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -518,6 +518,30 @@ pub fn expected_sha(info: &PackageInfo, version: &str) -> String {
     String::new()
 }
 
+/// Check whether a resolved symlink target path escapes `dest`.
+///
+/// `resolved` is the link target joined against the symlink's parent
+/// directory inside `dest`. Lexically normalizes `.`/`..` components and
+/// rejects absolute paths (any host spelling). Returns `true` when the
+/// target escapes `dest`.
+fn symlink_target_escapes(dest: &Path, resolved: &Path) -> bool {
+    let mut normalized = PathBuf::new();
+    for component in resolved.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => return true, // absolute
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+                if normalized.as_os_str().is_empty() {
+                    return true; // walked above the root
+                }
+            }
+            Component::Normal(_) => normalized.push(component),
+        }
+    }
+    !normalized.starts_with(dest)
+}
+
 /// Unpack `.tar.gz` bytes into `dest`, refusing entries that would escape
 /// it (absolute paths or `..` components). `dest` is created as needed.
 pub fn extract_tarball(bytes: &[u8], dest: &Path) -> Result<(), RemoteError> {
@@ -541,6 +565,25 @@ pub fn extract_tarball(bytes: &[u8], dest: &Path) -> Result<(), RemoteError> {
                 "entry escapes package root: {}",
                 path.display()
             )));
+        }
+        // Reject symlinks whose link target escapes dest. The link target
+        // resolves relative to the symlink's own directory within dest.
+        if entry.header().entry_type() == tar::EntryType::Symlink {
+            let link_target = entry
+                .header()
+                .link_name()
+                .map_err(|e| RemoteError::Tarball(format!("bad symlink target: {e}")))?;
+            let link_target = link_target.as_deref().unwrap_or(Path::new(""));
+            let entry_dest = dest.join(&path);
+            let entry_parent = entry_dest.parent().unwrap_or(dest);
+            let resolved = entry_parent.join(link_target);
+            if symlink_target_escapes(dest, &resolved) {
+                return Err(RemoteError::Tarball(format!(
+                    "symlink target escapes package root: {} -> {}",
+                    path.display(),
+                    link_target.display()
+                )));
+            }
         }
         let display = path.display().to_string();
         entry
