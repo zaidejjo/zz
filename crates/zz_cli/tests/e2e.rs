@@ -2559,13 +2559,13 @@ fn snapshot_error_diagnostics() {
         }
 
         // Otherwise, compare against the snapshot
-        let expected = fs::read_to_string(&snap_path).unwrap_or_else(|e| {
+        let expected = normalize_stderr(&fs::read_to_string(&snap_path).unwrap_or_else(|e| {
             panic!(
                 "snapshot not found for {}: {}. Run with UPDATE_SNAPSHOTS=1 to generate.",
                 fixture.display(),
                 e
             )
-        });
+        }));
 
         if let Some((actual, expected)) = compare_snapshot(&stderr, &expected) {
             eprintln!(
