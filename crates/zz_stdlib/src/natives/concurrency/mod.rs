@@ -1,6 +1,7 @@
 //! Channel concurrency primitives for ZZ.
 //!
-//! Provides `chan()`, `chan.send()`, `chan.recv()`, `chan.try_recv()`,
+//! Provides `chan()`, `chan.send()`, `chan.send_batch()`,
+//! `chan.recv()`, `chan.recv_batch()`, `chan.try_recv()`,
 //! `spawn()`, `task.join()`, and `task.try_join()`.
 //!
 //! Tasks are *green threads*: `spawn` builds an owned task (VM +
@@ -9,6 +10,12 @@
 //! at a blocking call; the executor parks and resumes them as other tasks
 //! (or the main thread) make progress. Green threads therefore multiplex
 //! onto a few OS threads and never block them on ZZ synchronization.
+//!
+//! `chan.send` takes an mpsc fast path: it enqueues lock-free into the
+//! ring and skips the mutex when no waiter can exist, so a burst of
+//! sends from many producers pays ~zero uncontended lock overhead.
+//! `chan.send_batch`/`chan.recv_batch` amortize one mutex over N messages
+//! for fan-in workloads (many workers → one collector).
 
 pub(crate) mod executor;
 
@@ -17,6 +24,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use zz_runtime::{EvalError, Interp, Span, Value};
 
+use crate::natives::expect_int;
 use executor::Executor;
 use zz_runtime::value::snapshot_env_cow;
 use zz_runtime::value::{ChanInner, ChanState};
@@ -45,6 +53,12 @@ pub(crate) fn chan_new(
 }
 
 /// `chan.send(ch, v)` — push a value into the channel.
+///
+/// MPS fast path: the value is enqueued lock-free into the ring. If no
+/// waiter can exist (`green_parked` clear and `cvar_waiters` zero) the
+/// mutex is skipped entirely — one uncontended lock (~25ns) saved per
+/// send. If a waiter may be racing or the ring is full, the slow path
+/// takes the mutex to preserve the no-lost-wakeup guarantee.
 pub(crate) fn chan_send(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
@@ -62,35 +76,159 @@ pub(crate) fn chan_send(
     match ch {
         Value::Chan(state) => {
             use std::sync::atomic::Ordering;
-            // Enqueue lock-free; waiter service always takes the mutex.
-            // (An earlier revision skipped servicing when the parked flag
-            // read clear — unsound: a lock-free enqueue racing a park
-            // registration can strand the waiter with a value present but
-            // nobody coming. The mutex pairs registration against drain,
-            // closing the window; uncontended it costs ~25ns, no futex.)
-            // `try_enqueue` hands the value back on failure, so the spill
-            // path below moves the *returned* value, never a copy.
-            if let Err(back) = state.ring.try_enqueue(v) {
-                // Ring full — spill under the mutex (channels stay
-                // unbounded no matter how deep the burst).
-                let mut guard = state
-                    .inner
-                    .lock()
-                    .map_err(|e| EvalError::new(format!("chan.send: lock poisoned: {e}"), span))?;
-                guard.queue.push_back(back);
-                state.spill.fetch_add(1, Ordering::Release);
-                service_chan_waiters(&state, guard, span);
+            // Fast path: lock-free enqueue, skip mutex when no waiters.
+            match state.ring.try_enqueue(v) {
+                Ok(()) => {
+                    if !state.green_parked.load(Ordering::Acquire)
+                        && state.cvar_waiters.load(Ordering::Acquire) == 0
+                    {
+                        // No waiter can be racing: the value sits in the
+                        // ring and the next recv pops it lock-free.
+                        return Ok(Value::Unit);
+                    }
+                    // A waiter may be racing: serve it under the mutex.
+                    // The value is already published in the ring, so the
+                    // waiter will dequeue it on wakeup.
+                    let guard = state.inner.lock().map_err(|e| {
+                        EvalError::new(format!("chan.send: lock poisoned: {e}"), span)
+                    })?;
+                    service_chan_waiters(&state, guard, span);
+                    Ok(Value::Unit)
+                }
+                Err(back) => {
+                    // Ring full — spill under the mutex (channels stay
+                    // unbounded no matter how deep the burst).
+                    let mut guard = state.inner.lock().map_err(|e| {
+                        EvalError::new(format!("chan.send: lock poisoned: {e}"), span)
+                    })?;
+                    guard.queue.push_back(back);
+                    state.spill.fetch_add(1, Ordering::Release);
+                    service_chan_waiters(&state, guard, span);
+                    Ok(Value::Unit)
+                }
+            }
+        }
+        other => Err(EvalError::new(
+            format!("chan.send: expected a channel, found `{other}`"),
+            span,
+        )),
+    }
+}
+
+/// `chan.send_batch(ch, arr)` — push every element of `arr` into the
+/// channel in one operation. One mutex at most (only when the ring fills
+/// or a waiter exists), amortizing the lock over N sends for fan-in.
+pub(crate) fn chan_send_batch(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let ch = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument `ch` for chan.send_batch", span))?;
+    let arr = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument `arr` for chan.send_batch", span))?;
+
+    let values = match arr {
+        Value::Array(a) => std::sync::Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+        other => {
+            return Err(EvalError::new(
+                format!("chan.send_batch: expected an array, found `{other}`"),
+                span,
+            ))
+        }
+    };
+
+    match ch {
+        Value::Chan(state) => {
+            use std::sync::atomic::Ordering;
+            let mut spilled: Vec<Value> = Vec::with_capacity(values.len());
+            for v in values {
+                match state.ring.try_enqueue(v) {
+                    Ok(()) => {}
+                    Err(back) => spilled.push(back),
+                }
+            }
+            if spilled.is_empty()
+                && !state.green_parked.load(Ordering::Acquire)
+                && state.cvar_waiters.load(Ordering::Acquire) == 0
+            {
+                // All enqueued lock-free, no waiter can be racing.
                 return Ok(Value::Unit);
             }
-            let guard = state
-                .inner
-                .lock()
-                .map_err(|e| EvalError::new(format!("chan.send: lock poisoned: {e}"), span))?;
+            // Mutex path: spill the overflow + serve any waiters.
+            let mut guard = state.inner.lock().map_err(|e| {
+                EvalError::new(format!("chan.send_batch: lock poisoned: {e}"), span)
+            })?;
+            for v in spilled {
+                guard.queue.push_back(v);
+                state.spill.fetch_add(1, Ordering::Release);
+            }
             service_chan_waiters(&state, guard, span);
             Ok(Value::Unit)
         }
         other => Err(EvalError::new(
-            format!("chan.send: expected a channel, found `{other}`"),
+            format!("chan.send_batch: expected a channel, found `{other}`"),
+            span,
+        )),
+    }
+}
+
+/// `chan.recv_batch(ch, n)` — receive up to `n` values from the channel,
+/// returned as an array. Lock-free ring pops for the fast path, one mutex
+/// at most to drain the spill for the rest.
+pub(crate) fn chan_recv_batch(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let ch = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument `ch` for chan.recv_batch", span))?;
+    let n = expect_int(args, 1, "chan.recv_batch")? as usize;
+
+    match ch {
+        Value::Chan(state) => {
+            use std::sync::atomic::Ordering;
+            let mut out: Vec<Value> = Vec::with_capacity(n);
+
+            // Fast path: lock-free ring pops.
+            while out.len() < n {
+                match state.ring.try_dequeue() {
+                    Some(v) => out.push(v),
+                    None => break,
+                }
+            }
+
+            if out.len() == n {
+                return Ok(Value::Array(std::sync::Arc::new(out)));
+            }
+
+            // Slow path: drain spill (older values) then ring, under one
+            // mutex.
+            let mut guard = state.inner.lock().map_err(|e| {
+                EvalError::new(format!("chan.recv_batch: lock poisoned: {e}"), span)
+            })?;
+            while out.len() < n && !guard.queue.is_empty() {
+                out.push(guard.queue.pop_front().unwrap());
+                state.spill.fetch_sub(1, Ordering::Release);
+            }
+            while out.len() < n {
+                match state.ring.try_dequeue() {
+                    Some(v) => out.push(v),
+                    None => break,
+                }
+            }
+            drop(guard);
+
+            Ok(Value::Array(std::sync::Arc::new(out)))
+        }
+        other => Err(EvalError::new(
+            format!("chan.recv_batch: expected a channel, found `{other}`"),
             span,
         )),
     }

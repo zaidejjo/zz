@@ -1276,7 +1276,9 @@ zz_value zz_encoding_hex_decode(zz_value s, int *err);
 zz_value zz_value_dup(zz_value v);
 zz_value zz_chan_new(zz_value unused, int *err);
 zz_value zz_chan_send(zz_value chan, zz_value val, int *err);
+zz_value zz_chan_send_batch(zz_value chan, zz_value arr, int *err);
 zz_value zz_chan_recv(zz_value chan, int *err);
+zz_value zz_chan_recv_batch(zz_value chan, zz_value n, int *err);
 zz_value zz_chan_try_recv(zz_value chan, int *err);
 zz_value zz_spawn(zz_value fn, int *err);
 // Spawn fast path for closure literals: builds the worker-owned rep

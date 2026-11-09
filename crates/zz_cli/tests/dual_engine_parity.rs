@@ -1451,6 +1451,11 @@ parity_strict!(
 );
 parity_strict!(parity_stdlib_channel_test, "stdlib", "channel_test.zz");
 parity_strict!(
+    parity_stdlib_concurrency_batch_test,
+    "stdlib",
+    "concurrency_batch_test.zz"
+);
+parity_strict!(
     parity_stdlib_concurrency_tasks_test,
     "stdlib",
     "concurrency_tasks_test.zz"
