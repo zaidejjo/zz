@@ -46,9 +46,9 @@ pub fn needs_recheck(
 
 // ── Per-file definition tracking ─────────────────────────────────────────
 
-/// Cached project-check result per file: content hash, seed version,
+/// Cached project-check result per file: content hash,
 /// published diagnostics.
-pub type ProjectCheckEntry = (u64, u32, Vec<Diagnostic>);
+pub type ProjectCheckEntry = (u64, Vec<Diagnostic>);
 
 /// Names of top-level definitions that a single file contributes to the
 /// global checker seed. Used to prune stale symbols on edit/close.

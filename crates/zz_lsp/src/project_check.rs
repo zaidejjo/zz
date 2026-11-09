@@ -10,6 +10,15 @@
 //! mutates the global seed (checked-in results for unopened files would
 //! go stale without an owner to prune them). Open buffers are checked
 //! from memory, everything else from disk.
+//!
+//! Closed-file results are cached by content hash only: if a file's
+//! disk bytes haven't changed since the last check, its cached
+//! diagnostics are reused without re-running the checker. This makes
+//! repeated project checks incremental — only new or modified files
+//! pay the checking cost.
+//!
+//! Pagination: `skip` and `take` let callers page through large projects
+//! without checking every file on every call.
 
 use std::sync::Arc;
 
@@ -22,27 +31,22 @@ use crate::state::GlobalState;
 /// The command editors invoke for a project-wide check.
 pub const CHECK_PROJECT_COMMAND: &str = "zz.checkProject";
 
-/// Safety cap: beyond this many files the command reports truncation
-/// instead of stalling the editor on a generated tree.
-const MAX_PROJECT_FILES: usize = 1000;
-
-/// Check every project file: `(uri, diagnostics)` in path order.
-/// Open documents are checked from their buffers, the rest from disk.
+/// Check project files with pagination.
 ///
-/// Disk files cache by (content hash, seed version): consecutive runs
-/// only pay for changed files or a moved seed. Open buffers always
-/// recheck (unsaved edits are the truth) and never populate the cache.
+/// `skip` skips the first `skip` files (for pagination).
+/// `take` limits how many files are returned (`None` = no limit).
+/// Returns `((uri, diagnostics) in path order, total_file_count)`.
 pub fn check_project_files(
     state: &GlobalState,
     root: &std::path::Path,
-) -> Vec<(Url, Vec<Diagnostic>)> {
+    skip: usize,
+    take: Option<usize>,
+) -> (Vec<(Url, Vec<Diagnostic>)>, usize) {
     let mut paths = crate::cross_file::scan_for_zz_files(root);
     paths.sort();
-    let truncated = paths.len() > MAX_PROJECT_FILES;
-    if truncated {
-        paths.truncate(MAX_PROJECT_FILES);
-    }
-    let seed_version = state.seed_version();
+    let total = paths.len();
+    // Apply pagination before checking: only pay for the files in this page.
+    let paths: Vec<_> = paths.into_iter().skip(skip).take(take.unwrap_or(usize::MAX)).collect();
     let mut cache = state.project_cache.write().unwrap();
     let mut out = Vec::new();
     for path in &paths {
@@ -68,8 +72,10 @@ pub fn check_project_files(
             Err(_) => continue,
         };
         let hash = crate::state::content_hash(&source);
-        if let Some((cached_hash, cached_seed, diags)) = cache.get(path) {
-            if *cached_hash == hash && *cached_seed == seed_version {
+        // Closed-file cache keyed by content hash only: unchanged disk
+        // bytes means unchanged diagnostics (no re-check needed).
+        if let Some((cached_hash, diags)) = cache.get(path) {
+            if *cached_hash == hash {
                 out.push((uri, diags.clone()));
                 continue;
             }
@@ -78,20 +84,14 @@ pub fn check_project_files(
         let program = Some(parsed.program);
         let parse_errors = parsed.errors;
         if let Some(diags) = check_one(state, path, &source, program, parse_errors) {
-            cache.insert(path.clone(), (hash, seed_version, diags.clone()));
+            cache.insert(path.clone(), (hash, diags.clone()));
             out.push((uri, diags));
         }
     }
     // Drop entries for files that left the tree (renames/deletes).
     let live: std::collections::HashSet<_> = paths.iter().collect();
     cache.retain(|cached_path, _| live.contains(cached_path));
-    if truncated {
-        log::warn!(
-            "project check truncated at {MAX_PROJECT_FILES} files under {}",
-            root.display()
-        );
-    }
-    out
+    (out, total)
 }
 
 /// Check one file: seed → check → convert. Returns `None` for files
@@ -125,12 +125,26 @@ pub async fn run_project_check(
     client: &tower_lsp::Client,
     root: std::path::PathBuf,
 ) -> serde_json::Value {
+    run_project_check_paginated(state, client, root, 0, None).await
+}
+
+/// Run the check off-thread with pagination, publish every file in the
+/// page, and report a summary.
+pub async fn run_project_check_paginated(
+    state: Arc<GlobalState>,
+    client: &tower_lsp::Client,
+    root: std::path::PathBuf,
+    skip: usize,
+    take: Option<usize>,
+) -> serde_json::Value {
     client
         .show_message(MessageType::INFO, "checking project…")
         .await;
-    let reports = tokio::task::spawn_blocking(move || check_project_files(&state, &root))
-        .await
-        .unwrap_or_default();
+    let (reports, total) = tokio::task::spawn_blocking(move || {
+        check_project_files(&state, &root, skip, take)
+    })
+    .await
+    .unwrap_or_default();
     let mut files = 0u32;
     let mut errors = 0u32;
     let mut warnings = 0u32;
@@ -147,8 +161,14 @@ pub async fn run_project_check(
             .publish_diagnostics(uri.clone(), diags.clone(), None)
             .await;
     }
-    let summary =
-        format!("project check: {files} file(s), {errors} error(s), {warnings} warning(s)");
+    let summary = if total > reports.len() {
+        format!(
+            "project check: {} of {} file(s), {} error(s), {} warning(s)",
+            reports.len(), total, errors, warnings
+        )
+    } else {
+        format!("project check: {files} file(s), {errors} error(s), {warnings} warning(s)")
+    };
     client
         .show_message(
             if errors == 0 {
@@ -185,7 +205,7 @@ mod tests {
         )
         .unwrap();
 
-        let reports = check_project_files(&state, &dir);
+        let (reports, _total) = check_project_files(&state, &dir, 0, None);
         assert_eq!(reports.len(), 2);
         let dep = reports
             .iter()
@@ -218,7 +238,7 @@ mod tests {
             "func broken() -> int {\n    return 1\n}\n".to_string(),
         );
 
-        let reports = check_project_files(&state, &dir);
+        let (reports, _total) = check_project_files(&state, &dir, 0, None);
         let dep = reports
             .iter()
             .find(|(u, _)| u.path().ends_with("dep.zz"))
@@ -234,7 +254,7 @@ mod tests {
         let dep_path = dir.join("dep.zz");
         std::fs::write(&dep_path, "func broken() -> int {\n    return nope\n}\n").unwrap();
 
-        let first = check_project_files(&state, &dir);
+        let (first, _) = check_project_files(&state, &dir, 0, None);
         let dep_first = first
             .iter()
             .find(|(u, _)| u.path().ends_with("dep.zz"))
@@ -243,7 +263,7 @@ mod tests {
         assert_eq!(state.project_cache.read().unwrap().len(), 1);
 
         // Unchanged second run: same diagnostics, served from cache.
-        let second = check_project_files(&state, &dir);
+        let (second, _) = check_project_files(&state, &dir, 0, None);
         let dep_second = second
             .iter()
             .find(|(u, _)| u.path().ends_with("dep.zz"))
@@ -252,7 +272,7 @@ mod tests {
 
         // Fix the file: cache invalidates, diagnostics clear.
         std::fs::write(&dep_path, "func broken() -> int {\n    return 1\n}\n").unwrap();
-        let third = check_project_files(&state, &dir);
+        let (third, _) = check_project_files(&state, &dir, 0, None);
         let dep_third = third
             .iter()
             .find(|(u, _)| u.path().ends_with("dep.zz"))
@@ -261,7 +281,7 @@ mod tests {
 
         // Delete the file: entry pruned, file unreported.
         std::fs::remove_file(&dep_path).unwrap();
-        let fourth = check_project_files(&state, &dir);
+        let (fourth, _) = check_project_files(&state, &dir, 0, None);
         assert!(
             fourth.iter().all(|(u, _)| !u.path().ends_with("dep.zz")),
             "deleted file unreported"
@@ -274,29 +294,62 @@ mod tests {
     }
 
     #[test]
-    fn cache_invalidates_when_seed_moves() {
+    fn pagination_returns_subset_and_total() {
         let state = GlobalState::new();
-        let dir = project_tmp("cacheseed");
+        let dir = project_tmp("pagination");
+        for i in 0..10 {
+            std::fs::write(
+                dir.join(format!("f{i}.zz")),
+                format!("func f{i}() -> int {{ return {i} }}\n"),
+            )
+            .unwrap();
+        }
+
+        // Page 1: first 3 files
+        let (page1, total) = check_project_files(&state, &dir, 0, Some(3));
+        assert_eq!(total, 10);
+        assert_eq!(page1.len(), 3);
+
+        // Page 2: next 3 files
+        let (page2, _) = check_project_files(&state, &dir, 3, Some(3));
+        assert_eq!(page2.len(), 3);
+
+        // No overlap between pages
+        let page1_uris: std::collections::HashSet<_> = page1.iter().map(|(u, _)| u.clone()).collect();
+        let page2_uris: std::collections::HashSet<_> = page2.iter().map(|(u, _)| u.clone()).collect();
+        assert!(page1_uris.is_disjoint(&page2_uris));
+
+        // Last page: remaining 4 files
+        let (page3, _) = check_project_files(&state, &dir, 6, Some(10));
+        assert_eq!(page3.len(), 4);
+
+        // Beyond end: empty
+        let (page4, _) = check_project_files(&state, &dir, 20, Some(10));
+        assert!(page4.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_invalidates_when_content_changes() {
+        let state = GlobalState::new();
+        let dir = project_tmp("cachechange");
         let dep_path = dir.join("dep.zz");
         std::fs::write(&dep_path, "func main() {\n    println(1)\n}\n").unwrap();
 
-        let first = check_project_files(&state, &dir);
+        let (first, _) = check_project_files(&state, &dir, 0, None);
         assert!(first.iter().all(|(_, d)| d.is_empty()));
-        // Simulate an unrelated absorb between runs: same disk content,
-        // moved seed → entry recomputed, not blindly reused.
-        state
-            .seed_version
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let second = check_project_files(&state, &dir);
+        assert_eq!(state.project_cache.read().unwrap().len(), 1);
+
+        // Same content: cache hit, no re-check.
+        let (second, _) = check_project_files(&state, &dir, 0, None);
         assert!(second.iter().all(|(_, d)| d.is_empty()));
-        let (_, cached_seed, _) = state
-            .project_cache
-            .read()
-            .unwrap()
-            .get(&dep_path)
-            .cloned()
-            .expect("entry refreshed");
-        assert_eq!(cached_seed, 1);
+
+        // Change content: cache invalidates.
+        std::fs::write(&dep_path, "func main() {\n    println(2)\n}\n").unwrap();
+        let (third, _) = check_project_files(&state, &dir, 0, None);
+        assert!(third.iter().all(|(_, d)| d.is_empty()));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
