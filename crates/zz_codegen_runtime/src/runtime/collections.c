@@ -321,6 +321,9 @@ void zz_array_push(zz_array *a, zz_value item) {
             || a->refs == ZZ_ARRAY_ARENA_MAGIC || a->items == NULL) {
             zz_value *new_items = (zz_value *)malloc(nc * sizeof(zz_value));
             for (size_t i = 0; i < a->len; i++) new_items[i] = a->items[i];
+            // Free the previous heap-backed items buffer, if any, to avoid
+            // leaking on every grow of a migrated arena/stack/lit array.
+            if (a->items != NULL) free(a->items);
             a->items = new_items;
             // Preserve an accurate `refs == 1` (fresh heap array claiming
             // its first buffer): it proves single ownership, which the
@@ -1174,13 +1177,37 @@ void zz_object_set_field(zz_value *obj, const char *name, zz_value val) {
 static int zz_object_get_depth(const zz_value *obj, const char *name, int depth, zz_value *out) {
     if (!obj || obj->tag != ZZ_OBJECT || !obj->obj) return 0;
     const zz_object *o = obj->obj;
+    // Single-entry cache for repeated field lookups on the same type.
+    // `name` and `o->type_name` are both pointer-stable C strings, so
+    // pointer comparison is valid. Hot paths like `rows[i].val` hit the
+    // cache on every access after the first, turning O(fields)·strcmp
+    // into O(1).
+    static const char *cached_type = NULL;
+    static const char *cached_name = NULL;
+    static size_t cached_index = 0;
+    static int cached_found = 0;
+    if (o->type_name == cached_type && name == cached_name) {
+        if (cached_found) {
+            *out = zz_clone(o->fields[cached_index * 2 + 1]);
+            return 1;
+        }
+        return 0;
+    }
     for (size_t i = 0; i < o->len; i++) {
         const zz_value *fname = &o->fields[i * 2];
         if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), name) == 0) {
+            cached_type = o->type_name;
+            cached_name = name;
+            cached_index = i;
+            cached_found = 1;
             *out = zz_clone(o->fields[i * 2 + 1]);
             return 1;
         }
     }
+    cached_type = o->type_name;
+    cached_name = name;
+    cached_index = 0;
+    cached_found = 0;
     // Embedded promotion: `u.id` reads `u.Base.id` transitively.
     if (depth < ZZ_EMBED_MAX_DEPTH) {
         for (size_t i = 0; i < o->len; i++) {
@@ -1408,6 +1435,8 @@ zz_value zz_vec_push(zz_value arr, zz_value item, int *err) {
             for (size_t i = 0; i < a->len; i++) {
                 new_items[i] = a->items[i];
             }
+            // Free the previous heap-backed items buffer, if any.
+            if (a->items != NULL) free(a->items);
             a->items = new_items;
             // Preserve `refs == 1` (see `zz_array_push`): dup results stay
             // provably single-owner, so a later move-aware push can go
