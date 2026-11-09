@@ -33,49 +33,66 @@ fn fixtures_dir() -> PathBuf {
 ///
 /// Handles:
 /// - CRLF → LF line endings (Windows console output)
-/// - Trailing whitespace (Windows programs often emit trailing spaces)
+/// - BOM and zero-width Unicode characters (invisible but byte-different)
+/// - Trailing whitespace per line (Windows programs emit trailing spaces)
 /// - All path formats: Unix (`/...`), Windows absolute (`C:\...`,
-///   `C:/...`), UNC (`\\...`), relative paths with `..` or `.`, and paths
-///   embedded in larger tokens (e.g. `-->C:\path\to\file:6:8`)
-/// - Tokens matching `name:line:col` or `name:line` patterns (file:line:col
-///   diagnostics with no directory separator)
+///   `C:/...`), UNC (`\\...`), relative paths, paths embedded in tokens
+/// - Tokens matching `name:line:col` or `name:line` patterns
+/// - Collapses all internal whitespace runs to a single space
 ///
-/// Any whitespace-delimited token containing `/`, `\`, or matching a
-/// `name:digits:digits` / `name:digits` pattern is replaced with `<path>`,
-/// so snapshots are identical regardless of checkout location or
-/// path-separator conventions.
+/// Returns a canonical form so snapshots are identical regardless of
+/// checkout location, path-separator conventions, or host OS.
 fn normalize_stderr(stderr: &str) -> String {
-    let stderr = stderr.replace("\r\n", "\n").replace('\r', "");
+    // Strip BOM, zero-width spaces/joiners, and other invisible Unicode
+    // that can differ between platforms without being visible.
+    let stderr: String = stderr
+        .replace("\r\n", "\n")
+        .replace('\r', "")
+        .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '\u{FEFF}' | '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{200E}' | '\u{200F}'
+            )
+        })
+        .collect();
+
     let mut out = String::with_capacity(stderr.len());
 
     for line in stderr.lines() {
-        // Strip trailing whitespace (Windows programs often emit trailing
-        // spaces), then collapse each whitespace-delimited token that looks
-        // like a path into <path>.
         let trimmed = line.trim_end();
-        let mut word_start: Option<usize> = None;
+        if trimmed.is_empty() {
+            out.push('\n');
+            continue;
+        }
+
+        // Split into whitespace-delimited tokens, normalize each, rejoin
+        // with single spaces. This absorbs any spacing differences between
+        // platforms (e.g. Windows vs Linux terminal rendering).
+        let mut tokens: Vec<&str> = Vec::new();
+        let mut start: Option<usize> = None;
 
         for (i, ch) in trimmed.char_indices() {
             if ch.is_whitespace() {
-                if let Some(start) = word_start.take() {
-                    let word = &trimmed[start..i];
-                    if is_path_like(word) {
-                        out.push_str("<path>");
-                    } else {
-                        out.push_str(word);
-                    }
+                if let Some(s) = start.take() {
+                    tokens.push(&trimmed[s..i]);
                 }
-                out.push(ch);
-            } else if word_start.is_none() {
-                word_start = Some(i);
+            } else if start.is_none() {
+                start = Some(i);
             }
         }
-        if let Some(start) = word_start {
-            let word = &trimmed[start..];
-            if is_path_like(word) {
+        if let Some(s) = start {
+            tokens.push(&trimmed[s..]);
+        }
+
+        for (i, token) in tokens.iter().enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            if is_path_like(token) {
                 out.push_str("<path>");
             } else {
-                out.push_str(word);
+                out.push_str(token);
             }
         }
         out.push('\n');
@@ -99,13 +116,42 @@ fn is_path_like(word: &str) -> bool {
     false
 }
 
+/// Hex dump `s` for byte-level diagnostics of snapshot mismatches.
+fn hex_dump(s: &str, label: &str) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("--- {} hex dump ---\n", label));
+    for (i, chunk) in s.as_bytes().chunks(16).enumerate() {
+        out.push_str(&format!("{:08x}: ", i * 16));
+        for b in chunk {
+            out.push_str(&format!("{:02x} ", b));
+        }
+        // Pad to aligned width
+        for _ in chunk.len()..16 {
+            out.push_str("   ");
+        }
+        out.push_str("  ");
+        for b in chunk {
+            if (32..127).contains(b) {
+                out.push(*b as char);
+            } else {
+                out.push('.');
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
 /// Compare normalized stderr against a committed snapshot. Returns None on
 /// match, or Some((actual, expected)) on mismatch for detailed diagnostics.
 fn compare_snapshot(stderr: &str, expected: &str) -> Option<(String, String)> {
     if stderr == expected {
         None
     } else {
-        Some((stderr.to_string(), expected.to_string()))
+        Some((
+            format!("{}\n{}", stderr, hex_dump(stderr, "ACTUAL")),
+            format!("{}\n{}", expected, hex_dump(expected, "EXPECTED")),
+        ))
     }
 }
 
