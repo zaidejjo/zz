@@ -1,0 +1,15 @@
+// features: dicts, loops, fstrings, string-concat
+// E2E: edge — a heap-string dict value created inside a loop must survive
+// the loop-arena reset and the string-header slab recycle. The heap dict's
+// entry slot used to be left uninitialized, so `zz_assign` released a stale
+// refcounted tag and freed the live value (corruption after ~1k iterations).
+i := 0
+while i < 1500 {
+    d := {"k": "a" + "b"}
+    e := {"k": "c" + "d"}
+    if i % 1000 == 0 {
+        println("i={i} d={d} e={e}")
+    }
+    i = i + 1
+}
+println("edge_dict_loop_heap_str_ok")

@@ -1085,6 +1085,13 @@ parity_strict!(
     "regression",
     "edge_dict_alias.zz"
 );
+// Loop-arena heap-string dict values: the heap dict entry must be zeroed
+// before `zz_assign` releases by tag (slab recycle used to corrupt it).
+parity_strict!(
+    parity_regression_edge_dict_loop_heap_str,
+    "regression",
+    "edge_dict_loop_heap_str.zz"
+);
 // Loop-iteration snapshot (cond-1): push / index-write / rebind inside
 // the body must not affect the visited elements or trip count.
 // VM ground truth: 3/60/4/99, 3/60/200, 3/60/2/7/8.

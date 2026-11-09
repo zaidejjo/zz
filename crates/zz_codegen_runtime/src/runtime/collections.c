@@ -684,6 +684,11 @@ zz_value zz_dict_new_arena_sized(zz_arena *arena, size_t hint) {
         if (hint > 0) {
             d->cap = hint;
             d->entries = (zz_dict_entry *)malloc(hint * sizeof(zz_dict_entry));
+            // Zero the slots: `zz_dict_set` releases `entry->val` through
+            // `zz_assign`, which reads the tag. Uninitialized slots could
+            // carry a stale refcounted tag/pointer from a recycled block
+            // and free a live string (heap corruption).
+            memset(d->entries, 0, hint * sizeof(zz_dict_entry));
         }
         // Literals and dict copies know their size up front: allocate the
         // index now so the inserts never rebuild it.
@@ -871,7 +876,11 @@ void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
             return;
         }
         size_t nc = d->cap == 0 ? 4 : d->cap * 2;
+        size_t old_cap = d->cap;
         d->entries = (zz_dict_entry *)realloc(d->entries, nc * sizeof(zz_dict_entry));
+        // `realloc` leaves the new tail uninitialized; zero it before the
+        // slot is handed to `zz_assign`, which releases by tag.
+        memset(&d->entries[old_cap], 0, (nc - old_cap) * sizeof(zz_dict_entry));
         d->cap = nc;
     }
     zz_dict_entry *e = &d->entries[d->len++];
