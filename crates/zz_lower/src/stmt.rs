@@ -1268,7 +1268,7 @@ impl Lowerer {
                             // copies in the unique case.
                             let func = names.current_scope.clone();
                             out.push_str(&format!(
-                                "    {{ int _e = 0; zz_value _si = {i_boxed}; zz_index_set(&{home}, _si, {boxed_val}, &_e);\n"
+                                "    {{ int _e = 0; zz_value _si __attribute__((cleanup(zz_release))) = {i_boxed}; zz_index_set(&{home}, _si, {boxed_val}, &_e);\n"
                             ));
                             out.push_str(&format!(
                                 "      if (_e) {{ zz_index_trap({home}, _si, \"{func}\"); }} }}\n"
@@ -1283,7 +1283,7 @@ impl Lowerer {
                             let wb = names.fresh("_wbs");
                             let func = names.current_scope.clone();
                             out.push_str(&format!(
-                                "    {{ int _e = 0; zz_value {wb} = zz_clone({o}); zz_value _si = {i_boxed};\n"
+                                "    {{ int _e = 0; zz_value {wb} = zz_clone({o}); zz_value _si __attribute__((cleanup(zz_release))) = {i_boxed};\n"
                             ));
                             out.push_str(&format!(
                                 "      zz_index_set(&{wb}, _si, {boxed_val}, &_e);\n"

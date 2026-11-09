@@ -1469,7 +1469,9 @@ impl Lowerer {
                 let itmp = names.fresh("_idxi");
                 let func = names.current_scope.clone();
                 out.push_str(&format!("    zz_value {otmp} = {o};\n"));
-                out.push_str(&format!("    zz_value {itmp} = {i_boxed};\n"));
+                out.push_str(&format!(
+                    "    zz_value {itmp} __attribute__((cleanup(zz_release))) = {i_boxed};\n"
+                ));
                 out.push_str(&format!("    int {err_tmp} = 0;\n"));
                 out.push_str(&format!(
                     "    zz_value {tmp} = zz_index_get({otmp}, {itmp}, &{err_tmp});\n"
@@ -1825,12 +1827,12 @@ impl Lowerer {
                 }
                 let fvar = format!("__fmt{}", names.counter);
                 names.counter += 1;
-                out.push_str(&format!("    zz_value {fvar} = zz_str_static(\"\");\n"));
+                out.push_str(&format!("    zz_value {fvar} __attribute__((cleanup(zz_release))) = zz_str_static(\"\");\n"));
                 for part in parts {
                     match part {
                         zz_frontend::ast::FmtPart::Text(value) => {
                             let lit = self.emit_str_literal(value);
-                            out.push_str(&format!("    {{ zz_value _r = zz_to_str({lit}, &(int){{0}}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
+                            out.push_str(&format!("    {{ zz_value _r __attribute__((cleanup(zz_release))) = zz_to_str({lit}, &(int){{0}}); zz_release(&{fvar}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
                         }
                         zz_frontend::ast::FmtPart::Expr(expr, spec) => {
                             let val = self.emit_expr(expr, names, out);
@@ -1847,9 +1849,9 @@ impl Lowerer {
                             };
                             if let Some(ref s) = spec {
                                 let spec_str = format!("\"{}\"", Self::c_escape(s));
-                                out.push_str(&format!("    {{ zz_value _r = zz_str_owned(zz_to_str_fmt({val}, {spec_str})); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
+                                out.push_str(&format!("    {{ zz_value _r __attribute__((cleanup(zz_release))) = zz_str_owned(zz_to_str_fmt({val}, {spec_str})); zz_release(&{fvar}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
                             } else {
-                                out.push_str(&format!("    {{ zz_value _r = zz_to_str({val}, &(int){{0}}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
+                                out.push_str(&format!("    {{ zz_value _r __attribute__((cleanup(zz_release))) = zz_to_str({val}, &(int){{0}}); zz_release(&{fvar}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
                             }
                         }
                     }
