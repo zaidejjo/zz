@@ -1,6 +1,8 @@
 //! Statement lowering: let bindings, assignments, if/else, match, loops,
 //! returns, and defer.
 
+use std::collections::HashMap;
+
 use zz_frontend::ast::{Block, Expr, FmtPart, Pattern, Stmt, Ty, TyKind};
 
 use super::*;
@@ -2982,12 +2984,263 @@ impl Lowerer {
         // block/closure bodies recompute their own set; restore ours after.
         let outer_flat = std::mem::take(&mut names.flat_locals);
         names.flat_locals = self.body_flat_locals(block);
+        // Dead-variable release: after a variable's last top-level use,
+        // emit `zz_release` to free refcounted containers (arrays, dicts,
+        // strings) early instead of holding them to end of scope. This cuts
+        // peak RSS on programs that build large intermediate containers
+        // (e.g. closure_chain: `nums` released after `map`, `doubled`
+        // released after `filter`). Only releases variables whose last use
+        // is top-level and that are not used again inside a later nested
+        // block (loops/if arms), so it is conservative and correct.
+        let (last_top_level, max_nested) = self.compute_last_uses(block);
         let n = block.stmts.len();
         for (i, stmt) in block.stmts.iter().enumerate() {
             let is_tail = tail_value && i == n - 1;
             self.emit_stmt(stmt, names, out, is_tail);
+            self.emit_dead_releases(i, &last_top_level, &max_nested, names, out);
         }
         names.flat_locals = outer_flat;
+    }
+
+    // ── Dead-variable release analysis ──────────────────────────────
+
+    /// Compute, for every variable, (a) the index of the last top-level
+    /// statement that reads it, and (b) the maximum statement index at
+    /// which it is read inside a nested block (loop body, if arm, match
+    /// arm, closure body). A variable is releasable after statement `i`
+    /// when its last top-level use is `i` and it has no nested-block use
+    /// at an index greater than `i`.
+    fn compute_last_uses(&self, block: &Block) -> (HashMap<String, usize>, HashMap<String, usize>) {
+        let mut last_top_level: HashMap<String, usize> = HashMap::new();
+        let mut max_nested: HashMap<String, usize> = HashMap::new();
+        for (i, stmt) in block.stmts.iter().enumerate() {
+            self.collect_stmt_uses(stmt, i, &mut last_top_level, &mut max_nested);
+        }
+        (last_top_level, max_nested)
+    }
+
+    /// Walk one top-level statement, recording `Expr::Ident` reads. The
+    /// statement's own expressions are top-level (`in_nested=false`);
+    /// nested blocks (loop bodies, if arms, closure bodies) are walked
+    /// with `in_nested=true`.
+    fn collect_stmt_uses(
+        &self,
+        stmt: &Stmt,
+        index: usize,
+        last_top_level: &mut HashMap<String, usize>,
+        max_nested: &mut HashMap<String, usize>,
+    ) {
+        match stmt {
+            Stmt::Decl { value, .. } => {
+                self.collect_expr_uses(value, index, false, last_top_level, max_nested);
+            }
+            Stmt::Assign { target, value, .. } => {
+                self.collect_expr_uses(target, index, false, last_top_level, max_nested);
+                self.collect_expr_uses(value, index, false, last_top_level, max_nested);
+            }
+            Stmt::CompoundAssign { target, value, .. } => {
+                self.collect_expr_uses(target, index, false, last_top_level, max_nested);
+                self.collect_expr_uses(value, index, false, last_top_level, max_nested);
+            }
+            Stmt::For { iter, body, .. } => {
+                self.collect_expr_uses(iter, index, false, last_top_level, max_nested);
+                self.collect_block_uses(body, index, last_top_level, max_nested);
+            }
+            Stmt::Expr(expr) => {
+                self.collect_expr_uses(expr, index, false, last_top_level, max_nested);
+            }
+            Stmt::Return { value, .. } => {
+                if let Some(v) = value {
+                    self.collect_expr_uses(v, index, false, last_top_level, max_nested);
+                }
+            }
+            Stmt::Defer { expr, .. } => {
+                self.collect_expr_uses(expr, index, false, last_top_level, max_nested);
+            }
+            Stmt::Func { body, .. } => {
+                self.collect_block_uses(body, index, last_top_level, max_nested);
+            }
+            Stmt::Impl { methods, .. } => {
+                for m in methods {
+                    self.collect_stmt_uses(m, index, last_top_level, max_nested);
+                }
+            }
+            Stmt::Destructure { value, .. } => {
+                self.collect_expr_uses(value, index, false, last_top_level, max_nested);
+            }
+            Stmt::Import { .. }
+            | Stmt::Struct { .. }
+            | Stmt::TypeAlias { .. }
+            | Stmt::Enum { .. }
+            | Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::ExternBlock { .. }
+            | Stmt::Link { .. } => {}
+        }
+    }
+
+    /// Walk a block (always a nested context) and record all ident reads.
+    fn collect_block_uses(
+        &self,
+        block: &Block,
+        index: usize,
+        last_top_level: &mut HashMap<String, usize>,
+        max_nested: &mut HashMap<String, usize>,
+    ) {
+        for stmt in &block.stmts {
+            self.collect_stmt_uses(stmt, index, last_top_level, max_nested);
+        }
+    }
+
+    /// Walk one expression, recording `Expr::Ident` reads. `in_nested`
+    /// selects whether reads go into `max_nested` (true) or
+    /// `last_top_level` (false). Closure bodies are treated as nested
+    /// (captured variables stay alive via the closure).
+    fn collect_expr_uses(
+        &self,
+        expr: &Expr,
+        index: usize,
+        in_nested: bool,
+        last_top_level: &mut HashMap<String, usize>,
+        max_nested: &mut HashMap<String, usize>,
+    ) {
+        match expr {
+            Expr::Ident { name, .. } => {
+                if in_nested {
+                    max_nested
+                        .entry(name.clone())
+                        .and_modify(|v| *v = (*v).max(index))
+                        .or_insert(index);
+                } else {
+                    last_top_level
+                        .entry(name.clone())
+                        .and_modify(|v| *v = (*v).max(index))
+                        .or_insert(index);
+                }
+            }
+            Expr::Block(block) => {
+                self.collect_block_uses(block, index, last_top_level, max_nested);
+            }
+            Expr::Call {
+                callee,
+                args,
+                named,
+                ..
+            } => {
+                self.collect_expr_uses(callee, index, in_nested, last_top_level, max_nested);
+                for a in args {
+                    self.collect_expr_uses(a, index, in_nested, last_top_level, max_nested);
+                }
+                for (_, v) in named {
+                    self.collect_expr_uses(v, index, in_nested, last_top_level, max_nested);
+                }
+            }
+            Expr::Closure { body, .. } => {
+                self.collect_expr_uses(body, index, true, last_top_level, max_nested);
+            }
+            Expr::If {
+                cond, then, els, ..
+            } => {
+                self.collect_expr_uses(cond, index, false, last_top_level, max_nested);
+                self.collect_block_uses(then, index, last_top_level, max_nested);
+                if let Some(e) = els {
+                    self.collect_expr_uses(e, index, false, last_top_level, max_nested);
+                }
+            }
+            Expr::While { cond, body, .. } => {
+                self.collect_expr_uses(cond, index, false, last_top_level, max_nested);
+                self.collect_block_uses(body, index, last_top_level, max_nested);
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                self.collect_expr_uses(scrutinee, index, false, last_top_level, max_nested);
+                for arm in arms {
+                    self.collect_expr_uses(&arm.body, index, true, last_top_level, max_nested);
+                    if let Some(g) = &arm.guard {
+                        self.collect_expr_uses(g, index, true, last_top_level, max_nested);
+                    }
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                self.collect_expr_uses(left, index, in_nested, last_top_level, max_nested);
+                self.collect_expr_uses(right, index, in_nested, last_top_level, max_nested);
+            }
+            Expr::Unary { expr, .. } => {
+                self.collect_expr_uses(expr, index, in_nested, last_top_level, max_nested);
+            }
+            Expr::Index {
+                obj, index: idx, ..
+            } => {
+                self.collect_expr_uses(obj, index, in_nested, last_top_level, max_nested);
+                self.collect_expr_uses(idx, index, in_nested, last_top_level, max_nested);
+            }
+            Expr::Field { obj, .. } => {
+                self.collect_expr_uses(obj, index, in_nested, last_top_level, max_nested);
+            }
+            Expr::Array { elems, .. } => {
+                for e in elems {
+                    self.collect_expr_uses(e, index, in_nested, last_top_level, max_nested);
+                }
+            }
+            Expr::Dict { entries, .. } => {
+                for (k, v) in entries {
+                    self.collect_expr_uses(k, index, in_nested, last_top_level, max_nested);
+                    self.collect_expr_uses(v, index, in_nested, last_top_level, max_nested);
+                }
+            }
+            Expr::Paren { expr, .. } => {
+                self.collect_expr_uses(expr, index, in_nested, last_top_level, max_nested);
+            }
+            Expr::Int { .. }
+            | Expr::Float { .. }
+            | Expr::Bool { .. }
+            | Expr::Str { .. }
+            | Expr::Fmt { .. }
+            | Expr::Try { .. } => {}
+            _ => {}
+        }
+    }
+
+    /// After emitting statement `i`, release any variable whose last
+    /// top-level use was `i` and that is not used inside a later nested
+    /// block. Only refcounted bindings (arrays, dicts, strings, objects)
+    /// are released; scalars and captured variables (cell derefs) are not.
+    fn emit_dead_releases(
+        &self,
+        index: usize,
+        last_top_level: &HashMap<String, usize>,
+        max_nested: &HashMap<String, usize>,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) {
+        for (name, &last_i) in last_top_level.iter() {
+            if last_i != index {
+                continue;
+            }
+            // Not used in a nested block after this statement → safe to release.
+            if max_nested.get(name).is_some_and(|&m| m > index) {
+                continue;
+            }
+            let Some(cid) = names.lookup(name) else {
+                continue;
+            };
+            // Skip captured variables (cell derefs like `(*_cellN)`) — they
+            // are owned by closures, not by this scope.
+            if cid.starts_with('(') || cid.starts_with('*') {
+                continue;
+            }
+            let Some(ty) = names.lookup_type(name) else {
+                continue;
+            };
+            // Only boxed refcounted values (C type `zz_value`) need
+            // releasing. Scalars (int64_t/double/bool) and raw structs
+            // (zz_struct_*) are Copy and must not be released.
+            if ty != "zz_value" {
+                continue;
+            }
+            out.push_str(&format!("    zz_release(&{});\n", cid));
+        }
     }
 
     /// The last statement of a function body — if it's an expression, that
