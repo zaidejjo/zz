@@ -125,6 +125,69 @@ fn scalar_lane(v: &Value) -> Option<ScalarLane> {
     }
 }
 
+/// Adaptive LSD radix sort for the homogeneous `[int]` lane. Integers sort
+/// in O(n) with a radix pass, and values that occupy a few bytes (ids,
+/// counts, the benchmark's `seed % 100000`) only pay for the passes they
+/// need. Equal ints are indistinguishable, so LSD stability is not
+/// observable and the output matches `sort_unstable` exactly — and the AOT
+/// C twin's `zz_sort_i64`, keeping VM/native parity. Small slices stay on
+/// `sort_unstable`, which is faster once the fixed 256-bucket setup
+/// dominates.
+fn radix_sort_i64(keys: &mut [i64]) {
+    let n = keys.len();
+    if n < 2 {
+        return;
+    }
+    if n < 128 {
+        keys.sort_unstable();
+        return;
+    }
+    // Flip the sign bit so unsigned digit order equals signed value order.
+    for k in keys.iter_mut() {
+        *k ^= i64::MIN;
+    }
+    let mut mn = u64::MAX;
+    let mut mx = 0u64;
+    for &k in keys.iter() {
+        let u = k as u64;
+        mn = mn.min(u);
+        mx = mx.max(u);
+    }
+    // Only the bits where the values actually differ need a pass.
+    let diff = mn ^ mx;
+    let bits = if diff == 0 {
+        0
+    } else {
+        (u64::BITS - diff.leading_zeros()) as usize
+    };
+    let passes = bits.div_ceil(8);
+    if passes > 0 {
+        let mut tmp = vec![0i64; n];
+        for p in 0..passes {
+            let shift = p * 8;
+            let mut cnt = [0usize; 256];
+            for &k in keys.iter() {
+                cnt[((k as u64) >> shift) as usize & 0xFF] += 1;
+            }
+            let mut sum = 0usize;
+            for c in cnt.iter_mut() {
+                let cur = *c;
+                *c = sum;
+                sum += cur;
+            }
+            for &k in keys.iter() {
+                let d = ((k as u64) >> shift) as usize & 0xFF;
+                tmp[cnt[d]] = k;
+                cnt[d] += 1;
+            }
+            keys.copy_from_slice(&tmp);
+        }
+    }
+    for k in keys.iter_mut() {
+        *k ^= i64::MIN;
+    }
+}
+
 pub(crate) fn vec_sort(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
@@ -150,7 +213,7 @@ pub(crate) fn vec_sort(
                         Value::Int(i) => Some(*i),
                         _ => None,
                     }));
-                    keys.sort_unstable();
+                    radix_sort_i64(&mut keys);
                     for (slot, key) in vs.iter_mut().zip(keys) {
                         *slot = Value::Int(key);
                     }
@@ -329,4 +392,70 @@ pub(crate) fn vec_remove(
     }
     vs.remove(idx as usize);
     Ok(Value::Array(std::sync::Arc::new(vs)))
+}
+
+#[cfg(test)]
+mod radix_tests {
+    use super::radix_sort_i64;
+
+    /// Deterministic LCG so the test exercises the same distribution the
+    /// benchmark does (many duplicates, 17-bit range) without a rand dep.
+    fn lcg_ints(n: usize, modulus: i64) -> Vec<i64> {
+        let mut seed: u32 = 12345;
+        (0..n)
+            .map(|_| {
+                seed = seed.wrapping_mul(1103515245).wrapping_add(12345) % 2147483648;
+                (seed as i64) % modulus
+            })
+            .collect()
+    }
+
+    fn assert_sorted_eq(got: &[i64], want: &[i64]) {
+        let mut want = want.to_vec();
+        want.sort_unstable();
+        assert_eq!(got, want.as_slice());
+    }
+
+    #[test]
+    fn radix_matches_sort_unstable_on_lcg_data() {
+        let mut keys = lcg_ints(100_000, 100_000);
+        let expected = keys.clone();
+        radix_sort_i64(&mut keys);
+        assert_sorted_eq(&keys, &expected);
+    }
+
+    #[test]
+    fn radix_handles_negatives_and_full_range() {
+        let mut keys = lcg_ints(20_000, 2_000_000_000);
+        for (i, k) in keys.iter_mut().enumerate() {
+            if i % 2 == 0 {
+                *k = -*k;
+            }
+        }
+        let expected = keys.clone();
+        radix_sort_i64(&mut keys);
+        assert_sorted_eq(&keys, &expected);
+
+        // Full 64-bit range (8 passes).
+        let mut wide = vec![i64::MIN, i64::MAX, 0, -1, 1, i64::MIN + 1, i64::MAX - 1];
+        let expected = wide.clone();
+        radix_sort_i64(&mut wide);
+        assert_sorted_eq(&wide, &expected);
+    }
+
+    #[test]
+    fn radix_handles_edge_sizes() {
+        for mut keys in [
+            vec![],
+            vec![42],
+            vec![7, 7, 7, 7],
+            vec![5, 4, 3, 2, 1],
+            vec![1, 2, 3, 4, 5],
+            vec![127; 200],
+        ] {
+            let expected = keys.clone();
+            radix_sort_i64(&mut keys);
+            assert_sorted_eq(&keys, &expected);
+        }
+    }
 }

@@ -2294,7 +2294,10 @@ impl Lowerer {
                             out.push_str(&format!("    {ederef} = {ev_unboxed};\n"));
                             ederef
                         });
-                    format!("for ({cid} = {sv_unboxed}; {cid} < {end_ref}; {cid}++, ptr += 1) {{\n")
+                    // Green loops never use the flat-array `ptr` walk
+                    // (`ptr_store` is `None` for green, see line 2097), so
+                    // the increment never touches `ptr`.
+                    format!("for ({cid} = {sv_unboxed}; {cid} < {end_ref}; {cid}++) {{\n")
                 } else {
                     if let Some((ref _arr_cid, ref _elem_ctype)) = ptr_store {
                         format!(
