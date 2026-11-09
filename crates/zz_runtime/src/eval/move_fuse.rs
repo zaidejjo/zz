@@ -340,19 +340,36 @@ impl Interp {
                 match self.eval(a) {
                     Ok(f) => arg_vals.push(f.into_value()?),
                     Err(e) => {
-                        restore(self, var, taken_opt.take().expect("move target kept"))?;
+                        // Restore the taken value: either still in taken_opt,
+                        // or already moved into arg_vals[at].
+                        if let Some(val) = taken_opt.take() {
+                            restore(self, var, val)?;
+                        } else {
+                            restore(self, var, arg_vals.remove(at))?;
+                        }
                         return Err(e);
                     }
                 }
             }
         }
+        // If the taken value was already moved into arg_vals[at], keep a
+        // clone for error restoration before call() consumes arg_vals.
+        let restore_val = if taken_opt.is_none() {
+            Some(arg_vals[at].clone())
+        } else {
+            None
+        };
         match self.call(callee_val, arg_vals, value.span()) {
             Ok(v) => {
                 restore(self, var, v)?;
                 Ok(true)
             }
             Err(e) => {
-                restore(self, var, taken_opt.take().expect("move target kept"))?;
+                if let Some(val) = taken_opt.take() {
+                    restore(self, var, val)?;
+                } else if let Some(val) = restore_val {
+                    restore(self, var, val)?;
+                }
                 Err(e)
             }
         }
