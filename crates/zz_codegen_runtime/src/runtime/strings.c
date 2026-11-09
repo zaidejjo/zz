@@ -1896,7 +1896,35 @@ zz_value zz_str_replace(zz_value s, zz_value old_s, zz_value new_s, int *err) {
     size_t old_len = old_s.s->len;
     const char *new_str = zz_str_ptr(new_s.s);
     size_t new_len = new_s.s->len;
-    if (old_len == 0) return zz_clone(s);
+    if (old_len == 0) {
+        // Rust str::replace("", new): insert new before each char and at
+        // the end.  Count UTF-8 characters first (char count, not bytes).
+        size_t nchars = 0;
+        size_t i = 0;
+        while (i < src_len) {
+            size_t slen;
+            (void)zz_utf8_decode((const unsigned char *)(src + i), src_len - i, &slen);
+            i += slen;
+            nchars++;
+        }
+        size_t out_len = (nchars + 1) * new_len + src_len;
+        zz_str *out = str_alloc(out_len);
+        char *w = zz_str_ptr(out);
+        i = 0;
+        while (i < src_len) {
+            size_t slen;
+            (void)zz_utf8_decode((const unsigned char *)(src + i), src_len - i, &slen);
+            memcpy(w, new_str, new_len);
+            w += new_len;
+            memcpy(w, src + i, slen);
+            w += slen;
+            i += slen;
+        }
+        memcpy(w, new_str, new_len);
+        w += new_len;
+        w[0] = '\0';
+        return (zz_value){ZZ_STR, {.s = out}};
+    }
     // Count occurrences.
     size_t count = 0;
     for (size_t i = 0; i + old_len <= src_len; i++) {
