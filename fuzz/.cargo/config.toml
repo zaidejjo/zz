@@ -1,0 +1,2 @@
+[target.'cfg(fuzz)']
+rustflags = ["-C", "instrument-coverage"]
