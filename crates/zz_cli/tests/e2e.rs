@@ -592,6 +592,11 @@ e2e_success_test!(
     "edge_dict_alias.zz"
 );
 e2e_success_test!(
+    e2e_regression_edge_dict_loop_heap_str,
+    "regression",
+    "edge_dict_loop_heap_str.zz"
+);
+e2e_success_test!(
     e2e_regression_edge_temp_index_drop,
     "regression",
     "edge_temp_index_drop.zz"
