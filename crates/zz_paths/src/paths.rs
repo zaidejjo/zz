@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use crate::pathsafe::escapes_root;
+
 // Thread-local: `ENV_OVERRIDES` maps a variable name to an optional value
 // (`Some(None)` = explicitly unset).
 thread_local! {
@@ -175,8 +177,16 @@ pub fn known_projects_path() -> PathBuf {
 ///
 /// Returns `~/.zz/packages/<hash>` — the directory where extracted
 /// source content lives after fetching into the CAS.
+///
+/// Rejects hashes containing path-escaping components (`..`, absolute
+/// paths, Windows prefixes) to prevent directory traversal. Such hashes
+/// are redirected to a safe "blocked" entry under the packages dir.
 pub fn cas_entry(hash: &str) -> PathBuf {
-    packages_dir().join(hash)
+    let path = packages_dir().join(hash);
+    if escapes_root(path.as_path()) {
+        return packages_dir().join("blocked");
+    }
+    path
 }
 
 /// `(entries, bytes)` under `dir`, best effort: unreadable subtrees count

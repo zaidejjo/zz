@@ -346,8 +346,7 @@ impl Lowerer {
                             }
                             let boxed_v = box_scalar_operand(inner, names, &v);
                             if let Some(ref s) = spec {
-                                let spec_str =
-                                    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+                                let spec_str = format!("\"{}\"", Self::c_escape(s));
                                 out.push_str(&format!(
                                     "    {{ zz_value _r = zz_str_owned(zz_to_str_fmt({boxed_v}, {spec_str})); zz_str_append_mut_str(&{fvar}, _r); zz_release(&_r); }}\n"
                                 ));
@@ -1445,7 +1444,8 @@ impl Lowerer {
                     "    zz_value {tmp} = zz_index_get({otmp}, {itmp}, &{err_tmp});\n"
                 ));
                 out.push_str(&format!(
-                    "    if ({err_tmp}) {{ zz_index_trap({otmp}, {itmp}, \"{func}\"); }}\n"
+                    "    if ({err_tmp}) {{ zz_index_trap({otmp}, {itmp}, \"{}\"); }}\n",
+                    Self::c_escape(&func)
                 ));
                 tmp
             }
@@ -1815,8 +1815,7 @@ impl Lowerer {
                                 val
                             };
                             if let Some(ref s) = spec {
-                                let spec_str =
-                                    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+                                let spec_str = format!("\"{}\"", Self::c_escape(s));
                                 out.push_str(&format!("    {{ zz_value _r = zz_str_owned(zz_to_str_fmt({val}, {spec_str})); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
                             } else {
                                 out.push_str(&format!("    {{ zz_value _r = zz_to_str({val}, &(int){{0}}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));

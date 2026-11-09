@@ -1,0 +1,23 @@
+// features: float-arith, locals, print, string-literal, string-ops
+// E2E: f-string format specs must escape correctly in generated C.
+
+pi := 3.14159
+name := "ZZ"
+
+// basic interpolation
+println("Hello, {name}!")
+println("Version: {pi:.2f}")
+
+// format specs with various specifiers
+println("{pi:x}")
+println("{pi:X}")
+println("{pi:o}")
+println("{pi:b}")
+println("{pi:d}")
+
+// multi-interpolation: multiple {expr} in one string
+first := "Hello"
+last := "World"
+println("{first} {last}!")
+
+println("fstr_ctrl_ok")

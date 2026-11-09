@@ -408,6 +408,11 @@ e2e_success_test!(e2e_syntax_frame_slots, "syntax", "frame_slots.zz");
 e2e_success_test!(e2e_syntax_operators, "syntax", "operators.zz");
 e2e_success_test!(e2e_syntax_short_circuit, "syntax", "short_circuit.zz");
 e2e_success_test!(e2e_syntax_fstrings, "syntax", "fstrings.zz");
+e2e_success_test!(
+    e2e_syntax_fstring_ctrl_chars,
+    "syntax",
+    "fstring_ctrl_chars.zz"
+);
 e2e_success_test!(e2e_syntax_brace_escapes, "syntax", "brace_escapes.zz");
 e2e_success_test!(e2e_syntax_raw_strings, "syntax", "raw_strings.zz");
 e2e_success_test!(
@@ -418,9 +423,11 @@ e2e_success_test!(
 e2e_success_test!(e2e_syntax_arrays, "syntax", "arrays.zz");
 e2e_success_test!(e2e_syntax_array_sum, "syntax", "array_sum.zz");
 e2e_success_test!(e2e_syntax_struct_access, "syntax", "struct_access.zz");
+e2e_success_test!(e2e_syntax_struct_debug_fwd, "syntax", "struct_debug_fwd.zz");
 e2e_success_test!(e2e_syntax_string_build, "syntax", "string_build.zz");
 e2e_success_test!(e2e_syntax_flat_arrays, "syntax", "flat_arrays.zz");
 e2e_success_test!(e2e_syntax_dicts, "syntax", "dicts.zz");
+e2e_success_test!(e2e_syntax_dict_eq_order, "syntax", "dict_eq_order.zz");
 e2e_success_test!(e2e_syntax_dicts_nonstr, "syntax", "dicts_nonstr.zz");
 e2e_success_test!(
     e2e_syntax_destructure_method_test,
@@ -838,6 +845,7 @@ e2e_success_test!(e2e_types_smart_try_convert, "types", "smart_try_convert.zz");
 
 // Stdlib fixtures
 e2e_success_test!(e2e_stdlib_strings, "stdlib", "strings.zz");
+e2e_success_test!(e2e_stdlib_replace_empty, "stdlib", "replace_empty.zz");
 e2e_success_test!(e2e_stdlib_vectors, "stdlib", "vectors.zz");
 e2e_success_test!(e2e_stdlib_vec_sort, "stdlib", "vec_sort.zz");
 e2e_success_test!(e2e_stdlib_str_utf8_parity, "stdlib", "str_utf8_parity.zz");

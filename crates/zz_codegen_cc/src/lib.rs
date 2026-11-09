@@ -31,20 +31,27 @@ pub fn clang_pin() -> Option<String> {
 
 /// Sanitizer list from `ZZ_SANITIZE` (comma-separated, allowlist:
 /// `address`, `undefined`), e.g. `address,undefined`. Empty/unset =
-/// no sanitizers. Unknown tokens are dropped with a stderr warning —
-/// silently running *without* a requested sanitizer would be worse than
-/// noise, but there is no error channel here (`clang_flags` returns
-/// flags, and failing a build over a typo'd env var would break
-/// unrelated flows).
+/// no sanitizers. Unknown tokens are dropped with a stderr warning.
+/// When `ZZ_SANITIZE_STRICT=1`, unknown tokens cause an exit(1) so CI
+/// catches typos instead of silently building without the sanitizer.
 pub fn sanitize_list() -> Vec<String> {
     const ALLOWED: &[&str] = &["address", "undefined"];
     let raw = std::env::var("ZZ_SANITIZE").unwrap_or_default();
+    let strict = std::env::var("ZZ_SANITIZE_STRICT")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     let mut out = Vec::new();
     for tok in raw.split(',').map(str::trim).filter(|t| !t.is_empty()) {
         if ALLOWED.contains(&tok) {
             if !out.iter().any(|t: &String| t == tok) {
                 out.push(tok.to_string());
             }
+        } else if strict {
+            eprintln!(
+                "zz: error: unknown sanitizer `{tok}` in ZZ_SANITIZE (want address,undefined); \
+                 set ZZ_SANITIZE_STRICT=0 to disable strict mode"
+            );
+            std::process::exit(1);
         } else {
             eprintln!("zz: warning: ignoring unknown sanitizer `{tok}` (want address,undefined)");
         }
@@ -113,7 +120,10 @@ fn static_syslibs_probe(clang: &Clang, need_curl: bool, need_sqlite: bool) -> bo
     if !need_curl && !need_sqlite {
         return true;
     }
-    let dir = std::env::temp_dir().join(format!("zz-static-probe-{}", std::process::id()));
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let uniq = PROBE_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("zz-static-probe-{}-{}", std::process::id(), uniq));
     if std::fs::create_dir_all(&dir).is_err() {
         return true;
     }

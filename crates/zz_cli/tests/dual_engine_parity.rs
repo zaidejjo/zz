@@ -930,6 +930,11 @@ parity_strict!(
     "generic_structs.zz"
 );
 parity_strict!(parity_syntax_fstrings, "syntax", "fstrings.zz");
+parity_strict!(
+    parity_syntax_fstring_ctrl_chars,
+    "syntax",
+    "fstring_ctrl_chars.zz"
+);
 parity_strict!(parity_syntax_brace_escapes, "syntax", "brace_escapes.zz");
 parity_strict!(parity_syntax_raw_strings, "syntax", "raw_strings.zz");
 parity_strict!(
@@ -938,6 +943,7 @@ parity_strict!(
     "brace_escapes_multiline.zz"
 );
 parity_strict!(parity_syntax_dicts, "syntax", "dicts.zz");
+parity_strict!(parity_syntax_dict_eq_order, "syntax", "dict_eq_order.zz");
 parity_strict!(parity_syntax_dicts_nonstr, "syntax", "dicts_nonstr.zz");
 parity_strict!(
     parity_syntax_destructure_method_test,
@@ -1371,6 +1377,7 @@ parity_strict!(parity_types_type_inference, "types", "type_inference.zz");
 
 // Stdlib
 parity_strict!(parity_stdlib_strings, "stdlib", "strings.zz");
+parity_strict!(parity_stdlib_replace_empty, "stdlib", "replace_empty.zz");
 parity_strict!(
     parity_stdlib_selective_calls,
     "stdlib",
@@ -1577,6 +1584,11 @@ parity_strict!(parity_syntax_hof, "syntax", "hof.zz");
 parity_strict!(parity_syntax_arrays, "syntax", "arrays.zz");
 parity_strict!(parity_syntax_array_sum, "syntax", "array_sum.zz");
 parity_strict!(parity_syntax_struct_access, "syntax", "struct_access.zz");
+parity_strict!(
+    parity_syntax_struct_debug_fwd,
+    "syntax",
+    "struct_debug_fwd.zz"
+);
 parity_strict!(parity_syntax_string_build, "syntax", "string_build.zz");
 parity_strict!(parity_syntax_flat_arrays, "syntax", "flat_arrays.zz");
 parity_strict!(parity_syntax_defer, "syntax", "defer.zz");

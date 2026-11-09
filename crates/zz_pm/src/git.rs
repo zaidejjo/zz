@@ -24,6 +24,7 @@ pub fn resolve_rev(url: &str, rev: &str) -> Result<String, ResolveError> {
             "--depth",
             "1",
             "--single-branch",
+            "--",
             url,
             &clone_dir.to_string_lossy(),
         ])
@@ -101,7 +102,14 @@ pub fn fetch_to_cas(url: &str, commit: &str) -> Result<PathBuf, ResolveError> {
     }
 
     let output = Command::new("git")
-        .args(["clone", "--depth", "1", url, &tmp_dir.to_string_lossy()])
+        .args([
+            "clone",
+            "--depth",
+            "1",
+            "--",
+            url,
+            &tmp_dir.to_string_lossy(),
+        ])
         .output()
         .map_err(|e| ResolveError::GitFetchFailed {
             name: String::new(),

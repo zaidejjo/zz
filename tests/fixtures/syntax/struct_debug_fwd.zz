@@ -1,0 +1,19 @@
+// features: structs, print, string-literal, string-ops
+// E2E: struct debug_string functions with embedded structs — forward
+// declarations must allow debug fns to call each other regardless of
+// alphabetical name order (ZZ < aaa alphabetically, so ZZ's debug fn
+// called aaa's debug fn before it was defined without this fix).
+
+struct aaa {
+    x: int,
+}
+
+struct ZZ {
+    inner: aaa,
+    y: int,
+}
+
+a := ZZ{inner: aaa{x: 42}, y: 7}
+println("{}", a)
+
+println("struct_debug_fwd_ok")
