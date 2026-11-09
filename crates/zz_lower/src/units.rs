@@ -946,11 +946,11 @@ mod tests {
             "flat buffer def missing:\n{all_code}"
         );
         assert!(
-            all_code.contains("int64_t zz_global_arr_len;"),
+            all_code.contains("int64_t zz_global_arr__len;"),
             "length counter def missing:\n{all_code}"
         );
         assert!(
-            all_code.contains("int64_t zz_global_arr_cap;"),
+            all_code.contains("int64_t zz_global_arr__cap;"),
             "capacity counter def missing:\n{all_code}"
         );
         assert!(
@@ -1008,12 +1008,16 @@ mod tests {
         assert!(!str_a.header.contains("zz_init__prelude"));
         // ... while program units see every prototype they can call.
         let prelude = unit(&a, PRELUDE_NS);
-        assert!(prelude.header.contains("zz_fn_main("), "{}", prelude.header);
+        assert!(
+            prelude.header.contains("zz_fn_main_("),
+            "{}",
+            prelude.header
+        );
         assert!(prelude
             .header
             .contains("// ---- module globals (extern) ----"));
         assert!(
-            prelude.header.contains("zz_fn_str__is_empty("),
+            prelude.header.contains("zz_fn_str_is__empty("),
             "{}",
             prelude.header
         );
@@ -1022,7 +1026,7 @@ mod tests {
         let entry = unit(&a, "main");
         assert!(entry.header.contains("zz_init_str"), "{}", entry.header);
         assert!(
-            entry.header.contains("zz_init__prelude"),
+            entry.header.contains("zz_init_z__prelude"),
             "{}",
             entry.header
         );
@@ -1055,7 +1059,7 @@ mod tests {
         );
         let units = lowerer.lower_units("main");
         let prelude = unit(&units, PRELUDE_NS);
-        assert!(prelude.header.contains("zz_fn_main("));
+        assert!(prelude.header.contains("zz_fn_main_("));
         assert_eq!(units.header, unit(&units, "main").header);
     }
 
@@ -1071,7 +1075,7 @@ mod tests {
         );
         let pkg = unit(&units, "pkg");
         assert!(
-            pkg.header.contains("zz_fn_pkg__add("),
+            pkg.header.contains("zz_fn_pkg_add("),
             "pkg header must expose its own prototype\n{}",
             pkg.header
         );
@@ -1085,7 +1089,7 @@ mod tests {
         assert!(!pkg.header.contains("zz_init__prelude"), "{}", pkg.header);
         // The package unit still compiles standalone-ish: its code defines
         // the function it declares.
-        assert!(pkg.code.contains("zz_fn_pkg__add("), "{}", pkg.code);
+        assert!(pkg.code.contains("zz_fn_pkg_add("), "{}", pkg.code);
     }
 
     /// The same external package imported by two different projects yields
@@ -1134,6 +1138,10 @@ mod tests {
             str_unit.header
         );
         let prelude = unit(&units, PRELUDE_NS);
-        assert!(prelude.header.contains("zz_fn_main("), "{}", prelude.header);
+        assert!(
+            prelude.header.contains("zz_fn_main_("),
+            "{}",
+            prelude.header
+        );
     }
 }

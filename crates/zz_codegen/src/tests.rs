@@ -389,7 +389,7 @@ fn units_header_declares_all_init_functions() {
     );
     let units = lowerer.lower_units("main");
     assert!(
-        units.header.contains("void zz_init__prelude(void);"),
+        units.header.contains("void zz_init_z__prelude(void);"),
         "header must declare prelude init:\n--- header ---\n{}\n--- end ---",
         units.header
     );
@@ -410,7 +410,7 @@ fn units_header_declares_all_init_functions() {
         .find(|u| u.ns == "util")
         .expect("util unit present");
     assert!(
-        prelude.code.contains("void zz_init__prelude(void)"),
+        prelude.code.contains("void zz_init_z__prelude(void)"),
         "_prelude unit defines its init"
     );
     assert!(
