@@ -31,12 +31,18 @@ fn fixtures_dir() -> PathBuf {
 
 /// Normalize stderr for cross-platform snapshot comparison.
 ///
-/// Strips every token containing a path separator (`/` or `\`) so that
-/// absolute and relative paths — Unix (`/...`), Windows (`C:\...`,
-/// `C:/...`), UNC (`\\...`) — all become `<path>`, regardless of the
-/// checkout location or path-separator conventions of the host machine.
-/// Also normalizes CRLF → LF so Windows console output matches
-/// `\n`-terminated committed snapshots.
+/// Handles:
+/// - CRLF → LF line endings (Windows console output)
+/// - All path formats: Unix (`/...`), Windows absolute (`C:\...`,
+///   `C:/...`), UNC (`\\...`), relative paths with `..` or `.`, and paths
+///   embedded in larger tokens (e.g. `-->C:\path\to\file:6:8`)
+/// - Tokens matching `name:line:col` or `name:line` patterns (file:line:col
+///   diagnostics with no directory separator)
+///
+/// Any whitespace-delimited token containing `/`, `\`, or matching a
+/// `name:digits:digits` / `name:digits` pattern is replaced with `<path>`,
+/// so snapshots are identical regardless of checkout location or
+/// path-separator conventions.
 fn normalize_stderr(stderr: &str) -> String {
     let stderr = stderr.replace("\r\n", "\n").replace('\r', "");
     let mut out = String::with_capacity(stderr.len());
@@ -46,7 +52,7 @@ fn normalize_stderr(stderr: &str) -> String {
         if ch.is_whitespace() {
             if let Some(start) = word_start.take() {
                 let word = &stderr[start..i];
-                if word.contains('/') || word.contains('\\') {
+                if is_path_like(word) {
                     out.push_str("<path>");
                 } else {
                     out.push_str(word);
@@ -59,13 +65,39 @@ fn normalize_stderr(stderr: &str) -> String {
     }
     if let Some(start) = word_start {
         let word = &stderr[start..];
-        if word.contains('/') || word.contains('\\') {
+        if is_path_like(word) {
             out.push_str("<path>");
         } else {
             out.push_str(word);
         }
     }
     out
+}
+
+/// Returns true when `word` looks like a file path or a path:line:col
+/// diagnostic marker, so it should be replaced with `<path>`.
+fn is_path_like(word: &str) -> bool {
+    if word.contains('/') || word.contains('\\') {
+        return true;
+    }
+    // `file.zz:6:8` or `file.zz:6` — file:line(:col) without directory
+    // separator. Contains a colon followed by digits.
+    let colon_pos = word.find(':');
+    if let Some(pos) = colon_pos {
+        let rest = &word[pos + 1..];
+        return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
+    }
+    false
+}
+
+/// Compare normalized stderr against a committed snapshot. Returns None on
+/// match, or Some((actual, expected)) on mismatch for detailed diagnostics.
+fn compare_snapshot(stderr: &str, expected: &str) -> Option<(String, String)> {
+    if stderr == expected {
+        None
+    } else {
+        Some((stderr.to_string(), expected.to_string()))
+    }
 }
 
 /// Run `zz run <file>` and return (exit_code, stdout, stderr).
@@ -2526,7 +2558,11 @@ fn snapshot_error_diagnostics() {
             )
         });
 
-        if stderr != expected {
+        if let Some((actual, expected)) = compare_snapshot(&stderr, &expected) {
+            eprintln!(
+                "\n--- SNAPSHOT MISMATCH for {} ---\nACTUAL:\n{}\nEXPECTED:\n{}\n--- END MISMATCH ---\n",
+                stem, actual, expected
+            );
             mismatches.push(stem);
         }
     }
