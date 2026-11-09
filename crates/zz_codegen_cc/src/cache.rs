@@ -367,14 +367,21 @@ fn compile_rt_a(
     // by extension still treat the unpublished fallback as an archive.
     let tmp_archive =
         archive_path.with_file_name(format!(".libzz_rt.{}.{}.tmp.a", std::process::id(), uniq));
+    let tmp_archive_str = tmp_archive.to_str().ok_or_else(|| {
+        BuildError::Io(std::io::Error::other(format!(
+            "non-UTF8 archive path: {}",
+            tmp_archive.display()
+        )))
+    })?;
+    let o_path_str = o_path.to_str().ok_or_else(|| {
+        BuildError::Io(std::io::Error::other(format!(
+            "non-UTF8 object path: {}",
+            o_path.display()
+        )))
+    })?;
     let ar_out = Command::new("ar")
-        .args([
-            "rcs",
-            tmp_archive.to_str().unwrap(),
-            o_path.to_str().unwrap(),
-        ])
-        .output()
-        .map_err(BuildError::Io)?;
+        .args(["rcs", tmp_archive_str, o_path_str])
+        .output()?;
     if !ar_out.status.success() {
         let _ = std::fs::remove_file(&c_path);
         let _ = std::fs::remove_file(&o_path);
