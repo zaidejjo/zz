@@ -1864,8 +1864,16 @@ zz_value zz_chan_send(zz_value chan, zz_value val, int *err) {
     // The dup happens before publish either way (ownership transfers
     // into the cell/queue, exactly like the old queue push — the
     // receiving thread frees or keeps it without touching the sender's
-    // memory).
-    zz_value owned = zz_value_dup(val);
+    // memory). Scalars are copied by value, so skip the memo setup that
+    // `zz_value_dup` pays to deep-copy heap tags; `zz_value_dup_inner`
+    // returns them unchanged anyway.
+    zz_value owned;
+    if (val.tag == ZZ_INT || val.tag == ZZ_FLOAT || val.tag == ZZ_BOOL
+        || val.tag == ZZ_UNIT) {
+        owned = val;
+    } else {
+        owned = zz_value_dup(val);
+    }
     // Single decision point under `lock`: queued green waiters are
     // served first (they registered on empty tiers, so they predate
     // anything we could enqueue), else the value goes to the ring (or
