@@ -14,6 +14,7 @@ use crate::TypeCheckOps as _;
 /// Validate that the number of provided arguments falls within the
 /// `[allowed_min, total_params]` range. Reports an error and returns `true`
 /// (caller should return early) when out of range.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn check_arg_count(
     checker: &mut Checker,
     callee: Option<&str>,
@@ -76,7 +77,7 @@ pub(crate) fn assign_positional_slots<'a>(
     checker: &mut Checker,
     total_params: usize,
     args: &'a [Expr],
-    slots: &mut Vec<Option<&'a Expr>>,
+    slots: &mut [Option<&'a Expr>],
 ) -> bool {
     for (i, arg) in args.iter().enumerate() {
         if i >= total_params {
@@ -105,7 +106,7 @@ pub(crate) fn check_named_args<'a>(
     checker: &mut Checker,
     param_names: &[String],
     named: &'a [(Ident, Expr)],
-    slots: &mut Vec<Option<&'a Expr>>,
+    slots: &mut [Option<&'a Expr>],
 ) -> bool {
     for (name, val) in named {
         let pos = param_names.iter().position(|pn| pn == &name.name);

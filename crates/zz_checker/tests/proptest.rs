@@ -5,7 +5,7 @@
 
 use proptest::prelude::*;
 use std::collections::HashMap;
-use zz_checker::{check_program, CheckResult};
+use zz_checker::check_program;
 use zz_frontend::parse;
 
 /// A small subset of expressions that always parse and type-check without
@@ -43,7 +43,7 @@ fn simple_expr() -> BoxedStrategy<String> {
     .boxed()
 }
 
-/// Test that parsing a simple expression never produces parse errors.
+// Test that parsing a simple expression never produces parse errors.
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(200))]
 
@@ -58,7 +58,7 @@ proptest! {
     }
 }
 
-/// Test that type-checking simple expressions never panics.
+// Test that type-checking simple expressions never panics.
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(200))]
 
@@ -85,7 +85,7 @@ proptest! {
     }
 }
 
-/// Test that unifying a type with itself always succeeds (reflexivity).
+// Test that unifying a type with itself always succeeds (reflexivity).
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(200))]
 

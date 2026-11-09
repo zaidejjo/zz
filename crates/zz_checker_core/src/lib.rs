@@ -10,7 +10,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use zz_diag_core::{error_at, ErrorCode, RawDiag, SecondaryLabel};
+use zz_diag_core::{error_at, RawDiag, SecondaryLabel};
 use zz_span_ast::ast::{Stmt, Ty};
 use zz_span_ast::span::Span;
 use zz_types::Type;

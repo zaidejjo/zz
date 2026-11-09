@@ -411,7 +411,7 @@ fn main_inner() -> ExitCode {
             if rest.is_empty() {
                 return explain_list_command();
             }
-            return explain_command(rest);
+            explain_command(rest)
         }
         Some("build") => match build_cmd(rest) {
             Ok(()) => ExitCode::SUCCESS,
@@ -3216,6 +3216,7 @@ impl CheckDedupe {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn check_or_fix_path(
     path_arg: &Option<String>,
     do_fix: bool,
@@ -3567,7 +3568,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{check_or_fix_path, CheckDedupe};
-    use zz_frontend::diag::warning_at;
+    use zz_frontend::diag::{warning_at, ColorMode};
     use zz_frontend::span::Span;
 
     fn write_temp(src: &str) -> PathBuf {
@@ -3595,6 +3596,7 @@ mod tests {
                 false,
                 false,
                 false,
+                color_mode,
                 &zz_pm::manifest::FeatureSelection::default(),
             )
         })
@@ -3647,7 +3649,7 @@ mod tests {
     fn fix_inserts_missing_match_comma() {
         // Zero-width insertion fixits must apply, not silently skip.
         let path = write_temp("match .ok(1) { .ok(n) => { n } .err(_) => { 0 } }\n");
-        let result = fix_isolated(&path.to_string_lossy());
+        let result = fix_isolated(&path.to_string_lossy(), ColorMode::Auto);
         assert!(result.is_ok(), "expected fix ok, got {result:?}");
         let fixed = fs::read_to_string(&path).unwrap();
         assert!(fixed.contains(", .err"), "comma not inserted: {fixed:?}");
@@ -3712,7 +3714,7 @@ mod tests {
 
     #[test]
     fn check_missing_file_errors() {
-        let result = check_isolated("/tmp/zz_no_such_file_zz.zz");
+        let result = check_isolated("/tmp/zz_no_such_file_zz.zz", ColorMode::Auto);
         assert!(result.is_err(), "expected error for missing file");
     }
     #[test]

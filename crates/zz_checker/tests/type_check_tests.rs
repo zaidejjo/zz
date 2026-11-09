@@ -6,7 +6,7 @@ use common::{
 };
 use std::collections::HashMap;
 use zz_checker::type_::Type;
-use zz_checker::{check_program, check_program_typed, FuncSig, SpanKey, StructSig};
+use zz_checker::{check_program, check_program_typed, FuncSig, StructSig};
 use zz_frontend::span::Span;
 
 #[test]

@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 
 use zz_diag_core::RawDiag;
-use zz_span_ast::ast::{Block, Expr, FmtPart, Program, Stmt, Ty, TyKind};
+use zz_span_ast::ast::{Expr, Program, Stmt, Ty, TyKind};
 use zz_span_ast::span::Span;
 use zz_span_ast::visitor::{AstVisitor, VisitControl};
 

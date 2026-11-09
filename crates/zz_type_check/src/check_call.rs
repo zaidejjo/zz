@@ -115,7 +115,6 @@ struct RemovedApi {
 enum RemovedRet {
     Unit,
     Int,
-    Str,
     Array,
     /// `Result<Str, Str>`
     ResultStrStr,
@@ -130,7 +129,7 @@ impl RemovedRet {
         match self {
             RemovedRet::Unit => Type::Unit,
             RemovedRet::Int => Type::Int,
-            RemovedRet::Str => Type::Str,
+
             RemovedRet::Array => Type::Array(Box::new(unifier.fresh_var())),
             RemovedRet::ResultStrStr => Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
             RemovedRet::ResultUnitStr => Type::Result(Box::new(Type::Unit), Box::new(Type::Str)),
@@ -377,6 +376,7 @@ fn short_name(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Check `input` / `range` builtins. Returns `Some(Type)` when handled, `None` otherwise.
 pub(crate) fn check_call_input_range(
     checker: &mut Checker,
@@ -513,12 +513,11 @@ pub(crate) fn check_call_path_method(
         return None;
     }
     let joined = parts.join(".");
-    if let Some(t) = check_call_path_enum_construction(checker, &parts, args, named, span) {
+    if let Some(t) = check_call_path_enum_construction(checker, parts, args, named, span) {
         return Some(t);
     }
     if parts.len() >= 3 {
-        if let Some(t) = check_call_path_variant_method(checker, &parts, args, named, *pspan, span)
-        {
+        if let Some(t) = check_call_path_variant_method(checker, parts, args, named, *pspan, span) {
             return Some(t);
         }
     }
@@ -610,6 +609,7 @@ fn check_call_path_variant_method(
 
 /// Variant method with a payload: first arg fills the payload, rest go to
 /// the method.
+#[allow(clippy::too_many_arguments)]
 fn check_call_path_variant_payload(
     checker: &mut Checker,
     canonical_head: &str,
@@ -685,9 +685,7 @@ fn check_call_path_local_var(
     if checker.method_shadow_call(callee, args, named) {
         return None;
     }
-    let Some(var_ty) = checker.lookup_opt(joined) else {
-        return None;
-    };
+    let var_ty = checker.lookup_opt(joined)?;
     let callee_t = checker.unifier.resolve(&var_ty);
     match &callee_t {
         Type::Func(..) | Type::Named(..) => {
@@ -764,15 +762,13 @@ fn check_call_path_type_dispatch(
     if sig.is_none() {
         sig = free_sig;
     }
-    let Some(sig) = sig else {
-        return None;
-    };
+    let sig = sig?;
     // sqlz method form.
     if (method == "query" || method == "exec" || method == "transaction")
         && matches!(checker.unifier.resolve(recv_t), Type::Db)
     {
         return check_call_path_sqlz_method(
-            checker, &sig, &recv_t, method, args, named, pspan, span,
+            checker, &sig, recv_t, method, args, named, pspan, span,
         );
     }
     // Generic method dispatch.
@@ -888,6 +884,7 @@ fn check_call_path_stdlib_ns(
 
 /// sqlz method form: `db.exec(sql)`, `db.query(sql)`,
 /// `db.transaction(fn(tx) { ... })` — receiver is implicit.
+#[allow(clippy::too_many_arguments)]
 fn check_call_path_sqlz_method(
     checker: &mut Checker,
     sig: &zz_checker_core::FuncSig,
@@ -1093,8 +1090,7 @@ pub(crate) fn check_call_direct_name(
             {
                 return Some(t);
             }
-            let pnames: Vec<String> =
-                sig.params.iter().map(|(n, _)| n.clone()).collect();
+            let pnames: Vec<String> = sig.params.iter().map(|(n, _)| n.clone()).collect();
             checker.check_args_against(
                 Some(short_name(name)),
                 &pnames,

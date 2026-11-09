@@ -3,7 +3,6 @@
 use zz_checker_core::{Checker, FuncSig};
 use zz_diag_core::{error_at, warning_at, ErrorCode, FixIt};
 use zz_infer::InferOps;
-use zz_lints::http_lint::HttpLintOps;
 use zz_scope::ScopeOps;
 use zz_sigs::enums::EnumOps;
 use zz_span_ast::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, Param, Pattern, Stmt, Ty, UnOp};
@@ -271,7 +270,7 @@ pub trait TypeCheckOps {
 
     /// Type-check array concatenation `[T] + [U]`: element types must match
     /// exactly, or one side can be unified with the other.
-    fn check_array_concat(&mut self, a: &Box<Type>, b: &Box<Type>, span: Span) -> Type;
+    fn check_array_concat(&mut self, a: &Type, b: &Type, span: Span) -> Type;
 
     /// True when a `head.method(args)` call must be read as a method call
     /// even though `head.method` also names a seeded free function: the
@@ -1923,7 +1922,7 @@ impl TypeCheckOps for Checker {
     /// Type-check array concatenation `[T] + [U]`: element types must match
     /// exactly, or one side can be unified with the other. Reports an error
     /// with cast hints when element types differ.
-    fn check_array_concat(&mut self, a: &Box<Type>, b: &Box<Type>, span: Span) -> Type {
+    fn check_array_concat(&mut self, a: &Type, b: &Type, span: Span) -> Type {
         let ea = self.unifier.resolve(a);
         let eb = self.unifier.resolve(b);
         match (&ea, &eb) {
@@ -2202,13 +2201,15 @@ impl TypeCheckOps for Checker {
             }
             _ => None,
         };
-        if let Some(t) = check_call::check_call_direct_name(self, &direct_name, &callee, args, named, span) {
+        if let Some(t) =
+            check_call::check_call_direct_name(self, &direct_name, &callee, args, named, span)
+        {
             return t;
         }
         if let Some(t) = check_call::check_call_path_method(self, &callee, args, named, span) {
             return t;
         }
-        return check_call::check_call_callee_type(self, &callee, args, named, span);
+        check_call::check_call_callee_type(self, &callee, args, named, span)
     }
 
     /// Check that the given positional and named arguments match the parameter
@@ -3379,9 +3380,7 @@ impl TypeCheckOps for Checker {
             return Some(Vec::new());
         }
         match ty {
-            Type::Enum(ename, _) => {
-                return self.missing_patterns_enum(ename, &flat);
-            }
+            Type::Enum(ename, _) => self.missing_patterns_enum(ename, &flat),
             Type::Option(inner) => {
                 let has_none = flat
                     .iter()
@@ -3397,11 +3396,9 @@ impl TypeCheckOps for Checker {
                 }
                 if !some_sub.is_empty() {
                     let inner_ty = &**inner;
-                    let args: Vec<Pattern> =
-                        some_sub.iter().map(|p| self.variant_arg(*p)).collect();
-                    if let Some(m) =
-                        self.missing_patterns(&args.iter().collect::<Vec<&Pattern>>(), inner_ty)
-                    {
+                    let args: Vec<Pattern> = some_sub.iter().map(|p| self.variant_arg(p)).collect();
+                    let args: Vec<&Pattern> = args.iter().collect();
+                    if let Some(m) = self.missing_patterns(&args, inner_ty) {
                         if !m.is_empty() {
                             missing.push(format!(".some ({})", m.join(", ")));
                         }
@@ -3426,10 +3423,9 @@ impl TypeCheckOps for Checker {
                     missing.push(".err".to_string());
                 }
                 if !ok_sub.is_empty() {
-                    let args: Vec<Pattern> = ok_sub.iter().map(|p| self.variant_arg(*p)).collect();
-                    if let Some(m) =
-                        self.missing_patterns(&args.iter().collect::<Vec<&Pattern>>(), ok)
-                    {
+                    let args: Vec<Pattern> = ok_sub.iter().map(|p| self.variant_arg(p)).collect();
+                    let args: Vec<&Pattern> = args.iter().collect();
+                    if let Some(m) = self.missing_patterns(&args, ok) {
                         if !m.is_empty() {
                             missing.push(format!(".ok ({})", m.join(", ")));
                         }
@@ -3523,10 +3519,9 @@ impl TypeCheckOps for Checker {
             }
             // Recurse: variant arms must cover the payload type.
             let payload_ty = payload.clone().unwrap_or(Type::Unit);
-            let args: Vec<Pattern> = sub.iter().map(|p| self.variant_arg(*p)).collect();
-            if let Some(m) =
-                self.missing_patterns(&args.iter().collect::<Vec<&Pattern>>(), &payload_ty)
-            {
+            let args: Vec<Pattern> = sub.iter().map(|p| self.variant_arg(p)).collect();
+            let args: Vec<&Pattern> = args.iter().collect();
+            if let Some(m) = self.missing_patterns(&args, &payload_ty) {
                 if !m.is_empty() {
                     missing.push(format!(".{vname} ({})", m.join(", ")));
                 }

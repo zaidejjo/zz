@@ -597,6 +597,7 @@ pub fn run_watch(
 /// `zz check --watch`: re-run `zz check` whenever any `.zz` file under
 /// `path` changes. Uses the same snapshot/debounce model as `run --watch`
 /// but re-checks in-process instead of spawning child runs.
+#[allow(clippy::too_many_arguments)]
 pub fn check_watch(
     path_arg: &Option<String>,
     do_fix: bool,
@@ -614,6 +615,9 @@ pub fn check_watch(
     let base = std::path::PathBuf::from(raw);
 
     // Discover files once to know the watch root.
+    // `base` is reused below for the scan-root fallback, so the clone is
+    // unavoidable — `discover` takes `&[PathBuf]` and we cannot move `base`.
+    #[allow(clippy::cloned_ref_to_slice_refs)]
     let files =
         zz_fmt::discover(&[base.clone()]).map_err(|e| format!("file discovery failed: {e}"))?;
     if files.is_empty() {

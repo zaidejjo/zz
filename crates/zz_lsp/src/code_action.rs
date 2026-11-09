@@ -543,7 +543,7 @@ mod tests {
     fn safe_fix_produces_single_action() {
         let raw = RawDiag {
             severity: Severity::Error,
-                code: None,
+            code: None,
             message: "undefined variable `x`".into(),
             span: Some(Span::new(10, 11)),
             notes: vec![],
@@ -565,7 +565,7 @@ mod tests {
     fn ambiguous_fix_produces_one_action_per_candidate() {
         let raw = RawDiag {
             severity: Severity::Error,
-                code: None,
+            code: None,
             message: "undefined variable `prntlnn`".into(),
             span: Some(Span::new(0, 8)),
             notes: vec![],
@@ -682,7 +682,7 @@ mod tests {
     fn undefined_diag(name: &str) -> Diagnostic {
         make_test_diag(&RawDiag {
             severity: Severity::Error,
-                code: None,
+            code: None,
             message: format!("undefined variable `{name}`"),
             span: Some(Span::new(0, 1)),
             notes: vec![],

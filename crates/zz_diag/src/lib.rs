@@ -302,17 +302,12 @@ fn render_one_colored(files: &Files, file_id: FileId, raw: &RawDiag) -> String {
 }
 
 /// Color mode for diagnostic output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ColorMode {
+    #[default]
     Auto,
     Always,
     Never,
-}
-
-impl Default for ColorMode {
-    fn default() -> Self {
-        ColorMode::Auto
-    }
 }
 
 impl ColorMode {
@@ -347,9 +342,9 @@ pub fn render_to_string(
             out.push_str(&render_one_colored(files, file_id, raw));
         } else {
             // Plain text without ANSI codes
-            let _ = write!(
+            let _ = writeln!(
                 out,
-                "{}: {}{}\n",
+                "{}: {}{}",
                 match raw.severity {
                     Severity::Error => "error",
                     Severity::Warning => "warning",
@@ -500,7 +495,7 @@ mod tests {
         let mut files = Files::new();
         let id = files.add("test.zz".to_string(), "x := 1 +\n".to_string());
         let diag = error_at("expected expression", Span::new(8, 9));
-        let out = render_to_string(&files, id, &[diag]);
+        let out = render_to_string(&files, id, &[diag], ColorMode::default());
         assert!(out.contains("error"), "missing error keyword: {out}");
         assert!(
             out.contains("expected expression"),
@@ -516,7 +511,7 @@ mod tests {
         let diag = warning_at("unused variable `y`", Span::new(7, 8))
             .with_note("consider prefixing with `_`")
             .with_fixit(FixIt::safe(Span::new(7, 8), "_y", "rename to"));
-        let out = render_to_string(&files, id, &[diag]);
+        let out = render_to_string(&files, id, &[diag], ColorMode::default());
         assert!(out.contains("warning"), "missing warning keyword: {out}");
         assert!(out.contains("unused variable"), "missing message: {out}");
         // Fixit should be inlined under the caret
@@ -531,7 +526,7 @@ mod tests {
         let mut files = Files::new();
         let id = files.add("test.zz".to_string(), "x\n".to_string());
         let diag = warning_at("unused variable `x`", Span::new(0, 1));
-        let out = render_to_string(&files, id, &[diag]);
+        let out = render_to_string(&files, id, &[diag], ColorMode::default());
         assert!(out.contains("warning"), "missing warning keyword: {out}");
     }
 
@@ -540,7 +535,7 @@ mod tests {
         let mut files = Files::new();
         let id = files.add("test.zz".to_string(), "x\n".to_string());
         let diag = note("did you mean `y`?");
-        let out = render_to_string(&files, id, &[diag]);
+        let out = render_to_string(&files, id, &[diag], ColorMode::default());
         assert!(out.contains("help"), "missing help keyword: {out}");
     }
 
@@ -552,7 +547,7 @@ mod tests {
             "line 1\nline 2\nx := bad\nline 4\n".to_string(),
         );
         let diag = error_at("undefined variable", Span::new(14, 17));
-        let out = render_to_string(&files, id, &[diag]);
+        let out = render_to_string(&files, id, &[diag], ColorMode::default());
         assert!(out.contains("3"), "missing line number: {out}");
         assert!(out.contains("bad"), "missing source text: {out}");
     }

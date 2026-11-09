@@ -46,7 +46,11 @@ pub fn check_project_files(
     paths.sort();
     let total = paths.len();
     // Apply pagination before checking: only pay for the files in this page.
-    let paths: Vec<_> = paths.into_iter().skip(skip).take(take.unwrap_or(usize::MAX)).collect();
+    let paths: Vec<_> = paths
+        .into_iter()
+        .skip(skip)
+        .take(take.unwrap_or(usize::MAX))
+        .collect();
     let mut cache = state.project_cache.write().unwrap();
     let mut out = Vec::new();
     for path in &paths {
@@ -140,11 +144,10 @@ pub async fn run_project_check_paginated(
     client
         .show_message(MessageType::INFO, "checking project…")
         .await;
-    let (reports, total) = tokio::task::spawn_blocking(move || {
-        check_project_files(&state, &root, skip, take)
-    })
-    .await
-    .unwrap_or_default();
+    let (reports, total) =
+        tokio::task::spawn_blocking(move || check_project_files(&state, &root, skip, take))
+            .await
+            .unwrap_or_default();
     let mut files = 0u32;
     let mut errors = 0u32;
     let mut warnings = 0u32;
@@ -164,7 +167,10 @@ pub async fn run_project_check_paginated(
     let summary = if total > reports.len() {
         format!(
             "project check: {} of {} file(s), {} error(s), {} warning(s)",
-            reports.len(), total, errors, warnings
+            reports.len(),
+            total,
+            errors,
+            warnings
         )
     } else {
         format!("project check: {files} file(s), {errors} error(s), {warnings} warning(s)")
@@ -315,8 +321,10 @@ mod tests {
         assert_eq!(page2.len(), 3);
 
         // No overlap between pages
-        let page1_uris: std::collections::HashSet<_> = page1.iter().map(|(u, _)| u.clone()).collect();
-        let page2_uris: std::collections::HashSet<_> = page2.iter().map(|(u, _)| u.clone()).collect();
+        let page1_uris: std::collections::HashSet<_> =
+            page1.iter().map(|(u, _)| u.clone()).collect();
+        let page2_uris: std::collections::HashSet<_> =
+            page2.iter().map(|(u, _)| u.clone()).collect();
         assert!(page1_uris.is_disjoint(&page2_uris));
 
         // Last page: remaining 4 files

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
-use zz_checker::{SpanKey, TOP_SCOPE, Type};
+use zz_checker::{SpanKey, Type, TOP_SCOPE};
 use zz_hir::TypedProgram;
 
 use super::Backend;
@@ -159,42 +159,42 @@ pub(crate) async fn handle_hover(backend: &Backend, params: HoverParams) -> Resu
 
     if !name.is_empty() {
         if let Some(sig) = zz_checker::lookup_std(&check_result.funcs, &name) {
-        contents.push_str(&format!("**func** `{name}`\n\n"));
-        contents.push_str("```zz\n");
-        contents.push_str(&format!("func {name}("));
-        for (i, (pname, pty)) in sig.params.iter().enumerate() {
-            if i > 0 {
-                contents.push_str(", ");
+            contents.push_str(&format!("**func** `{name}`\n\n"));
+            contents.push_str("```zz\n");
+            contents.push_str(&format!("func {name}("));
+            for (i, (pname, pty)) in sig.params.iter().enumerate() {
+                if i > 0 {
+                    contents.push_str(", ");
+                }
+                contents.push_str(&format!("{pname}: {pty}"));
             }
-            contents.push_str(&format!("{pname}: {pty}"));
-        }
-        contents.push_str(&format!(") -> {}\n", sig.ret));
-        contents.push_str("```\n");
-    } else if let Some(sig) = check_result.structs.get(&name) {
-        contents.push_str(&format!("**struct** `{name}`\n\n"));
-        contents.push_str("```zz\n");
-        contents.push_str(&format!("struct {name} {{\n"));
-        for (fname, fty) in &sig.fields {
-            contents.push_str(&format!("  {fname}: {fty}\n"));
-        }
-        contents.push_str("}\n");
-        contents.push_str("```\n");
-    } else if let Some(ty) = check_result.bindings.get(&name) {
-        contents.push_str(&format!("**let** `{name}: {ty}`\n"));
-    } else if let Some(Expr::Field {
-        name: field, obj, ..
-    }) = node.expr
-    {
-        if let Some(zz_checker::Type::Struct(struct_name, _)) =
-            crate::lookup::resolve_type_of_expr(program, check_result, obj)
+            contents.push_str(&format!(") -> {}\n", sig.ret));
+            contents.push_str("```\n");
+        } else if let Some(sig) = check_result.structs.get(&name) {
+            contents.push_str(&format!("**struct** `{name}`\n\n"));
+            contents.push_str("```zz\n");
+            contents.push_str(&format!("struct {name} {{\n"));
+            for (fname, fty) in &sig.fields {
+                contents.push_str(&format!("  {fname}: {fty}\n"));
+            }
+            contents.push_str("}\n");
+            contents.push_str("```\n");
+        } else if let Some(ty) = check_result.bindings.get(&name) {
+            contents.push_str(&format!("**let** `{name}: {ty}`\n"));
+        } else if let Some(Expr::Field {
+            name: field, obj, ..
+        }) = node.expr
         {
-            if let Some(ssig) = check_result.structs.get(&struct_name) {
-                if let Some((_, fty)) = ssig.fields.iter().find(|(n, _)| n == field) {
-                    contents.push_str(&format!("**{struct_name}.{field}: {fty}**\n"));
+            if let Some(zz_checker::Type::Struct(struct_name, _)) =
+                crate::lookup::resolve_type_of_expr(program, check_result, obj)
+            {
+                if let Some(ssig) = check_result.structs.get(&struct_name) {
+                    if let Some((_, fty)) = ssig.fields.iter().find(|(n, _)| n == field) {
+                        contents.push_str(&format!("**{struct_name}.{field}: {fty}**\n"));
+                    }
                 }
             }
         }
-    }
     }
 
     if !contents.is_empty() {
@@ -263,9 +263,7 @@ fn expression_type_at(
     expr: &zz_frontend::ast::Expr,
     offset: u32,
 ) -> Option<String> {
-    let Some(span_types) = span_types else {
-        return None;
-    };
+    let span_types = span_types?;
     let tp = TypedProgram {
         program: program.clone(),
         types: span_types.clone(),

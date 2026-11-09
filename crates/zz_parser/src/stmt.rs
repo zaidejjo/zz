@@ -212,7 +212,7 @@ impl<'a> Parser<'a> {
                         "remove `let`",
                     )),
                 );
-                return self.parse_stmt();
+                self.parse_stmt()
             }
             // `var x := 5` — `var` is not a ZZ keyword; use `:=`
             TokenKind::Ident if self.peek().text == "var" => {
@@ -229,7 +229,7 @@ impl<'a> Parser<'a> {
                         "remove `var`",
                     )),
                 );
-                return self.parse_stmt();
+                self.parse_stmt()
             }
             // `end` — ZZ uses `}` to close blocks, not `end`
             TokenKind::Ident if self.peek().text == "end" => {
@@ -246,7 +246,7 @@ impl<'a> Parser<'a> {
                         "replace `end` with `}`",
                     )),
                 );
-                return self.parse_stmt();
+                self.parse_stmt()
             }
             // `def` / `fn` / `function` are not ZZ keywords; use `func`
             TokenKind::Ident
@@ -315,10 +315,10 @@ impl<'a> Parser<'a> {
                 // We don't advance pos here; parse_stmt_list will advance
                 // past one token on the next iteration if we made no
                 // progress, avoiding an EOF error.
-                return Stmt::Return {
+                Stmt::Return {
                     value: None,
                     span: self.peek().span,
-                };
+                }
             }
             // `public` is not a ZZ keyword; use `pub`
             TokenKind::Ident if self.peek().text == "public" => {
@@ -335,7 +335,7 @@ impl<'a> Parser<'a> {
                         "replace with `pub`",
                     )),
                 );
-                return self.parse_stmt();
+                self.parse_stmt()
             }
             // `class` is not a ZZ keyword; use `struct` + `impl`
             TokenKind::Ident if self.peek().text == "class" => {
@@ -352,7 +352,7 @@ impl<'a> Parser<'a> {
                         "replace with `struct`",
                     )),
                 );
-                return self.parse_stmt();
+                self.parse_stmt()
             }
             // `new` is not a ZZ keyword; use struct literal syntax
             TokenKind::Ident if self.peek().text == "new" => {
@@ -366,7 +366,7 @@ impl<'a> Parser<'a> {
                             "remove `new`",
                         )),
                 );
-                return self.parse_stmt();
+                self.parse_stmt()
             }
             // `switch` is not a ZZ keyword; use `match`
             TokenKind::Ident if self.peek().text == "switch" => {
@@ -383,7 +383,7 @@ impl<'a> Parser<'a> {
                         "replace with `match`",
                     )),
                 );
-                return self.parse_stmt();
+                self.parse_stmt()
             }
             // `goto` is not a ZZ keyword
             TokenKind::Ident if self.peek().text == "goto" => {
@@ -392,7 +392,7 @@ impl<'a> Parser<'a> {
                     "unexpected `goto` — ZZ does not have `goto`",
                     goto_tok.span,
                 ));
-                return self.parse_stmt();
+                self.parse_stmt()
             }
             _ => {
                 // Try `IDENT: TYPE = expr` (explicit declaration). Backtrack
@@ -1364,12 +1364,12 @@ impl<'a> Parser<'a> {
                 TyKind::Named(n, _) => n.as_str(),
                 _ => "type",
             };
+            let decl = format!("{}: {}", name.text, type_name);
             self.push_error(
                 error_at(
                     format!(
-                        "invalid declaration: use `{} = expr` or `{} := expr`",
-                        format!("{}: {}", name.text, type_name),
-                        name.text
+                        "invalid declaration: use `{decl} = expr` or `{name} := expr`",
+                        name = name.text,
                     ),
                     colon_eq_tok.span,
                 )

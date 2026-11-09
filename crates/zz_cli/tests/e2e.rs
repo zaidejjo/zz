@@ -2440,7 +2440,6 @@ fn error_codes_have_explanations() {
 #[test]
 fn snapshot_error_diagnostics() {
     use std::fs;
-    use std::process::Command;
 
     let errors_dir = fixtures_dir().join("errors");
     let snapshots_dir = errors_dir.parent().unwrap().join("snapshots");
@@ -2465,7 +2464,7 @@ fn snapshot_error_diagnostics() {
         // Run `zz check` on the fixture
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_zz"))
             .arg("check")
-            .arg(&fixture)
+            .arg(fixture)
             .output()
             .expect("failed to run `zz check`");
 

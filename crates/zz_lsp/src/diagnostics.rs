@@ -209,7 +209,7 @@ mod tests {
     fn convert_diagnostic_basic_error() {
         let raw = RawDiag {
             severity: Severity::Error,
-                code: None,
+            code: None,
             message: "unexpected token".to_string(),
             span: Some(Span::new(0, 5)),
             notes: vec![],
@@ -229,7 +229,7 @@ mod tests {
     fn convert_diagnostic_with_fixit_data() {
         let raw = RawDiag {
             severity: Severity::Warning,
-                code: None,
+            code: None,
             message: "unused variable".to_string(),
             span: Some(Span::new(4, 5)),
             notes: vec!["consider removing".to_string()],
@@ -257,7 +257,7 @@ mod tests {
         // Span [2, 8) covers from '\n' (byte 2) to 'f' (byte 7, exclusive of 8)
         let raw = RawDiag {
             severity: Severity::Error,
-                code: None,
+            code: None,
             message: "type mismatch".to_string(),
             span: Some(Span::new(2, 8)),
             notes: vec![],

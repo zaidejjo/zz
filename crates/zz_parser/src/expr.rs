@@ -1021,7 +1021,7 @@ impl<'a> Parser<'a> {
                     ),
                 );
                 self.skip_to_stmt_end();
-                return dummy_expr(tok.span);
+                dummy_expr(tok.span)
             }
             _ => {
                 // A stray closing bracket in expression position (e.g. the
