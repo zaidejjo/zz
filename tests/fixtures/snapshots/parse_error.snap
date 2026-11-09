@@ -4,6 +4,6 @@ error: expected expression, found end of input
 
   --> <path>
     |
-    4 | 
+    4 |
       | ^
 zz: 1 file(s) failed type-check

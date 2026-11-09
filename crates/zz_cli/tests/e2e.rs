@@ -33,6 +33,7 @@ fn fixtures_dir() -> PathBuf {
 ///
 /// Handles:
 /// - CRLF → LF line endings (Windows console output)
+/// - Trailing whitespace (Windows programs often emit trailing spaces)
 /// - All path formats: Unix (`/...`), Windows absolute (`C:\...`,
 ///   `C:/...`), UNC (`\\...`), relative paths with `..` or `.`, and paths
 ///   embedded in larger tokens (e.g. `-->C:\path\to\file:6:8`)
@@ -46,30 +47,38 @@ fn fixtures_dir() -> PathBuf {
 fn normalize_stderr(stderr: &str) -> String {
     let stderr = stderr.replace("\r\n", "\n").replace('\r', "");
     let mut out = String::with_capacity(stderr.len());
-    let mut word_start: Option<usize> = None;
 
-    for (i, ch) in stderr.char_indices() {
-        if ch.is_whitespace() {
-            if let Some(start) = word_start.take() {
-                let word = &stderr[start..i];
-                if is_path_like(word) {
-                    out.push_str("<path>");
-                } else {
-                    out.push_str(word);
+    for line in stderr.lines() {
+        // Strip trailing whitespace (Windows programs often emit trailing
+        // spaces), then collapse each whitespace-delimited token that looks
+        // like a path into <path>.
+        let trimmed = line.trim_end();
+        let mut word_start: Option<usize> = None;
+
+        for (i, ch) in trimmed.char_indices() {
+            if ch.is_whitespace() {
+                if let Some(start) = word_start.take() {
+                    let word = &trimmed[start..i];
+                    if is_path_like(word) {
+                        out.push_str("<path>");
+                    } else {
+                        out.push_str(word);
+                    }
                 }
+                out.push(ch);
+            } else if word_start.is_none() {
+                word_start = Some(i);
             }
-            out.push(ch);
-        } else if word_start.is_none() {
-            word_start = Some(i);
         }
-    }
-    if let Some(start) = word_start {
-        let word = &stderr[start..];
-        if is_path_like(word) {
-            out.push_str("<path>");
-        } else {
-            out.push_str(word);
+        if let Some(start) = word_start {
+            let word = &trimmed[start..];
+            if is_path_like(word) {
+                out.push_str("<path>");
+            } else {
+                out.push_str(word);
+            }
         }
+        out.push('\n');
     }
     out
 }
