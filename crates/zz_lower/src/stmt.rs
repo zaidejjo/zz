@@ -2386,6 +2386,71 @@ impl Lowerer {
                                         };
                                         out.push_str(&pre_reserve);
                                         self.skip_flat_push_grow.set(true);
+                                    } else {
+                                        // Boxed array pre-reserve:
+                                        // `for i in 0..N { arr.push(k) }` where
+                                        // arr is a boxed zz_value array.
+                                        // Pre-reserve capacity N once before
+                                        // the loop to avoid per-push reallocs.
+                                        if let Some(arg) = args.first() {
+                                            let _ = arg;
+                                            let arr_name = match &**callee {
+                                                Expr::Path { parts, .. } if parts.len() == 2 => {
+                                                    Some(parts[0].clone())
+                                                }
+                                                Expr::Field { obj, name, .. } if name == "push" => {
+                                                    match obj.as_ref() {
+                                                        Expr::Ident { name: obj_name, .. } => {
+                                                            Some(obj_name.clone())
+                                                        }
+                                                        _ => None,
+                                                    }
+                                                }
+                                                _ => None,
+                                            };
+                                            if let Some(name) = arr_name {
+                                                let ctype = names.lookup_type(&name).unwrap_or("");
+                                                if ctype == "zz_value" {
+                                                    let cid = names
+                                                        .lookup(&name)
+                                                        .map(str::to_string)
+                                                        .unwrap_or_else(|| name.clone());
+                                                    out.push_str(&format!(
+                                                        "    {{ int _err = 0; zz_array_reserve({cid}, {n}, &_err); }}\n",
+                                                        cid = cid,
+                                                        n = n
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Dict pre-size for counted loops:
+                    // `for i in 0..N { d[key] = value }` where d is a dict.
+                    // Pre-size dict to N entries to avoid incremental growth
+                    // (dict_lookup: 50k entries grow 4→8→…→65536 = 15 reallocs).
+                    if let Some(Stmt::Assign { target, .. }) = body.stmts.first() {
+                        if body.stmts.len() == 1 {
+                            if let Expr::Index { obj, .. } = &*target {
+                                if let Expr::Ident {
+                                    name: dict_name, ..
+                                } = &**obj
+                                {
+                                    let ctype = names.lookup_type(dict_name.as_str()).unwrap_or("");
+                                    if ctype == "zz_value" {
+                                        let cid = names
+                                            .lookup(dict_name.as_str())
+                                            .map(str::to_string)
+                                            .unwrap_or_else(|| dict_name.clone());
+                                        out.push_str(&format!(
+                                            "    {{ int _err = 0; zz_dict_reserve({cid}, {n}, &_err); }}\n",
+                                            cid = cid,
+                                            n = n
+                                        ));
                                     }
                                 }
                             }
@@ -3493,9 +3558,9 @@ fn flat_push_receiver(
     is_flat.then_some((recv_name, recv_ctype))
 }
 
-/// Find the integer value of a `const name = <literal>` binding.
-/// Searches top-level declarations and the bodies of top-level functions
-/// (including nested blocks) since `const` inside `main` lives there.
+/// Find the integer value of a `const name = <literal>` or `let name = <literal>`
+/// binding. Searches top-level declarations and the bodies of top-level functions
+/// (including nested blocks).
 fn find_const_value(stmts: &[Stmt], name: &str) -> Option<i64> {
     for stmt in stmts {
         match stmt {
@@ -3503,7 +3568,6 @@ fn find_const_value(stmts: &[Stmt], name: &str) -> Option<i64> {
                 ty: None,
                 name: decl_name,
                 value: Expr::Int { value, .. },
-                is_const: true,
                 ..
             } if decl_name.name == name => return Some(*value),
             Stmt::Func { body, .. } => {
@@ -3524,7 +3588,6 @@ fn find_const_in_block(block: &Block, name: &str) -> Option<i64> {
                 ty: None,
                 name: decl_name,
                 value: Expr::Int { value, .. },
-                is_const: true,
                 ..
             } if decl_name.name == name => return Some(*value),
             Stmt::For { body, .. } => {
