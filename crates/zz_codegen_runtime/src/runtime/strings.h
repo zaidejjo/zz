@@ -70,6 +70,7 @@ zz_value zz_str_heal_arena(zz_value v);
 // ---- string concatenation shims ----------------------------------------
 zz_value zz_binop_cat(zz_value a, zz_value b);       // str concat
 zz_value zz_binop_cat_arena(zz_value a, zz_value b, zz_arena *arena); // arena str concat
+zz_value zz_str_cat3_arena(zz_value a, zz_value b, zz_value c, zz_arena *arena); // a+b+c, one alloc
 zz_value zz_binop_cat_str(zz_value a, zz_value b);   // str + Display(b)
 // In-place append: reuses *a->s buffer if refs==1 and capacity allows.
 // Returns void; *a is mutated. Generated for hot `s = s + literal` loops.

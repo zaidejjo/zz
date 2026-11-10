@@ -1015,6 +1015,11 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_stdlib_channel_test, "stdlib", "channel_test.zz");
 e2e_success_test!(
+    e2e_stdlib_concurrency_batch_test,
+    "stdlib",
+    "concurrency_batch_test.zz"
+);
+e2e_success_test!(
     e2e_stdlib_concurrency_tasks_test,
     "stdlib",
     "concurrency_tasks_test.zz"

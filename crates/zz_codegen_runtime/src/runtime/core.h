@@ -170,10 +170,10 @@ typedef struct {
     int interned;
     int mutable;      // non-zero: mutable string, never shared, in-place append
     size_t cap;     // 0 = SSO, >0 = heap capacity
-    size_t len;     // payload length in bytes
-    size_t charlen; // cached Unicode scalar count (ZZ_STR_CHARLEN_UNKNOWN = unknown)
+        size_t len;
+        size_t hash;    // cached FNV-1a hash for interned strings (0 = uncached)
     union {
-        char sso[ZZ_SSO_MAX + 1]; // 24 bytes: inline data (cap == 0)
+        char sso[ZZ_SSO_MAX + 1]; // 24 bytes: inline data + NUL (cap == 0)
         char *heap;                // 8 bytes:  heap pointer  (cap > 0)
     };
 } zz_str;
@@ -281,6 +281,9 @@ struct zz_array {
 // Dicts switch from a linear scan to a key index once they outgrow this
 // many entries — the VM's `DICT_INDEX_THRESHOLD` (`DictData` in
 // `zz_runtime::value`), so both engines index at the same size.
+// Arena dicts are short-lived (freed by arena reset), so linear scan is
+// faster than building + probing a hash index for them; keep threshold
+// high so arena temp dicts never index.
 #define ZZ_DICT_INDEX_THRESHOLD 8
 
 struct zz_dict {
@@ -296,6 +299,8 @@ struct zz_dict {
     // Entries stay the source of truth for order, length and iteration.
     size_t *idx;
     size_t idx_cap;
+    uint8_t has_heap_values; // 0 if all values are scalars (int/float/bool/unit)
+    uint8_t has_heap_keys;   // 0 if all keys are interned strings (no release needed)
 };
 
 // Dict keys are full values, not strings: `{int: int}`, `{bool: str}` and
@@ -325,6 +330,8 @@ int zz_values_equal(zz_value a, zz_value b);
 // so `1` and `1.0` are *different* keys even though `1 == 1.0` is true.
 static inline int zz_key_eq(zz_value a, zz_value b) {
     if (a.tag != b.tag) return 0;
+    // Same interned string singleton: pointer equality, no strcmp.
+    if (a.tag == ZZ_STR && a.s && b.s && a.s == b.s) return 1;
     return zz_values_equal(a, b);
 }
 
@@ -1281,7 +1288,9 @@ zz_value zz_encoding_hex_decode(zz_value s, int *err);
 zz_value zz_value_dup(zz_value v);
 zz_value zz_chan_new(zz_value unused, int *err);
 zz_value zz_chan_send(zz_value chan, zz_value val, int *err);
+zz_value zz_chan_send_batch(zz_value chan, zz_value arr, int *err);
 zz_value zz_chan_recv(zz_value chan, int *err);
+zz_value zz_chan_recv_batch(zz_value chan, zz_value n, int *err);
 zz_value zz_chan_try_recv(zz_value chan, int *err);
 zz_value zz_spawn(zz_value fn, int *err);
 // Spawn fast path for closure literals: builds the worker-owned rep

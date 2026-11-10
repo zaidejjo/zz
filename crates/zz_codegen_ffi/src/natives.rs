@@ -345,7 +345,9 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         // channels
         "chan" | "std.chan" => Some("zz_chan_new"),
         "chan.send" | "std.chan.send" => Some("zz_chan_send"),
+        "chan.send_batch" | "std.chan.send_batch" => Some("zz_chan_send_batch"),
         "chan.recv" | "std.chan.recv" => Some("zz_chan_recv"),
+        "chan.recv_batch" | "std.chan.recv_batch" => Some("zz_chan_recv_batch"),
         "chan.try_recv" | "std.chan.try_recv" => Some("zz_chan_try_recv"),
         // spawn / task join
         "spawn" | "std.spawn" | "task.spawn" | "std.task.spawn" => Some("zz_spawn"),

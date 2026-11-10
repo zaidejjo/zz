@@ -442,9 +442,74 @@ fn bench_struct_access() {
         k = k + 1;
     }
     let t1 = now_ms();
-    println("fill_1M_ms: {}", t1 - t0);
-    println("sum_x: {}", sum);
-    println("struct_access_ok");
+    println!("fill_1M_ms: {}", t1 - t0);
+    println!("sum_x: {}", sum);
+    println!("struct_access_ok");
+}
+
+fn bench_prime_sieve() {
+    const N: usize = 2_000_000;
+    let mut flags = vec![true; N];
+    flags[0] = false;
+    flags[1] = false;
+
+    let t0 = now_ms();
+    let mut i: usize = 2;
+    while i * i < N {
+        if flags[i] {
+            let mut j = i * i;
+            while j < N {
+                flags[j] = false;
+                j += i;
+            }
+        }
+        i += 1;
+    }
+    let mut count: i64 = 0;
+    let mut k: usize = 0;
+    while k < N {
+        if flags[k] {
+            count += 1;
+        }
+        k += 1;
+    }
+    let t1 = now_ms();
+    println!("primes: {}", count);
+    println!("sieve_ms: {}", t1 - t0);
+    println!("bench_prime_sieve_ok");
+}
+
+fn bench_matrix_mul() {
+    let n: usize = 200;
+    let t0 = now_ms();
+    let mut a = vec![0i64; n * n];
+    let mut b = vec![0i64; n * n];
+    let mut c = vec![0i64; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            a[i * n + j] = (i + j) as i64;
+            b[i * n + j] = (i * 2 + j) as i64;
+        }
+    }
+    for i in 0..n {
+        for j in 0..n {
+            let mut sum: i64 = 0;
+            for k in 0..n {
+                sum += a[i * n + k] * b[k * n + j];
+            }
+            c[i * n + j] = sum;
+        }
+    }
+    let mut total: i64 = 0;
+    for i in 0..n {
+        for j in 0..n {
+            total += c[i * n + j];
+        }
+    }
+    let t1 = now_ms();
+    println!("result: {}", total);
+    println!("matmul_ms: {}", t1 - t0);
+    println!("bench_matrix_mul_ok");
 }
 
 fn main() {
@@ -459,9 +524,11 @@ fn main() {
         "http_throughput" => bench_http_throughput(),
         "memory_alloc" => bench_memory_alloc(),
         "struct_access" => bench_struct_access(),
+        "prime_sieve" => bench_prime_sieve(),
+        "matrix_mul" => bench_matrix_mul(),
         _ => {
             eprintln!(
-                "usage: {} <memory_leak|cpu_intensive|string_concats|concurrency_stress|http_throughput|memory_alloc>",
+                "usage: {} <memory_leak|cpu_intensive|string_concats|concurrency_stress|http_throughput|memory_alloc|struct_access|prime_sieve|matrix_mul>",
                 args.get(0).map(String::as_str).unwrap_or("bench")
             );
             std::process::exit(2);
