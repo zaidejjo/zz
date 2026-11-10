@@ -392,6 +392,7 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "http.post" | "std.http.post" => Some("zz_http_post"),
         "http.put" | "std.http.put" => Some("zz_http_put"),
         "http.fetch" | "std.http.fetch" => Some("zz_http_fetch"),
+        "http.fetch_insecure" | "std.http.fetch_insecure" => Some("zz_http_fetch_insecure"),
         "http.post_json" | "std.http.post_json" => Some("zz_http_post_json"),
         _ => None,
     }

@@ -4349,6 +4349,18 @@ impl Lowerer {
                     arg_items.push(pad);
                 }
             }
+            if effective_name == "zz_http_fetch_insecure" {
+                // Signature: (url, method, headers, body, timeout_ms).
+                while arg_items.len() < 5 {
+                    let pad = match 5 - arg_items.len() {
+                        4 => "zz_str_static(\"GET\")".to_string(),
+                        3 => "zz_dict_new()".to_string(),
+                        2 => "zz_str_static(\"\")".to_string(),
+                        _ => "zz_int(30000)".to_string(),
+                    };
+                    arg_items.push(pad);
+                }
+            }
             // Borrowed-arg fast path for proven read-only natives: `zz_len`
             // only inspects its input's tag/length and `zz_fs_write` /
             // `zz_fs_append` only read the data bytes during the call, so

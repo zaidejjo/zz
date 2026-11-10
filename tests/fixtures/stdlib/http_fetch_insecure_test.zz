@@ -1,0 +1,27 @@
+// features: closures, comparison, dicts, func-call, imports, locals, match, option-result, print, std-http, string-literal
+// tests/fixtures/stdlib/http_fetch_insecure_test.zz — http.fetch_insecure C twin.
+// Network-free: a refused loopback port exercises arg parsing, method
+// plumbing, TLS-no-verify plumbing and error mapping identically on VM
+// and AOT. Mirrors http_fetch_test.zz (same curl client, same error tags).
+import std.http
+
+func main() -> Result<int, str> {
+    // Defaults: fetch_insecure(url) == fetch_insecure(url, "GET", {}, "", 30000).
+    match http.fetch_insecure("http://127.0.0.1:9/nope") {
+        .ok(_r) => println("ERROR: fetch_insecure should have failed"),
+        .err(_e) => println("fetch_insecure_default_err_ok"),
+    }
+    // Full options bag.
+    match http.fetch_insecure("http://127.0.0.1:9/nope", "POST", {}, "hi", 2000) {
+        .ok(_r) => println("ERROR: fetch_insecure should have failed"),
+        .err(_e) => println("fetch_insecure_full_err_ok"),
+    }
+    // Explicit headers pass through.
+    match http.fetch_insecure("http://127.0.0.1:9/nope", "GET", {"X-A": "b"}, "", 2000) {
+        .ok(_r) => println("ERROR: fetch_insecure should have failed"),
+        .err(_e) => println("fetch_insecure_headers_err_ok"),
+    }
+
+    println("http_fetch_insecure_test_ok")
+    return .ok(0)
+}

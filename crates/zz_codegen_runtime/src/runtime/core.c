@@ -12391,7 +12391,7 @@ static size_t curl_header_cb(void *data, size_t size, size_t nmemb, void *userp)
 zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err);
 static zz_value http_client_perform(const char *method, const char *url, size_t url_len,
         zz_value headers, const unsigned char *body, size_t body_len,
-        long timeout_ms, const char *label, int *err) {
+        long timeout_ms, int insecure, const char *label, int *err) {
     CURL *curl = curl_easy_init();
     if (!curl) { *err = 1; return zz_variant_err(zz_str_static("http client: curl_easy_init failed")); }
 
@@ -12410,6 +12410,13 @@ static zz_value http_client_perform(const char *method, const char *url, size_t 
     curl_easy_setopt(curl, CURLOPT_URL, url_c);
     // Custom request covers every verb uniformly (GET/POST/PUT/DELETE/PATCH).
     curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method);
+
+    // Insecure mode: disable TLS certificate verification (self-signed /
+    // test fixtures only — never use for production traffic).
+    if (insecure) {
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    }
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body_buf);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, curl_header_cb);
@@ -12536,7 +12543,60 @@ zz_value zz_http_fetch(zz_value url, zz_value method, zz_value headers, zz_value
     char verb_copy[16];
     memcpy(verb_copy, verb, mlen + 1);
     return http_client_perform(verb_copy, zz_str_cptr(url.s), url.s->len,
-        headers, bdata, blen, toms, "http.fetch", err);
+        headers, bdata, blen, toms, 0, "http.fetch", err);
+}
+
+// http.fetch_insecure(url, method?, headers?, body?, timeout_ms?) → .ok(HttpResponse) or .err(str)
+// Same as fetch but with TLS certificate verification disabled (self-signed
+// / test fixtures only). Mirrors the VM's insecure_client().
+zz_value zz_http_fetch_insecure(zz_value url, zz_value method, zz_value headers,
+                                zz_value body, zz_value timeout_ms, int *err) {
+    *err = 0;
+    if (url.tag != ZZ_STR || !url.s) { *err = 1; return zz_variant_err(zz_str_static("http.fetch_insecure: url must be a string")); }
+    if (method.tag != ZZ_STR || !method.s) { *err = 1; return zz_variant_err(zz_str_static("http.fetch_insecure: method must be a string")); }
+    const char *m = zz_str_cptr(method.s);
+    size_t mlen = method.s->len;
+    char up[16];
+    const char *verb = NULL;
+    if (mlen < sizeof up) {
+        for (size_t i = 0; i < mlen; i++) {
+            char c = m[i];
+            up[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+        }
+        up[mlen] = '\0';
+        if ((mlen == 3 && memcmp(up, "GET", 3) == 0) ||
+            (mlen == 4 && memcmp(up, "POST", 4) == 0) ||
+            (mlen == 3 && memcmp(up, "PUT", 3) == 0) ||
+            (mlen == 6 && memcmp(up, "DELETE", 6) == 0) ||
+            (mlen == 5 && memcmp(up, "PATCH", 5) == 0)) {
+            verb = up;
+        }
+    }
+    if (!verb) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("http.fetch_insecure: unknown method (expected GET, POST, PUT, DELETE or PATCH)"));
+    }
+    long toms = (timeout_ms.tag == ZZ_INT && timeout_ms.i > 0) ? (long)timeout_ms.i : -1;
+    if (toms < 0) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("http.fetch_insecure: timeout_ms must be a positive int"));
+    }
+    const unsigned char *bdata = NULL;
+    size_t blen = 0;
+    if (body.tag == ZZ_STR && body.s) {
+        bdata = (const unsigned char *)zz_str_cptr(body.s);
+        blen = body.s->len;
+    } else if (body.tag == ZZ_BYTES && body.bytes) {
+        bdata = body.bytes->buf->data + body.bytes->off;
+        blen = body.bytes->len;
+    } else if (body.tag != ZZ_STR) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("http.fetch_insecure: body must be a string or bytes"));
+    }
+    char verb_copy[16];
+    memcpy(verb_copy, verb, mlen + 1);
+    return http_client_perform(verb_copy, zz_str_cptr(url.s), url.s->len,
+        headers, bdata, blen, toms, 1, "http.fetch_insecure", err);
 }
 
 // http.post_json(url, body, headers) → .ok(HttpResponse) or .err(str)

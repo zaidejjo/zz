@@ -520,8 +520,7 @@ pub(crate) const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("http.listen_tls", "AOT exclusion (VM-only): TLS listener needs rustls server config + TLS accept loop in C"),
     ("std.http.listen_tls_cfg", "AOT exclusion (VM-only): TLS listener + listen_cfg limits; needs rustls in C"),
     ("http.listen_tls_cfg", "AOT exclusion (VM-only): TLS listener + listen_cfg limits; needs rustls in C"),
-    ("std.http.fetch_insecure", "AOT exclusion (VM-only): insecure (self-signed) TLS client needs libcurl with verification disabled; no C twin"),
-    ("http.fetch_insecure", "AOT exclusion (VM-only): insecure (self-signed) TLS client needs libcurl with verification disabled; no C twin"),
+
     ("std.http.hijack", "AOT exclusion (VM-only): WebSocket upgrade handshake + TCP stream handoff; cleartext-only in AOT"),
     ("http.hijack", "AOT exclusion (VM-only): WebSocket upgrade handshake + TCP stream handoff; cleartext-only in AOT"),
     // MySQL wire driver — VM-only (no staticlib backend like PG has;
