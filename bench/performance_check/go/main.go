@@ -360,11 +360,107 @@ func benchMemoryAlloc() {
 }
 
 // ---------------------------------------------------------------------
+// bench_struct_access — mirror of bench_struct_access.zz
+// ---------------------------------------------------------------------
+type Pt struct{ x, y int }
+
+func benchStructAccess() {
+	const N = 1_000_000
+	arr := make([]Pt, 0, N)
+	i := 0
+	for i < N {
+		arr = append(arr, Pt{x: i, y: i * 2})
+		i++
+	}
+
+	t0 := nowMs()
+	sum := 0
+	n := len(arr)
+	k := 0
+	for k < n {
+		sum += arr[k].x
+		k++
+	}
+	t1 := nowMs()
+	fmt.Printf("fill_1M_ms: %d\n", t1-t0)
+	fmt.Printf("sum_x: %d\n", sum)
+	fmt.Println("struct_access_ok")
+}
+
+// ---------------------------------------------------------------------
+// bench_prime_sieve — mirror of bench_prime_sieve.zz
+// ---------------------------------------------------------------------
+func benchPrimeSieve() {
+	const N = 2_000_000
+	flags := make([]bool, N)
+	for i := range flags {
+		flags[i] = true
+	}
+	flags[0] = false
+	flags[1] = false
+
+	t0 := nowMs()
+	for i := 2; i*i < N; i++ {
+		if flags[i] {
+			for j := i * i; j < N; j += i {
+				flags[j] = false
+			}
+		}
+	}
+	count := 0
+	for k := 0; k < N; k++ {
+		if flags[k] {
+			count++
+		}
+	}
+	t1 := nowMs()
+	fmt.Printf("primes: %d\n", count)
+	fmt.Printf("sieve_ms: %d\n", t1-t0)
+	fmt.Println("bench_prime_sieve_ok")
+}
+
+// ---------------------------------------------------------------------
+// bench_matrix_mul — mirror of bench_matrix_mul.zz
+// ---------------------------------------------------------------------
+func benchMatrixMul() {
+	n := 200
+	t0 := nowMs()
+	a := make([]int64, n*n)
+	b := make([]int64, n*n)
+	c := make([]int64, n*n)
+	for i := 0; i < n; i++ {
+		for j := 0; j < n; j++ {
+			a[i*n+j] = int64(i + j)
+			b[i*n+j] = int64(i*2 + j)
+		}
+	}
+	for i := 0; i < n; i++ {
+		for j := 0; j < n; j++ {
+			var sum int64
+			for k := 0; k < n; k++ {
+				sum += a[i*n+k] * b[k*n+j]
+			}
+			c[i*n+j] = sum
+		}
+	}
+	var total int64
+	for i := 0; i < n; i++ {
+		for j := 0; j < n; j++ {
+			total += c[i*n+j]
+		}
+	}
+	t1 := nowMs()
+	fmt.Printf("result: %d\n", total)
+	fmt.Printf("matmul_ms: %d\n", t1-t0)
+	fmt.Println("bench_matrix_mul_ok")
+}
+
+// ---------------------------------------------------------------------
 // dispatch
 // ---------------------------------------------------------------------
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: main <memory_leak|cpu_intensive|string_concats|concurrency_stress|http_throughput|memory_alloc>")
+		fmt.Fprintln(os.Stderr, "usage: main <memory_leak|cpu_intensive|string_concats|concurrency_stress|http_throughput|memory_alloc|struct_access|prime_sieve|matrix_mul>")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -380,6 +476,12 @@ func main() {
 		benchHttpThroughput()
 	case "memory_alloc":
 		benchMemoryAlloc()
+	case "struct_access":
+		benchStructAccess()
+	case "prime_sieve":
+		benchPrimeSieve()
+	case "matrix_mul":
+		benchMatrixMul()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown benchmark: %s\n", os.Args[1])
 		os.Exit(2)

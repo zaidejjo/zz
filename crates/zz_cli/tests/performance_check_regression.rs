@@ -247,6 +247,84 @@ fn regression_bench_struct_access_compiles_and_runs() {
     );
 }
 
+// ----- bench_prime_sieve -------------------------------------------
+// Numeric-kernel guard: flat comprehension storage (`[true for _ in
+// range(N)]` → `bool *`), raw loop-condition comparisons and elided
+// bounds checks on `flags[j]`. Locks in the sieve's prime count and a
+// generous wall-time ceiling so a codegen regression surfaces fast.
+const BASELINE_SIEVE_WALL_MS: u128 = 30_000; // 30 s (measured ~20-100ms)
+#[test]
+fn regression_bench_prime_sieve_completes_with_expected_count() {
+    let Some(bin) = build_zz_bench("prime_sieve") else {
+        return;
+    };
+
+    let (stdout, wall, peak_kib) = run_meas(&bin);
+    let _ = bin;
+
+    assert!(
+        stdout.contains("bench_prime_sieve_ok"),
+        "prime_sieve missing success marker.\nstdout:\n{stdout}"
+    );
+
+    // π(2_000_000) = 148933 — deterministic across engines.
+    let primes = parse_marker(&stdout, "primes").expect("missing primes in prime_sieve output");
+    assert_eq!(primes, 148_933, "prime count drift (got {primes})");
+
+    let wall_ms = wall.as_millis();
+    assert!(
+        wall_ms < BASELINE_SIEVE_WALL_MS,
+        "prime_sieve wall time {wall_ms}ms exceeds baseline {BASELINE_SIEVE_WALL_MS}ms"
+    );
+
+    // The sieve keeps a 2 MB bool buffer; allow generous runtime overhead.
+    let peak_mb = peak_kib / 1024;
+    assert!(
+        peak_mb < 128,
+        "prime_sieve peak RSS {peak_mb}MB exceeds baseline 128MB"
+    );
+}
+
+// ----- bench_matrix_mul --------------------------------------------
+// Numeric-kernel guard: arithmetic-index bounds elision (`a[i*n+k]`),
+// raw flat-read arithmetic (`sum + a[..] * b[..]`) and raw comparisons.
+// Locks in the cross-engine checksum and a generous wall-time ceiling.
+const BASELINE_MATMUL_WALL_MS: u128 = 30_000; // 30 s (measured ~15-70ms)
+#[test]
+fn regression_bench_matrix_mul_completes_with_expected_checksum() {
+    let Some(bin) = build_zz_bench("matrix_mul") else {
+        return;
+    };
+
+    let (stdout, wall, peak_kib) = run_meas(&bin);
+    let _ = bin;
+
+    assert!(
+        stdout.contains("bench_matrix_mul_ok"),
+        "matrix_mul missing success marker.\nstdout:\n{stdout}"
+    );
+
+    // Sum of all products for n=200, a[i][j]=i+j, b[i][j]=2i+j.
+    let result = parse_marker(&stdout, "result").expect("missing result in matrix_mul output");
+    assert_eq!(
+        result, 528_544_000_000,
+        "matrix_mul checksum drift (got {result})"
+    );
+
+    let wall_ms = wall.as_millis();
+    assert!(
+        wall_ms < BASELINE_MATMUL_WALL_MS,
+        "matrix_mul wall time {wall_ms}ms exceeds baseline {BASELINE_MATMUL_WALL_MS}ms"
+    );
+
+    // Three 200×200 int64 buffers ≈ 960 KB; allow generous overhead.
+    let peak_mb = peak_kib / 1024;
+    assert!(
+        peak_mb < 128,
+        "matrix_mul peak RSS {peak_mb}MB exceeds baseline 128MB"
+    );
+}
+
 // ----- bench_check_20k ---------------------------------------------
 // Performance regression: `zz check` on a 20k-line synthetic program
 // (many funcs, structs, long match chains, big arrays, imports) must
