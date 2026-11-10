@@ -847,12 +847,46 @@ impl Lowerer {
                             // Arena string concatenation: when Add is used on
                             // strings inside a loop, allocate the result on
                             // the arena to avoid heap malloc per iteration.
+                            // Flatten `(a + b) + c` into a single
+                            // `zz_str_cat3_arena(a, b, c, &arena)` to avoid
+                            // the intermediate arena string + extra memcpy
+                            // that nested `zz_binop_cat_arena` pays.
                             if matches!(op, zz_frontend::ast::BinOp::Add)
                                 && (self.is_string_expr(left, names)
                                     || self.is_string_expr(right, names))
                                 && self.loop_arenas.borrow().last().is_some()
                             {
                                 let arena = self.loop_arenas.borrow().last().unwrap().clone();
+                                if let zz_frontend::ast::Expr::Binary {
+                                    op: inner_op,
+                                    left: ll,
+                                    right: lr,
+                                    ..
+                                } = left.as_ref()
+                                {
+                                    if matches!(inner_op, zz_frontend::ast::BinOp::Add)
+                                        && self.is_string_expr(ll, names)
+                                        && self.is_string_expr(lr, names)
+                                        && self.is_string_expr(right, names)
+                                    {
+                                        // Emit the two inner operands into
+                                        // scratch buffers so each gets its
+                                        // own correct emitted text
+                                        // (reusing `&l`/`&r` would pass the
+                                        // outer operands' text to the inner
+                                        // ones).
+                                        let mut ll_stmts = String::new();
+                                        let boxed_ll = self.emit_expr(ll, names, &mut ll_stmts);
+                                        out.push_str(&ll_stmts);
+                                        let mut lr_stmts = String::new();
+                                        let boxed_lr = self.emit_expr(lr, names, &mut lr_stmts);
+                                        out.push_str(&lr_stmts);
+                                        // `right` was already emitted into `r`.
+                                        return format!(
+                                            "zz_str_cat3_arena({boxed_ll}, {boxed_lr}, {r}, &{arena})"
+                                        );
+                                    }
+                                }
                                 let boxed_l = box_scalar_operand(left, names, &l);
                                 let boxed_r = box_scalar_operand(right, names, &r);
                                 format!("zz_binop_cat_arena({boxed_l}, {boxed_r}, &{arena})")
@@ -1773,16 +1807,40 @@ impl Lowerer {
                     None => format!("zz_dict_new_sized({n})"),
                 };
                 out.push_str(&format!("    zz_value {dv} = {arena_code};\n"));
-                for (k, v) in entries {
-                    let raw_key = self.emit_expr(k, names, out);
-                    let raw_val = self.emit_expr(v, names, out);
-                    // Box raw-scalar keys/values (loop vars, arithmetic)
-                    // so every `zz_index_set` argument is a real zz_value.
-                    let key = box_scalar_operand(k, names, &raw_key);
-                    let val = box_scalar_operand(v, names, &raw_val);
-                    out.push_str(&format!(
-                        "    {{ int _de = 0; zz_index_set(&{dv}, {key}, {val}, &_de); }}\n"
-                    ));
+
+                // Fast path: arena-allocated dict with string-literal keys.
+                // Write entries directly into the entries buffer, bypassing
+                // `zz_index_set` (which pays hash probe + clone + heal per
+                // insert). Safe because the dict is fresh (no aliasing),
+                // keys are interned string literals (no clone needed), and
+                // values are scalars (no heal needed). The arena reset will
+                // free everything when the loop iteration ends.
+                let all_str_keys = entries.iter().all(|(k, _)| matches!(k, Expr::Str { .. }));
+                if self.arena_for(*span).is_some() && all_str_keys {
+                    for (i, (k, v)) in entries.iter().enumerate() {
+                        let Expr::Str { value, .. } = k else {
+                            unreachable!()
+                        };
+                        let raw_val = self.emit_expr(v, names, out);
+                        let val = box_scalar_operand(v, names, &raw_val);
+                        let escaped = Self::c_escape(value);
+                        out.push_str(&format!(
+                            "    {dv}.dict->entries[{i}].key = zz_str_static(\"{escaped}\");\n    {dv}.dict->entries[{i}].val = {val};\n    {dv}.dict->len = {};\n",
+                            i + 1
+                        ));
+                    }
+                } else {
+                    for (k, v) in entries {
+                        let raw_key = self.emit_expr(k, names, out);
+                        let raw_val = self.emit_expr(v, names, out);
+                        // Box raw-scalar keys/values (loop vars, arithmetic)
+                        // so every `zz_index_set` argument is a real zz_value.
+                        let key = box_scalar_operand(k, names, &raw_key);
+                        let val = box_scalar_operand(v, names, &raw_val);
+                        out.push_str(&format!(
+                            "    {{ int _de = 0; zz_index_set(&{dv}, {key}, {val}, &_de); }}\n"
+                        ));
+                    }
                 }
                 dv
             }

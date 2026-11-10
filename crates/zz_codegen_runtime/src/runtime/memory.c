@@ -213,6 +213,10 @@ void zz_retain_dict(zz_dict *d) {
 
 void zz_release_dict(zz_dict *d) {
     if (!d) return;
+    // Skip per-entry release when nothing needs it: all values are scalars
+    // and all keys are interned strings (immortal, no refcount to drop).
+    if (!d->has_heap_values && !d->has_heap_keys)
+        return;
     // Arena-allocated dicts have refs==0 sentinel — skip atomic decrement.
     if (d->refs == 0) {
         for (size_t i = 0; i < d->len; i++) {
