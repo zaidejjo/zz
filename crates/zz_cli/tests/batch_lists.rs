@@ -124,6 +124,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("syntax", "closure_nested.zz", false),
     ("syntax", "closure_capture_struct_array.zz", false),
     ("stdlib", "bytes_finish_test.zz", true),
+    ("stdlib", "http_delete_put.zz", true),
     ("syntax", "brace_escapes.zz", false),
     ("syntax", "raw_strings.zz", false),
     ("syntax", "brace_escapes_multiline.zz", false),

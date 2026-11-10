@@ -491,8 +491,6 @@ pub(crate) const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // NOTE: `serve_dir`/`serve_dir_at` used to be listed here (no C
     // implementation); both are implemented in the AOT runtime now, so the
     // stale-gap check requires their removal.
-    ("std.http.delete", "http fixtures skipped in parity"),
-    ("std.http.put", "http fixtures skipped in parity"),
     // HTTP helpers (pure-ZZ, compiled from zz/http/mod.zz)
     ("std.http.ok", "pure ZZ; no C codegen"),
     ("http.ok", "pure ZZ alias"),

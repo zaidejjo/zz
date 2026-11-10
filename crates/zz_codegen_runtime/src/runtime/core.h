@@ -1365,7 +1365,9 @@ zz_value zz_http_body_bytes(zz_value req, int *err);  // 1 arg
 
 // HTTP client stubs (native mode — returns mock responses)
 zz_value zz_http_get(zz_value url, zz_value headers, int *err);
+zz_value zz_http_delete(zz_value url, zz_value headers, int *err);
 zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err);
+zz_value zz_http_put(zz_value url, zz_value body, zz_value headers, int *err);
 zz_value zz_http_fetch(zz_value url, zz_value method, zz_value headers, zz_value body, zz_value timeout_ms, int *err);  // 5 args
 zz_value zz_http_post_json(zz_value url, zz_value body, zz_value headers, int *err);  // 3 args
 zz_value zz_http_response_status(zz_value resp, int *err);

@@ -387,7 +387,9 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "http.headers" | "std.http.headers" => Some("zz_http_response_headers"),
         // http request functions
         "http.get" | "std.http.get" => Some("zz_http_get"),
+        "http.delete" | "std.http.delete" => Some("zz_http_delete"),
         "http.post" | "std.http.post" => Some("zz_http_post"),
+        "http.put" | "std.http.put" => Some("zz_http_put"),
         "http.fetch" | "std.http.fetch" => Some("zz_http_fetch"),
         "http.post_json" | "std.http.post_json" => Some("zz_http_post_json"),
         _ => None,

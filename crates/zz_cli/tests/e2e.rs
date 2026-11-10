@@ -868,6 +868,7 @@ e2e_success_test!(e2e_stdlib_map_set, "stdlib", "map_set.zz");
 e2e_success_test!(e2e_stdlib_dec_ops, "stdlib", "dec_ops.zz");
 e2e_success_test!(e2e_stdlib_csv_test, "stdlib", "csv_test.zz");
 e2e_success_test!(e2e_stdlib_builders, "stdlib", "builders.zz");
+e2e_success_test!(e2e_stdlib_http_delete_put, "stdlib", "http_delete_put.zz");
 e2e_success_test!(e2e_stdlib_time_date, "stdlib", "time_date.zz");
 e2e_success_test!(e2e_stdlib_jsonmod, "stdlib", "jsonmod.zz");
 e2e_success_test!(e2e_stdlib_filesystem, "stdlib", "filesystem.zz");

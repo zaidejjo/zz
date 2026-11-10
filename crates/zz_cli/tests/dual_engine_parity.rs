@@ -1613,6 +1613,11 @@ parity_strict!(parity_stdlib_map_set, "stdlib", "map_set.zz");
 parity_strict!(parity_stdlib_dec_ops, "stdlib", "dec_ops.zz");
 parity_strict!(parity_stdlib_csv_test, "stdlib", "csv_test.zz");
 parity_strict!(parity_stdlib_builders, "stdlib", "builders.zz");
+parity_strict!(
+    parity_stdlib_http_delete_put,
+    "stdlib",
+    "http_delete_put.zz"
+);
 parity_strict!(parity_stdlib_time_date, "stdlib", "time_date.zz");
 parity_known_failure!(
     parity_stdlib_math_extended,
