@@ -16,7 +16,7 @@ pub mod token;
 use std::borrow::Cow;
 
 use crate::token::{Token, TokenKind, Trivia, TriviaKind};
-use zz_diag_core::{error_at, FixIt, RawDiag};
+use zz_diag_core::{error_at, warning_at, FixIt, RawDiag};
 use zz_span_ast::Span;
 
 /// Render a fixit replacement for display: backtick-quoted, except a
@@ -196,7 +196,29 @@ impl<'a> Lexer<'a> {
                         self.push_trivia(TriviaKind::Newline);
                     }
                 }
-                ';' => self.emit_significant(TokenKind::StmtEnd, self.pos, self.pos + 1),
+                ';' => {
+                    let semi_start = self.pos;
+                    self.emit_significant(TokenKind::StmtEnd, self.pos, self.pos + 1);
+                    // `;` is only needed to place multiple statements on one
+                    // single line. A trailing `;` (nothing but whitespace /
+                    // line comments until the newline) is redundant: the
+                    // newline already ends the statement, so the compiler
+                    // never needs to auto-insert `;`. Warn and offer a safe
+                    // fix-it to delete it.
+                    if self.semicolon_redundant_after(semi_start + 1) {
+                        self.errors.push(
+                            warning_at(
+                                "redundant semicolon — the newline already ends this statement",
+                                Span::new(semi_start as u32, (semi_start + 1) as u32),
+                            )
+                            .with_fixit(FixIt::safe(
+                                Span::new(semi_start as u32, (semi_start + 1) as u32),
+                                "",
+                                "remove the semicolon",
+                            )),
+                        );
+                    }
+                }
                 '/' if self.peek_char_at(1) == Some('/') => self.lex_line_comment(),
                 '/' if self.peek_char_at(1) == Some('*') => self.lex_block_comment(),
                 '/' if self.peek_char_at(1) == Some('=') => {
@@ -614,6 +636,34 @@ impl<'a> Lexer<'a> {
                 return rest.starts_with("|>");
             }
         }
+    }
+
+    /// True when the `;` that just preceded `start` (the byte right after
+    /// the semicolon) is redundant: the rest of this line holds only
+    /// whitespace and line comments, so the newline alone would already end
+    /// the statement. `;` is meaningful only to place multiple statements on
+    /// one single line. Returns `true` at end of file too.
+    fn semicolon_redundant_after(&self, start: usize) -> bool {
+        let bytes = self.src.as_bytes();
+        let mut i = start;
+        while i < bytes.len() {
+            match bytes[i] {
+                b' ' | b'\t' => i += 1,
+                b'\n' | b'\r' => return true, // end of line: nothing after `;`
+                b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                    // line comment: skip to end of line
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                    // block comment: conservative — treat as real content
+                    return false;
+                }
+                _ => return false, // real content follows `;` on this line
+            }
+        }
+        true // `;` at end of file: nothing after it
     }
 
     fn emit_significant(&mut self, kind: TokenKind, start: usize, end: usize) {

@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn round_trip_semicolons() {
-        round_trips("a := 1; b := 2;");
+        round_trips("a := 1; b := 2");
     }
 
     #[test]
