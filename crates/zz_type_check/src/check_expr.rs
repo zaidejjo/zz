@@ -340,6 +340,11 @@ fn check_expr_array(checker: &mut Checker, elems: &[Expr]) -> Type {
 }
 
 fn check_expr_tuple(checker: &mut Checker, items: &[Expr]) -> Type {
+    if items.is_empty() {
+        // An empty tuple `()` is unit (#712): match arms like
+        // `.err(_) => ()` must type-check as unit, not `tuple([])`.
+        return Type::Unit;
+    }
     let item_types: Vec<Type> = items.iter().map(|item| checker.check_expr(item)).collect();
     Type::Tuple(item_types)
 }
