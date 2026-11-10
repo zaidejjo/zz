@@ -438,14 +438,8 @@ impl Lowerer {
                         && matches!(value, Expr::Array { elems, .. } if elems.is_empty())
                     {
                         out.push_str(&format!("    {gid} = NULL;\n"));
-                        out.push_str(&format!(
-                            "    {} = 0;\n",
-                            Self::global_cid(&format!("{zz_name}_len"))
-                        ));
-                        out.push_str(&format!(
-                            "    {} = 0;\n",
-                            Self::global_cid(&format!("{zz_name}_cap"))
-                        ));
+                        out.push_str(&format!("    {gid}_len = 0;\n"));
+                        out.push_str(&format!("    {gid}_cap = 0;\n"));
                         global_init_done.insert(zz_name.clone());
                         body.push_str(&out);
                         continue;

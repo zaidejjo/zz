@@ -740,14 +740,8 @@ fn emit_top_decl(
         && matches!(value, Expr::Array { elems, .. } if elems.is_empty())
     {
         out.push_str(&format!("    {gid} = NULL;\n"));
-        out.push_str(&format!(
-            "    {} = 0;\n",
-            Lowerer::global_cid(&format!("{zz_name}_len"))
-        ));
-        out.push_str(&format!(
-            "    {} = 0;\n",
-            Lowerer::global_cid(&format!("{zz_name}_cap"))
-        ));
+        out.push_str(&format!("    {gid}_len = 0;\n"));
+        out.push_str(&format!("    {gid}_cap = 0;\n"));
         global_init_done.insert(zz_name.to_string());
         return;
     }
@@ -946,11 +940,11 @@ mod tests {
             "flat buffer def missing:\n{all_code}"
         );
         assert!(
-            all_code.contains("int64_t zz_global_arr__len;"),
+            all_code.contains("int64_t zz_global_arr_len;"),
             "length counter def missing:\n{all_code}"
         );
         assert!(
-            all_code.contains("int64_t zz_global_arr__cap;"),
+            all_code.contains("int64_t zz_global_arr_cap;"),
             "capacity counter def missing:\n{all_code}"
         );
         assert!(
@@ -977,6 +971,50 @@ mod tests {
         assert!(
             !prelude.code.contains("zz_global_arr_len"),
             "boxed global must not get counters:\n{}",
+            prelude.code
+        );
+    }
+
+    /// Regression for the double-mangled flat-array counter: `arr_len`/`arr_cap`
+    /// must lower to `zz_global_arr_len` / `zz_global_arr_cap` (single
+    /// underscore, appended to the already-mangled base `zz_global_arr`), NOT
+    /// `zz_global_arr__len` (double underscore from re-mangling `arr_len`).
+    /// Both `arr.push(...)` growth and `len(arr)` must reference the same
+    /// single-underscore counter symbol.
+    #[test]
+    fn flat_global_array_counter_uses_single_underscore() {
+        let units = lower_merged(
+            "arr: [int] = []
+             func main() {
+                 arr.push(1)
+                 println(len(arr))
+             }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let all_code: String = units.units.iter().map(|u| u.code.as_str()).collect();
+        // Definitions live across units' code (see flat_global_array_gets_pointer_and_counters).
+        assert!(
+            all_code.contains("int64_t zz_global_arr_len;"),
+            "flat counter def missing (single underscore):\n{all_code}"
+        );
+        assert!(
+            all_code.contains("int64_t zz_global_arr_cap;"),
+            "flat cap def missing (single underscore):\n{all_code}"
+        );
+        assert!(
+            !all_code.contains("zz_global_arr__len") && !all_code.contains("zz_global_arr__cap"),
+            "double-mangled counter must not appear:\n{all_code}"
+        );
+        // Usage lives in main's body (prelude.code).
+        assert!(
+            prelude.code.contains("zz_global_arr[zz_global_arr_len]")
+                && prelude.code.contains("zz_global_arr_len++"),
+            "push must use the single-underscore counter:\n{}",
+            prelude.code
+        );
+        assert!(
+            prelude.code.contains("zz_int(zz_global_arr_len)"),
+            "len(arr) must read the single-underscore counter:\n{}",
             prelude.code
         );
     }
