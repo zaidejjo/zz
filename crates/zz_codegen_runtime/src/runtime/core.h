@@ -170,7 +170,8 @@ typedef struct {
     int interned;
     int mutable;      // non-zero: mutable string, never shared, in-place append
     size_t cap;     // 0 = SSO, >0 = heap capacity
-        size_t len;
+        size_t len;     // payload length in bytes
+        size_t charlen; // cached Unicode scalar count (ZZ_STR_CHARLEN_UNKNOWN = unknown)
         size_t hash;    // cached FNV-1a hash for interned strings (0 = uncached)
     union {
         char sso[ZZ_SSO_MAX + 1]; // 24 bytes: inline data + NUL (cap == 0)

@@ -1502,6 +1502,7 @@ zz_value zz_str_cat3_arena(zz_value a, zz_value b, zz_value c, zz_arena *arena) 
     out->refs = 0;
     out->interned = 0;
     out->len = need;
+    out->charlen = ZZ_STR_CHARLEN_UNKNOWN; // not yet scanned
     if (need <= ZZ_SSO_MAX) {
         out->cap = 0;
         memcpy(out->sso, pa, la);
