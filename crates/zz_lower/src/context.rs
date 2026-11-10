@@ -106,6 +106,8 @@ pub struct NameCtx {
     /// (call argument, return, capture, rebinding, slice, any other method)
     /// is absent and keeps the boxed `zz_value` layout.
     pub(crate) flat_locals: HashSet<String>,
+    /// Inferred flat scalar array element types for `ty: None` declarations.
+    pub(crate) flat_scalar_types: HashMap<String, String>,
     /// Stack of counter snapshots for scope tracking. `push_scope` records
     /// the current counter; `pop_scope` removes all entries whose C id was
     /// created at or after that counter value.
@@ -176,6 +178,7 @@ impl NameCtx {
             cap_ptrs: HashMap::new(),
             capture_set: HashSet::new(),
             flat_locals: HashSet::new(),
+            flat_scalar_types: HashMap::new(),
             scope_markers: Vec::new(),
             array_lens: HashMap::new(),
             array_len_exprs: HashMap::new(),
@@ -1402,6 +1405,50 @@ impl Lowerer {
         )
     }
 
+    /// Infer the C scalar element type of a `push` argument. Returns `Some`
+    /// only for expressions whose type is statically known (int literals,
+    /// int ident, raw int/float/bool arithmetic). Returns `None` for anything
+    /// else (closures, strings, structs, calls).
+    pub(crate) fn infer_scalar_push_ctype(
+        &self,
+        arg: &zz_frontend::ast::Expr,
+        names: &NameCtx,
+    ) -> Option<String> {
+        match arg {
+            Expr::Int { .. } => Some("int64_t".to_string()),
+            Expr::Float { .. } => Some("double".to_string()),
+            Expr::Bool { .. } => Some("bool".to_string()),
+            Expr::Ident { name, .. } => names.lookup_type(name).and_then(|t| match t {
+                "int64_t" => Some("int64_t".to_string()),
+                "double" => Some("double".to_string()),
+                "bool" => Some("bool".to_string()),
+                _ => None,
+            }),
+            Expr::Binary {
+                op: _, left, right, ..
+            } => {
+                let ltype = self.infer_scalar_push_ctype(left, names);
+                let rtype = self.infer_scalar_push_ctype(right, names);
+                match (ltype.as_deref(), rtype.as_deref()) {
+                    (Some("int64_t"), Some("int64_t")) => Some("int64_t".to_string()),
+                    (Some("double"), Some("double"))
+                    | (Some("int64_t"), Some("double"))
+                    | (Some("double"), Some("int64_t")) => Some("double".to_string()),
+                    (Some("bool"), Some("bool")) => Some("bool".to_string()),
+                    _ => None,
+                }
+            }
+            Expr::StructInit { name, .. } => {
+                if self.is_unboxed_struct(name) {
+                    Some(format!("zz_struct_{}", mangle(name)))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Convert a checker type to C type string.
     pub(crate) fn type_to_c(&self, ty: &zz_checker::Type) -> String {
         match ty {
@@ -1491,8 +1538,167 @@ impl Lowerer {
     pub(crate) fn body_flat_locals(
         &self,
         block: &zz_frontend::ast::Block,
+        names: &mut NameCtx,
     ) -> std::collections::HashSet<String> {
-        crate::param_escape::flat_array_locals(block, &|n: &str| self.is_unboxed_struct(n))
+        let mut flat_names =
+            crate::param_escape::flat_array_locals(block, &|n: &str| self.is_unboxed_struct(n));
+        self.infer_flat_from_push_usage(block, &mut flat_names, names);
+
+        // Infer flat arrays from `ty: None` declarations (`name := []`)
+
+        flat_names
+    }
+
+    /// Scan `block` (recursively into nested blocks) for `name := []`
+    /// declarations where every `name.push(...)` has a scalar argument.
+    /// Adds qualifying names to `flat_names` and records their element types
+    /// in `flat_scalar_types`.
+    fn infer_flat_from_push_usage(
+        &self,
+        block: &zz_frontend::ast::Block,
+        flat_names: &mut std::collections::HashSet<String>,
+        names: &mut NameCtx,
+    ) {
+        let mut candidates: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut bad: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        Self::collect_ty_none_arrays(block, &mut candidates, flat_names);
+
+        if candidates.is_empty() {
+            return;
+        }
+
+        self.scan_pushes(block, &mut candidates, &mut bad, names);
+
+        for (name, elem_type) in &candidates {
+            if !bad.contains(name) && !elem_type.is_empty() {
+                flat_names.insert(name.clone());
+                names
+                    .flat_scalar_types
+                    .insert(name.clone(), elem_type.clone());
+            }
+        }
+    }
+
+    /// Collect `name := []` (ty: None, empty array literal) declarations.
+    fn collect_ty_none_arrays(
+        block: &zz_frontend::ast::Block,
+        candidates: &mut std::collections::HashMap<String, String>,
+        flat_names: &std::collections::HashSet<String>,
+    ) {
+        for stmt in &block.stmts {
+            match stmt {
+                Stmt::Decl {
+                    ty: None,
+                    name,
+                    value: Expr::Array { elems, .. },
+                    ..
+                } => {
+                    if elems.is_empty() && !flat_names.contains(&name.name) {
+                        candidates.insert(name.name.clone(), String::new());
+                    }
+                }
+                Stmt::For { body, .. } => {
+                    Self::collect_ty_none_arrays(body, candidates, flat_names);
+                }
+                Stmt::Expr(Expr::Block(b)) => {
+                    Self::collect_ty_none_arrays(b, candidates, flat_names);
+                }
+                Stmt::Expr(Expr::If { then, els, .. }) => {
+                    Self::collect_ty_none_arrays(then, candidates, flat_names);
+                    if let Some(Expr::Block(b)) = els.as_deref() {
+                        Self::collect_ty_none_arrays(b, candidates, flat_names);
+                    }
+                }
+                Stmt::Expr(Expr::While { body, .. }) => {
+                    Self::collect_ty_none_arrays(body, candidates, flat_names);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Scan all statements (recursively) for `name.push(...)` usage and
+    /// disqualify candidates with incompatible argument types.
+    fn scan_pushes(
+        &self,
+        block: &zz_frontend::ast::Block,
+        candidates: &mut std::collections::HashMap<String, String>,
+        bad: &mut std::collections::HashSet<String>,
+        names: &mut NameCtx,
+    ) {
+        'outer: for stmt in &block.stmts {
+            match stmt {
+                Stmt::Expr(Expr::Call { callee, args, .. }) => {
+                    let (push_name, is_push) = match callee.as_ref() {
+                        Expr::Path { parts, .. } if parts.len() == 2 => {
+                            if parts[1] == "push" {
+                                (parts[0].clone(), true)
+                            } else {
+                                (String::new(), false)
+                            }
+                        }
+                        Expr::Field {
+                            obj, name: mname, ..
+                        } if mname == "push" => match obj.as_ref() {
+                            Expr::Ident { name: obj_name, .. } => (obj_name.clone(), true),
+                            _ => (String::new(), false),
+                        },
+                        _ => (String::new(), false),
+                    };
+                    if !is_push || push_name.is_empty() {
+                        continue;
+                    }
+                    if !candidates.contains_key(&push_name) {
+                        continue;
+                    }
+                    let Some(arg) = args.first() else {
+                        bad.insert(push_name.clone());
+                        continue 'outer;
+                    };
+                    // Determine element type from push argument
+                    let elem_type = match self.infer_scalar_push_ctype(arg, names) {
+                        Some(ctype) => ctype,
+                        None => {
+                            bad.insert(push_name.clone());
+                            continue 'outer;
+                        }
+                    };
+                    // Record element type (first push wins; mixed types disqualify)
+                    match candidates.get_mut(&push_name) {
+                        Some(existing) => {
+                            if existing.is_empty() {
+                                *existing = elem_type.clone();
+                            } else if *existing != elem_type {
+                                bad.insert(push_name.clone());
+                                continue 'outer;
+                            }
+                        }
+                        None => {
+                            bad.insert(push_name.clone());
+                            continue 'outer;
+                        }
+                    }
+                }
+                Stmt::For { body, .. } => {
+                    self.scan_pushes(body, candidates, bad, names);
+                }
+                Stmt::Expr(Expr::Block(b)) => {
+                    self.scan_pushes(b, candidates, bad, names);
+                }
+                Stmt::Expr(Expr::If { then, els, .. }) => {
+                    self.scan_pushes(then, candidates, bad, names);
+                    if let Some(Expr::Block(b)) = els.as_deref() {
+                        self.scan_pushes(b, candidates, bad, names);
+                    }
+                }
+                Stmt::Expr(Expr::While { body, .. }) => {
+                    self.scan_pushes(body, candidates, bad, names);
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Emit a heap cell allocation + initialization for a captured binding.

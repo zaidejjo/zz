@@ -283,6 +283,30 @@ impl Lowerer {
                     return;
                 }
 
+                // ---- Flat arrays from ty: None declarations (inferred from push usage) ----
+                // `rows := []` where all `rows.push(...)` are struct literals of the
+                // same unboxed struct type (or scalar pushes) lowers to flat storage
+                // instead of a boxed zz_value container. `infer_flat_from_push_usage`
+                // populated `flat_locals` and `flat_scalar_types` during body prelude.
+                if !self.green_active()
+                    && names.flat_locals.contains(&name.name)
+                    && matches!(value, Expr::Array { elems, .. } if elems.is_empty())
+                    && ty.is_none()
+                {
+                    if let Some(elem_ctype) = names.flat_scalar_types.get(&name.name) {
+                        let ptr_ty = format!("{elem_ctype} *");
+                        let cid = names.enter_with_type(&name.name, &ptr_ty);
+                        let len_cid =
+                            names.enter_with_type(&format!("{}_len", name.name), "int64_t");
+                        let cap_cid =
+                            names.enter_with_type(&format!("{}_cap", name.name), "int64_t");
+                        out.push_str(&format!("    {ptr_ty} {cid} = NULL;\n"));
+                        out.push_str(&format!("    int64_t {len_cid} = 0;\n"));
+                        out.push_str(&format!("    int64_t {cap_cid} = 0;\n"));
+                        return;
+                    }
+                }
+
                 // ---- Flat arrays from list comprehensions ------------------
                 // `[true for _ in 0..n]` lowers to flat `bool *` storage with
                 // direct index access. The ListComp lowering already emitted
@@ -2435,7 +2459,7 @@ impl Lowerer {
                     // (dict_lookup: 50k entries grow 4→8→…→65536 = 15 reallocs).
                     if let Some(Stmt::Assign { target, .. }) = body.stmts.first() {
                         if body.stmts.len() == 1 {
-                            if let Expr::Index { obj, .. } = &*target {
+                            if let Expr::Index { obj, .. } = target {
                                 if let Expr::Ident {
                                     name: dict_name, ..
                                 } = &**obj
@@ -3048,7 +3072,7 @@ impl Lowerer {
         // compute it before emitting any statement of this body. Nested
         // block/closure bodies recompute their own set; restore ours after.
         let outer_flat = std::mem::take(&mut names.flat_locals);
-        names.flat_locals = self.body_flat_locals(block);
+        names.flat_locals = self.body_flat_locals(block, names);
         // Dead-variable release: after a variable's last top-level use,
         // emit `zz_release` to free refcounted containers (arrays, dicts,
         // strings) early instead of holding them to end of scope. This cuts
@@ -3561,7 +3585,7 @@ fn flat_push_receiver(
 /// Find the integer value of a `const name = <literal>` or `let name = <literal>`
 /// binding. Searches top-level declarations and the bodies of top-level functions
 /// (including nested blocks).
-fn find_const_value(stmts: &[Stmt], name: &str) -> Option<i64> {
+pub(crate) fn find_const_value(stmts: &[Stmt], name: &str) -> Option<i64> {
     for stmt in stmts {
         match stmt {
             Stmt::Decl {

@@ -1550,11 +1550,19 @@ impl Lowerer {
                         }
                         _ => (String::new(), None),
                     };
-                    if let Some(sname) = sname {
+                    if sname.is_some() {
                         let arr_cid = names.lookup(&arr_name).unwrap().to_string();
                         let idx_raw = self.flat_index_expr(index, names, out);
-                        let field_ctype =
-                            self.field_type_from_struct(&self.struct_c_type(&sname), name);
+                        // `sname` from `flat_array_from_ptr` is already mangled;
+                        // `struct_c_type` would re-mangle it. Pass the original
+                        // ctype (stripped of " *") directly to `field_type_from_struct`
+                        // which internally strips `zz_struct_` prefix.
+                        let base_c_type = names
+                            .lookup_type(&arr_name)
+                            .unwrap_or("")
+                            .strip_suffix(" *")
+                            .unwrap_or("");
+                        let field_ctype = self.field_type_from_struct(base_c_type, name);
                         let raw = format!("({arr_cid})[{idx_raw}].{name}");
                         return auto_box(&raw, field_ctype);
                     }
