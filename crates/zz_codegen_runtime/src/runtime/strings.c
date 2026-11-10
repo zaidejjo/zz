@@ -2034,7 +2034,17 @@ zz_value zz_str_replace(zz_value s, zz_value old_s, zz_value new_s, int *err) {
             i += slen;
             nchars++;
         }
-        size_t out_len = (nchars + 1) * new_len + src_len;
+        // Guard against size_t overflow: (nchars + 1) * new_len + src_len.
+        if (new_len > 0 && nchars + 1 > SIZE_MAX / new_len) {
+            fprintf(stderr, "zz error: string replace overflow\n");
+            exit(1);
+        }
+        size_t out_len = (nchars + 1) * new_len;
+        if (out_len > SIZE_MAX - src_len) {
+            fprintf(stderr, "zz error: string replace overflow\n");
+            exit(1);
+        }
+        out_len += src_len;
         zz_str *out = str_alloc(out_len);
         char *w = zz_str_ptr(out);
         i = 0;
