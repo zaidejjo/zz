@@ -204,6 +204,10 @@ fn check_expr_range(checker: &mut Checker, start: &Expr, end: &Expr) -> Type {
     let en = checker.check_expr(end);
     let st = checker.unifier.resolve(&st);
     let en = checker.unifier.resolve(&en);
+    // Short-circuit cascade noise on an already-errored bound (#711).
+    if matches!(st, Type::Error) || matches!(en, Type::Error) {
+        return Type::Error;
+    }
     match (&st, &en) {
         (Type::Int, Type::Int) => Type::Range(Box::new(Type::Int)),
         (Type::Var(_), Type::Var(_)) => Type::Range(Box::new(checker.unifier.fresh_var())),
@@ -274,6 +278,10 @@ fn check_expr_struct_init(
 fn check_expr_index(checker: &mut Checker, obj: &Expr, index: &Expr, span: Span) -> Type {
     let ot = checker.check_expr(obj);
     let ot = checker.unifier.resolve(&ot);
+    // Short-circuit cascade noise on an already-errored receiver (#711).
+    if matches!(ot, Type::Error) {
+        return Type::Error;
+    }
     let it = checker.check_expr(index);
     match ot {
         Type::Array(elem) => {
