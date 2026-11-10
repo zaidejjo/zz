@@ -875,6 +875,7 @@ e2e_success_test!(
     "stdlib",
     "http_fetch_insecure_test.zz"
 );
+e2e_success_test!(e2e_stdlib_http_hijack, "stdlib", "http_hijack_test.zz");
 e2e_success_test!(e2e_stdlib_time_date, "stdlib", "time_date.zz");
 e2e_success_test!(e2e_stdlib_jsonmod, "stdlib", "jsonmod.zz");
 e2e_success_test!(e2e_stdlib_filesystem, "stdlib", "filesystem.zz");

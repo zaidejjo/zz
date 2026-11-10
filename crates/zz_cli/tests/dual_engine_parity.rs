@@ -1630,6 +1630,7 @@ parity_strict!(
     "stdlib",
     "http_fetch_insecure_test.zz"
 );
+parity_strict!(parity_stdlib_http_hijack, "stdlib", "http_hijack_test.zz");
 parity_strict!(parity_stdlib_time_date, "stdlib", "time_date.zz");
 parity_known_failure!(
     parity_stdlib_math_extended,

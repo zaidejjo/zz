@@ -5476,6 +5476,18 @@ static int g_http_post_middleware_count = 0;
 // Access-log flag for the socket serve path (http.log).
 static int g_http_log_enabled = 0;
 
+// Hijack routes: path + ZZ handler closure. Matched against WebSocket
+// upgrade requests; on match the connection is handed off to the handler
+// as a raw TCP stream (VM parity).
+#define HTTP_MAX_HIJACK_ROUTES 16
+typedef struct {
+    char *pattern;
+    size_t plen;
+    zz_value handler;
+} http_hijack_entry;
+static http_hijack_entry g_http_hijack_table[HTTP_MAX_HIJACK_ROUTES];
+static int g_http_hijack_count = 0;
+
 // Rate limiter (http.rate_limit) — one token bucket per client key.
 // Bounded like the VM (RATE_LIMIT_MAX_KEYS = 4096); a key flood resets
 // the table rather than growing without bound, and lock failure fails
@@ -5603,6 +5615,11 @@ static void http_server_reset(void) {
     }
     g_http_static_dir_count = 0;
     g_http_log_enabled = 0;
+    for (int i = 0; i < g_http_hijack_count; i++) {
+        free(g_http_hijack_table[i].pattern);
+        zz_release(&g_http_hijack_table[i].handler);
+    }
+    g_http_hijack_count = 0;
     if (pthread_mutex_lock(&g_http_rate_lock) == 0) {
         memset(g_http_rate_buckets, 0, sizeof g_http_rate_buckets);
         g_http_rate_count = 0;
@@ -5785,6 +5802,28 @@ zz_value zz_http_route_put_fast(zz_value server, zz_value path, zz_value handler
 zz_value zz_http_route_delete_fast(zz_value server, zz_value path, zz_value handler, int *err) {
     (void)server;
     return http_route_add("DELETE", path, handler, 0, err);
+}
+
+// zz_http_hijack(server, path, handler, err) — register a WebSocket
+// upgrade hijack route. On a matching GET with `Upgrade: websocket`, the
+// connection is handed off to `handler` as a raw TCP stream (VM parity).
+zz_value zz_http_hijack(zz_value server, zz_value path, zz_value handler, int *err) {
+    (void)server;
+    *err = 0;
+    if (path.tag != ZZ_STR || !path.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.hijack: path must be a string"));
+    }
+    if (handler.tag != ZZ_FUNC && handler.tag != ZZ_NATIVE) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.hijack: handler must be a function"));
+    }
+    if (g_http_hijack_count >= HTTP_MAX_HIJACK_ROUTES) return zz_int(0);
+    http_hijack_entry *e = &g_http_hijack_table[g_http_hijack_count++];
+    e->pattern = strndup(zz_str_cptr(path.s), path.s->len);
+    e->plen = strlen(e->pattern);
+    e->handler = zz_clone(handler);
+    return zz_int(0);
 }
 
 // ---- shared request/response helpers ----

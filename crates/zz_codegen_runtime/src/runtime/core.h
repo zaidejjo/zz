@@ -1370,6 +1370,7 @@ zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err);
 zz_value zz_http_put(zz_value url, zz_value body, zz_value headers, int *err);
 zz_value zz_http_fetch(zz_value url, zz_value method, zz_value headers, zz_value body, zz_value timeout_ms, int *err);  // 5 args
 zz_value zz_http_fetch_insecure(zz_value url, zz_value method, zz_value headers, zz_value body, zz_value timeout_ms, int *err);  // 5 args, no TLS verify
+zz_value zz_http_hijack(zz_value server, zz_value path, zz_value handler, int *err);  // 3 args, WebSocket upgrade registration
 zz_value zz_http_post_json(zz_value url, zz_value body, zz_value headers, int *err);  // 3 args
 zz_value zz_http_response_status(zz_value resp, int *err);
 zz_value zz_http_response_text(zz_value resp, int *err);

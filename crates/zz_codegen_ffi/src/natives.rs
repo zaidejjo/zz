@@ -371,6 +371,7 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "http.listen_cfg" | "std.http.listen_cfg" => Some("zz_http_listen_cfg"),
         "http.serve_dir" | "std.http.serve_dir" => Some("zz_http_serve_dir"),
         "http.serve_dir_at" | "std.http.serve_dir_at" => Some("zz_http_serve_dir_at"),
+        "http.hijack" | "std.http.hijack" => Some("zz_http_hijack"),
         "http.test" | "std.http.test" => Some("zz_http_test"),
         "http.test_req" | "std.http.test_req" => Some("zz_http_test_req"),
         "http.handle" | "std.http.handle" => Some("zz_http_handle"),
