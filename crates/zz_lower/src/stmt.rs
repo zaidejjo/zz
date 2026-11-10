@@ -435,9 +435,19 @@ impl Lowerer {
                 if self.green_active() {
                     self.stmt_direct.set(true);
                 }
+                // Flat-storage comprehensions are only sound when this Decl
+                // consumes the buffer below (`last_flat_comp`). Every other
+                // context lowers the comprehension to a boxed `zz_array`, and a
+                // nested comprehension inside a larger RHS stays boxed.
+                let flat_comp = !self.green_active() && matches!(value, Expr::ListComp { .. });
                 let val = match struct_copy {
                     Some(ref sname) => self.emit_boxed_value(sname, value, names, out),
-                    None => self.emit_expr(value, names, out),
+                    None => {
+                        self.flat_comp_ok.set(flat_comp);
+                        let v = self.emit_expr(value, names, out);
+                        self.flat_comp_ok.set(false);
+                        v
+                    }
                 };
                 // Snapshot the emitted RHS for the array record below
                 // (`final_val` moves `val` for boxed types).
@@ -1132,7 +1142,21 @@ impl Lowerer {
                                     (false, None)
                                 }
                             }
-                            _ => (false, None),
+                            _ => {
+                                // `c[i * n + j] = v` on an `n * n` buffer with
+                                // `i < n` and `j < n` is provably in bounds.
+                                if let Expr::Ident { name, .. } = &**obj {
+                                    if crate::context::flat_arith_index_in_bounds(
+                                        index, name, names,
+                                    ) {
+                                        (true, Some(self.flat_index_expr(index, names, out)))
+                                    } else {
+                                        (false, None)
+                                    }
+                                } else {
+                                    (false, None)
+                                }
+                            }
                         };
 
                         if bounds_eliminated {
@@ -1156,20 +1180,15 @@ impl Lowerer {
                                     // Direct flat store: home[i] = raw_val. No bounds
                                     // check, no COW, no refcount.
                                     if let Some(home) = self.index_store_home(obj, names) {
-                                        // Extract raw value from boxed_val (e.g.
-                                        // zz_bool(false) → false).
-                                        let raw_val = match value {
-                                            Expr::Bool { value, .. } => {
-                                                if *value {
-                                                    "true".to_string()
-                                                } else {
-                                                    "false".to_string()
-                                                }
-                                            }
-                                            Expr::Int { value, .. } => value.to_string(),
-                                            Expr::Float { value, .. } => value.to_string(),
-                                            _ => boxed_val.clone(),
+                                        let elem = match obj.as_ref() {
+                                            Expr::Ident { name, .. } => names
+                                                .lookup_type(name)
+                                                .and_then(|t| t.strip_suffix(" *"))
+                                                .unwrap_or("int64_t"),
+                                            _ => "int64_t",
                                         };
+                                        let raw_val = self
+                                            .flat_store_raw_value(value, &val, &boxed_val, elem);
                                         out.push_str(&format!(
                                             "    {home}[{i_raw}] = {raw_val};\n"
                                         ));
@@ -1241,18 +1260,12 @@ impl Lowerer {
                                         names.lookup_or_name(&format!("{arr_name}_len"))
                                     });
                                 let func = names.current_scope.clone();
-                                let raw_val = match value {
-                                    Expr::Bool { value, .. } => {
-                                        if *value {
-                                            "true".to_string()
-                                        } else {
-                                            "false".to_string()
-                                        }
-                                    }
-                                    Expr::Int { value, .. } => value.to_string(),
-                                    Expr::Float { value, .. } => value.to_string(),
-                                    _ => boxed_val.clone(),
-                                };
+                                let elem = names
+                                    .lookup_type(&arr_name)
+                                    .and_then(|t| t.strip_suffix(" *"))
+                                    .unwrap_or("int64_t");
+                                let raw_val =
+                                    self.flat_store_raw_value(value, &val, &boxed_val, elem);
                                 out.push_str(&format!(
                                     "    {{ int _e = 0; {home}[zz_flat_index({i_raw}, {len_cid}, \"{func}\")] = {raw_val}; }}\n"
                                 ));
@@ -2152,6 +2165,10 @@ impl Lowerer {
                 cid
             };
 
+            // Captured upper bound of a scalar-terminated loop, recorded into
+            // the body scope for bounds-check elimination (see
+            // `set_loop_bound`). Stays `None` for boxed/non-scalar ends.
+            let mut for_loop_bound: Option<String> = None;
             // Fast path: if end is an unboxed scalar, use unboxed C loop variables
             if end_is_scalar {
                 // Determine the actual unboxed value.
@@ -2200,6 +2217,9 @@ impl Lowerer {
                     // Some other expression, unbox it
                     format!("({ev}).i")
                 };
+                if !green {
+                    for_loop_bound = Some(ev_unboxed.clone());
+                }
 
                 // For start, similar logic: scalar-typed starts are already
                 // unboxed (same raw-deref rule as the end bound above).
@@ -2309,13 +2329,9 @@ impl Lowerer {
                         )
                     }
                 };
-                // Record loop bound for bounds-check elimination:
-                // `for i in 0..limit` means `i < limit` inside the body,
-                // so `arr[i]` with `arr.len >= limit` is provably in bounds.
-                if !green {
-                    let bound_expr = ev_unboxed.clone();
-                    names.loop_bounds.insert(v.clone(), bound_expr);
-                }
+                // Loop bound for bounds-check elimination is recorded once the
+                // body scope opens (below), so it retires with the loop and
+                // outer bounds survive nested loops.
                 // Pointer setup for flat array store optimization:
                 // `T *ptr = arr;` before the loop lets clang vectorize stores.
                 if let Some((ref arr_cid, ref elem_ctype)) = ptr_store {
@@ -2491,6 +2507,9 @@ impl Lowerer {
             // Per-iteration scope: body-declared heap locals release at the
             // bottom (loop_scope_end) instead of accumulating per iteration.
             let body_scope = self.loop_scope_begin(names);
+            if let Some(bound) = for_loop_bound {
+                names.set_loop_bound(v.clone(), bound);
+            }
             // Reset the per-loop accumulator name set so that a redeclared
             // accumulator (e.g. `row := ""` at the top of each iteration) can
             // be hoisted again on every iteration. Without this, the name

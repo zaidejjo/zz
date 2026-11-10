@@ -820,6 +820,19 @@ impl Lowerer {
                             right_raw = Some((raw, t));
                             right_type = Some(t);
                         }
+                        // Flat scalar array reads (`arr[i]` on `int64_t *` /
+                        // `double *` / `bool *`) are raw C loads wrapped by
+                        // the Index lowering; recover the raw text so
+                        // `sum + arr[i]` stays raw C instead of boxed
+                        // `zz_binop`.
+                        if let Some((raw, t)) = self.flat_index_read_scalar(left, &l, names) {
+                            left_raw = Some((raw, t));
+                            left_type = Some(t);
+                        }
+                        if let Some((raw, t)) = self.flat_index_read_scalar(right, &r, names) {
+                            right_raw = Some((raw, t));
+                            right_type = Some(t);
+                        }
 
                         // Both operands are scalars of compatible type:
                         // emit a raw C arithmetic op instead of going
@@ -1092,7 +1105,9 @@ impl Lowerer {
                 names.clear_array_lens();
                 // Track while-loop bound for bounds-check elimination:
                 // `while j < n { ... }` means j < n inside the body, so
-                // `arr[j]` with arr.len == n is provably in bounds.
+                // `arr[j]` with arr.len == n is provably in bounds. Recorded
+                // once the body scope opens so it retires with the loop.
+                let (mut while_bound_var, mut while_bound_limit) = (String::new(), String::new());
                 if let Expr::Binary {
                     op: zz_frontend::ast::BinOp::Lt,
                     left,
@@ -1125,9 +1140,8 @@ impl Lowerer {
                         }
                         _ => (String::new(), String::new()),
                     };
-                    if !bound_var.is_empty() {
-                        names.loop_bounds.insert(bound_var, limit_text);
-                    }
+                    while_bound_var = bound_var;
+                    while_bound_limit = limit_text;
                 }
                 let c = self.emit_expr(cond, names, out);
                 // While conditions: if the condition is already a raw C scalar
@@ -1168,6 +1182,9 @@ impl Lowerer {
                 // The marker additionally releases body-declared heap
                 // locals at the bottom of every iteration.
                 let while_scope = self.loop_scope_begin(names);
+                if !while_bound_var.is_empty() {
+                    names.set_loop_bound(while_bound_var, while_bound_limit);
+                }
                 // Enter the loop scope so statement lowering can tell
                 // body-declared locals (released by `loop_scope_end`) from
                 // function-scope locals (released by their `cleanup`
@@ -1245,18 +1262,29 @@ impl Lowerer {
                         }
                     }
                 } else {
-                    let c = box_scalar_operand(cond, names, &c);
-                    // Flat bool array reads emit a raw C bool — test directly
-                    // instead of boxing through zz_truthy().
-                    // Simple identifiers (_idxv10, etc.) hold boxed zz_value
-                    // and need zz_truthy(). emit_expr wraps call results in
-                    // parens, so strip leading '(' before checking for zz_
-                    // prefix.
-                    let c_trim = c.trim_start_matches('(');
-                    if c_trim.starts_with("zz_") || crate::context::is_simple_ident(c_trim) {
-                        format!("zz_truthy({c})")
-                    } else {
-                        c
+                    // Raw scalar conditions (comparisons, flat bool reads)
+                    // test directly without zz_truthy()/zz_bool() wrapping.
+                    // Fall back to the boxed path otherwise.
+                    match crate::context::raw_scalar_text(cond, &c, names) {
+                        Some((raw, "bool")) => raw,
+                        Some((raw, "double")) => format!("zz_truthy(zz_float({raw}))"),
+                        Some((raw, _)) => format!("zz_truthy(zz_int({raw}))"),
+                        None => {
+                            let c = box_scalar_operand(cond, names, &c);
+                            // Flat bool array reads emit a raw C bool — test directly
+                            // instead of boxing through zz_truthy().
+                            // Simple identifiers (_idxv10, etc.) hold boxed zz_value
+                            // and need zz_truthy(). emit_expr wraps call results in
+                            // parens, so strip leading '(' before checking for zz_
+                            // prefix.
+                            let c_trim = c.trim_start_matches('(');
+                            if c_trim.starts_with("zz_") || crate::context::is_simple_ident(c_trim)
+                            {
+                                format!("zz_truthy({c})")
+                            } else {
+                                c
+                            }
+                        }
                     }
                 };
                 let tmp = names.fresh("_ifv");
@@ -1350,7 +1378,13 @@ impl Lowerer {
                                 false
                             }
                         }
-                        _ => false,
+                        // `a[i * n + k]` on an `n * n` buffer with `i < n`
+                        // and `k < n` is provably in bounds.
+                        _ => crate::context::flat_arith_index_in_bounds(
+                            index.as_ref(),
+                            arr_name.as_str(),
+                            names,
+                        ),
                     };
 
                     let raw = if bounds_eliminated {
@@ -1908,6 +1942,10 @@ impl Lowerer {
                 ..
             } => {
                 let comp = names.fresh("__comp");
+                // Consume the one-shot flat-storage permission (set by a
+                // `Decl` that will adopt the buffer). Nested comprehensions
+                // inside this one's body must stay boxed.
+                let allow_flat = self.flat_comp_ok.replace(false);
                 // Static bounds when the iterable is `range(a, b)` or `a..b`.
                 let bounds: Option<(String, String)> = match iter.as_ref() {
                     Expr::Call { callee, args, .. } => {
@@ -1915,12 +1953,25 @@ impl Lowerer {
                             callee.as_ref(),
                             Expr::Ident { name, .. } if name == "range"
                         );
-                        if is_range && args.len() == 2 {
-                            let a = self.emit_expr(&args[0], names, out);
-                            let a = box_scalar_operand(&args[0], names, &a);
-                            let b = self.emit_expr(&args[1], names, out);
-                            let b = box_scalar_operand(&args[1], names, &b);
-                            Some((a, b))
+                        if is_range {
+                            match args.len() {
+                                // range(stop) == 0..stop, matching `emit_for`
+                                // and the runtime `range` native.
+                                1 => {
+                                    let b = self.emit_expr(&args[0], names, out);
+                                    let b = box_scalar_operand(&args[0], names, &b);
+                                    Some(("zz_int(0)".to_string(), b))
+                                }
+                                // range(start, stop)
+                                2 => {
+                                    let a = self.emit_expr(&args[0], names, out);
+                                    let a = box_scalar_operand(&args[0], names, &a);
+                                    let b = self.emit_expr(&args[1], names, out);
+                                    let b = box_scalar_operand(&args[1], names, &b);
+                                    Some((a, b))
+                                }
+                                _ => None,
+                            }
                         } else {
                             None
                         }
@@ -1943,7 +1994,7 @@ impl Lowerer {
                     body.as_ref(),
                     Expr::Bool { .. } | Expr::Int { .. } | Expr::Float { .. }
                 );
-                if is_scalar_body && filter.is_none() && !self.green_active() {
+                if is_scalar_body && filter.is_none() && !self.green_active() && allow_flat {
                     if let Some((ref a, ref b)) = bounds {
                         let (elem_ctype, raw_val): (&str, String) = match body.as_ref() {
                             Expr::Bool { value, .. } => (
@@ -6051,6 +6102,45 @@ impl Lowerer {
         } else {
             val
         }
+    }
+
+    /// Raw C scalar to store into a flat scalar array element (`int64_t` /
+    /// `double` / `bool`). Literals keep their natural text; boxed scalars
+    /// (`zz_int(…)`, `zz_float(…)`, `zz_bool(…)`) are unwrapped, and any
+    /// other boxed `zz_value` is projected through its scalar field so a
+    /// `zz_value` never lands in a raw `T *` slot.
+    pub(crate) fn flat_store_raw_value(
+        &self,
+        value: &Expr,
+        val: &str,
+        boxed_val: &str,
+        elem: &str,
+    ) -> String {
+        match value {
+            Expr::Bool { value, .. } => {
+                return if *value { "true" } else { "false" }.to_string();
+            }
+            Expr::Int { value, .. } => return value.to_string(),
+            Expr::Float { value, .. } => return value.to_string(),
+            _ => {}
+        }
+        for prefix in ["zz_int(", "zz_float(", "zz_bool("] {
+            if let Some(inner) = boxed_val
+                .strip_prefix(prefix)
+                .and_then(|s| s.strip_suffix(')'))
+            {
+                return inner.to_string();
+            }
+        }
+        if !val.starts_with("zz_") {
+            return val.to_string();
+        }
+        let field = match elem {
+            "double" => "f",
+            "bool" => "b",
+            _ => "i",
+        };
+        format!("({boxed_val}).{field}")
     }
 
     pub(crate) fn emit_str_literal(&self, s: &str) -> String {
