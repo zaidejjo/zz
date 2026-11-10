@@ -6323,12 +6323,21 @@ impl Lowerer {
     /// Box a raw-scalar index-store RHS to a `zz_value` before storing.
     /// Extracted from the `obj[idx] = v` lowering so compound assignment
     /// (`obj[idx] OP= v`) boxes identically.
+    ///
+    /// Returns `(expression, needs_release)`. `needs_release` is `true` when
+    /// the expression is a named variable owning a `zz_value` share that the
+    /// caller must release after the store consumes it (only struct RHS, via
+    /// `box_raw_struct`). Scalar/immediate results (`zz_int(…)` etc.) return
+    /// `false` — they are either immediates or already-owned `zz_value`s that
+    /// the consuming runtime function (`zz_index_set`, `zz_object_set_field`)
+    /// takes ownership of.
     pub(crate) fn box_index_store_value(
         &self,
         value: &Expr,
         val: String,
-        names: &NameCtx,
-    ) -> String {
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> (String, bool) {
         let ast_says_scalar = super::expr_emits_raw_scalar(value);
         let ident = match value {
             Expr::Ident { name, .. } => Some(name.as_str()),
@@ -6340,26 +6349,34 @@ impl Lowerer {
         if value_is_scalar {
             if let Expr::Ident { name, .. } = value {
                 let name_str = name.clone();
-                auto_box(&val, names.lookup_type(&name_str))
+                (auto_box(&val, names.lookup_type(&name_str)), false)
             } else if let Expr::Path { parts, .. } = value {
                 let joined = parts.join(".");
-                auto_box(&val, names.lookup_type(&joined))
+                (auto_box(&val, names.lookup_type(&joined)), false)
             } else if val.starts_with("(double)(") {
-                format!("zz_float({val})")
+                (format!("zz_float({val})"), false)
             } else if val.starts_with("(bool)(") {
-                format!("zz_bool({val})")
+                (format!("zz_bool({val})"), false)
             } else if val_is_actually_scalar {
                 // Genuinely raw scalar (int ident/arithmetic):
                 // box it. (String concats over string idents
                 // trip the AST-only check above but lower to
                 // a zz_value — wrapping one in zz_int is a C
                 // type error.)
-                format!("zz_int({val})")
+                (format!("zz_int({val})"), false)
             } else {
-                val
+                (val, false)
             }
+        } else if let Some(sname) = self.struct_box_name(value, names) {
+            // Struct RHS must be boxed to a zz_value before zz_index_set /
+            // zz_object_set_field consume it as `item: zz_value`. Emits the
+            // field-copy statements to `out` and returns the boxed object.
+            // `box_raw_struct` creates a named `__eqobjN` variable owning a
+            // share; the caller must release it unless the consumer
+            // (`zz_index_set`) does so.
+            (self.box_raw_struct(&sname, &val, names, out), true)
         } else {
-            val
+            (val, false)
         }
     }
 

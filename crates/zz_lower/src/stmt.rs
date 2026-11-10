@@ -1110,8 +1110,13 @@ impl Lowerer {
                         if let Some(root) = Self::store_root_ident(obj) {
                             let root = root.to_string();
                             names.invalidate_stack_array_elems(&root);
+                            // `d[k] = v` mutates the dict, so a previously
+                            // cached `len(d)` (constant-folded from the
+                            // literal size) must not stay valid.
+                            names.invalidate_dict_len(&root);
                         }
-                        let boxed_val = self.box_index_store_value(value, val.clone(), names);
+                        let (boxed_val, boxed_needs_release) =
+                            self.box_index_store_value(value, val.clone(), names, out);
 
                         // Bounds-check elimination for array writes:
                         // `for k in 0..n { ... flags[k] = ... }` where flags.len == n
@@ -1239,6 +1244,14 @@ impl Lowerer {
                                         out.push_str(&format!(
                                             "    {{ int _e = 0; zz_array_set_raw(&{home}, {i_raw}, {boxed_val}, &_e);\n"
                                         ));
+                                        // `zz_array_set_raw` clones `v` but does not
+                                        // release the caller's share; a boxed struct
+                                        // RHS owns a share the caller must drop.
+                                        if boxed_needs_release {
+                                            out.push_str(&format!(
+                                                "      zz_release(&{boxed_val});\n"
+                                            ));
+                                        }
                                         out.push_str(&format!(
                                             "      if (_e) {{ zz_index_trap({home}, zz_int({i_raw}), \"{func}\"); }} }}\n"
                                         ));
@@ -1254,6 +1267,12 @@ impl Lowerer {
                                     out.push_str(&format!(
                                         "      zz_array_set_raw(&{wb}, {i_raw}, {boxed_val}, &_e);\n"
                                     ));
+                                    // `zz_array_set_raw` clones `v` but does not
+                                    // release the caller's share; a boxed struct
+                                    // RHS owns a share the caller must drop.
+                                    if boxed_needs_release {
+                                        out.push_str(&format!("      zz_release(&{boxed_val});\n"));
+                                    }
                                     out.push_str(&format!(
                                         "      if (_e) {{ zz_index_trap({wb}, zz_int({i_raw}), \"{func}\"); }}\n"
                                     ));
@@ -1362,12 +1381,19 @@ impl Lowerer {
                             names.invalidate_stack_array_elems(&root);
                         }
                         let o = self.emit_expr(obj, names, out);
-                        let boxed_val = self.box_index_store_value(value, val.clone(), names);
+                        let (boxed_val, boxed_needs_release) =
+                            self.box_index_store_value(value, val.clone(), names, out);
                         let tmp = names.fresh("_wbf");
                         out.push_str(&format!("    {{ zz_value {tmp} = zz_clone({o});\n"));
                         out.push_str(&format!(
                             "      zz_object_set_field(&{tmp}, \"{name}\", {boxed_val});\n"
                         ));
+                        // `zz_object_set_field` clones `val` but does not
+                        // release it; a boxed struct RHS owns a share the
+                        // caller must drop.
+                        if boxed_needs_release {
+                            out.push_str(&format!("      zz_release(&{boxed_val});\n"));
+                        }
                         self.emit_store_writeback(obj, &tmp, names, out);
                         out.push_str("    }\n");
                     }
@@ -1413,7 +1439,8 @@ impl Lowerer {
                             names.invalidate_stack_array_elems(&root);
                         }
                         let rhs = self.emit_expr(value, names, out);
-                        let rhs_boxed = self.box_index_store_value(value, rhs, names);
+                        let (rhs_boxed, rhs_needs_release) =
+                            self.box_index_store_value(value, rhs, names, out);
                         let cop = binop_runtime_op(op);
                         if let Some(home) = self.index_store_home(obj, names) {
                             let i = self.emit_expr(index, names, out);
@@ -1432,6 +1459,11 @@ impl Lowerer {
                             out.push_str(&format!(
                                 "      zz_value _cr = zz_binop({cop}, _cc, {rhs_boxed});\n"
                             ));
+                            // `zz_binop` does not release its inputs; a boxed
+                            // struct RHS owns a share the caller must drop.
+                            if rhs_needs_release {
+                                out.push_str(&format!("      zz_release(&{rhs_boxed});\n"));
+                            }
                             out.push_str(&format!("      zz_index_set(&{home}, _ci, _cr, &_e);\n"));
                             out.push_str(&format!(
                                 "      if (_e) {{ zz_index_trap({home}, _ci, \"{func}\"); }} }}\n"
@@ -1451,6 +1483,11 @@ impl Lowerer {
                             out.push_str(&format!(
                                 "      zz_value _cr = zz_binop({cop}, _cc, {rhs_boxed});\n"
                             ));
+                            // `zz_binop` does not release its inputs; a boxed
+                            // struct RHS owns a share the caller must drop.
+                            if rhs_needs_release {
+                                out.push_str(&format!("      zz_release(&{rhs_boxed});\n"));
+                            }
                             out.push_str("      zz_index_set(&_co, _ci, _cr, &_e);\n");
                             out.push_str(&format!(
                                 "      if (_e) {{ zz_index_trap(_co, _ci, \"{func}\"); }}\n"
