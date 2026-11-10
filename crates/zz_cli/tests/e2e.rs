@@ -881,6 +881,7 @@ e2e_success_test!(
     "stdlib",
     "http_listen_tls_test.zz"
 );
+e2e_success_test!(e2e_stdlib_mysql_test, "stdlib", "mysql_test.zz");
 e2e_success_test!(e2e_stdlib_time_date, "stdlib", "time_date.zz");
 e2e_success_test!(e2e_stdlib_jsonmod, "stdlib", "jsonmod.zz");
 e2e_success_test!(e2e_stdlib_filesystem, "stdlib", "filesystem.zz");

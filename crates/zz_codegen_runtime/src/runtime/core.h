@@ -1361,6 +1361,15 @@ __attribute__((weak)) zz_value zz_tls_read(zz_value id, zz_value max, int *err);
 __attribute__((weak)) zz_value zz_tls_write(zz_value id, zz_value data, int *err);
 __attribute__((weak)) zz_value zz_tls_close(zz_value id, int *err);
 __attribute__((weak)) zz_value zz_tls_listener_close(zz_value id, int *err);
+// MySQL client (weak externs from native-rt staticlib)
+__attribute__((weak)) zz_value zz_tcp_connect(zz_value addr, zz_value timeout_ms, int *err);
+__attribute__((weak)) zz_value zz_tcp_write(zz_value id, zz_value data, int *err);
+__attribute__((weak)) zz_value zz_tcp_read(zz_value id, zz_value max_bytes, int *err);
+__attribute__((weak)) zz_value zz_tcp_shutdown(zz_value id, int *err);
+zz_value zz_mysql_connect(zz_value conninfo, int *err);  // 1 arg, returns ZZ_DB handle
+zz_value zz_mysql_exec(zz_value db, zz_value sql, int *err);  // 2 args, returns Result<Int, Str>
+zz_value zz_mysql_query(zz_value db, zz_value sql, int *err);  // 2 args, returns Result<[T], Str>
+zz_value zz_mysql_close(zz_value db, int *err);  // 1 arg, returns Result<Unit, Str>
 zz_value zz_http_test(zz_value server, zz_value method, zz_value path, zz_value body, int *err);  // 4 args
 zz_value zz_http_test_req(zz_value server, zz_value method, zz_value path,
                           zz_value headers, zz_value body, int *err);  // 5 args

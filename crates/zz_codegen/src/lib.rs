@@ -516,12 +516,6 @@ pub(crate) const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // that does not exist in AOT (rustls TLS, WebSocket handshake + TCP
     // handoff, insecure curl client). They abort loudly (`zz_unimplemented_native`)
     // on AOT — never silently lower to unit.
-    // MySQL wire driver — VM-only (no staticlib backend like PG has;
-    // AOT lowers these to Unit like time.now_ms).
-    ("std.sqlz.mysql.connect", "VM-only; no C socket driver"),
-    ("std.sqlz.mysql.exec", "VM-only; no C socket driver"),
-    ("std.sqlz.mysql.query", "VM-only; no C socket driver"),
-    ("std.sqlz.mysql.close", "VM-only; no C socket driver"),
     // Closure transactions — inlined by the AOT codegen (BEGIN/COMMIT/ROLLBACK
     // around the closure body); no native C implementation needed.
     ("std.sqlz.transaction", "AOT-inlined; no native C impl"),

@@ -343,6 +343,11 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "pg.query" | "std.sqlz.postgres.query" => Some("zz_db_query"),
         "sqlz.close" | "std.sqlz.close" => Some("zz_db_close"),
         "pg.close" | "std.sqlz.postgres.close" => Some("zz_db_close"),
+        // MySQL client
+        "sqlz.mysql.connect" | "std.sqlz.mysql.connect" => Some("zz_mysql_connect"),
+        "sqlz.mysql.exec" | "std.sqlz.mysql.exec" => Some("zz_mysql_exec"),
+        "sqlz.mysql.query" | "std.sqlz.mysql.query" => Some("zz_mysql_query"),
+        "sqlz.mysql.close" | "std.sqlz.mysql.close" => Some("zz_mysql_close"),
         // channels
         "chan" | "std.chan" => Some("zz_chan_new"),
         "chan.send" | "std.chan.send" => Some("zz_chan_send"),

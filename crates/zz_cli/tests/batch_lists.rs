@@ -219,6 +219,10 @@ pub const EXCLUDED: &[(&str, &str)] = &[
         "stdlib/http_listen_tls_test.zz",
         "binds TLS listen port (collide in batch)",
     ),
+    (
+        "stdlib/mysql_test.zz",
+        "connects to localhost:3306 (collide in batch)",
+    ),
     ("stdlib/input_chained.zz", "needs .stdin (shared in batch)"),
     (
         "stdlib/http_request_response.zz",
