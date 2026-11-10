@@ -1877,7 +1877,7 @@ impl Lowerer {
                     .unwrap_or_else(|| "zz_value".to_string()),
             };
             let cid = Self::global_cid(&n);
-            result.push((n.clone(), cid, ctype, checker_ty.clone()));
+            result.push((n.clone(), cid.clone(), ctype, checker_ty.clone()));
             // Flat arrays carry their length/capacity counters next to the
             // buffer (mirrors the local layout: `arr`, `arr_len`, `arr_cap`).
             if flat_ctype.is_some() {
@@ -1890,7 +1890,7 @@ impl Lowerer {
                     }
                     result.push((
                         synth_name.clone(),
-                        Self::global_cid(&synth_name),
+                        format!("{cid}{suffix}"),
                         ctype.to_string(),
                         Some(zz_checker::Type::Int),
                     ));
