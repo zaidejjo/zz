@@ -1,0 +1,13 @@
+struct Row { id: int, val: int }
+
+func main() {
+    n := 100000
+    rows := []
+    for i in 0..n { rows.push(Row{ id: i, val: i * 7 }) }
+    s := 0
+    c := len(rows)
+    i := 0
+    while i < c { s = s + rows[i].val; i = i + 1 }
+    println("struct_array_ok")
+    println("sig: " + str(s))
+}

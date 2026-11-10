@@ -1506,6 +1506,37 @@ impl Lowerer {
                     return tmp;
                 }
 
+                // String-index fast path: skip the `zz_index_get` tag
+                // dispatch and call `zz_str_get` directly. `zz_str_get` has
+                // an ASCII fast path that returns an interned 1-char
+                // singleton (O(1), zero allocation), so a hot
+                // `s[i] == " "` loop does no UTF-8 scan and no malloc per
+                // index.
+                let is_str_index = match obj.as_ref() {
+                    Expr::Ident { name, .. } => names.lookup_type(name).is_some_and(|t| t == "Str"),
+                    _ => false,
+                };
+                if is_str_index {
+                    if let Expr::Ident { .. } = obj.as_ref() {
+                        let otmp = names.fresh("_idxo");
+                        let itmp = names.fresh("_idxi");
+                        let err_tmp = names.fresh("_idxe");
+                        let tmp = names.fresh("_idxv");
+                        let i_boxed = self.box_index_arg(index, i, names);
+                        out.push_str(&format!("    zz_value {otmp} = {o};\n"));
+                        out.push_str(&format!("    zz_value {itmp} = {i_boxed};\n"));
+                        out.push_str(&format!("    int {err_tmp} = 0;\n"));
+                        out.push_str(&format!(
+                            "    zz_value {tmp} = zz_str_get(({otmp}).s, {itmp}, &{err_tmp});\n"
+                        ));
+                        out.push_str(&format!(
+                            "    if ({err_tmp}) {{ zz_index_trap({otmp}, {itmp}, \"{}\"); }}\n",
+                            Self::c_escape(&names.current_scope.clone())
+                        ));
+                        return tmp;
+                    }
+                }
+
                 // Box a scalar index (ident/raw-arith) to a zz_value.
                 let i_boxed = self.box_index_arg(index, i, names);
                 // Hoist the read into a temp and check the error flag:
@@ -1521,7 +1552,9 @@ impl Lowerer {
                 let itmp = names.fresh("_idxi");
                 let func = names.current_scope.clone();
                 out.push_str(&format!("    zz_value {otmp} = {o};\n"));
-                out.push_str(&format!("    zz_value {itmp} = {i_boxed};\n"));
+                out.push_str(&format!(
+                    "    zz_value {itmp} __attribute__((cleanup(zz_release))) = {i_boxed};\n"
+                ));
                 out.push_str(&format!("    int {err_tmp} = 0;\n"));
                 out.push_str(&format!(
                     "    zz_value {tmp} = zz_index_get({otmp}, {itmp}, &{err_tmp});\n"
@@ -1600,7 +1633,7 @@ impl Lowerer {
                         }
                         _ => (String::new(), None),
                     };
-                    if let Some(sname) = sname {
+                    if sname.is_some() {
                         let arr_cid = names.lookup(&arr_name).unwrap().to_string();
                         let idx_raw = self.flat_index_expr(index, names, out);
                         let field_ctype =
@@ -1901,12 +1934,12 @@ impl Lowerer {
                 }
                 let fvar = format!("__fmt{}", names.counter);
                 names.counter += 1;
-                out.push_str(&format!("    zz_value {fvar} = zz_str_static(\"\");\n"));
+                out.push_str(&format!("    zz_value {fvar} __attribute__((cleanup(zz_release))) = zz_str_static(\"\");\n"));
                 for part in parts {
                     match part {
                         zz_frontend::ast::FmtPart::Text(value) => {
                             let lit = self.emit_str_literal(value);
-                            out.push_str(&format!("    {{ zz_value _r = zz_to_str({lit}, &(int){{0}}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
+                            out.push_str(&format!("    {{ zz_value _r __attribute__((cleanup(zz_release))) = zz_to_str({lit}, &(int){{0}}); zz_release(&{fvar}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
                         }
                         zz_frontend::ast::FmtPart::Expr(expr, spec) => {
                             let val = self.emit_expr(expr, names, out);
@@ -1923,9 +1956,9 @@ impl Lowerer {
                             };
                             if let Some(ref s) = spec {
                                 let spec_str = format!("\"{}\"", Self::c_escape(s));
-                                out.push_str(&format!("    {{ zz_value _r = zz_str_owned(zz_to_str_fmt({val}, {spec_str})); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
+                                out.push_str(&format!("    {{ zz_value _r __attribute__((cleanup(zz_release))) = zz_str_owned(zz_to_str_fmt({val}, {spec_str})); zz_release(&{fvar}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
                             } else {
-                                out.push_str(&format!("    {{ zz_value _r = zz_to_str({val}, &(int){{0}}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
+                                out.push_str(&format!("    {{ zz_value _r __attribute__((cleanup(zz_release))) = zz_to_str({val}, &(int){{0}}); zz_release(&{fvar}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
                             }
                         }
                     }
@@ -2810,6 +2843,95 @@ impl Lowerer {
         }
 
         None
+    }
+
+    /// Inline `map`/`filter` with a simple scalar closure: emit an inline loop
+    /// applying the closure body directly to each element, avoiding the
+    /// per-element indirect closure call via `zz_iter_map`/`zz_iter_filter`.
+    ///
+    /// Only fires for:
+    ///   - `map(items, |x: T| expr)` or `filter(items, |x: T| expr)`
+    ///   - `x` is a scalar (int/float/bool) with no default value
+    ///   - the closure captures nothing
+    ///   - the body is a single expression
+    fn try_emit_map_filter_inline(
+        &self,
+        effective_name: &str,
+        ordered_args: &[&Expr],
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> Option<String> {
+        if !matches!(effective_name, "zz_iter_map" | "zz_iter_filter") {
+            return None;
+        }
+        if ordered_args.len() != 2 {
+            return None;
+        }
+        let Expr::Closure { params, body, .. } = ordered_args[1] else {
+            return None;
+        };
+        if params.len() != 1 || params[0].default.is_some() {
+            return None;
+        }
+        let param = &params[0];
+        let param_ctype = match param.ty.as_ref().map(|t| &t.kind) {
+            Some(zz_frontend::ast::TyKind::Int) => "int64_t",
+            Some(zz_frontend::ast::TyKind::Float) => "double",
+            Some(zz_frontend::ast::TyKind::Bool) => "bool",
+            _ => return None,
+        };
+        // No captures allowed: keep the inlining simple and correct.
+        let param_names: Vec<String> = params.iter().map(|p| p.name.name.clone()).collect();
+        let free_vars = zz_hir::closure_free_vars(&param_names, body, &self.global_set);
+        if !free_vars.is_empty() {
+            return None;
+        }
+
+        let is_map = effective_name == "zz_iter_map";
+
+        // Emit the input array into a temp for repeated indexed reads.
+        let input_cid = names.fresh("_in");
+        let input_val = self.emit_expr(ordered_args[0], names, out);
+        // Natives borrow Ident args (no clone), so input_cid is a shallow copy
+        // of a borrowed zz_value — read-only, nothing to release at the end.
+        out.push_str(&format!("    zz_value {input_cid} = {input_val};\n"));
+        let len_cid = names.fresh("_n");
+        out.push_str(&format!("    size_t {len_cid} = {input_cid}.arr->len;\n"));
+
+        let out_cid = names.fresh("_out");
+        out.push_str(&format!(
+            "    zz_value {out_cid} = zz_array_new_sized({len_cid});\n"
+        ));
+
+        // Bind the closure parameter to the raw array element. Bounds are
+        // eliminated because we iterate 0..len ourselves.
+        let param_cid = names.enter_with_type(&param.name.name, param_ctype);
+        let elem_field = match param_ctype {
+            "int64_t" => "i",
+            "double" => "f",
+            "bool" => "b",
+            _ => "i",
+        };
+
+        let mut body_out = String::new();
+        let body_val = self.emit_expr(body, names, &mut body_out);
+        out.push_str(&body_out);
+
+        if is_map {
+            // body result is boxed for the array element slot.
+            let body_boxed = box_scalar_operand(body, names, &body_val);
+            out.push_str(&format!(
+                "    for (size_t __i = 0; __i < {len_cid}; __i++) {{\n        {param_ctype} {param_cid} = {input_cid}.arr->items[__i].{elem_field};\n        zz_array_push({out_cid}.arr, {body_boxed});\n    }}\n"
+            ));
+        } else {
+            // filter: push the input element when the body is truthy.
+            let body_truthy = format!("zz_truthy({body_val})");
+            out.push_str(&format!(
+                "    for (size_t __i = 0; __i < {len_cid}; __i++) {{\n        {param_ctype} {param_cid} = {input_cid}.arr->items[__i].{elem_field};\n        if ({body_truthy}) {{\n            zz_array_push({out_cid}.arr, {input_cid}.arr->items[__i]);\n        }}\n    }}\n"
+            ));
+        }
+
+        Some(out_cid.to_string())
     }
 
     /// Cast inlining: `float(int|float)` → `(double)(x)`, `int(int|float)` →
@@ -4373,6 +4495,17 @@ impl Lowerer {
                 }
                 _ => effective_name,
             };
+            // Inline map/filter with simple scalar closures: apply the closure
+            // body directly in an inline loop, avoiding the per-element indirect
+            // closure call via zz_iter_map/zz_iter_filter. Only fires for
+            // `map(items, |x: T| expr)` / `filter(items, |x: T| expr)` where x
+            // is a scalar, the closure captures nothing, and the body is a
+            // single expression.
+            if let Some(inline) =
+                self.try_emit_map_filter_inline(effective_name, &ordered_args, names, out)
+            {
+                return inline;
+            }
             // Arena-aware str_cast inside loops: allocate result on arena
             // to avoid heap malloc for intermediate string conversions.
             if effective_name == "zz_str_cast" {
