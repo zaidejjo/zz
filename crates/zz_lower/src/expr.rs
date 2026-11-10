@@ -5112,30 +5112,32 @@ impl Lowerer {
                 "    zz_value {obj_tmp} = zz_object_new(\"{qualified}\", NULL, 0);\n",
             ));
         } else {
-            // The checker enforces ≤1 positional and no named args; emit
-            // positionally in order so nothing is silently dropped.
-            let payload_expr: &Expr = args
-                .first()
-                .or_else(|| named.first().map(|(_, v)| v))
-                .expect("enum payload expr");
-            // `zz_object_set_field` below retains the payload.
-            self.fmt_borrow.set(true);
-            let raw = self.emit_expr(payload_expr, names, out);
-            // Box scalars AND unboxed structs (a struct payload lowers to
-            // a raw C struct — same two-step boxing as struct fields and
-            // binop operands).
-            let boxed = box_scalar_operand(payload_expr, names, &raw);
-            let boxed = self.box_struct_operand(payload_expr, boxed, &raw, names, out);
+            // Multi-field tuple payloads: emit one field per positional arg,
+            // named "value0", "value1", ... (single field keeps "value").
+            let n = args.len();
             let names_arr_tmp = names.fresh("__enum_fields");
-            out.push_str(&format!("    zz_value {names_arr_tmp}[1];\n"));
+            out.push_str(&format!("    zz_value {names_arr_tmp}[{n}];\n"));
+            for (i, arg) in args.iter().enumerate() {
+                self.fmt_borrow.set(true);
+                let raw = self.emit_expr(arg, names, out);
+                // Box scalars AND unboxed structs (same two-step boxing as
+                // struct fields and binop operands).
+                let boxed = box_scalar_operand(arg, names, &raw);
+                let boxed = self.box_struct_operand(arg, boxed, &raw, names, out);
+                let field_name = if n == 1 {
+                    "value".to_string()
+                } else {
+                    format!("value{i}")
+                };
+                out.push_str(&format!(
+                    "    {names_arr_tmp}[{i}] = zz_str_static(\"{field_name}\");\n",
+                ));
+                out.push_str(&format!(
+                    "    zz_object_set_field(&{obj_tmp}, \"{field_name}\", {boxed});\n",
+                ));
+            }
             out.push_str(&format!(
-                "    {names_arr_tmp}[0] = zz_str_static(\"value\");\n",
-            ));
-            out.push_str(&format!(
-                "    zz_value {obj_tmp} = zz_object_new(\"{qualified}\", {names_arr_tmp}, 1);\n",
-            ));
-            out.push_str(&format!(
-                "    zz_object_set_field(&{obj_tmp}, \"value\", {boxed});\n",
+                "    zz_value {obj_tmp} = zz_object_new(\"{qualified}\", {names_arr_tmp}, {n});\n",
             ));
         }
         obj_tmp
