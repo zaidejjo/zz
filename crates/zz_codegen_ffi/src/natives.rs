@@ -167,6 +167,7 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "math.rand_range" | "std.math.rand_range" => Some("zz_math_rand_range"),
         "math.dot_product" | "std.math.dot_product" => Some("zz_math_dot_product"),
         "math.magnitude" | "std.math.magnitude" => Some("zz_math_magnitude"),
+        "math.matrix_mul" | "std.math.matrix_mul" => Some("zz_math_matrix_mul"),
         // json
         "json.parse" | "std.json.parse" => Some("zz_json_parse"),
         "json.stringify" | "std.json.stringify" => Some("zz_json_stringify"),
@@ -342,6 +343,11 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "pg.query" | "std.sqlz.postgres.query" => Some("zz_db_query"),
         "sqlz.close" | "std.sqlz.close" => Some("zz_db_close"),
         "pg.close" | "std.sqlz.postgres.close" => Some("zz_db_close"),
+        // MySQL client
+        "sqlz.mysql.connect" | "std.sqlz.mysql.connect" => Some("zz_mysql_connect"),
+        "sqlz.mysql.exec" | "std.sqlz.mysql.exec" => Some("zz_mysql_exec"),
+        "sqlz.mysql.query" | "std.sqlz.mysql.query" => Some("zz_mysql_query"),
+        "sqlz.mysql.close" | "std.sqlz.mysql.close" => Some("zz_mysql_close"),
         // channels
         "chan" | "std.chan" => Some("zz_chan_new"),
         "chan.send" | "std.chan.send" => Some("zz_chan_send"),
@@ -368,8 +374,11 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "http.rate_limit" | "std.http.rate_limit" => Some("zz_http_rate_limit"),
         "http.listen" | "std.http.listen" => Some("zz_http_listen"),
         "http.listen_cfg" | "std.http.listen_cfg" => Some("zz_http_listen_cfg"),
+        "http.listen_tls" | "std.http.listen_tls" => Some("zz_http_listen_tls"),
+        "http.listen_tls_cfg" | "std.http.listen_tls_cfg" => Some("zz_http_listen_tls_cfg"),
         "http.serve_dir" | "std.http.serve_dir" => Some("zz_http_serve_dir"),
         "http.serve_dir_at" | "std.http.serve_dir_at" => Some("zz_http_serve_dir_at"),
+        "http.hijack" | "std.http.hijack" => Some("zz_http_hijack"),
         "http.test" | "std.http.test" => Some("zz_http_test"),
         "http.test_req" | "std.http.test_req" => Some("zz_http_test_req"),
         "http.handle" | "std.http.handle" => Some("zz_http_handle"),
@@ -387,8 +396,11 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "http.headers" | "std.http.headers" => Some("zz_http_response_headers"),
         // http request functions
         "http.get" | "std.http.get" => Some("zz_http_get"),
+        "http.delete" | "std.http.delete" => Some("zz_http_delete"),
         "http.post" | "std.http.post" => Some("zz_http_post"),
+        "http.put" | "std.http.put" => Some("zz_http_put"),
         "http.fetch" | "std.http.fetch" => Some("zz_http_fetch"),
+        "http.fetch_insecure" | "std.http.fetch_insecure" => Some("zz_http_fetch_insecure"),
         "http.post_json" | "std.http.post_json" => Some("zz_http_post_json"),
         _ => None,
     }

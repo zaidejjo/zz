@@ -1,0 +1,32 @@
+// features: closures, comparison, imports, locals, match, option-result, print, std-http, string-literal
+// tests/fixtures/stdlib/http_delete_put.zz — http.delete / http.put C twins.
+// Network-free: a refused loopback port exercises arg parsing, method
+// plumbing and error mapping identically on VM and AOT. Mirrors
+// http_fetch_test.zz (same curl client, same error tags).
+import std.http
+
+func main() -> Result<int, str> {
+    // DELETE to an unreachable port → client error, not a crash.
+    match http.delete("http://127.0.0.1:9/nope") {
+        .ok(_r) => println("ERROR: delete should have failed")
+        .err(_e) => println("delete_err_ok"),
+    }
+    // DELETE with headers still routes through the C client.
+    match http.delete("http://127.0.0.1:9/nope", {"X-Test": "1"}) {
+        .ok(_r) => println("ERROR: delete+headers should have failed")
+        .err(_e) => println("delete_headers_err_ok"),
+    }
+    // PUT with a body to an unreachable port → client error.
+    match http.put("http://127.0.0.1:9/nope", "payload") {
+        .ok(_r) => println("ERROR: put should have failed")
+        .err(_e) => println("put_err_ok"),
+    }
+    // PUT with body + headers.
+    match http.put("http://127.0.0.1:9/nope", "payload", {"Content-Type": "text/plain"}) {
+        .ok(_r) => println("ERROR: put+body+headers should have failed")
+        .err(_e) => println("put_full_err_ok"),
+    }
+
+    println("http_delete_put_ok")
+    return .ok(0)
+}

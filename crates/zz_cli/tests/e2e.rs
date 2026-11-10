@@ -860,6 +860,7 @@ e2e_success_test!(
     "vec_nested_str_parity.zz"
 );
 e2e_success_test!(e2e_stdlib_math_ops, "stdlib", "math_ops.zz");
+e2e_success_test!(e2e_stdlib_matrix_mul_test, "stdlib", "matrix_mul_test.zz");
 e2e_success_test!(e2e_stdlib_math_consts, "stdlib", "math_consts.zz");
 e2e_success_test!(e2e_stdlib_const_index_test, "stdlib", "const_index_test.zz");
 e2e_success_test!(e2e_stdlib_enumerate_loop, "stdlib", "enumerate_loop.zz");
@@ -868,6 +869,19 @@ e2e_success_test!(e2e_stdlib_map_set, "stdlib", "map_set.zz");
 e2e_success_test!(e2e_stdlib_dec_ops, "stdlib", "dec_ops.zz");
 e2e_success_test!(e2e_stdlib_csv_test, "stdlib", "csv_test.zz");
 e2e_success_test!(e2e_stdlib_builders, "stdlib", "builders.zz");
+e2e_success_test!(e2e_stdlib_http_delete_put, "stdlib", "http_delete_put.zz");
+e2e_success_test!(
+    e2e_stdlib_http_fetch_insecure,
+    "stdlib",
+    "http_fetch_insecure_test.zz"
+);
+e2e_success_test!(e2e_stdlib_http_hijack, "stdlib", "http_hijack_test.zz");
+e2e_success_test!(
+    e2e_stdlib_http_listen_tls,
+    "stdlib",
+    "http_listen_tls_test.zz"
+);
+e2e_success_test!(e2e_stdlib_mysql_test, "stdlib", "mysql_test.zz");
 e2e_success_test!(e2e_stdlib_time_date, "stdlib", "time_date.zz");
 e2e_success_test!(e2e_stdlib_jsonmod, "stdlib", "jsonmod.zz");
 e2e_success_test!(e2e_stdlib_filesystem, "stdlib", "filesystem.zz");
@@ -935,6 +949,16 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_stdlib_net_tls_test, "stdlib", "net_tls_test.zz");
 e2e_success_test!(e2e_stdlib_net_unix_test, "stdlib", "net_unix_test.zz");
+e2e_success_test!(
+    e2e_stdlib_net_tls_listener_shutdown,
+    "stdlib",
+    "net_tls_listener_shutdown.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_net_unix_listener_shutdown,
+    "stdlib",
+    "net_unix_listener_shutdown.zz"
+);
 e2e_success_test!(e2e_stdlib_cell_test, "stdlib", "cell_test.zz");
 e2e_success_test!(
     e2e_stdlib_option_result_unwrap_test,

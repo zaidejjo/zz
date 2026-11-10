@@ -1352,8 +1352,28 @@ zz_value zz_http_log(zz_value server, zz_value enabled, int *err);  // 2 args
 zz_value zz_http_rate_limit(zz_value server, zz_value max_requests, zz_value window_ms, int *err);  // 3 args
 zz_value zz_http_listen(zz_value server, zz_value port, int *err);  // 2 args
 zz_value zz_http_listen_cfg(zz_value server, zz_value port, zz_value opts, int *err);  // 3 args
+zz_value zz_http_listen_tls(zz_value server, zz_value port, zz_value cert, zz_value key, int *err);  // 4 args, TLS
+zz_value zz_http_listen_tls_cfg(zz_value server, zz_value port, zz_value cert, zz_value key, zz_value opts, int *err);  // 5 args, TLS+opts
 zz_value zz_http_serve_dir_at(zz_value server, zz_value prefix, zz_value dir, int *err);  // 3 args
 zz_value zz_http_serve_dir(zz_value server, zz_value dir, int *err);  // 2 args → prefix "/"
+
+// TLS listener (staticlib FFI symbols — weak so programs that don't use
+// listen_tls don't require the native-rt archive to be linked).
+__attribute__((weak)) zz_value zz_tls_listen(zz_value addr, zz_value cert, zz_value key, int *err);
+__attribute__((weak)) zz_value zz_tls_accept(zz_value id, int *err);
+__attribute__((weak)) zz_value zz_tls_read(zz_value id, zz_value max, int *err);
+__attribute__((weak)) zz_value zz_tls_write(zz_value id, zz_value data, int *err);
+__attribute__((weak)) zz_value zz_tls_close(zz_value id, int *err);
+__attribute__((weak)) zz_value zz_tls_listener_close(zz_value id, int *err);
+// MySQL client (weak externs from native-rt staticlib)
+__attribute__((weak)) zz_value zz_tcp_connect(zz_value addr, zz_value timeout_ms, int *err);
+__attribute__((weak)) zz_value zz_tcp_write(zz_value id, zz_value data, int *err);
+__attribute__((weak)) zz_value zz_tcp_read(zz_value id, zz_value max_bytes, int *err);
+__attribute__((weak)) zz_value zz_tcp_shutdown(zz_value id, int *err);
+zz_value zz_mysql_connect(zz_value conninfo, int *err);  // 1 arg, returns ZZ_DB handle
+zz_value zz_mysql_exec(zz_value db, zz_value sql, int *err);  // 2 args, returns Result<Int, Str>
+zz_value zz_mysql_query(zz_value db, zz_value sql, int *err);  // 2 args, returns Result<[T], Str>
+zz_value zz_mysql_close(zz_value db, int *err);  // 1 arg, returns Result<Unit, Str>
 zz_value zz_http_test(zz_value server, zz_value method, zz_value path, zz_value body, int *err);  // 4 args
 zz_value zz_http_test_req(zz_value server, zz_value method, zz_value path,
                           zz_value headers, zz_value body, int *err);  // 5 args
@@ -1369,8 +1389,12 @@ zz_value zz_http_body_bytes(zz_value req, int *err);  // 1 arg
 
 // HTTP client stubs (native mode — returns mock responses)
 zz_value zz_http_get(zz_value url, zz_value headers, int *err);
+zz_value zz_http_delete(zz_value url, zz_value headers, int *err);
 zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err);
+zz_value zz_http_put(zz_value url, zz_value body, zz_value headers, int *err);
 zz_value zz_http_fetch(zz_value url, zz_value method, zz_value headers, zz_value body, zz_value timeout_ms, int *err);  // 5 args
+zz_value zz_http_fetch_insecure(zz_value url, zz_value method, zz_value headers, zz_value body, zz_value timeout_ms, int *err);  // 5 args, no TLS verify
+zz_value zz_http_hijack(zz_value server, zz_value path, zz_value handler, int *err);  // 3 args, WebSocket upgrade registration
 zz_value zz_http_post_json(zz_value url, zz_value body, zz_value headers, int *err);  // 3 args
 zz_value zz_http_response_status(zz_value resp, int *err);
 zz_value zz_http_response_text(zz_value resp, int *err);

@@ -92,9 +92,12 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("syntax", "scope_collision.zz", false),
     ("stdlib", "builders.zz", true),
     ("stdlib", "csv_test.zz", true),
+    ("stdlib", "colors_demo.zz", false),
     ("stdlib", "dec_ops.zz", true),
+    ("stdlib", "regexp_test.zz", false),
     ("stdlib", "map_set.zz", true),
     ("stdlib", "math_ops.zz", false),
+    ("stdlib", "matrix_mul_test.zz", true),
     ("stdlib", "path_join.zz", true),
     ("stdlib", "time_date.zz", true),
     ("stdlib", "math_consts.zz", false),
@@ -124,6 +127,9 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("syntax", "closure_nested.zz", false),
     ("syntax", "closure_capture_struct_array.zz", false),
     ("stdlib", "bytes_finish_test.zz", true),
+    ("stdlib", "http_delete_put.zz", true),
+    ("stdlib", "http_fetch_insecure_test.zz", true),
+    ("stdlib", "http_hijack_test.zz", true),
     ("syntax", "brace_escapes.zz", false),
     ("syntax", "raw_strings.zz", false),
     ("syntax", "brace_escapes_multiline.zz", false),
@@ -200,6 +206,22 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     (
         "stdlib/net_unix_test.zz",
         "binds socket files (collide in batch)",
+    ),
+    (
+        "stdlib/net_tls_listener_shutdown.zz",
+        "binds TLS socket (collide in batch)",
+    ),
+    (
+        "stdlib/net_unix_listener_shutdown.zz",
+        "binds socket file (collide in batch)",
+    ),
+    (
+        "stdlib/http_listen_tls_test.zz",
+        "binds TLS listen port (collide in batch)",
+    ),
+    (
+        "stdlib/mysql_test.zz",
+        "connects to localhost:3306 (collide in batch)",
     ),
     ("stdlib/input_chained.zz", "needs .stdin (shared in batch)"),
     (

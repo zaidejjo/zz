@@ -1,0 +1,27 @@
+// features: imports, match, option-result, print, std-sqlz, string-literal
+// tests/fixtures/stdlib/mysql_test.zz — std.sqlz.mysql C twin.
+// Verifies that mysql.connect does not hit zz_unimplemented_native under
+// AOT. Connects to a non-existent host and expects a connection error
+// (not an unimplemented-native abort).
+import std.sqlz
+
+func main() -> () {
+    // Connect to localhost:3306 (nothing listening) - should get a connection
+    // refused error, not an unimplemented native abort.
+    match sqlz.mysql.connect("host=127.0.0.1 port=3306 user=root password=secret dbname=test") {
+        .ok(_db) => {
+            println("ERROR: connect should have failed")
+        }
+        .err(e) => {
+            println("connect_err_ok: {e}")
+            // Verify it's a connection error, not an unimplemented native
+            if e == "zz_unimplemented_native" {
+                println("ERROR: got unimplemented native")
+            } else {
+                println("not_unimplemented_ok")
+            }
+        }
+    }
+
+    println("mysql_test_ok")
+}

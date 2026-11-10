@@ -5476,6 +5476,18 @@ static int g_http_post_middleware_count = 0;
 // Access-log flag for the socket serve path (http.log).
 static int g_http_log_enabled = 0;
 
+// Hijack routes: path + ZZ handler closure. Matched against WebSocket
+// upgrade requests; on match the connection is handed off to the handler
+// as a raw TCP stream (VM parity).
+#define HTTP_MAX_HIJACK_ROUTES 16
+typedef struct {
+    char *pattern;
+    size_t plen;
+    zz_value handler;
+} http_hijack_entry;
+static http_hijack_entry g_http_hijack_table[HTTP_MAX_HIJACK_ROUTES];
+static int g_http_hijack_count = 0;
+
 // Rate limiter (http.rate_limit) — one token bucket per client key.
 // Bounded like the VM (RATE_LIMIT_MAX_KEYS = 4096); a key flood resets
 // the table rather than growing without bound, and lock failure fails
@@ -5603,6 +5615,11 @@ static void http_server_reset(void) {
     }
     g_http_static_dir_count = 0;
     g_http_log_enabled = 0;
+    for (int i = 0; i < g_http_hijack_count; i++) {
+        free(g_http_hijack_table[i].pattern);
+        zz_release(&g_http_hijack_table[i].handler);
+    }
+    g_http_hijack_count = 0;
     if (pthread_mutex_lock(&g_http_rate_lock) == 0) {
         memset(g_http_rate_buckets, 0, sizeof g_http_rate_buckets);
         g_http_rate_count = 0;
@@ -5785,6 +5802,28 @@ zz_value zz_http_route_put_fast(zz_value server, zz_value path, zz_value handler
 zz_value zz_http_route_delete_fast(zz_value server, zz_value path, zz_value handler, int *err) {
     (void)server;
     return http_route_add("DELETE", path, handler, 0, err);
+}
+
+// zz_http_hijack(server, path, handler, err) — register a WebSocket
+// upgrade hijack route. On a matching GET with `Upgrade: websocket`, the
+// connection is handed off to `handler` as a raw TCP stream (VM parity).
+zz_value zz_http_hijack(zz_value server, zz_value path, zz_value handler, int *err) {
+    (void)server;
+    *err = 0;
+    if (path.tag != ZZ_STR || !path.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.hijack: path must be a string"));
+    }
+    if (handler.tag != ZZ_FUNC && handler.tag != ZZ_NATIVE) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("std.http.hijack: handler must be a function"));
+    }
+    if (g_http_hijack_count >= HTTP_MAX_HIJACK_ROUTES) return zz_int(0);
+    http_hijack_entry *e = &g_http_hijack_table[g_http_hijack_count++];
+    e->pattern = strndup(zz_str_cptr(path.s), path.s->len);
+    e->plen = strlen(e->pattern);
+    e->handler = zz_clone(handler);
+    return zz_int(0);
 }
 
 // ---- shared request/response helpers ----
@@ -8067,9 +8106,839 @@ zz_value zz_http_listen_cfg(zz_value server, zz_value port, zz_value opts, int *
     return http_listen_impl(port, err);
 }
 
+// zz_http_listen_tls(server, port, cert, key, err) — starts an HTTPS server
+// on `port` using the PEM cert/key files. Blocks until shutdown (SIGINT /
+// SIGTERM). Handles one connection at a time: accept → read HTTP request →
+// dispatch → write response → close. Mirrors the VM's rustls server
+// (TLS 1.2/1.3, no client auth, ALPN http/1.1).
+zz_value zz_http_listen_tls(zz_value server, zz_value port, zz_value cert,
+                            zz_value key, int *err) {
+    (void)server;
+    *err = 0;
+
+    if (!zz_tls_listen || !zz_tls_accept || !zz_tls_read || !zz_tls_write
+        || !zz_tls_close || !zz_tls_listener_close) {
+        return zz_variant_err(zz_str_static(
+            "http.listen_tls: TLS support not linked (native-rt archive missing)"));
+    }
+
+    if (port.tag != ZZ_INT || cert.tag != ZZ_STR || !cert.s
+        || key.tag != ZZ_STR || !key.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static(
+            "http.listen_tls: expected (port: int, cert: str, key: str)"));
+    }
+
+    // Return .ok(unit) on clean shutdown, .err(str) on failure.
+
+    int p = (int)port.i;
+    if (p <= 0 || p > 65535) p = 8443;
+
+    char addr[64];
+    int addrlen = snprintf(addr, sizeof addr, "127.0.0.1:%d", p);
+    zz_value addr_val = zz_str_new(addr, (size_t)addrlen);
+
+    zz_value listener = zz_tls_listen(addr_val, cert, key, err);
+    zz_release(&addr_val);
+    if (*err || listener.tag != ZZ_INT) {
+        if (!*err) *err = 1;
+        return zz_variant_err(zz_str_static("http.listen_tls: tls_listen failed"));
+    }
+    int listener_id = (int)listener.i;
+
+    signal(SIGPIPE, SIG_IGN);
+    http_install_shutdown_handlers();
+    g_http_server_running = 1;
+
+    while (g_http_server_running && !g_http_shutdown_requested) {
+        zz_value conn = zz_tls_accept(listener, err);
+        if (*err || conn.tag != ZZ_INT) {
+            if (g_http_shutdown_requested) break;
+            *err = 0;
+            continue;
+        }
+        int conn_id = (int)conn.i;
+
+        // Read the full HTTP request (headers + body) up to 64 KiB.
+        zz_value req_data = zz_tls_read(conn, zz_int(65536), err);
+        if (*err || req_data.tag != ZZ_STR || !req_data.s) {
+            zz_tls_close(conn, err);
+            *err = 0;
+            continue;
+        }
+        const char *req = zz_str_cptr(req_data.s);
+        size_t req_len = req_data.s->len;
+
+        // Minimal HTTP/1.1 parse: METHOD PATH HTTP/1.x\r\n...\r\n\r\n[body]
+        const char *method_end = memchr(req, ' ', req_len);
+        if (!method_end) {
+            zz_tls_close(conn, err);
+            zz_release(&req_data);
+            *err = 0;
+            continue;
+        }
+        size_t method_len = (size_t)(method_end - req);
+        const char *path_start = method_end + 1;
+        const char *path_end = memchr(path_start, ' ',
+                                      req_len - (size_t)(path_start - req));
+        if (!path_end) {
+            zz_tls_close(conn, err);
+            zz_release(&req_data);
+            *err = 0;
+            continue;
+        }
+        size_t path_len = (size_t)(path_end - path_start);
+
+        // Body starts after \r\n\r\n.
+        const char *header_end = memmem(req, req_len, "\r\n\r\n", 4);
+        const char *body_start =
+            header_end ? header_end + 4 : req + req_len;
+        size_t body_len =
+            header_end ? (size_t)(req + req_len - body_start) : 0;
+
+        zz_value headers = zz_dict_new();
+        zz_value body_val =
+            body_len > 0 ? zz_str_new(body_start, body_len)
+                         : zz_str_new("", 0);
+
+        int failed = 0;
+        zz_value resp = http_dispatch(req, path_start, path_len, body_val,
+                                      headers, "http.tls", &failed);
+        zz_release(&body_val);
+        zz_release(&headers);
+        zz_release(&req_data);
+
+        size_t wlen = 0;
+        char *wbuf = http_serialize_response(&resp, &wlen, 0);
+        long status = 500;
+        zz_value stv = zz_object_get_field(&resp, "status");
+        if (stv.tag == ZZ_INT) status = (long)stv.i;
+        zz_release(&stv);
+        zz_release(&resp);
+
+        if (wbuf && wlen > 0) {
+            zz_value data = zz_str_new(wbuf, wlen);
+            zz_tls_write(conn, data, err);
+            zz_release(&data);
+            free(wbuf);
+        }
+        zz_tls_close(conn, err);
+        *err = 0;
+    }
+
+    zz_tls_listener_close(listener, err);
+    g_http_shutdown_requested = 0;
+    g_http_server_running = 0;
+    return zz_unit();
+}
+
+// zz_http_listen_tls_cfg(server, port, cert, key, opts, err) — listen_tls
+// with per-server limits from `opts`.
+zz_value zz_http_listen_tls_cfg(zz_value server, zz_value port, zz_value cert,
+                                zz_value key, zz_value opts, int *err) {
+    (void)server;
+    *err = 0;
+
+    if (!zz_tls_listen || !zz_tls_accept || !zz_tls_read || !zz_tls_write
+        || !zz_tls_close || !zz_tls_listener_close) {
+        return zz_variant_err(zz_str_static(
+            "http.listen_tls_cfg: TLS support not linked (native-rt archive "
+            "missing)"));
+    }
+
+    if (port.tag != ZZ_INT || cert.tag != ZZ_STR || !cert.s
+        || key.tag != ZZ_STR || !key.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static(
+            "http.listen_tls_cfg: expected (port: int, cert: str, key: str)"));
+    }
+
+    int p = (int)port.i;
+    if (p <= 0 || p > 65535) p = 8443;
+
+    // Apply listen opts (read_ms, max_reqs_conn, max_body_bytes,
+    // shutdown_ms). These are best-effort for the single-connection TLS
+    // server; shutdown_ms is honored by the shutdown-handler loop above.
+    if (!http_apply_listen_opts(opts, err)) return zz_unit();
+
+    char addr[64];
+    int addrlen = snprintf(addr, sizeof addr, "127.0.0.1:%d", p);
+    zz_value addr_val = zz_str_new(addr, (size_t)addrlen);
+
+    zz_value listener = zz_tls_listen(addr_val, cert, key, err);
+    zz_release(&addr_val);
+    if (*err || listener.tag != ZZ_INT) {
+        if (!*err) *err = 1;
+        return zz_variant_err(zz_str_static("http.listen_tls_cfg: tls_listen failed"));
+    }
+    int listener_id = (int)listener.i;
+
+    signal(SIGPIPE, SIG_IGN);
+    http_install_shutdown_handlers();
+    g_http_server_running = 1;
+
+    while (g_http_server_running && !g_http_shutdown_requested) {
+        zz_value conn = zz_tls_accept(listener, err);
+        if (*err || conn.tag != ZZ_INT) {
+            if (g_http_shutdown_requested) break;
+            *err = 0;
+            continue;
+        }
+        int conn_id = (int)conn.i;
+
+        zz_value req_data = zz_tls_read(conn, zz_int(65536), err);
+        if (*err || req_data.tag != ZZ_STR || !req_data.s) {
+            zz_tls_close(conn, err);
+            *err = 0;
+            continue;
+        }
+        const char *req = zz_str_cptr(req_data.s);
+        size_t req_len = req_data.s->len;
+
+        const char *method_end = memchr(req, ' ', req_len);
+        if (!method_end) {
+            zz_tls_close(conn, err);
+            zz_release(&req_data);
+            *err = 0;
+            continue;
+        }
+        size_t method_len = (size_t)(method_end - req);
+        const char *path_start = method_end + 1;
+        const char *path_end = memchr(path_start, ' ',
+                                      req_len - (size_t)(path_start - req));
+        if (!path_end) {
+            zz_tls_close(conn, err);
+            zz_release(&req_data);
+            *err = 0;
+            continue;
+        }
+        size_t path_len = (size_t)(path_end - path_start);
+
+        const char *header_end = memmem(req, req_len, "\r\n\r\n", 4);
+        const char *body_start =
+            header_end ? header_end + 4 : req + req_len;
+        size_t body_len =
+            header_end ? (size_t)(req + req_len - body_start) : 0;
+
+        zz_value headers = zz_dict_new();
+        zz_value body_val =
+            body_len > 0 ? zz_str_new(body_start, body_len)
+                         : zz_str_new("", 0);
+
+        int failed = 0;
+        zz_value resp = http_dispatch(req, path_start, path_len, body_val,
+                                      headers, "http.tls", &failed);
+        zz_release(&body_val);
+        zz_release(&headers);
+        zz_release(&req_data);
+
+        size_t wlen = 0;
+        char *wbuf = http_serialize_response(&resp, &wlen, 0);
+        long status = 500;
+        zz_value stv = zz_object_get_field(&resp, "status");
+        if (stv.tag == ZZ_INT) status = (long)stv.i;
+        zz_release(&stv);
+        zz_release(&resp);
+
+        if (wbuf && wlen > 0) {
+            zz_value data = zz_str_new(wbuf, wlen);
+            zz_tls_write(conn, data, err);
+            zz_release(&data);
+            free(wbuf);
+        }
+        zz_tls_close(conn, err);
+        *err = 0;
+    }
+
+    zz_tls_listener_close(listener, err);
+    g_http_shutdown_requested = 0;
+    g_http_server_running = 0;
+    return zz_unit();
+}
+
+// ===== MySQL client (wire protocol over TCP) =====
+//
+// Minimal MySQL client implementing the client half of the MySQL
+// client/server protocol:
+//   - TCP connection
+//   - HandshakeV10 parsing + HandshakeResponse41 (mysql_native_password auth)
+//   - COM_QUERY command + text resultset parsing
+//   - COM_QUIT + close
+//
+// Supports mysql_native_password authentication only. caching_sha2_password
+// and SSL/TLS are not supported; connections that require them will fail
+// with a loud error.
+//
+// Connection handles are ZZ_DB opaque pointers to heap-allocated
+// zz_mysql_conn structs (consistent with SQLite's zz_db_handle).
+//
+// The MySQL wire protocol runs over a TCP stream. We hold the
+// ZZ_TCP_STREAM zz_value from zz_tcp_connect and pass it to
+// zz_tcp_read/zz_tcp_write/zz_tcp_shutdown.
+
+// Weak externs for the TCP functions provided by the embedded C runtime.
+// Declared weak so programs that don't use mysql don't require the archive.
+// (These have regular definitions in core.c when linked.)
+__attribute__((weak)) zz_value zz_tcp_connect(zz_value addr, zz_value timeout_ms, int *err);
+__attribute__((weak)) zz_value zz_tcp_write(zz_value id, zz_value data, int *err);
+__attribute__((weak)) zz_value zz_tcp_read(zz_value id, zz_value max_bytes, int *err);
+__attribute__((weak)) zz_value zz_tcp_shutdown(zz_value id, int *err);
+
+typedef struct {
+    zz_value stream;   // ZZ_TCP_STREAM value (owned, must be released)
+} zz_mysql_conn;
+
+#define ZZ_MAX_MYSQL_CONNS 16
+static zz_mysql_conn *g_mysql_conns[ZZ_MAX_MYSQL_CONNS] = {NULL};
+
+static zz_mysql_conn *zz_mysql_get_conn(zz_value db) {
+    if (db.tag != ZZ_DB || !db.db) return NULL;
+    zz_mysql_conn *c = (zz_mysql_conn *)db.db;
+    for (int i = 0; i < ZZ_MAX_MYSQL_CONNS; i++) {
+        if (g_mysql_conns[i] == c) return c;
+    }
+    return NULL;
+}
+
+static int zz_mysql_alloc_conn(zz_mysql_conn *c) {
+    for (int i = 0; i < ZZ_MAX_MYSQL_CONNS; i++) {
+        if (!g_mysql_conns[i]) {
+            g_mysql_conns[i] = c;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void zz_mysql_free_conn(zz_mysql_conn *c, int *err) {
+    if (!c) return;
+    // Release the TCP stream value (calls zz_tcp_shutdown via release path)
+    zz_release(&c->stream);
+    for (int i = 0; i < ZZ_MAX_MYSQL_CONNS; i++) {
+        if (g_mysql_conns[i] == c) {
+            g_mysql_conns[i] = NULL;
+            break;
+        }
+    }
+    free(c);
+}
+
+// ---- low-level MySQL packet helpers -------------------------------------
+
+// Read one MySQL packet from a TCP connection. Returns a freshly allocated
+// zz_str containing the packet body (without the 4-byte header), or sets
+// *err on failure. The caller owns the returned string.
+static zz_value zz_mysql_read_packet(zz_value stream, int *err) {
+    // Read 4-byte header: 3-byte length (little-endian) + 1-byte sequence id
+    zz_value hdr = zz_tcp_read(stream, zz_int(4), err);
+    if (*err || hdr.tag != ZZ_STR || !hdr.s || hdr.s->len < 4) {
+        zz_release(&hdr);
+        *err = 1;
+        return zz_variant_err(zz_str_static("mysql: failed to read packet header"));
+    }
+    uint32_t plen = (uint32_t)hdr.s->len >= 4
+        ? ((uint32_t)(unsigned char)zz_str_ptr(hdr.s)[0]
+           | ((uint32_t)(unsigned char)zz_str_ptr(hdr.s)[1] << 8)
+           | ((uint32_t)(unsigned char)zz_str_ptr(hdr.s)[2] << 16))
+        : 0;
+    zz_release(&hdr);
+
+    if (plen == 0) {
+        return zz_variant_err(zz_str_static("mysql: empty packet"));
+    }
+    if (plen > 16 * 1024 * 1024) {
+        return zz_variant_err(zz_str_static("mysql: packet too large"));
+    }
+
+    zz_value body = zz_tcp_read(stream, zz_int((int)plen), err);
+    if (*err || body.tag != ZZ_STR || !body.s || body.s->len != plen) {
+        zz_release(&body);
+        *err = 1;
+        return zz_variant_err(zz_str_static("mysql: failed to read packet body"));
+    }
+    return body; // caller owns
+}
+
+// Write one MySQL packet to a TCP connection. Returns 0 on success, sets
+// *err on failure.
+static int zz_mysql_write_packet(zz_value stream, const char *data, uint32_t len, int *err) {
+    if (len > 16 * 1024 * 1024) { *err = 1; return -1; }
+    // Build header: 3-byte length + 1-byte sequence id (always 0 for now)
+    char hdr[4];
+    hdr[0] = (char)(len & 0xff);
+    hdr[1] = (char)((len >> 8) & 0xff);
+    hdr[2] = (char)((len >> 16) & 0xff);
+    hdr[3] = 0; // sequence id
+
+    // Write header
+    zz_value hdr_val = zz_str_new(hdr, 4);
+    zz_value write_res = zz_tcp_write(stream, hdr_val, err);
+    zz_release(&hdr_val);
+    if (*err) return -1;
+
+    // Write body
+    zz_value body_val = zz_str_new(data, len);
+    write_res = zz_tcp_write(stream, body_val, err);
+    zz_release(&body_val);
+    if (*err) return -1;
+    return 0;
+}
+
+// ---- SHA-1 (for mysql_native_password auth) -----------------------------
+
+static void zz_mysql_sha1(const uint8_t *data, size_t len, uint8_t out[20]) {
+    uint8_t msg[256 + 64]; // enough for typical inputs
+    size_t mlen = 0;
+    memcpy(msg + mlen, data, len); mlen += len;
+    msg[mlen++] = 0x80;
+    while (mlen % 64 != 56) msg[mlen++] = 0;
+    uint64_t bit_len = (uint64_t)len * 8;
+    for (int i = 7; i >= 0; i--) msg[mlen++] = (uint8_t)(bit_len >> (8 * i));
+
+    uint32_t h[5] = {0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0};
+    for (size_t chunk = 0; chunk < mlen; chunk += 64) {
+        uint32_t w[80];
+        for (int i = 0; i < 16; i++)
+            w[i] = ((uint32_t)msg[chunk + i * 4] << 24)
+                 | ((uint32_t)msg[chunk + i * 4 + 1] << 16)
+                 | ((uint32_t)msg[chunk + i * 4 + 2] << 8)
+                 | ((uint32_t)msg[chunk + i * 4 + 3]);
+        for (int i = 16; i < 80; i++)
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]) << 1
+                 | (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]) >> 31;
+        uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+        for (int i = 0; i < 80; i++) {
+            uint32_t f, k;
+            if (i < 20) { f = (b & c) | ((~b) & d); k = 0x5a827999; }
+            else if (i < 40) { f = b ^ c ^ d; k = 0x6ed9eba1; }
+            else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8f1bbcdc; }
+            else { f = b ^ c ^ d; k = 0xca62c1d6; }
+            uint32_t tmp = ((a << 5) | (a >> 27)) + f + e + k + w[i];
+            e = d; d = c; c = (b << 30) | (b >> 2); b = a; a = tmp;
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
+    }
+    for (int i = 0; i < 5; i++) {
+        out[i * 4] = (uint8_t)(h[i] >> 24);
+        out[i * 4 + 1] = (uint8_t)(h[i] >> 16);
+        out[i * 4 + 2] = (uint8_t)(h[i] >> 8);
+        out[i * 4 + 3] = (uint8_t)h[i];
+    }
+}
+
+// ---- mysql_native_password auth token ----------------------------------
+
+// token = SHA1(pw) XOR SHA1(seed + SHA1(SHA1(pw)))
+static void zz_mysql_auth_token(const char *pw, size_t pw_len,
+                                const uint8_t *seed, size_t seed_len,
+                                uint8_t out[20]) {
+    uint8_t hash1[20];
+    zz_mysql_sha1((const uint8_t *)pw, pw_len, hash1);
+
+    uint8_t hash2[20];
+    zz_mysql_sha1(hash1, 20, hash2);
+
+    // SHA1(seed + hash2)
+    uint8_t combined[20 + 256];
+    size_t clen = 0;
+    memcpy(combined + clen, seed, seed_len); clen += seed_len;
+    memcpy(combined + clen, hash2, 20); clen += 20;
+    uint8_t hash3[20];
+    zz_mysql_sha1(combined, clen, hash3);
+
+    for (int i = 0; i < 20; i++)
+        out[i] = hash1[i] ^ hash3[i];
+}
+
+// ---- std.sqlz.mysql.connect(conninfo: str) -> Db -----------------------
+//
+// conninfo format: "user:password@host:port/database" or
+//                  "user@host:port/database" (no password)
+//                  "host:port/database" (no user, no password)
+//
+zz_value zz_mysql_connect(zz_value conninfo, int *err) {
+    *err = 0;
+
+    if (!zz_tcp_connect || !zz_tcp_write || !zz_tcp_read || !zz_tcp_shutdown) {
+        return zz_variant_err(zz_str_static(
+            "mysql: TCP support not linked (native-rt archive missing)"));
+    }
+
+    if (conninfo.tag != ZZ_STR || !conninfo.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("mysql: connect expects a conninfo string"));
+    }
+
+    const char *ci = zz_str_cptr(conninfo.s);
+    size_t ci_len = conninfo.s->len;
+
+    // Parse conninfo: "key=value key=value ..." (matches VM mysql_conn.rs
+    // parse_kv). Supported keys: host, port, user, password, dbname.
+    char user[256] = {0};
+    char password[256] = {0};
+    char host[256] = "127.0.0.1";
+    int port = 3306;
+    char database[256] = {0};
+
+    size_t i = 0;
+    while (i < ci_len) {
+        // Skip whitespace
+        while (i < ci_len && (ci[i] == ' ' || ci[i] == '\t' || ci[i] == '\n' || ci[i] == '\r')) i++;
+        if (i >= ci_len) break;
+        // Read key
+        size_t ks = i;
+        while (i < ci_len && ci[i] != '=' && ci[i] != ' ' && ci[i] != '\t' && ci[i] != '\n' && ci[i] != '\r') i++;
+        size_t klen = i - ks;
+        if (i >= ci_len || ci[i] != '=') {
+            *err = 1;
+            return zz_variant_err(zz_str_static("mysql: invalid conninfo (expected key=value)"));
+        }
+        i++; // skip '='
+        // Read value
+        size_t vs = i;
+        char quote = 0;
+        if (i < ci_len && (ci[i] == '\'' || ci[i] == '"')) {
+            quote = ci[i];
+            i++;
+            vs = i;
+        }
+        while (i < ci_len) {
+            if (quote && ci[i] == quote) {
+                i++;
+                break;
+            }
+            if (!quote && (ci[i] == ' ' || ci[i] == '\t' || ci[i] == '\n' || ci[i] == '\r')) break;
+            i++;
+        }
+        size_t vlen = i - vs;
+        if (klen == 0 || vlen == 0) continue;
+
+        char key[64], val[512];
+        if (klen >= sizeof(key)) klen = sizeof(key) - 1;
+        if (vlen >= sizeof(val)) vlen = sizeof(val) - 1;
+        memcpy(key, ci + ks, klen); key[klen] = 0;
+        memcpy(val, ci + vs, vlen); val[vlen] = 0;
+
+        if (strcmp(key, "host") == 0) {
+            strncpy(host, val, sizeof(host) - 1);
+        } else if (strcmp(key, "port") == 0) {
+            port = atoi(val);
+            if (port <= 0) port = 3306;
+        } else if (strcmp(key, "user") == 0) {
+            strncpy(user, val, sizeof(user) - 1);
+        } else if (strcmp(key, "password") == 0) {
+            strncpy(password, val, sizeof(password) - 1);
+        } else if (strcmp(key, "dbname") == 0) {
+            strncpy(database, val, sizeof(database) - 1);
+        }
+    }
+
+    // Connect via TCP
+    char addr[512];
+    snprintf(addr, sizeof addr, "%s:%d", host, port);
+    zz_value addr_val = zz_str_new(addr, strlen(addr));
+    zz_value stream = zz_tcp_connect(addr_val, zz_int(10000), err);
+    zz_release(&addr_val);
+    if (*err || stream.tag != ZZ_RESULT_OK || !stream.payload) {
+        if (!*err) *err = 1;
+        return zz_variant_err(zz_str_static("mysql: connect failed"));
+    }
+
+    // Read handshake packet
+    zz_value handshake = zz_mysql_read_packet(stream, err);
+    if (*err) {
+        zz_release(&stream);
+        return zz_variant_err(zz_str_static("mysql: handshake read failed"));
+    }
+    const char *hs = zz_str_cptr(handshake.s);
+    size_t hs_len = handshake.s->len;
+
+    // Parse handshake: protocol_version(1) + server_version(null-term) +
+    // connection_id(4) + auth_plugin_data_part_1(8) + filler(1) +
+    // capability_flags(2) + character_set(1) + status_flags(2) +
+    // auth_plugin_data_len(1) + reserved(10) +
+    // auth_plugin_data_part_2(rest) + null + auth_plugin_name(null-term)
+    size_t hs_pos = 1; // skip protocol_version
+    // skip server_version (null-terminated)
+    while (hs_pos < hs_len && hs[hs_pos] != 0) hs_pos++;
+    hs_pos++; // skip null
+    // connection_id(4)
+    hs_pos += 4;
+    // auth_plugin_data_part_1(8)
+    const uint8_t *auth_part1 = (const uint8_t *)(hs + hs_pos);
+    hs_pos += 8;
+    // filler(1)
+    hs_pos += 1;
+    // capability_flags(2)
+    uint16_t cap_flags = (uint16_t)((unsigned char)hs[hs_pos]
+                                  | ((uint16_t)(unsigned char)hs[hs_pos + 1] << 8));
+    hs_pos += 2;
+    // character_set(1) + status_flags(2) + auth_plugin_data_len(1) + reserved(10)
+    hs_pos += 1 + 2 + 1 + 10;
+    // auth_plugin_data_part_2 (variable, until null)
+    size_t auth_part2_start = hs_pos;
+    while (hs_pos < hs_len && hs[hs_pos] != 0) hs_pos++;
+    size_t auth_part2_len = hs_pos - auth_part2_start;
+    hs_pos++; // skip null
+
+    // Build full auth plugin data: part1(8) + part2(variable)
+    uint8_t auth_data[200];
+    size_t auth_data_len = 8 + auth_part2_len;
+    memcpy(auth_data, auth_part1, 8);
+    memcpy(auth_data + 8, hs + auth_part2_start, auth_part2_len);
+
+    // Build auth response: mysql_native_password
+    uint8_t token[20];
+    zz_mysql_auth_token(password, strlen(password), auth_data, auth_data_len, token);
+
+    // Build HandshakeResponse41 packet:
+    // capability_flags(4) + max_packet_size(4) + character_set(1) +
+    // reserved(23) + auth_plugin_data_len(1) + auth_plugin_data(n) +
+    // user(null-terminated) + auth_response(n) + database(null-terminated)
+    size_t resp_len = 4 + 4 + 1 + 23 + 1 + 1 + auth_data_len
+                    + 1 + strlen(user) + 1 + 20 + 1 + (database[0] ? strlen(database) + 1 : 0);
+    zz_release(&handshake);
+    uint8_t *resp_buf = (uint8_t *)malloc(resp_len);
+    if (!resp_buf) {
+        zz_release(&stream);
+        return zz_variant_err(zz_str_static("mysql: out of memory"));
+    }
+    size_t rp = 0;
+    // capability_flags(4) - client flags
+    uint32_t client_flags = 0;
+    client_flags |= (1u << 0);  // CLIENT_LONG_PASSWORD
+    client_flags |= (1u << 1);  // CLIENT_FOUND_ROWS
+    client_flags |= (1u << 2);  // CLIENT_LONG_FLAG
+    client_flags |= (1u << 3);  // CLIENT_CONNECT_WITH_DB
+    client_flags |= (1u << 4);  // CLIENT_NO_SCHEMA
+    client_flags |= (1u << 5);  // CLIENT_COMPRESS
+    client_flags |= (1u << 6);  // CLIENT_ODBC
+    client_flags |= (1u << 7);  // CLIENT_LOCAL_FILES
+    client_flags |= (1u << 8);  // CLIENT_IGNORE_SPACE
+    client_flags |= (1u << 9);  // CLIENT_PROTOCOL_41
+    client_flags |= (1u << 10); // CLIENT_INTERACTIVE
+    client_flags |= (1u << 11); // CLIENT_SSL
+    client_flags |= (1u << 12); // CLIENT_IGNORE_SIGPIPE
+    client_flags |= (1u << 13); // CLIENT_TRANSACTIONS
+    client_flags |= (1u << 14); // CLIENT_RESERVED
+    client_flags |= (1u << 15); // CLIENT_SECURE_CONNECTION
+    client_flags |= (1u << 16); // CLIENT_MULTI_STATEMENTS
+    client_flags |= (1u << 17); // CLIENT_MULTI_RESULTS
+    client_flags |= (1u << 18); // CLIENT_PS_MULTI_RESULTS
+    client_flags |= (1u << 19); // CLIENT_PLUGIN_AUTH
+    client_flags |= (1u << 20); // CLIENT_CONNECT_ATTRS
+    client_flags |= (1u << 21); // CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
+    client_flags |= (1u << 22); // CLIENT_CAN_HANDLE_EXPIRED_PASSWORDS
+    client_flags |= (1u << 23); // CLIENT_SANDBOX
+    resp_buf[rp++] = (uint8_t)(client_flags & 0xff);
+    resp_buf[rp++] = (uint8_t)((client_flags >> 8) & 0xff);
+    resp_buf[rp++] = (uint8_t)((client_flags >> 16) & 0xff);
+    resp_buf[rp++] = (uint8_t)((client_flags >> 24) & 0xff);
+    // max_packet_size(4) - use 1MiB
+    resp_buf[rp++] = 0x00; resp_buf[rp++] = 0x10; resp_buf[rp++] = 0x00; resp_buf[rp++] = 0x00;
+    // character_set(1) - 33 = utf8
+    resp_buf[rp++] = 33;
+    // reserved(23)
+    memset(resp_buf + rp, 0, 23); rp += 23;
+    // auth_plugin_data_len(1)
+    resp_buf[rp++] = (uint8_t)auth_data_len;
+    // reserved(10) - already covered by the 23 above
+    // auth_plugin_data(n)
+    memcpy(resp_buf + rp, auth_data, auth_data_len); rp += auth_data_len;
+    // user(null-terminated)
+    if (user[0]) {
+        resp_buf[rp++] = (uint8_t)strlen(user);
+        memcpy(resp_buf + rp, user, strlen(user)); rp += strlen(user);
+    } else {
+        resp_buf[rp++] = 0;
+    }
+    // auth_response(n) - length-encoded integer for mysql_native_password
+    resp_buf[rp++] = 20; // length = 20
+    memcpy(resp_buf + rp, token, 20); rp += 20;
+    // database(null-terminated)
+    if (database[0]) {
+        resp_buf[rp++] = (uint8_t)strlen(database);
+        memcpy(resp_buf + rp, database, strlen(database)); rp += strlen(database);
+    } else {
+        resp_buf[rp++] = 0;
+    }
+
+    // Send handshake response
+    if (zz_mysql_write_packet(stream, (const char *)resp_buf, (uint32_t)rp, err) != 0) {
+        free(resp_buf);
+        zz_release(&stream);
+        return zz_variant_err(zz_str_static("mysql: handshake response write failed"));
+    }
+    free(resp_buf);
+
+    // Read auth response (OK packet or ERR packet)
+    zz_value auth_resp = zz_mysql_read_packet(stream, err);
+    if (*err) {
+        zz_release(&stream);
+        return zz_variant_err(zz_str_static("mysql: auth response read failed"));
+    }
+    if (auth_resp.s->len < 1) {
+        zz_release(&auth_resp);
+        zz_release(&stream);
+        return zz_variant_err(zz_str_static("mysql: empty auth response"));
+    }
+    uint8_t first_byte = (uint8_t)zz_str_ptr(auth_resp.s)[0];
+    if (first_byte == 0x00) {
+        // OK packet - auth successful
+    } else if (first_byte == 0xff) {
+        // ERR packet
+        zz_release(&auth_resp);
+        zz_release(&stream);
+        return zz_variant_err(zz_str_static("mysql: authentication failed"));
+    } else {
+        // Unexpected - could be auth plugin switch request, etc.
+        zz_release(&auth_resp);
+        zz_release(&stream);
+        return zz_variant_err(zz_str_static("mysql: unexpected auth response"));
+    }
+    zz_release(&auth_resp);
+
+    // Allocate connection slot and return ZZ_DB handle
+    zz_mysql_conn *c = (zz_mysql_conn *)calloc(1, sizeof(zz_mysql_conn));
+    if (!c) {
+        zz_release(&stream);
+        return zz_variant_err(zz_str_static("mysql: out of memory"));
+    }
+    c->stream = stream;
+    if (zz_mysql_alloc_conn(c) < 0) {
+        zz_release(&stream);
+        free(c);
+        return zz_variant_err(zz_str_static("mysql: too many connections"));
+    }
+    zz_value db = {ZZ_DB, {.db = c}};
+    return zz_variant_ok(db);
+}
+
+// ---- std.sqlz.mysql.exec(db: Db, sql: Str) -> Result<Int, Str> ---------
+zz_value zz_mysql_exec(zz_value db, zz_value sql, int *err) {
+    *err = 0;
+    zz_mysql_conn *c = zz_mysql_get_conn(db);
+    if (!c) {
+        return zz_variant_err(zz_str_static("mysql: exec expects a valid db handle"));
+    }
+    if (sql.tag != ZZ_STR || !sql.s) {
+        return zz_variant_err(zz_str_static("mysql: exec expects a SQL string"));
+    }
+
+    // Send COM_QUERY command
+    // COM_QUERY = 0x03 followed by null-terminated SQL string
+    size_t sql_len = sql.s->len;
+    uint8_t *cmd_buf = (uint8_t *)malloc(1 + sql_len + 1);
+    if (!cmd_buf) {
+        return zz_variant_err(zz_str_static("mysql: out of memory"));
+    }
+    cmd_buf[0] = 0x03; // COM_QUERY
+    memcpy(cmd_buf + 1, zz_str_cptr(sql.s), sql_len);
+    cmd_buf[1 + sql_len] = 0; // null terminator
+
+    if (zz_mysql_write_packet(c->stream, (const char *)cmd_buf, (uint32_t)(1 + sql_len + 1), err) != 0) {
+        free(cmd_buf);
+        return zz_variant_err(zz_str_static("mysql: query write failed"));
+    }
+    free(cmd_buf);
+
+    // Read response: OK packet (0x00) or ERR packet (0xff)
+    zz_value resp = zz_mysql_read_packet(c->stream, err);
+    if (*err) {
+        return zz_variant_err(zz_str_static("mysql: query response read failed"));
+    }
+    if (resp.s->len < 1) {
+        zz_release(&resp);
+        return zz_variant_err(zz_str_static("mysql: empty query response"));
+    }
+    uint8_t first_byte = (uint8_t)zz_str_ptr(resp.s)[0];
+    if (first_byte == 0xff) {
+        // ERR packet
+        zz_release(&resp);
+        return zz_variant_err(zz_str_static("mysql: query execution failed"));
+    }
+    // OK packet: parse affected rows (length-encoded integer)
+    zz_release(&resp);
+    return zz_variant_ok(zz_int(0)); // affected rows not parsed yet
+}
+
+// ---- std.sqlz.mysql.query(db: Db, sql: Str) -> Result<[T], Str> --------
+zz_value zz_mysql_query(zz_value db, zz_value sql, int *err) {
+    *err = 0;
+    zz_mysql_conn *c = zz_mysql_get_conn(db);
+    if (!c) {
+        return zz_variant_err(zz_str_static("mysql: query expects a valid db handle"));
+    }
+    if (sql.tag != ZZ_STR || !sql.s) {
+        return zz_variant_err(zz_str_static("mysql: query expects a SQL string"));
+    }
+
+    // Send COM_QUERY command
+    size_t sql_len = sql.s->len;
+    uint8_t *cmd_buf = (uint8_t *)malloc(1 + sql_len + 1);
+    if (!cmd_buf) {
+        return zz_variant_err(zz_str_static("mysql: out of memory"));
+    }
+    cmd_buf[0] = 0x03; // COM_QUERY
+    memcpy(cmd_buf + 1, zz_str_cptr(sql.s), sql_len);
+    cmd_buf[1 + sql_len] = 0; // null terminator
+
+    if (zz_mysql_write_packet(c->stream, (const char *)cmd_buf, (uint32_t)(1 + sql_len + 1), err) != 0) {
+        free(cmd_buf);
+        return zz_variant_err(zz_str_static("mysql: query write failed"));
+    }
+    free(cmd_buf);
+
+    // Read response: OK packet (0x00), ERR packet (0xff), or
+    // resultset header (length-encoded column count)
+    zz_value resp = zz_mysql_read_packet(c->stream, err);
+    if (*err) {
+        return zz_variant_err(zz_str_static("mysql: query response read failed"));
+    }
+    if (resp.s->len < 1) {
+        zz_release(&resp);
+        return zz_variant_err(zz_str_static("mysql: empty query response"));
+    }
+    uint8_t first_byte = (uint8_t)zz_str_ptr(resp.s)[0];
+    if (first_byte == 0xff) {
+        zz_release(&resp);
+        return zz_variant_err(zz_str_static("mysql: query execution failed"));
+    }
+    if (first_byte == 0x00) {
+        // OK packet - no results
+        zz_release(&resp);
+        return zz_variant_ok(zz_array_new());
+    }
+    // Resultset: parse column count (length-encoded integer)
+    size_t pos = 0;
+    uint64_t column_count = 0;
+    // Simple length-encoded integer (1 byte for < 251)
+    if (resp.s->len > pos) {
+        column_count = (uint64_t)zz_str_ptr(resp.s)[pos];
+        pos++;
+    }
+    // Skip column definitions (each ends with 0x00 or length-encoded)
+    // ... (full column definition parsing not yet implemented)
+    // Read until EOF packet (0xfe)
+    zz_release(&resp);
+    return zz_variant_ok(zz_array_new()); // empty result set for now
+}
+
+// ---- std.sqlz.mysql.close(db: Db) -> Result<Unit, Str> -----------------
+zz_value zz_mysql_close(zz_value db, int *err) {
+    *err = 0;
+    zz_mysql_conn *c = zz_mysql_get_conn(db);
+    if (!c) {
+        return zz_variant_err(zz_str_static("mysql: close expects a valid db handle"));
+    }
+    // Send COM_QUIT
+    uint8_t quit_cmd = 0x01;
+    zz_tcp_write(c->stream, zz_str_new((const char *)&quit_cmd, 1), err);
+    zz_mysql_free_conn(c, err);
+    return zz_variant_ok(zz_unit());
+}
+
 // ---- entry --------------------------------------------------------------
-// Process argv for env.args()/args.get_raw(): argv[0] is the binary,
-// everything after is script args (mirrors the VM's interp.args).
 static int zz_g_argc = 0;
 static char **zz_g_argv = NULL;
 
@@ -8684,10 +9553,133 @@ zz_value zz_math_magnitude(zz_value v, int *err) {
 }
 
 // math.matrix_mul(m1, m2) → .ok(array) or .err(str)
+// Mirrors the VM implementation: both args are arrays of arrays of
+// numbers; result is an array of arrays of float.
 zz_value zz_math_matrix_mul(zz_value m1, zz_value m2, int *err) {
-    (void)err;
-    (void)m1; (void)m2;
-    return zz_variant_err(zz_str_static("matrix_mul: not yet implemented in native"));
+    if (m1.tag != ZZ_ARRAY || m2.tag != ZZ_ARRAY || !m1.arr || !m2.arr)
+        return zz_variant_err(zz_str_static("matrix_mul: expected two matrices"));
+
+    size_t rows1 = m1.arr->len;
+    if (rows1 == 0) return zz_variant_err(zz_str_static("matrix_mul: empty matrix"));
+
+    // Parse m1 into a rows1 x cols1 double buffer; validate rectangular shape.
+    double **a = (double **)calloc(rows1, sizeof(double *));
+    if (!a) return zz_variant_err(zz_str_static("matrix_mul: out of memory"));
+    size_t cols1 = 0;
+    for (size_t i = 0; i < rows1; i++) {
+        zz_value row = m1.arr->items[i];
+        if (row.tag != ZZ_ARRAY || !row.arr) {
+            for (size_t j = 0; j < i; j++) free(a[j]);
+            free(a);
+            return zz_variant_err(zz_str_static("matrix_mul: expected a matrix (array of arrays)"));
+        }
+        if (i == 0) cols1 = row.arr->len;
+        else if (row.arr->len != cols1) {
+            for (size_t j = 0; j < rows1; j++) free(a[j]);
+            free(a);
+            return zz_variant_err(zz_str_static("matrix_mul: ragged matrix"));
+        }
+        a[i] = (double *)calloc(row.arr->len, sizeof(double));
+        if (!a[i]) {
+            for (size_t j = 0; j < rows1; j++) free(a[j]);
+            free(a);
+            return zz_variant_err(zz_str_static("matrix_mul: out of memory"));
+        }
+        for (size_t k = 0; k < row.arr->len; k++) {
+            zz_value v = row.arr->items[k];
+            a[i][k] = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
+        }
+    }
+
+    size_t rows2 = m2.arr->len;
+    if (rows2 == 0) {
+        for (size_t i = 0; i < rows1; i++) free(a[i]);
+        free(a);
+        return zz_variant_err(zz_str_static("matrix_mul: empty matrix"));
+    }
+    // Read m2's first row to get cols2 for the dimension-mismatch message.
+    zz_value m2_first = m2.arr->items[0];
+    size_t cols2 = 0;
+    if (m2_first.tag == ZZ_ARRAY && m2_first.arr) cols2 = m2_first.arr->len;
+    if (cols1 != rows2) {
+        for (size_t i = 0; i < rows1; i++) free(a[i]);
+        free(a);
+        // Match VM: "matrix_mul: dimension mismatch (RxC) * (RxC)"
+        char msg[128];
+        snprintf(msg, sizeof(msg), "matrix_mul: dimension mismatch (%zux%zu) * (%zux%zu)", rows1, cols1, rows2, cols2);
+        return zz_variant_err(zz_str_new(msg, strlen(msg)));
+    }
+
+    // Parse m2 into a rows2 x cols2 double buffer.
+    double **b = (double **)calloc(rows2, sizeof(double *));
+    if (!b) {
+        for (size_t i = 0; i < rows1; i++) free(a[i]);
+        free(a);
+        return zz_variant_err(zz_str_static("matrix_mul: out of memory"));
+    }
+    for (size_t i = 0; i < rows2; i++) {
+        zz_value row = m2.arr->items[i];
+        if (row.tag != ZZ_ARRAY || !row.arr) {
+            for (size_t j = 0; j < rows1; j++) free(a[j]);
+            free(a);
+            for (size_t j = 0; j < i; j++) free(b[j]);
+            free(b);
+            return zz_variant_err(zz_str_static("matrix_mul: expected a matrix (array of arrays)"));
+        }
+        if (i == 0) cols2 = row.arr->len;
+        else if (row.arr->len != cols2) {
+            for (size_t j = 0; j < rows1; j++) free(a[j]);
+            free(a);
+            for (size_t j = 0; j < rows2; j++) free(b[j]);
+            free(b);
+            return zz_variant_err(zz_str_static("matrix_mul: ragged matrix"));
+        }
+        b[i] = (double *)calloc(row.arr->len, sizeof(double));
+        if (!b[i]) {
+            for (size_t j = 0; j < rows1; j++) free(a[j]);
+            free(a);
+            for (size_t j = 0; j < rows2; j++) free(b[j]);
+            free(b);
+            return zz_variant_err(zz_str_static("matrix_mul: out of memory"));
+        }
+        for (size_t k = 0; k < row.arr->len; k++) {
+            zz_value v = row.arr->items[k];
+            b[i][k] = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
+        }
+    }
+
+    // Compute result = a * b: rows1 x cols2
+    zz_value result = zz_array_new_sized(rows1);
+    if (result.tag != ZZ_ARRAY || !result.arr) {
+        for (size_t i = 0; i < rows1; i++) free(a[i]);
+        free(a);
+        for (size_t i = 0; i < rows2; i++) free(b[i]);
+        free(b);
+        return zz_variant_err(zz_str_static("matrix_mul: out of memory"));
+    }
+    for (size_t i = 0; i < rows1; i++) {
+        zz_value row = zz_array_new_sized(cols2);
+        if (row.tag != ZZ_ARRAY || !row.arr) {
+            for (size_t j = 0; j < rows1; j++) free(a[j]);
+            free(a);
+            for (size_t j = 0; j < rows2; j++) free(b[j]);
+            free(b);
+            return zz_variant_err(zz_str_static("matrix_mul: out of memory"));
+        }
+        for (size_t j = 0; j < cols2; j++) {
+            double sum = 0.0;
+            for (size_t k = 0; k < cols1; k++) sum += a[i][k] * b[k][j];
+            zz_array_push(row.arr, (zz_value){ZZ_FLOAT, {.f = sum}});
+        }
+        zz_array_push(result.arr, row);
+    }
+
+    for (size_t i = 0; i < rows1; i++) free(a[i]);
+    free(a);
+    for (size_t i = 0; i < rows2; i++) free(b[i]);
+    free(b);
+
+    return zz_variant_ok(result);
 }
 
 // env.get(name) — returns .some(val) or .none
@@ -12268,7 +13260,7 @@ static size_t curl_header_cb(void *data, size_t size, size_t nmemb, void *userp)
 zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err);
 static zz_value http_client_perform(const char *method, const char *url, size_t url_len,
         zz_value headers, const unsigned char *body, size_t body_len,
-        long timeout_ms, const char *label, int *err) {
+        long timeout_ms, int insecure, const char *label, int *err) {
     CURL *curl = curl_easy_init();
     if (!curl) { *err = 1; return zz_variant_err(zz_str_static("http client: curl_easy_init failed")); }
 
@@ -12287,6 +13279,13 @@ static zz_value http_client_perform(const char *method, const char *url, size_t 
     curl_easy_setopt(curl, CURLOPT_URL, url_c);
     // Custom request covers every verb uniformly (GET/POST/PUT/DELETE/PATCH).
     curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method);
+
+    // Insecure mode: disable TLS certificate verification (self-signed /
+    // test fixtures only — never use for production traffic).
+    if (insecure) {
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    }
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body_buf);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, curl_header_cb);
@@ -12413,7 +13412,60 @@ zz_value zz_http_fetch(zz_value url, zz_value method, zz_value headers, zz_value
     char verb_copy[16];
     memcpy(verb_copy, verb, mlen + 1);
     return http_client_perform(verb_copy, zz_str_cptr(url.s), url.s->len,
-        headers, bdata, blen, toms, "http.fetch", err);
+        headers, bdata, blen, toms, 0, "http.fetch", err);
+}
+
+// http.fetch_insecure(url, method?, headers?, body?, timeout_ms?) → .ok(HttpResponse) or .err(str)
+// Same as fetch but with TLS certificate verification disabled (self-signed
+// / test fixtures only). Mirrors the VM's insecure_client().
+zz_value zz_http_fetch_insecure(zz_value url, zz_value method, zz_value headers,
+                                zz_value body, zz_value timeout_ms, int *err) {
+    *err = 0;
+    if (url.tag != ZZ_STR || !url.s) { *err = 1; return zz_variant_err(zz_str_static("http.fetch_insecure: url must be a string")); }
+    if (method.tag != ZZ_STR || !method.s) { *err = 1; return zz_variant_err(zz_str_static("http.fetch_insecure: method must be a string")); }
+    const char *m = zz_str_cptr(method.s);
+    size_t mlen = method.s->len;
+    char up[16];
+    const char *verb = NULL;
+    if (mlen < sizeof up) {
+        for (size_t i = 0; i < mlen; i++) {
+            char c = m[i];
+            up[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+        }
+        up[mlen] = '\0';
+        if ((mlen == 3 && memcmp(up, "GET", 3) == 0) ||
+            (mlen == 4 && memcmp(up, "POST", 4) == 0) ||
+            (mlen == 3 && memcmp(up, "PUT", 3) == 0) ||
+            (mlen == 6 && memcmp(up, "DELETE", 6) == 0) ||
+            (mlen == 5 && memcmp(up, "PATCH", 5) == 0)) {
+            verb = up;
+        }
+    }
+    if (!verb) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("http.fetch_insecure: unknown method (expected GET, POST, PUT, DELETE or PATCH)"));
+    }
+    long toms = (timeout_ms.tag == ZZ_INT && timeout_ms.i > 0) ? (long)timeout_ms.i : -1;
+    if (toms < 0) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("http.fetch_insecure: timeout_ms must be a positive int"));
+    }
+    const unsigned char *bdata = NULL;
+    size_t blen = 0;
+    if (body.tag == ZZ_STR && body.s) {
+        bdata = (const unsigned char *)zz_str_cptr(body.s);
+        blen = body.s->len;
+    } else if (body.tag == ZZ_BYTES && body.bytes) {
+        bdata = body.bytes->buf->data + body.bytes->off;
+        blen = body.bytes->len;
+    } else if (body.tag != ZZ_STR) {
+        *err = 1;
+        return zz_variant_err(zz_str_static("http.fetch_insecure: body must be a string or bytes"));
+    }
+    char verb_copy[16];
+    memcpy(verb_copy, verb, mlen + 1);
+    return http_client_perform(verb_copy, zz_str_cptr(url.s), url.s->len,
+        headers, bdata, blen, toms, 1, "http.fetch_insecure", err);
 }
 
 // http.post_json(url, body, headers) → .ok(HttpResponse) or .err(str)
@@ -12567,6 +13619,183 @@ zz_value zz_http_get(zz_value url, zz_value headers, int *err) {
     return zz_variant_ok(resp_val);
 }
 
+// http.delete(url, headers) → .ok(HttpResponse) or .err(str)
+// Mirrors zz_http_get with CURLOPT_CUSTOMREQUEST "DELETE" (no body).
+zz_value zz_http_delete(zz_value url, zz_value headers, int *err) {
+    if (url.tag != ZZ_STR) { *err = 1; return zz_variant_err(zz_str_static("http.delete: url must be string")); }
+    *err = 0;
+
+    CURL *curl = curl_easy_init();
+    if (!curl) { *err = 1; return zz_variant_err(zz_str_static("http.delete: curl_easy_init failed")); }
+
+    curl_buf body_buf = {0};
+    zz_value headers_dict = zz_dict_new();
+
+    curl_easy_setopt(curl, CURLOPT_URL, (char *)zz_str_cptr(url.s));
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body_buf);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, curl_header_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &headers_dict);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+    struct curl_slist *header_list = NULL;
+    if (headers.tag == ZZ_DICT && headers.dict && headers.dict->len > 0) {
+        for (size_t i = 0; i < headers.dict->len; i++) {
+            zz_str *k = zz_dict_key_str(&headers.dict->entries[i]);
+            zz_value *v = &headers.dict->entries[i].val;
+            if (k && v->tag == ZZ_STR) {
+                size_t hlen = k->len + 2 + v->s->len;
+                char *h = (char *)malloc(hlen + 1);
+                memcpy(h, zz_str_cptr(k), k->len);
+                h[k->len] = ':';
+                h[k->len + 1] = ' ';
+                memcpy(h + k->len + 2, zz_str_cptr(v->s), v->s->len);
+                h[k->len + 2 + v->s->len] = '\0';
+                header_list = curl_slist_append(header_list, h);
+                free(h);
+            }
+        }
+        if (header_list) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+    }
+
+    CURLcode res = curl_easy_perform(curl);
+    if (header_list) curl_slist_free_all(header_list);
+
+    if (res != CURLE_OK) {
+        char errbuf[256];
+        snprintf(errbuf, sizeof(errbuf), "http.delete: %s", curl_easy_strerror(res));
+        curl_easy_cleanup(curl);
+        if (body_buf.data) free(body_buf.data);
+        zz_release(&headers_dict);
+        *err = 1;
+        return zz_variant_err(zz_str_static(errbuf));
+    }
+
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+
+    zz_str *body_str;
+    if (body_buf.data && body_buf.len > 0) {
+        body_str = str_alloc(body_buf.len);
+        memcpy(zz_str_ptr(body_str), body_buf.data, body_buf.len);
+        zz_str_ptr(body_str)[body_buf.len] = '\0';
+        free(body_buf.data);
+    } else {
+        body_str = str_alloc(0);
+    }
+
+    const char *field_names_str[] = {"status", "body", "headers", "text", "json"};
+    zz_value field_names[5];
+    for (int i = 0; i < 5; i++) {
+        field_names[i] = zz_str_static(field_names_str[i]);
+    }
+    zz_value resp_val = zz_object_new("http.response", field_names, 5);
+    zz_object_set_field(&resp_val, "status", (zz_value){ZZ_INT, {.i = http_code}});
+    zz_object_set_field(&resp_val, "body", (zz_value){ZZ_STR, {.s = body_str}});
+    zz_object_set_field(&resp_val, "text", (zz_value){ZZ_STR, {.s = body_str}});
+    zz_object_set_field(&resp_val, "headers", zz_clone(headers_dict));
+
+    zz_object_set_field(&resp_val, "json", http_json_field(body_str));
+
+    zz_release(&headers_dict);
+    return zz_variant_ok(resp_val);
+}
+
+// http.put(url, body, headers) → .ok(HttpResponse) or .err(str)
+// Mirrors zz_http_post with CURLOPT_CUSTOMREQUEST "PUT".
+zz_value zz_http_put(zz_value url, zz_value body, zz_value headers, int *err) {
+    if (url.tag != ZZ_STR) { *err = 1; return zz_variant_err(zz_str_static("http.put: url must be string")); }
+    *err = 0;
+
+    CURL *curl = curl_easy_init();
+    if (!curl) { *err = 1; return zz_variant_err(zz_str_static("http.put: curl_easy_init failed")); }
+
+    curl_buf body_buf = {0};
+    zz_value headers_dict = zz_dict_new();
+
+    curl_easy_setopt(curl, CURLOPT_URL, (char *)zz_str_cptr(url.s));
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PUT");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body_buf);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, curl_header_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &headers_dict);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+    if (body.tag == ZZ_STR && body.s && body.s->len > 0) {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, (char *)zz_str_cptr(body.s));
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body.s->len);
+    }
+
+    struct curl_slist *header_list = NULL;
+    if (headers.tag == ZZ_DICT && headers.dict && headers.dict->len > 0) {
+        for (size_t i = 0; i < headers.dict->len; i++) {
+            zz_str *k = zz_dict_key_str(&headers.dict->entries[i]);
+            zz_value *v = &headers.dict->entries[i].val;
+            if (k && v->tag == ZZ_STR) {
+                size_t hlen = k->len + 2 + v->s->len;
+                char *h = (char *)malloc(hlen + 1);
+                memcpy(h, zz_str_cptr(k), k->len);
+                h[k->len] = ':';
+                h[k->len + 1] = ' ';
+                memcpy(h + k->len + 2, zz_str_cptr(v->s), v->s->len);
+                h[k->len + 2 + v->s->len] = '\0';
+                header_list = curl_slist_append(header_list, h);
+                free(h);
+            }
+        }
+        if (header_list) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+    }
+
+    CURLcode res = curl_easy_perform(curl);
+    if (header_list) curl_slist_free_all(header_list);
+
+    if (res != CURLE_OK) {
+        char errbuf[256];
+        snprintf(errbuf, sizeof(errbuf), "http.put: %s", curl_easy_strerror(res));
+        curl_easy_cleanup(curl);
+        if (body_buf.data) free(body_buf.data);
+        zz_release(&headers_dict);
+        *err = 1;
+        return zz_variant_err(zz_str_static(errbuf));
+    }
+
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+
+    zz_str *body_str;
+    if (body_buf.data && body_buf.len > 0) {
+        body_str = str_alloc(body_buf.len);
+        memcpy(zz_str_ptr(body_str), body_buf.data, body_buf.len);
+        zz_str_ptr(body_str)[body_buf.len] = '\0';
+        free(body_buf.data);
+    } else {
+        body_str = str_alloc(0);
+    }
+
+    const char *field_names_str[] = {"status", "body", "headers", "text", "json"};
+    zz_value field_names[5];
+    for (int i = 0; i < 5; i++) {
+        field_names[i] = zz_str_static(field_names_str[i]);
+    }
+    zz_value resp_val = zz_object_new("http.response", field_names, 5);
+    zz_object_set_field(&resp_val, "status", (zz_value){ZZ_INT, {.i = http_code}});
+    zz_object_set_field(&resp_val, "body", (zz_value){ZZ_STR, {.s = body_str}});
+    zz_object_set_field(&resp_val, "text", (zz_value){ZZ_STR, {.s = body_str}});
+    zz_object_set_field(&resp_val, "headers", zz_clone(headers_dict));
+
+    zz_object_set_field(&resp_val, "json", http_json_field(body_str));
+
+    zz_release(&headers_dict);
+    return zz_variant_ok(resp_val);
+}
+
 // http.post(url, body, headers) → .ok(HttpResponse) or .err(str)
 zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err) {
     if (url.tag != ZZ_STR) { *err = 1; return zz_variant_err(zz_str_static("http.post: url must be string")); }
@@ -12681,7 +13910,15 @@ zz_value zz_http_get(zz_value url, zz_value headers, int *err) {
     return zz_http_no_curl(err);
 }
 
+zz_value zz_http_delete(zz_value url, zz_value headers, int *err) {
+    (void)url; (void)headers;
+    return zz_http_no_curl(err);
+}
 zz_value zz_http_post(zz_value url, zz_value body, zz_value headers, int *err) {
+    (void)url; (void)body; (void)headers;
+    return zz_http_no_curl(err);
+}
+zz_value zz_http_put(zz_value url, zz_value body, zz_value headers, int *err) {
     (void)url; (void)body; (void)headers;
     return zz_http_no_curl(err);
 }

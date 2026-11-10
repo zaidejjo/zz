@@ -1601,6 +1601,11 @@ parity_strict!(parity_syntax_dict_iteration, "syntax", "dict_iteration.zz");
 parity_strict!(parity_stdlib_vectors, "stdlib", "vectors.zz");
 parity_strict!(parity_stdlib_vec_sort, "stdlib", "vec_sort.zz");
 parity_strict!(parity_stdlib_math_ops, "stdlib", "math_ops.zz");
+parity_strict!(
+    parity_stdlib_matrix_mul_test,
+    "stdlib",
+    "matrix_mul_test.zz"
+);
 parity_strict!(parity_stdlib_math_consts, "stdlib", "math_consts.zz");
 parity_strict!(
     parity_stdlib_const_index_test,
@@ -1612,7 +1617,20 @@ parity_strict!(parity_stdlib_path_join, "stdlib", "path_join.zz");
 parity_strict!(parity_stdlib_map_set, "stdlib", "map_set.zz");
 parity_strict!(parity_stdlib_dec_ops, "stdlib", "dec_ops.zz");
 parity_strict!(parity_stdlib_csv_test, "stdlib", "csv_test.zz");
+parity_strict!(parity_stdlib_colors_demo, "stdlib", "colors_demo.zz");
+parity_strict!(parity_stdlib_regexp_test, "stdlib", "regexp_test.zz");
 parity_strict!(parity_stdlib_builders, "stdlib", "builders.zz");
+parity_strict!(
+    parity_stdlib_http_delete_put,
+    "stdlib",
+    "http_delete_put.zz"
+);
+parity_strict!(
+    parity_stdlib_http_fetch_insecure,
+    "stdlib",
+    "http_fetch_insecure_test.zz"
+);
+parity_strict!(parity_stdlib_http_hijack, "stdlib", "http_hijack_test.zz");
 parity_strict!(parity_stdlib_time_date, "stdlib", "time_date.zz");
 parity_known_failure!(
     parity_stdlib_math_extended,
@@ -1664,6 +1682,16 @@ parity_strict!(
 );
 parity_strict!(parity_stdlib_net_tls_test, "stdlib", "net_tls_test.zz");
 parity_strict!(parity_stdlib_net_unix_test, "stdlib", "net_unix_test.zz");
+parity_strict!(
+    parity_stdlib_net_tls_listener_shutdown,
+    "stdlib",
+    "net_tls_listener_shutdown.zz"
+);
+parity_strict!(
+    parity_stdlib_net_unix_listener_shutdown,
+    "stdlib",
+    "net_unix_listener_shutdown.zz"
+);
 parity_strict!(parity_stdlib_cell_test, "stdlib", "cell_test.zz");
 parity_strict!(
     parity_stdlib_option_result_unwrap_test,

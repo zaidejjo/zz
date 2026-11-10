@@ -1636,8 +1636,10 @@ impl Lowerer {
                     if sname.is_some() {
                         let arr_cid = names.lookup(&arr_name).unwrap().to_string();
                         let idx_raw = self.flat_index_expr(index, names, out);
-                        let field_ctype =
-                            self.field_type_from_struct(&format!("zz_struct_{}", sname), name);
+                        let field_ctype = self.field_type_from_struct(
+                            &format!("zz_struct_{}", sname.as_deref().unwrap_or("")),
+                            name,
+                        );
                         let raw = format!("({arr_cid})[{idx_raw}].{name}");
                         return auto_box(&raw, field_ctype);
                     }
@@ -4536,6 +4538,18 @@ impl Lowerer {
                 }
             }
             if effective_name == "zz_http_fetch" {
+                // Signature: (url, method, headers, body, timeout_ms).
+                while arg_items.len() < 5 {
+                    let pad = match 5 - arg_items.len() {
+                        4 => "zz_str_static(\"GET\")".to_string(),
+                        3 => "zz_dict_new()".to_string(),
+                        2 => "zz_str_static(\"\")".to_string(),
+                        _ => "zz_int(30000)".to_string(),
+                    };
+                    arg_items.push(pad);
+                }
+            }
+            if effective_name == "zz_http_fetch_insecure" {
                 // Signature: (url, method, headers, body, timeout_ms).
                 while arg_items.len() < 5 {
                     let pad = match 5 - arg_items.len() {

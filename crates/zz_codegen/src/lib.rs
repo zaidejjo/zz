@@ -49,7 +49,6 @@ pub use zz_codegen_types::{CodegenSink, NoopSink};
 /// test [`all_stdlib_funcs_have_c_impls`] enforces this.
 pub(crate) const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // Non-reachable from parity fixtures (no fixture uses them):
-    ("std.math.matrix_mul", "no fixture; niche math"),
     // Pure-ZZ stdlib functions — run in VM only, no C codegen
     ("std.math.sum", "pure ZZ; no C codegen"),
     ("std.math.product", "pure ZZ; no C codegen"),
@@ -491,8 +490,6 @@ pub(crate) const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // NOTE: `serve_dir`/`serve_dir_at` used to be listed here (no C
     // implementation); both are implemented in the AOT runtime now, so the
     // stale-gap check requires their removal.
-    ("std.http.delete", "http fixtures skipped in parity"),
-    ("std.http.put", "http fixtures skipped in parity"),
     // HTTP helpers (pure-ZZ, compiled from zz/http/mod.zz)
     ("std.http.ok", "pure ZZ; no C codegen"),
     ("http.ok", "pure ZZ alias"),
@@ -519,27 +516,10 @@ pub(crate) const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // that does not exist in AOT (rustls TLS, WebSocket handshake + TCP
     // handoff, insecure curl client). They abort loudly (`zz_unimplemented_native`)
     // on AOT — never silently lower to unit.
-    ("std.http.listen_tls", "AOT exclusion (VM-only): TLS listener needs rustls server config + TLS accept loop in C"),
-    ("http.listen_tls", "AOT exclusion (VM-only): TLS listener needs rustls server config + TLS accept loop in C"),
-    ("std.http.listen_tls_cfg", "AOT exclusion (VM-only): TLS listener + listen_cfg limits; needs rustls in C"),
-    ("http.listen_tls_cfg", "AOT exclusion (VM-only): TLS listener + listen_cfg limits; needs rustls in C"),
-    ("std.http.fetch_insecure", "AOT exclusion (VM-only): insecure (self-signed) TLS client needs libcurl with verification disabled; no C twin"),
-    ("http.fetch_insecure", "AOT exclusion (VM-only): insecure (self-signed) TLS client needs libcurl with verification disabled; no C twin"),
-    ("std.http.hijack", "AOT exclusion (VM-only): WebSocket upgrade handshake + TCP stream handoff; cleartext-only in AOT"),
-    ("http.hijack", "AOT exclusion (VM-only): WebSocket upgrade handshake + TCP stream handoff; cleartext-only in AOT"),
-    // MySQL wire driver — VM-only (no staticlib backend like PG has;
-    // AOT lowers these to Unit like time.now_ms).
-    ("std.sqlz.mysql.connect", "VM-only; no C socket driver"),
-    ("std.sqlz.mysql.exec", "VM-only; no C socket driver"),
-    ("std.sqlz.mysql.query", "VM-only; no C socket driver"),
-    ("std.sqlz.mysql.close", "VM-only; no C socket driver"),
     // Closure transactions — inlined by the AOT codegen (BEGIN/COMMIT/ROLLBACK
     // around the closure body); no native C implementation needed.
     ("std.sqlz.transaction", "AOT-inlined; no native C impl"),
     ("sqlz.transaction", "AOT-inlined; no native C impl"),
-    // Listener shutdown — VM-only, no C socket listener shutdown twin.
-    ("std.tls_listener.shutdown", "VM-only; no C listener shutdown twin"),
-    ("std.unix_listener.shutdown", "VM-only; no C listener shutdown twin"),
 ];
 
 /// Lower a pruned typed program to C without compiling.

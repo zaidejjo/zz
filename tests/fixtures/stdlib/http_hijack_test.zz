@@ -1,0 +1,13 @@
+// features: closures, imports, locals, print, std-http, string-literal
+// tests/fixtures/stdlib/http_hijack_test.zz — http.hijack C twin.
+// Registration: hijack(route_path, handler) stores the route and returns
+// the server. No crash under VM or AOT.
+import std.http
+
+func main() -> Result<int, str> {
+    s := http.server()
+    _s2 := http.hijack(s, "/ws", |req, stream| println("ws_handler_called"))
+    println("hijack_register_ok")
+    println("http_hijack_test_ok")
+    return .ok(0)
+}

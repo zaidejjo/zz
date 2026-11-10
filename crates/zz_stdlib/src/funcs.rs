@@ -3495,25 +3495,35 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     // std.sqlz.mysql — MySQL wire-protocol driver (binary prepared
     // statements). Same shape as postgres: import as
     // `import std.sqlz.mysql as my`.
+    // All operations are fallible and return Result<T, str>.
+    let result_db_str = || Type::Result(Box::new(Type::Db), Box::new(Type::Str));
+    let result_int_str = || Type::Result(Box::new(Type::Int), Box::new(Type::Str));
+    let result_unit_str = || Type::Result(Box::new(Type::Unit), Box::new(Type::Str));
     let my_row_t = Type::Named("T".to_string());
+    let result_array_str = || {
+        Type::Result(
+            Box::new(Type::Array(Box::new(my_row_t.clone()))),
+            Box::new(Type::Str),
+        )
+    };
     m.insert(
         "std.sqlz.mysql.connect".into(),
-        sig(vec![("conninfo", Type::Str)], Type::Db),
+        sig(vec![("conninfo", Type::Str)], result_db_str()),
     );
     m.insert(
         "std.sqlz.mysql.exec".into(),
-        sig(vec![("db", Type::Db), ("sql", Type::Str)], Type::Int),
+        sig(vec![("db", Type::Db), ("sql", Type::Str)], result_int_str()),
     );
     m.insert(
         "std.sqlz.mysql.query".into(),
-        sig_t(
+        sig(
             vec![("db", Type::Db), ("sql", Type::Str)],
-            Type::Array(Box::new(my_row_t.clone())),
+            result_array_str(),
         ),
     );
     m.insert(
         "std.sqlz.mysql.close".into(),
-        sig(vec![("db", Type::Db)], Type::Unit),
+        sig(vec![("db", Type::Db)], result_unit_str()),
     );
 
     // sqlz.transaction — unified closure transactions for all backends.
