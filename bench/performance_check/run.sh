@@ -74,7 +74,7 @@ if [ "$HAVE_RUST" -eq 1 ]; then
 fi
 
 declare -A ZZ_AOT_BIN
-for bench in cpu_intensive concurrency_stress http_throughput memory_alloc memory_leak string_concats; do
+for bench in cpu_intensive concurrency_stress http_throughput memory_alloc memory_leak string_concats struct_access prime_sieve matrix_mul; do
 	src="$HERE/zz/bench_${bench}.zz"
 	out="$ZZ_BIN_DIR/bench_${bench}_aot"
 	rm -f "$out"
@@ -220,7 +220,7 @@ def binary_kib(path):
     if not os.path.exists(path): return 0
     return (os.path.getsize(path) + 1023) // 1024
 
-BENCHES = ["cpu_intensive", "concurrency_stress", "memory_alloc", "memory_leak", "string_concats", "struct_access"]
+BENCHES = ["cpu_intensive", "concurrency_stress", "memory_alloc", "memory_leak", "string_concats", "struct_access", "prime_sieve", "matrix_mul"]
 HTTP_BENCH = "http_throughput"
 
 results = {}
@@ -301,7 +301,7 @@ import json, sys
 with open(sys.argv[1]) as f:
     data = json.load(f)
 
-BENCHES = ["cpu_intensive","concurrency_stress","memory_alloc","memory_leak","string_concats"]
+BENCHES = ["cpu_intensive","concurrency_stress","memory_alloc","memory_leak","string_concats","struct_access","prime_sieve","matrix_mul"]
 HTTP_BENCH = "http_throughput"
 
 def fmt(v): return str(v) if v else "0"
@@ -326,6 +326,8 @@ with open(sys.argv[2], "w") as f:
 | `bench_struct_access` | Struct field access over arrays (1M Pt{x,y}) |
 | `bench_memory_leak` | 50M short-lived allocs across 2 passes |
 | `bench_string_concats` | String building patterns (50×5k + 20×2k) |
+| `bench_prime_sieve` | Sieve of Eratosthenes over 2M bools (flat numeric kernel) |
+| `bench_matrix_mul` | Dense 200×200 int64 matrix multiply (O(n³) kernel) |
 
 ## Execution time — Non-HTTP benchmarks (lower is better, ms)
 

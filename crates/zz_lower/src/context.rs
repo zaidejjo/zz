@@ -11,7 +11,7 @@ use std::collections::HashSet;
 
 use zz_frontend::ast::{Expr, ImportItem, Pattern, Stmt};
 
-use zz_codegen_types::mangle;
+use zz_codegen_types::{demangle, mangle};
 
 /// Extract the creation counter from a C identifier for scope tracking.
 /// Plain locals are `vN`; owner-cell derefs are `(*_cellN)`; green frame
@@ -106,6 +106,8 @@ pub struct NameCtx {
     /// (call argument, return, capture, rebinding, slice, any other method)
     /// is absent and keeps the boxed `zz_value` layout.
     pub(crate) flat_locals: HashSet<String>,
+    /// Inferred flat scalar array element types for `ty: None` declarations.
+    pub(crate) flat_scalar_types: HashMap<String, String>,
     /// Stack of counter snapshots for scope tracking. `push_scope` records
     /// the current counter; `pop_scope` removes all entries whose C id was
     /// created at or after that counter value.
@@ -114,6 +116,9 @@ pub struct NameCtx {
     /// most recently bound to (straight-line code only). Used to fold
     /// `len(v)` to a constant so tight loops lower to raw scalar arith.
     pub(crate) array_lens: HashMap<String, usize>,
+    /// zz var name → dict literal entry count, for folding `len(dict_var)`
+    /// to a constant. Mirrors `array_lens`.
+    pub(crate) dict_lens: HashMap<String, usize>,
     /// zz var name → C expression for its runtime length (e.g. from
     /// `[val; N]` where N is a variable). Used by bounds-check elimination:
     /// when a loop var `i` is bounded by `limit` and `arr.len_expr == limit`,
@@ -123,6 +128,10 @@ pub struct NameCtx {
     /// Used by bounds-check elimination: when `arr.len_expr == limit`, `arr[i]`
     /// inside the loop is provably in bounds.
     pub(crate) loop_bounds: HashMap<String, String>,
+    /// Stack parallel to `scope_markers` recording which `loop_bounds` keys
+    /// each scope introduced, so `pop_scope` removes exactly those (outer
+    /// loop bounds survive nested-loop scopes). See `set_loop_bound`.
+    pub(crate) loop_bounds_scopes: Vec<Vec<String>>,
     /// zz var name → pure-scalar array literal elements it was most
     /// recently bound to (straight-line code only). Used to forward
     /// `arr[lit]` reads to the element's raw C expression, eliminating
@@ -176,10 +185,13 @@ impl NameCtx {
             cap_ptrs: HashMap::new(),
             capture_set: HashSet::new(),
             flat_locals: HashSet::new(),
+            flat_scalar_types: HashMap::new(),
             scope_markers: Vec::new(),
             array_lens: HashMap::new(),
+            dict_lens: HashMap::new(),
             array_len_exprs: HashMap::new(),
             loop_bounds: HashMap::new(),
+            loop_bounds_scopes: Vec::new(),
             stack_array_elems: HashMap::new(),
             last_promoted_array: None,
             checker_types: HashMap::new(),
@@ -422,6 +434,17 @@ impl NameCtx {
     /// `pop_scope`.
     pub(crate) fn push_scope(&mut self) {
         self.scope_markers.push(self.counter);
+        self.loop_bounds_scopes.push(Vec::new());
+    }
+
+    /// Record a loop-variable upper bound for bounds-check elimination,
+    /// attributing it to the current scope so `pop_scope` retires it with
+    /// the loop's body scope (outer loop bounds survive nested loops).
+    pub(crate) fn set_loop_bound(&mut self, name: String, text: String) {
+        self.loop_bounds.insert(name.clone(), text);
+        if let Some(scope) = self.loop_bounds_scopes.last_mut() {
+            scope.push(name);
+        }
     }
 
     /// Pop all entries whose C identifier was created at or after the
@@ -438,7 +461,14 @@ impl NameCtx {
         // variables to flat buffers that live for the function lifetime.
         self.stack_array_elems.clear();
         self.last_promoted_array = None;
-        self.loop_bounds.clear();
+        // `loop_bounds` dies with the scope it was recorded in: loop
+        // variables are scoped, but outer loop bounds must survive a nested
+        // loop's body scope, so remove only the keys this scope introduced.
+        if let Some(keys) = self.loop_bounds_scopes.pop() {
+            for k in keys {
+                self.loop_bounds.remove(&k);
+            }
+        }
         if let Some(marker) = self.scope_markers.pop() {
             for vec in self.stack.values_mut() {
                 vec.retain(|(cid, _)| cid_counter(cid) < marker);
@@ -454,6 +484,17 @@ impl NameCtx {
     pub(crate) fn set_array_len(&mut self, name: &str, n: usize) {
         self.array_lens.insert(name.to_string(), n);
     }
+
+    /// Record that `name` currently holds a dict literal of length `n`.
+    pub(crate) fn set_dict_len(&mut self, name: &str, n: usize) {
+        self.dict_lens.insert(name.to_string(), n);
+    }
+
+    /// Statically-known length of `name` if it was most recently bound to
+    /// a dict literal in the current straight-line block.
+    pub(crate) fn dict_len(&self, name: &str) -> Option<usize> {
+        self.dict_lens.get(name).copied()
+    }
     /// Forget any statically-known literal length for `name`. Called when
     /// `name` is reassigned with a non-literal value or aliased into a call.
     /// Top-level globals may be namespaced (`mod.a`) while Assign targets
@@ -461,6 +502,13 @@ impl NameCtx {
     /// namespaced variant ending in `.{name}`.
     pub(crate) fn invalidate_array_len(&mut self, name: &str) {
         self.array_lens
+            .retain(|k, _| k != name && !k.ends_with(&format!(".{name}")));
+    }
+
+    /// Forget any statically-known literal length for `name` when it is
+    /// reassigned with a non-dict value.
+    pub(crate) fn invalidate_dict_len(&mut self, name: &str) {
+        self.dict_lens
             .retain(|k, _| k != name && !k.ends_with(&format!(".{name}")));
     }
 
@@ -475,6 +523,7 @@ impl NameCtx {
     /// merged path could have changed.
     pub(crate) fn clear_array_lens(&mut self) {
         self.array_lens.clear();
+        self.dict_lens.clear();
         self.stack_array_elems.clear();
         self.last_promoted_array = None;
     }
@@ -611,6 +660,12 @@ pub struct Lowerer {
     /// green transform. Consumed (reset) by every `emit_expr` entry, so
     /// nested calls never observe it.
     pub(crate) stmt_direct: std::cell::Cell<bool>,
+    /// When set, the list-comprehension flat-storage fast path may produce a
+    /// raw `T *` buffer. Only the `Decl` handler — the sole consumer of
+    /// `last_flat_comp` — sets this, so every other context (global init,
+    /// assignment, return, call argument) lowers the comprehension to a boxed
+    /// `zz_array` and stays type-correct.
+    pub(crate) flat_comp_ok: std::cell::Cell<bool>,
     /// Active green (suspendable) transform state, if a green closure
     /// body is being emitted. See `green.rs`.
     pub(crate) green: std::cell::RefCell<Option<crate::green::GreenCtx>>,
@@ -710,6 +765,7 @@ impl Lowerer {
             void_context: std::cell::RefCell::new(false),
             current_loop_arena: std::cell::RefCell::new(None),
             stmt_direct: std::cell::Cell::new(false),
+            flat_comp_ok: std::cell::Cell::new(false),
             green: std::cell::RefCell::new(None),
             precompiled: false,
             global_list: Vec::new(),
@@ -830,6 +886,42 @@ impl Lowerer {
             }
             _ => None,
         }
+    }
+
+    /// Recover the raw C text + scalar type of a flat scalar array read
+    /// (`arr[i]` on `int64_t *` / `double *` / `bool *`). The `Index`
+    /// lowering boxes int/float reads as `zz_int((arr)[i])` /
+    /// `zz_float(...)` and leaves bool reads raw, so strip the wrapper when
+    /// present. Used by the Binary arithmetic path to keep `sum + arr[i]` in
+    /// raw C instead of boxed `zz_binop`.
+    pub(crate) fn flat_index_read_scalar(
+        &self,
+        e: &Expr,
+        emitted: &str,
+        names: &NameCtx,
+    ) -> Option<(String, &'static str)> {
+        let Expr::Index { obj, .. } = e else {
+            return None;
+        };
+        let Expr::Ident { name, .. } = obj.as_ref() else {
+            return None;
+        };
+        let elem = names.lookup_type(name)?.strip_suffix(" *")?;
+        let t: &'static str = match elem {
+            "int64_t" => "int64_t",
+            "double" => "double",
+            "bool" => "bool",
+            _ => return None,
+        };
+        for prefix in ["zz_int(", "zz_float(", "zz_bool("] {
+            if let Some(inner) = emitted
+                .strip_prefix(prefix)
+                .and_then(|s| s.strip_suffix(')'))
+            {
+                return Some((inner.to_string(), t));
+            }
+        }
+        Some((emitted.to_string(), t))
     }
 
     /// Linkage keyword for emitted definitions/prototypes: `static` for
@@ -1402,6 +1494,50 @@ impl Lowerer {
         )
     }
 
+    /// Infer the C scalar element type of a `push` argument. Returns `Some`
+    /// only for expressions whose type is statically known (int literals,
+    /// int ident, raw int/float/bool arithmetic). Returns `None` for anything
+    /// else (closures, strings, structs, calls).
+    pub(crate) fn infer_scalar_push_ctype(
+        &self,
+        arg: &zz_frontend::ast::Expr,
+        names: &NameCtx,
+    ) -> Option<String> {
+        match arg {
+            Expr::Int { .. } => Some("int64_t".to_string()),
+            Expr::Float { .. } => Some("double".to_string()),
+            Expr::Bool { .. } => Some("bool".to_string()),
+            Expr::Ident { name, .. } => names.lookup_type(name).and_then(|t| match t {
+                "int64_t" => Some("int64_t".to_string()),
+                "double" => Some("double".to_string()),
+                "bool" => Some("bool".to_string()),
+                _ => None,
+            }),
+            Expr::Binary {
+                op: _, left, right, ..
+            } => {
+                let ltype = self.infer_scalar_push_ctype(left, names);
+                let rtype = self.infer_scalar_push_ctype(right, names);
+                match (ltype.as_deref(), rtype.as_deref()) {
+                    (Some("int64_t"), Some("int64_t")) => Some("int64_t".to_string()),
+                    (Some("double"), Some("double"))
+                    | (Some("int64_t"), Some("double"))
+                    | (Some("double"), Some("int64_t")) => Some("double".to_string()),
+                    (Some("bool"), Some("bool")) => Some("bool".to_string()),
+                    _ => None,
+                }
+            }
+            Expr::StructInit { name, .. } => {
+                if self.is_unboxed_struct(name) {
+                    Some(format!("zz_struct_{}", mangle(name)))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Convert a checker type to C type string.
     pub(crate) fn type_to_c(&self, ty: &zz_checker::Type) -> String {
         match ty {
@@ -1491,8 +1627,167 @@ impl Lowerer {
     pub(crate) fn body_flat_locals(
         &self,
         block: &zz_frontend::ast::Block,
+        names: &mut NameCtx,
     ) -> std::collections::HashSet<String> {
-        crate::param_escape::flat_array_locals(block, &|n: &str| self.is_unboxed_struct(n))
+        let mut flat_names =
+            crate::param_escape::flat_array_locals(block, &|n: &str| self.is_unboxed_struct(n));
+        self.infer_flat_from_push_usage(block, &mut flat_names, names);
+
+        // Infer flat arrays from `ty: None` declarations (`name := []`)
+
+        flat_names
+    }
+
+    /// Scan `block` (recursively into nested blocks) for `name := []`
+    /// declarations where every `name.push(...)` has a scalar argument.
+    /// Adds qualifying names to `flat_names` and records their element types
+    /// in `flat_scalar_types`.
+    fn infer_flat_from_push_usage(
+        &self,
+        block: &zz_frontend::ast::Block,
+        flat_names: &mut std::collections::HashSet<String>,
+        names: &mut NameCtx,
+    ) {
+        let mut candidates: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut bad: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        Self::collect_ty_none_arrays(block, &mut candidates, flat_names);
+
+        if candidates.is_empty() {
+            return;
+        }
+
+        self.scan_pushes(block, &mut candidates, &mut bad, names);
+
+        for (name, elem_type) in &candidates {
+            if !bad.contains(name) && !elem_type.is_empty() {
+                flat_names.insert(name.clone());
+                names
+                    .flat_scalar_types
+                    .insert(name.clone(), elem_type.clone());
+            }
+        }
+    }
+
+    /// Collect `name := []` (ty: None, empty array literal) declarations.
+    fn collect_ty_none_arrays(
+        block: &zz_frontend::ast::Block,
+        candidates: &mut std::collections::HashMap<String, String>,
+        flat_names: &std::collections::HashSet<String>,
+    ) {
+        for stmt in &block.stmts {
+            match stmt {
+                Stmt::Decl {
+                    ty: None,
+                    name,
+                    value: Expr::Array { elems, .. },
+                    ..
+                } => {
+                    if elems.is_empty() && !flat_names.contains(&name.name) {
+                        candidates.insert(name.name.clone(), String::new());
+                    }
+                }
+                Stmt::For { body, .. } => {
+                    Self::collect_ty_none_arrays(body, candidates, flat_names);
+                }
+                Stmt::Expr(Expr::Block(b)) => {
+                    Self::collect_ty_none_arrays(b, candidates, flat_names);
+                }
+                Stmt::Expr(Expr::If { then, els, .. }) => {
+                    Self::collect_ty_none_arrays(then, candidates, flat_names);
+                    if let Some(Expr::Block(b)) = els.as_deref() {
+                        Self::collect_ty_none_arrays(b, candidates, flat_names);
+                    }
+                }
+                Stmt::Expr(Expr::While { body, .. }) => {
+                    Self::collect_ty_none_arrays(body, candidates, flat_names);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Scan all statements (recursively) for `name.push(...)` usage and
+    /// disqualify candidates with incompatible argument types.
+    fn scan_pushes(
+        &self,
+        block: &zz_frontend::ast::Block,
+        candidates: &mut std::collections::HashMap<String, String>,
+        bad: &mut std::collections::HashSet<String>,
+        names: &mut NameCtx,
+    ) {
+        'outer: for stmt in &block.stmts {
+            match stmt {
+                Stmt::Expr(Expr::Call { callee, args, .. }) => {
+                    let (push_name, is_push) = match callee.as_ref() {
+                        Expr::Path { parts, .. } if parts.len() == 2 => {
+                            if parts[1] == "push" {
+                                (parts[0].clone(), true)
+                            } else {
+                                (String::new(), false)
+                            }
+                        }
+                        Expr::Field {
+                            obj, name: mname, ..
+                        } if mname == "push" => match obj.as_ref() {
+                            Expr::Ident { name: obj_name, .. } => (obj_name.clone(), true),
+                            _ => (String::new(), false),
+                        },
+                        _ => (String::new(), false),
+                    };
+                    if !is_push || push_name.is_empty() {
+                        continue;
+                    }
+                    if !candidates.contains_key(&push_name) {
+                        continue;
+                    }
+                    let Some(arg) = args.first() else {
+                        bad.insert(push_name.clone());
+                        continue 'outer;
+                    };
+                    // Determine element type from push argument
+                    let elem_type = match self.infer_scalar_push_ctype(arg, names) {
+                        Some(ctype) => ctype,
+                        None => {
+                            bad.insert(push_name.clone());
+                            continue 'outer;
+                        }
+                    };
+                    // Record element type (first push wins; mixed types disqualify)
+                    match candidates.get_mut(&push_name) {
+                        Some(existing) => {
+                            if existing.is_empty() {
+                                *existing = elem_type.clone();
+                            } else if *existing != elem_type {
+                                bad.insert(push_name.clone());
+                                continue 'outer;
+                            }
+                        }
+                        None => {
+                            bad.insert(push_name.clone());
+                            continue 'outer;
+                        }
+                    }
+                }
+                Stmt::For { body, .. } => {
+                    self.scan_pushes(body, candidates, bad, names);
+                }
+                Stmt::Expr(Expr::Block(b)) => {
+                    self.scan_pushes(b, candidates, bad, names);
+                }
+                Stmt::Expr(Expr::If { then, els, .. }) => {
+                    self.scan_pushes(then, candidates, bad, names);
+                    if let Some(Expr::Block(b)) = els.as_deref() {
+                        self.scan_pushes(b, candidates, bad, names);
+                    }
+                }
+                Stmt::Expr(Expr::While { body, .. }) => {
+                    self.scan_pushes(body, candidates, bad, names);
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Emit a heap cell allocation + initialization for a captured binding.
@@ -1640,7 +1935,10 @@ impl Lowerer {
         ctype
             .strip_prefix("zz_struct_")?
             .strip_suffix(" *")
-            .map(|s| s.to_string())
+            // `ctype` carries the mangled identifier; callers feed the result
+            // back through `struct_c_type`/`mangle`, so undo it here to avoid
+            // double-escaping (`mod__X` → `mod____X`).
+            .map(demangle)
     }
 
     /// If `ctype` is a flat scalar array pointer (`int64_t *`, `double *`,
@@ -2685,6 +2983,26 @@ pub(crate) fn scalar_operand_type(e: &Expr, names: &NameCtx) -> Option<&'static 
                         None
                     }
                 }
+                // Scalar comparisons lower to a raw C `bool` (the result is
+                // consumed by `if`/`while` and by `zz_bool(...)` boxing).
+                // Both sides must be the same scalar type; mixed numeric
+                // comparisons keep the boxed runtime promotion semantics.
+                zz_frontend::ast::BinOp::Lt
+                | zz_frontend::ast::BinOp::Le
+                | zz_frontend::ast::BinOp::Gt
+                | zz_frontend::ast::BinOp::Ge
+                | zz_frontend::ast::BinOp::Eq
+                | zz_frontend::ast::BinOp::Ne => {
+                    let lt = scalar_operand_type(left, names)?;
+                    let rt = scalar_operand_type(right, names)?;
+                    if (lt == rt && (lt == "int64_t" || lt == "double"))
+                        || (lt == "bool" && rt == "bool")
+                    {
+                        Some("bool")
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             }
         }
@@ -2707,6 +3025,146 @@ pub(crate) fn scalar_operand_type(e: &Expr, names: &NameCtx) -> Option<&'static 
     }
 }
 
+/// Remove whitespace and redundant outer parentheses for symbolic text
+/// comparison of C scalar expressions.
+fn strip_ws_parens(s: &str) -> String {
+    let mut t: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    loop {
+        if t.len() >= 2 && t.starts_with('(') && t.ends_with(')') {
+            let inner = &t[1..t.len() - 1];
+            let mut depth = 0i32;
+            let mut balanced = true;
+            for c in inner.chars() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth < 0 {
+                            balanced = false;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if balanced && depth == 0 {
+                t = inner.to_string();
+                continue;
+            }
+        }
+        break;
+    }
+    t
+}
+
+/// Normalize a simple C product into a sorted factor list so commutative
+/// forms compare equal (`n * n` vs `v0 * v0`, `n * 4` vs `4 * n`).
+fn normalize_product(s: &str) -> Vec<String> {
+    let t = strip_ws_parens(s);
+    let mut factors = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for c in t.chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(c);
+            }
+            '*' if depth == 0 => factors.push(std::mem::take(&mut cur)),
+            _ => cur.push(c),
+        }
+    }
+    factors.push(cur);
+    for f in &mut factors {
+        *f = f.trim_matches(|c| c == '(' || c == ')').to_string();
+    }
+    factors.sort();
+    factors
+}
+
+/// Prove that a flat-array index of the form `A * L + R` (or `A * L`,
+/// `R + A * L`) is in bounds when the array length is `bound_A * L`:
+/// `A < bound_A` (loop bound) and `R < L` (loop bound), so
+/// `A*L + R <= (bound_A-1)*L + (L-1) = bound_A*L - 1 < length`.
+///
+/// This covers the matrix-kernel shape `a[i * n + k]` / `c[i * n + j]`
+/// where the buffer was sized `n * n` by a comprehension and both `i`
+/// and `k` are bounded by `n`. Sound because the symbols are unique C
+/// identifiers (equal text ⟹ same runtime variable).
+pub(crate) fn flat_arith_index_in_bounds(index: &Expr, arr_name: &str, names: &NameCtx) -> bool {
+    let Some(len_text) = names.array_len_exprs.get(arr_name) else {
+        return false;
+    };
+    let (a, l, r): (&Expr, &Expr, Option<&Expr>) = match index {
+        Expr::Binary {
+            op: zz_frontend::ast::BinOp::Add,
+            left,
+            right,
+            ..
+        } => match (left.as_ref(), right.as_ref()) {
+            (
+                Expr::Binary {
+                    op: zz_frontend::ast::BinOp::Mul,
+                    left: a,
+                    right: l,
+                    ..
+                },
+                r,
+            ) => (a, l, Some(r)),
+            (
+                r,
+                Expr::Binary {
+                    op: zz_frontend::ast::BinOp::Mul,
+                    left: a,
+                    right: l,
+                    ..
+                },
+            ) => (a, l, Some(r)),
+            _ => return false,
+        },
+        Expr::Binary {
+            op: zz_frontend::ast::BinOp::Mul,
+            left: a,
+            right: l,
+            ..
+        } => (a, l, None),
+        _ => return false,
+    };
+    let Expr::Ident { name: a_name, .. } = a else {
+        return false;
+    };
+    let Some(bound_a) = names.loop_bounds.get(a_name) else {
+        return false;
+    };
+    let sym_l = match l {
+        Expr::Ident { name, .. } => match names.lookup(name) {
+            Some(s) => s.to_string(),
+            None => return false,
+        },
+        Expr::Int { value, .. } => value.to_string(),
+        _ => return false,
+    };
+    if let Some(r) = r {
+        match r {
+            Expr::Int { value: 0, .. } => {}
+            Expr::Ident { name: r_name, .. } => {
+                let Some(bound_r) = names.loop_bounds.get(r_name) else {
+                    return false;
+                };
+                if strip_ws_parens(bound_r) != strip_ws_parens(&sym_l) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    normalize_product(&format!("{bound_a} * {sym_l}")) == normalize_product(len_text)
+}
+
 /// Raw C text plus C scalar type for an already-lowered expression, or
 /// `None` when the emission is boxed (or of unknown shape).
 ///
@@ -2726,6 +3184,32 @@ pub(crate) fn raw_scalar_text(
     emitted: &str,
     names: &NameCtx,
 ) -> Option<(String, &'static str)> {
+    // Recognize `len(var)` as a raw int64_t constant when `var` was bound
+    // to an array/dict literal of known length. This lets `sum + len(arr)`
+    // lower to raw C arithmetic instead of boxed zz_binop calls.
+    if let Expr::Call { callee, args, .. } = e {
+        if let Expr::Ident {
+            name: callee_name, ..
+        } = callee.as_ref()
+        {
+            if callee_name == "len" && args.len() == 1 {
+                if let Expr::Ident { name: arg_name, .. } = &args[0] {
+                    if let Some(n) = names.array_len(arg_name) {
+                        return Some((n.to_string(), "int64_t"));
+                    }
+                    if let Some(n) = names.dict_len(arg_name) {
+                        return Some((n.to_string(), "int64_t"));
+                    }
+                }
+            }
+            // Also recognize `zz_int(N)` as a raw int64_t constant.
+            if callee_name == "zz_int" && args.len() == 1 {
+                if let Expr::Int { value, .. } = &args[0] {
+                    return Some((value.to_string(), "int64_t"));
+                }
+            }
+        }
+    }
     if let (Some(raw), Some(t)) = (scalar_operand_c(e, names), scalar_operand_type(e, names)) {
         return Some((raw, t));
     }
@@ -2748,6 +3232,22 @@ pub(crate) fn raw_scalar_text(
             if ctype.starts_with("zz_struct_") {
                 let cid = names.lookup(obj_name).unwrap_or(obj_name);
                 return Some((format!("({cid}).{name}"), "int64_t"));
+            }
+        }
+    }
+    // Flat scalar array reads: the Index lowering boxes int/float reads
+    // (`zz_int((arr)[i])`) but leaves bool reads as a raw C `bool` so `if`
+    // / `while` conditions can test them directly. Classify only the raw
+    // (bool) form here; the boxed int/float forms pass through untouched so
+    // value contexts never double-box.
+    if let Expr::Index { obj, .. } = e {
+        if let Expr::Ident { name, .. } = obj.as_ref() {
+            if names.lookup_type(name) == Some("bool *")
+                && !emitted.starts_with("zz_bool(")
+                && !emitted.starts_with("zz_int(")
+                && !emitted.starts_with("zz_float(")
+            {
+                return Some((emitted.to_string(), "bool"));
             }
         }
     }
@@ -3057,6 +3557,21 @@ pub(crate) fn scalar_operand_c(e: &Expr, names: &NameCtx) -> Option<String> {
             // Must agree with scalar_operand_type's Binary fold: only
             // emit raw C when the fold classified this node.
             let t = scalar_operand_type(e, names)?;
+            if t == "bool" {
+                // Scalar comparison fold: raw C comparison yields a C bool.
+                let l = scalar_operand_c(left, names)?;
+                let r = scalar_operand_c(right, names)?;
+                let c_op = match op {
+                    zz_frontend::ast::BinOp::Lt => "<",
+                    zz_frontend::ast::BinOp::Le => "<=",
+                    zz_frontend::ast::BinOp::Gt => ">",
+                    zz_frontend::ast::BinOp::Ge => ">=",
+                    zz_frontend::ast::BinOp::Eq => "==",
+                    zz_frontend::ast::BinOp::Ne => "!=",
+                    _ => return None,
+                };
+                return Some(format!("(({l}) {c_op} ({r}))"));
+            }
             debug_assert!(t == "int64_t" || t == "double");
             let l = scalar_operand_c(left, names)?;
             let r = scalar_operand_c(right, names)?;

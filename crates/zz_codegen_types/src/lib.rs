@@ -566,6 +566,62 @@ pub fn mangle(name: &str) -> String {
     reserve_symbol(out)
 }
 
+/// Recover the dotted ZZ name from a C identifier produced by [`mangle`].
+///
+/// This is the inverse of [`mangle`] for module-qualified identifiers (the
+/// shape used for struct names, e.g. `mod.Type` → `mod_Type`). It undoes the
+/// reserved-symbol suffix appended by `reserve_symbol` on a best-effort
+/// basis; names that `reserve_symbol` had to prefix with `z` (only possible
+/// for identifiers beginning with `_`, which ZZ reserves for the wildcard)
+/// are not recovered.
+///
+/// Round-trips every `mangle` output for names made of alphanumeric
+/// characters, `.` and `_`.
+pub fn demangle(mangled: &str) -> String {
+    let bytes = mangled.as_bytes();
+    // A single trailing `_` is the reserved-symbol suffix appended by
+    // `reserve_symbol` (`int` → `int_`); an original trailing `_` mangles to
+    // `__`, so a lone `_` is unambiguous.
+    let end =
+        if bytes.len() >= 2 && bytes[bytes.len() - 1] == b'_' && bytes[bytes.len() - 2] != b'_' {
+            bytes.len() - 1
+        } else {
+            bytes.len()
+        };
+
+    let mut out = String::with_capacity(end);
+    let mut i = 0;
+    while i < end {
+        if bytes[i] != b'_' {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        // `_uXXXX_` reversible hex escape (7 chars).
+        if i + 6 < end
+            && bytes[i + 1] == b'u'
+            && bytes[i + 6] == b'_'
+            && bytes[i + 2..i + 6].iter().all(u8::is_ascii_hexdigit)
+        {
+            let hex = std::str::from_utf8(&bytes[i + 2..i + 6]).unwrap_or("0");
+            if let Some(c) = u32::from_str_radix(hex, 16).ok().and_then(char::from_u32) {
+                out.push(c);
+                i += 7;
+                continue;
+            }
+        }
+        // `__` is an escaped underscore; a lone `_` is a path separator.
+        if i + 1 < end && bytes[i + 1] == b'_' {
+            out.push('_');
+            i += 2;
+        } else {
+            out.push('.');
+            i += 1;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,6 +648,38 @@ mod tests {
         assert_eq!(mangle("a.b"), "a_b");
         assert_eq!(mangle("a.b.c"), "a_b_c");
         assert_eq!(mangle("mod.Type.method"), "mod_Type_method");
+    }
+
+    #[test]
+    fn demangle_inverts_mangle_for_qualified_identifiers() {
+        for name in [
+            "Pt",
+            "mod.Pt",
+            "bench_struct_access.Pt",
+            "a_b",
+            "a__b",
+            "a.b",
+            "a.b.c",
+            "mod.Type.method",
+            "a.b_c",
+            "a_b.c",
+            "hello123",
+        ] {
+            assert_eq!(
+                demangle(&mangle(name)),
+                name,
+                "round-trip failed for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn demangle_undoes_reserved_suffix() {
+        // `reserve_symbol` appends `_` to C keywords; demangle strips it.
+        assert_eq!(demangle(&mangle("int")), "int");
+        assert_eq!(demangle(&mangle("main")), "main");
+        // A genuine trailing underscore mangles to `__` and survives.
+        assert_eq!(demangle(&mangle("mod.int_")), "mod.int_");
     }
 
     #[test]

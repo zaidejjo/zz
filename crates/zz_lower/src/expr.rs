@@ -820,6 +820,19 @@ impl Lowerer {
                             right_raw = Some((raw, t));
                             right_type = Some(t);
                         }
+                        // Flat scalar array reads (`arr[i]` on `int64_t *` /
+                        // `double *` / `bool *`) are raw C loads wrapped by
+                        // the Index lowering; recover the raw text so
+                        // `sum + arr[i]` stays raw C instead of boxed
+                        // `zz_binop`.
+                        if let Some((raw, t)) = self.flat_index_read_scalar(left, &l, names) {
+                            left_raw = Some((raw, t));
+                            left_type = Some(t);
+                        }
+                        if let Some((raw, t)) = self.flat_index_read_scalar(right, &r, names) {
+                            right_raw = Some((raw, t));
+                            right_type = Some(t);
+                        }
 
                         // Both operands are scalars of compatible type:
                         // emit a raw C arithmetic op instead of going
@@ -1133,7 +1146,9 @@ impl Lowerer {
                 names.clear_array_lens();
                 // Track while-loop bound for bounds-check elimination:
                 // `while j < n { ... }` means j < n inside the body, so
-                // `arr[j]` with arr.len == n is provably in bounds.
+                // `arr[j]` with arr.len == n is provably in bounds. Recorded
+                // once the body scope opens so it retires with the loop.
+                let (mut while_bound_var, mut while_bound_limit) = (String::new(), String::new());
                 if let Expr::Binary {
                     op: zz_frontend::ast::BinOp::Lt,
                     left,
@@ -1166,9 +1181,8 @@ impl Lowerer {
                         }
                         _ => (String::new(), String::new()),
                     };
-                    if !bound_var.is_empty() {
-                        names.loop_bounds.insert(bound_var, limit_text);
-                    }
+                    while_bound_var = bound_var;
+                    while_bound_limit = limit_text;
                 }
                 let c = self.emit_expr(cond, names, out);
                 // While conditions: if the condition is already a raw C scalar
@@ -1209,6 +1223,9 @@ impl Lowerer {
                 // The marker additionally releases body-declared heap
                 // locals at the bottom of every iteration.
                 let while_scope = self.loop_scope_begin(names);
+                if !while_bound_var.is_empty() {
+                    names.set_loop_bound(while_bound_var, while_bound_limit);
+                }
                 // Enter the loop scope so statement lowering can tell
                 // body-declared locals (released by `loop_scope_end`) from
                 // function-scope locals (released by their `cleanup`
@@ -1286,18 +1303,29 @@ impl Lowerer {
                         }
                     }
                 } else {
-                    let c = box_scalar_operand(cond, names, &c);
-                    // Flat bool array reads emit a raw C bool — test directly
-                    // instead of boxing through zz_truthy().
-                    // Simple identifiers (_idxv10, etc.) hold boxed zz_value
-                    // and need zz_truthy(). emit_expr wraps call results in
-                    // parens, so strip leading '(' before checking for zz_
-                    // prefix.
-                    let c_trim = c.trim_start_matches('(');
-                    if c_trim.starts_with("zz_") || crate::context::is_simple_ident(c_trim) {
-                        format!("zz_truthy({c})")
-                    } else {
-                        c
+                    // Raw scalar conditions (comparisons, flat bool reads)
+                    // test directly without zz_truthy()/zz_bool() wrapping.
+                    // Fall back to the boxed path otherwise.
+                    match crate::context::raw_scalar_text(cond, &c, names) {
+                        Some((raw, "bool")) => raw,
+                        Some((raw, "double")) => format!("zz_truthy(zz_float({raw}))"),
+                        Some((raw, _)) => format!("zz_truthy(zz_int({raw}))"),
+                        None => {
+                            let c = box_scalar_operand(cond, names, &c);
+                            // Flat bool array reads emit a raw C bool — test directly
+                            // instead of boxing through zz_truthy().
+                            // Simple identifiers (_idxv10, etc.) hold boxed zz_value
+                            // and need zz_truthy(). emit_expr wraps call results in
+                            // parens, so strip leading '(' before checking for zz_
+                            // prefix.
+                            let c_trim = c.trim_start_matches('(');
+                            if c_trim.starts_with("zz_") || crate::context::is_simple_ident(c_trim)
+                            {
+                                format!("zz_truthy({c})")
+                            } else {
+                                c
+                            }
+                        }
                     }
                 };
                 let tmp = names.fresh("_ifv");
@@ -1369,13 +1397,21 @@ impl Lowerer {
                     let idx_raw = self.flat_index_expr(index, names, out);
                     let func = names.current_scope.clone();
 
-                    // Resolve array length: prefer array_len_exprs (raw bound
-                    // expression from list comprehension), fall back to {name}_len CID.
-                    let len_cid = names
-                        .array_len_exprs
-                        .get(arr_name.as_str())
-                        .cloned()
-                        .unwrap_or_else(|| names.lookup_or_name(&format!("{}_len", arr_name)));
+                    // Resolve array length: flat locals track the live length in
+                    // `{name}_len` (a `push` can grow the buffer, so the static
+                    // comprehension bound in `array_len_exprs` is only valid for
+                    // bounds-check elimination). Other flat buffers prefer the
+                    // raw bound expression from the list comprehension, then the
+                    // `{name}_len` counter.
+                    let len_cid = if names.flat_locals.contains(arr_name.as_str()) {
+                        names.lookup_or_name(&format!("{}_len", arr_name))
+                    } else {
+                        names
+                            .array_len_exprs
+                            .get(arr_name.as_str())
+                            .cloned()
+                            .unwrap_or_else(|| names.lookup_or_name(&format!("{}_len", arr_name)))
+                    };
 
                     // Check bounds-check elimination: index var bounded by array length.
                     let bounds_eliminated = match index.as_ref() {
@@ -1391,7 +1427,13 @@ impl Lowerer {
                                 false
                             }
                         }
-                        _ => false,
+                        // `a[i * n + k]` on an `n * n` buffer with `i < n`
+                        // and `k < n` is provably in bounds.
+                        _ => crate::context::flat_arith_index_in_bounds(
+                            index.as_ref(),
+                            arr_name.as_str(),
+                            names,
+                        ),
                     };
 
                     let raw = if bounds_eliminated {
@@ -1464,6 +1506,37 @@ impl Lowerer {
                     return tmp;
                 }
 
+                // String-index fast path: skip the `zz_index_get` tag
+                // dispatch and call `zz_str_get` directly. `zz_str_get` has
+                // an ASCII fast path that returns an interned 1-char
+                // singleton (O(1), zero allocation), so a hot
+                // `s[i] == " "` loop does no UTF-8 scan and no malloc per
+                // index.
+                let is_str_index = match obj.as_ref() {
+                    Expr::Ident { name, .. } => names.lookup_type(name).is_some_and(|t| t == "Str"),
+                    _ => false,
+                };
+                if is_str_index {
+                    if let Expr::Ident { .. } = obj.as_ref() {
+                        let otmp = names.fresh("_idxo");
+                        let itmp = names.fresh("_idxi");
+                        let err_tmp = names.fresh("_idxe");
+                        let tmp = names.fresh("_idxv");
+                        let i_boxed = self.box_index_arg(index, i, names);
+                        out.push_str(&format!("    zz_value {otmp} = {o};\n"));
+                        out.push_str(&format!("    zz_value {itmp} = {i_boxed};\n"));
+                        out.push_str(&format!("    int {err_tmp} = 0;\n"));
+                        out.push_str(&format!(
+                            "    zz_value {tmp} = zz_str_get(({otmp}).s, {itmp}, &{err_tmp});\n"
+                        ));
+                        out.push_str(&format!(
+                            "    if ({err_tmp}) {{ zz_index_trap({otmp}, {itmp}, \"{}\"); }}\n",
+                            Self::c_escape(&names.current_scope.clone())
+                        ));
+                        return tmp;
+                    }
+                }
+
                 // Box a scalar index (ident/raw-arith) to a zz_value.
                 let i_boxed = self.box_index_arg(index, i, names);
                 // Hoist the read into a temp and check the error flag:
@@ -1479,7 +1552,9 @@ impl Lowerer {
                 let itmp = names.fresh("_idxi");
                 let func = names.current_scope.clone();
                 out.push_str(&format!("    zz_value {otmp} = {o};\n"));
-                out.push_str(&format!("    zz_value {itmp} = {i_boxed};\n"));
+                out.push_str(&format!(
+                    "    zz_value {itmp} __attribute__((cleanup(zz_release))) = {i_boxed};\n"
+                ));
                 out.push_str(&format!("    int {err_tmp} = 0;\n"));
                 out.push_str(&format!(
                     "    zz_value {tmp} = zz_index_get({otmp}, {itmp}, &{err_tmp});\n"
@@ -1558,7 +1633,7 @@ impl Lowerer {
                         }
                         _ => (String::new(), None),
                     };
-                    if let Some(sname) = sname {
+                    if sname.is_some() {
                         let arr_cid = names.lookup(&arr_name).unwrap().to_string();
                         let idx_raw = self.flat_index_expr(index, names, out);
                         let field_ctype =
@@ -1859,12 +1934,12 @@ impl Lowerer {
                 }
                 let fvar = format!("__fmt{}", names.counter);
                 names.counter += 1;
-                out.push_str(&format!("    zz_value {fvar} = zz_str_static(\"\");\n"));
+                out.push_str(&format!("    zz_value {fvar} __attribute__((cleanup(zz_release))) = zz_str_static(\"\");\n"));
                 for part in parts {
                     match part {
                         zz_frontend::ast::FmtPart::Text(value) => {
                             let lit = self.emit_str_literal(value);
-                            out.push_str(&format!("    {{ zz_value _r = zz_to_str({lit}, &(int){{0}}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
+                            out.push_str(&format!("    {{ zz_value _r __attribute__((cleanup(zz_release))) = zz_to_str({lit}, &(int){{0}}); zz_release(&{fvar}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
                         }
                         zz_frontend::ast::FmtPart::Expr(expr, spec) => {
                             let val = self.emit_expr(expr, names, out);
@@ -1881,9 +1956,9 @@ impl Lowerer {
                             };
                             if let Some(ref s) = spec {
                                 let spec_str = format!("\"{}\"", Self::c_escape(s));
-                                out.push_str(&format!("    {{ zz_value _r = zz_str_owned(zz_to_str_fmt({val}, {spec_str})); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
+                                out.push_str(&format!("    {{ zz_value _r __attribute__((cleanup(zz_release))) = zz_str_owned(zz_to_str_fmt({val}, {spec_str})); zz_release(&{fvar}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
                             } else {
-                                out.push_str(&format!("    {{ zz_value _r = zz_to_str({val}, &(int){{0}}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
+                                out.push_str(&format!("    {{ zz_value _r __attribute__((cleanup(zz_release))) = zz_to_str({val}, &(int){{0}}); zz_release(&{fvar}); {fvar} = zz_binop_cat({fvar}, _r); }}\n"));
                             }
                         }
                     }
@@ -1973,6 +2048,10 @@ impl Lowerer {
                 ..
             } => {
                 let comp = names.fresh("__comp");
+                // Consume the one-shot flat-storage permission (set by a
+                // `Decl` that will adopt the buffer). Nested comprehensions
+                // inside this one's body must stay boxed.
+                let allow_flat = self.flat_comp_ok.replace(false);
                 // Static bounds when the iterable is `range(a, b)` or `a..b`.
                 let bounds: Option<(String, String)> = match iter.as_ref() {
                     Expr::Call { callee, args, .. } => {
@@ -1980,12 +2059,25 @@ impl Lowerer {
                             callee.as_ref(),
                             Expr::Ident { name, .. } if name == "range"
                         );
-                        if is_range && args.len() == 2 {
-                            let a = self.emit_expr(&args[0], names, out);
-                            let a = box_scalar_operand(&args[0], names, &a);
-                            let b = self.emit_expr(&args[1], names, out);
-                            let b = box_scalar_operand(&args[1], names, &b);
-                            Some((a, b))
+                        if is_range {
+                            match args.len() {
+                                // range(stop) == 0..stop, matching `emit_for`
+                                // and the runtime `range` native.
+                                1 => {
+                                    let b = self.emit_expr(&args[0], names, out);
+                                    let b = box_scalar_operand(&args[0], names, &b);
+                                    Some(("zz_int(0)".to_string(), b))
+                                }
+                                // range(start, stop)
+                                2 => {
+                                    let a = self.emit_expr(&args[0], names, out);
+                                    let a = box_scalar_operand(&args[0], names, &a);
+                                    let b = self.emit_expr(&args[1], names, out);
+                                    let b = box_scalar_operand(&args[1], names, &b);
+                                    Some((a, b))
+                                }
+                                _ => None,
+                            }
                         } else {
                             None
                         }
@@ -2008,7 +2100,7 @@ impl Lowerer {
                     body.as_ref(),
                     Expr::Bool { .. } | Expr::Int { .. } | Expr::Float { .. }
                 );
-                if is_scalar_body && filter.is_none() && !self.green_active() {
+                if is_scalar_body && filter.is_none() && !self.green_active() && allow_flat {
                     if let Some((ref a, ref b)) = bounds {
                         let (elem_ctype, raw_val): (&str, String) = match body.as_ref() {
                             Expr::Bool { value, .. } => (
@@ -2753,6 +2845,95 @@ impl Lowerer {
         None
     }
 
+    /// Inline `map`/`filter` with a simple scalar closure: emit an inline loop
+    /// applying the closure body directly to each element, avoiding the
+    /// per-element indirect closure call via `zz_iter_map`/`zz_iter_filter`.
+    ///
+    /// Only fires for:
+    ///   - `map(items, |x: T| expr)` or `filter(items, |x: T| expr)`
+    ///   - `x` is a scalar (int/float/bool) with no default value
+    ///   - the closure captures nothing
+    ///   - the body is a single expression
+    fn try_emit_map_filter_inline(
+        &self,
+        effective_name: &str,
+        ordered_args: &[&Expr],
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> Option<String> {
+        if !matches!(effective_name, "zz_iter_map" | "zz_iter_filter") {
+            return None;
+        }
+        if ordered_args.len() != 2 {
+            return None;
+        }
+        let Expr::Closure { params, body, .. } = ordered_args[1] else {
+            return None;
+        };
+        if params.len() != 1 || params[0].default.is_some() {
+            return None;
+        }
+        let param = &params[0];
+        let param_ctype = match param.ty.as_ref().map(|t| &t.kind) {
+            Some(zz_frontend::ast::TyKind::Int) => "int64_t",
+            Some(zz_frontend::ast::TyKind::Float) => "double",
+            Some(zz_frontend::ast::TyKind::Bool) => "bool",
+            _ => return None,
+        };
+        // No captures allowed: keep the inlining simple and correct.
+        let param_names: Vec<String> = params.iter().map(|p| p.name.name.clone()).collect();
+        let free_vars = zz_hir::closure_free_vars(&param_names, body, &self.global_set);
+        if !free_vars.is_empty() {
+            return None;
+        }
+
+        let is_map = effective_name == "zz_iter_map";
+
+        // Emit the input array into a temp for repeated indexed reads.
+        let input_cid = names.fresh("_in");
+        let input_val = self.emit_expr(ordered_args[0], names, out);
+        // Natives borrow Ident args (no clone), so input_cid is a shallow copy
+        // of a borrowed zz_value — read-only, nothing to release at the end.
+        out.push_str(&format!("    zz_value {input_cid} = {input_val};\n"));
+        let len_cid = names.fresh("_n");
+        out.push_str(&format!("    size_t {len_cid} = {input_cid}.arr->len;\n"));
+
+        let out_cid = names.fresh("_out");
+        out.push_str(&format!(
+            "    zz_value {out_cid} = zz_array_new_sized({len_cid});\n"
+        ));
+
+        // Bind the closure parameter to the raw array element. Bounds are
+        // eliminated because we iterate 0..len ourselves.
+        let param_cid = names.enter_with_type(&param.name.name, param_ctype);
+        let elem_field = match param_ctype {
+            "int64_t" => "i",
+            "double" => "f",
+            "bool" => "b",
+            _ => "i",
+        };
+
+        let mut body_out = String::new();
+        let body_val = self.emit_expr(body, names, &mut body_out);
+        out.push_str(&body_out);
+
+        if is_map {
+            // body result is boxed for the array element slot.
+            let body_boxed = box_scalar_operand(body, names, &body_val);
+            out.push_str(&format!(
+                "    for (size_t __i = 0; __i < {len_cid}; __i++) {{\n        {param_ctype} {param_cid} = {input_cid}.arr->items[__i].{elem_field};\n        zz_array_push({out_cid}.arr, {body_boxed});\n    }}\n"
+            ));
+        } else {
+            // filter: push the input element when the body is truthy.
+            let body_truthy = format!("zz_truthy({body_val})");
+            out.push_str(&format!(
+                "    for (size_t __i = 0; __i < {len_cid}; __i++) {{\n        {param_ctype} {param_cid} = {input_cid}.arr->items[__i].{elem_field};\n        if ({body_truthy}) {{\n            zz_array_push({out_cid}.arr, {input_cid}.arr->items[__i]);\n        }}\n    }}\n"
+            ));
+        }
+
+        Some(out_cid.to_string())
+    }
+
     /// Cast inlining: `float(int|float)` → `(double)(x)`, `int(int|float)` →
     /// `(int64_t)(x)`. Only fires when the argument is provably scalar
     /// (int64_t or double). `int()` used without `??` still needs the boxed
@@ -3472,6 +3653,9 @@ impl Lowerer {
                         if let Some(n) = names.array_len(name.as_str()) {
                             return format!("zz_int({n})");
                         }
+                        if let Some(n) = names.dict_len(name.as_str()) {
+                            return format!("zz_int({n})");
+                        }
                         // Flat array of unboxed structs: length is tracked in
                         // `name_len`, avoiding the `zz_len` native call.
                         if let Some(_sname) =
@@ -3519,17 +3703,20 @@ impl Lowerer {
         // forwarding (a store through the call would stale the texts).
         if let Some(Expr::Ident { name, .. }) = &method_receiver {
             names.invalidate_array_len(name);
+            names.invalidate_dict_len(name);
             names.invalidate_stack_array_elems(name);
         }
         for a in args {
             match a {
                 Expr::Ident { name, .. } => {
                     names.invalidate_array_len(name);
+                    names.invalidate_dict_len(name);
                     names.invalidate_stack_array_elems(name);
                 }
                 Expr::Path { parts, .. } => {
                     let joined = parts.join(".");
                     names.invalidate_array_len(&joined);
+                    names.invalidate_dict_len(&joined);
                     names.invalidate_stack_array_elems(&joined);
                 }
                 _ => {}
@@ -4308,6 +4495,17 @@ impl Lowerer {
                 }
                 _ => effective_name,
             };
+            // Inline map/filter with simple scalar closures: apply the closure
+            // body directly in an inline loop, avoiding the per-element indirect
+            // closure call via zz_iter_map/zz_iter_filter. Only fires for
+            // `map(items, |x: T| expr)` / `filter(items, |x: T| expr)` where x
+            // is a scalar, the closure captures nothing, and the body is a
+            // single expression.
+            if let Some(inline) =
+                self.try_emit_map_filter_inline(effective_name, &ordered_args, names, out)
+            {
+                return inline;
+            }
             // Arena-aware str_cast inside loops: allocate result on arena
             // to avoid heap malloc for intermediate string conversions.
             if effective_name == "zz_str_cast" {
@@ -6128,6 +6326,45 @@ impl Lowerer {
         } else {
             val
         }
+    }
+
+    /// Raw C scalar to store into a flat scalar array element (`int64_t` /
+    /// `double` / `bool`). Literals keep their natural text; boxed scalars
+    /// (`zz_int(…)`, `zz_float(…)`, `zz_bool(…)`) are unwrapped, and any
+    /// other boxed `zz_value` is projected through its scalar field so a
+    /// `zz_value` never lands in a raw `T *` slot.
+    pub(crate) fn flat_store_raw_value(
+        &self,
+        value: &Expr,
+        val: &str,
+        boxed_val: &str,
+        elem: &str,
+    ) -> String {
+        match value {
+            Expr::Bool { value, .. } => {
+                return if *value { "true" } else { "false" }.to_string();
+            }
+            Expr::Int { value, .. } => return value.to_string(),
+            Expr::Float { value, .. } => return value.to_string(),
+            _ => {}
+        }
+        for prefix in ["zz_int(", "zz_float(", "zz_bool("] {
+            if let Some(inner) = boxed_val
+                .strip_prefix(prefix)
+                .and_then(|s| s.strip_suffix(')'))
+            {
+                return inner.to_string();
+            }
+        }
+        if !val.starts_with("zz_") {
+            return val.to_string();
+        }
+        let field = match elem {
+            "double" => "f",
+            "bool" => "b",
+            _ => "i",
+        };
+        format!("({boxed_val}).{field}")
     }
 
     pub(crate) fn emit_str_literal(&self, s: &str) -> String {

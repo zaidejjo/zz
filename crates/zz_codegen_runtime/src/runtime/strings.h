@@ -100,54 +100,18 @@ static inline size_t zz_utf8_seq_len(const unsigned char *p, size_t remain) {
 }
 
 // Number of Unicode scalar values in `s` (chars, not bytes).
+// The result is cached on the string (`s->charlen`) so repeated calls
+// (e.g. `len(s)` in a loop, or `s[i]` bounds checks) are O(1). Pure-ASCII
+// strings end up with charlen == len, which `zz_str_get` exploits for
+// O(1), zero-allocation char indexing. Mutable strings never cache (their
+// bytes can change), so they always take the scan path.
+// Forward declarations — defined out of line in strings.c:
+size_t zz_str_char_len_compute(const zz_str *s);
+zz_str *zz_str_byte_singleton(unsigned char c);
 static inline size_t zz_str_char_len(const zz_str *s) {
     if (!s) return 0;
-    const unsigned char *p = (const unsigned char *)zz_str_cptr(s);
-    size_t n = s->len;
-    // ASCII fast path: bytes without the high bit are single-byte
-    // chars, so a pure-ASCII string's char count is its byte length.
-    // Word-at-a-time high-bit test (~n/8 steps); only strings with
-    // actual multibyte sequences pay for the precise UTF-8 walk.
-    size_t i = 0;
-    const size_t WS = sizeof(size_t);
-    const size_t LO = ((size_t)-1) / (size_t)0xFF;
-    const size_t HI = LO * (size_t)0x80;
-    int ascii = 1;
-    while (i < n && (((uintptr_t)(p + i)) & (WS - 1)) != 0) {
-        if (p[i] >= 0x80) {
-            ascii = 0;
-            break;
-        }
-        i++;
-    }
-    if (ascii) {
-        for (; i + WS <= n; i += WS) {
-            size_t w;
-            memcpy(&w, p + i, WS);
-            if ((w & HI) != 0) {
-                ascii = 0;
-                break;
-            }
-        }
-    }
-    if (ascii) {
-        for (; i < n; i++) {
-            if (p[i] >= 0x80) {
-                ascii = 0;
-                break;
-            }
-        }
-    }
-    if (ascii) {
-        return n;
-    }
-    size_t count = 0;
-    i = 0;
-    while (i < n) {
-        i += zz_utf8_seq_len(p + i, n - i);
-        count++;
-    }
-    return count;
+    if (s->charlen != ZZ_STR_CHARLEN_UNKNOWN) return s->charlen;
+    return zz_str_char_len_compute(s);
 }
 
 // Byte offset of the `char_idx`-th char (0-based) plus its byte length in
@@ -170,19 +134,31 @@ static inline size_t zz_str_char_byte_off(const zz_str *s, size_t char_idx, size
 // Index a string by char: `s[i]` → 1-char string, negative counts
 // from the end (in chars). Out of bounds (or non-int index) → unit + *err,
 // mirroring zz_bytes_get. Char-based like the VM; slicing below agrees.
+// Pure-ASCII strings take an O(1) zero-allocation fast path: char index
+// equals byte index and the result is an interned singleton, so a hot
+// `s[i] == " "` loop does no scanning and no malloc per iteration.
 static inline zz_value zz_str_get(const zz_str *s, zz_value idx, int *err) {
     *err = 0;
     if (idx.tag != ZZ_INT || !s) {
         *err = 1;
         return zz_unit();
     }
-    int64_t n = (int64_t)zz_str_char_len(s);
+    int64_t n = (int64_t)zz_str_char_len(s); // cached after first call
     int64_t i = idx.i;
     if (i < 0)
         i += n;
     if (i < 0 || i >= n) {
         *err = 1;
         return zz_unit();
+    }
+    // ASCII fast path: char i lives at byte i, no UTF-8 scan, no malloc.
+    // Return the interned singleton for that byte (immortal, release is a
+    // no-op). `s[i] == " "` then collapses to a pointer comparison.
+    if ((size_t)n == s->len) {
+        zz_value v;
+        v.tag = ZZ_STR;
+        v.s = zz_str_byte_singleton((unsigned char)zz_str_cptr(s)[(size_t)i]);
+        return v;
     }
     size_t clen = 1;
     size_t off = zz_str_char_byte_off(s, (size_t)i, &clen);
