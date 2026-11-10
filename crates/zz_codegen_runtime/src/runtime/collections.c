@@ -321,9 +321,10 @@ void zz_array_push(zz_array *a, zz_value item) {
             || a->refs == ZZ_ARRAY_ARENA_MAGIC || a->items == NULL) {
             zz_value *new_items = (zz_value *)malloc(nc * sizeof(zz_value));
             for (size_t i = 0; i < a->len; i++) new_items[i] = a->items[i];
-            // Free the previous heap-backed items buffer, if any, to avoid
-            // leaking on every grow of a migrated arena/stack/lit array.
-            if (a->items != NULL) free(a->items);
+            // Stack/lit/arena items live on the stack or an arena — they must
+            // NOT be freed (free() on stack/arena memory corrupts the heap).
+            // They're reclaimed when the frame/arena resets. On later grows
+            // `a->refs` is 0/1 so we take the realloc branch above.
             a->items = new_items;
             // Preserve an accurate `refs == 1` (fresh heap array claiming
             // its first buffer): it proves single ownership, which the
@@ -1219,8 +1220,10 @@ zz_value zz_vec_push(zz_value arr, zz_value item, int *err) {
             for (size_t i = 0; i < a->len; i++) {
                 new_items[i] = a->items[i];
             }
-            // Free the previous heap-backed items buffer, if any.
-            if (a->items != NULL) free(a->items);
+            // Stack/lit/arena items live on the stack or an arena — they must
+            // NOT be freed (free() on stack/arena memory corrupts the heap).
+            // They're reclaimed when the frame/arena resets. On later grows
+            // `a->refs` is 0/1 so we take the realloc branch above.
             a->items = new_items;
             // Preserve `refs == 1` (see `zz_array_push`): dup results stay
             // provably single-owner, so a later move-aware push can go

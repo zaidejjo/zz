@@ -1433,7 +1433,7 @@ static void zz_rep_block_checkin(void *block, size_t size) {
     if (block) free(block);
 }
 
-static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m);
+static zz_value zz_value_dup_inner(zz_value v, int *err, zz_dup_memo *m);
 
 // Build a worker-owned fused closure rep directly from capture cells:
 // one block holds header + env ptrs + kinds + sizes + inline VALUE cells
@@ -1447,7 +1447,7 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m);
 static zz_value zz_closure_dup_build(zz_dispatch_fn fn, void **env,
                                      const unsigned char *kinds,
                                      const size_t *sizes, size_t nenv,
-                                     int is_green, zz_dup_memo *m) {
+                                     int is_green, int *err, zz_dup_memo *m) {
     size_t nval = 0;
     size_t nraw = 0;
     for (size_t i = 0; i < nenv; i++) {
@@ -1474,6 +1474,7 @@ static zz_value zz_closure_dup_build(zz_dispatch_fn fn, void **env,
     if (!nr) {
         // OOM degradation: null-payload closure (calls evaluate to unit,
         // spawns report via err). Callers never memoize this as a copy.
+        if (err) *err = 1;
         zz_value oom;
         oom.tag = ZZ_NATIVE;
         oom.payload = NULL;
@@ -1510,7 +1511,7 @@ static zz_value zz_closure_dup_build(zz_dispatch_fn fn, void **env,
             rr = slot + size;
         } else {
             nr->env[i] = &rv[vi++];
-            rv[vi - 1] = env[i] ? zz_value_dup_inner(*(zz_value *)env[i], m)
+            rv[vi - 1] = env[i] ? zz_value_dup_inner(*(zz_value *)env[i], err, m)
                                 : zz_unit();
         }
     }
@@ -1520,7 +1521,7 @@ static zz_value zz_closure_dup_build(zz_dispatch_fn fn, void **env,
     return out;
 }
 
-static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
+static zz_value zz_value_dup_inner(zz_value v, int *err, zz_dup_memo *m) {
     switch (v.tag) {
     case ZZ_INT:
     case ZZ_FLOAT:
@@ -1547,11 +1548,15 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
         zz_value hit;
         if (zz_dup_memo_get(m, v.arr, &hit)) return hit;
         zz_value out = zz_array_new();
+        if (!out.arr) {
+            if (err) *err = 1;
+            return v;
+        }
         // Memoize before recursing so self-referential arrays terminate.
         zz_dup_memo_put(m, v.arr, out);
         for (size_t i = 0; i < v.arr->len; i++) {
             // NOTE: zz_array_push moves (no clone) — ownership transfers.
-            zz_array_push(out.arr, zz_value_dup_inner(v.arr->items[i], m));
+            zz_array_push(out.arr, zz_value_dup_inner(v.arr->items[i], err, m));
         }
         return out;
     }
@@ -1567,7 +1572,7 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
         // traffic, no aliasing of the spawner's box).
         if (!v.range) return v;
         zz_range *r = (zz_range *)malloc(sizeof(zz_range));
-        if (!r) return v;
+        if (!r) { if (err) *err = 1; return v; }
         r->refs = 1;
         r->start = v.range->start;
         r->end = v.range->end;
@@ -1582,10 +1587,14 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
         zz_value hit;
         if (zz_dup_memo_get(m, v.dict, &hit)) return hit;
         zz_value out = zz_dict_new();
+        if (!out.dict) {
+            if (err) *err = 1;
+            return v;
+        }
         zz_dup_memo_put(m, v.dict, out);
         for (size_t i = 0; i < v.dict->len; i++) {
-            zz_value k = zz_value_dup_inner(v.dict->entries[i].key, m);
-            zz_value val = zz_value_dup_inner(v.dict->entries[i].val, m);
+            zz_value k = zz_value_dup_inner(v.dict->entries[i].key, err, m);
+            zz_value val = zz_value_dup_inner(v.dict->entries[i].val, err, m);
             // `zz_dict_set` retains the key and adopts the value; drop the
             // key temp so the duplicate owns exactly one share.
             zz_dict_set(out.dict, k, val);
@@ -1598,7 +1607,8 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
         // Tuple boxes keep their plain allocation: `ZZ_TUPLE` has no
         // clone/release arms, so there is no shared-ownership to track.
         zz_value *p = (zz_value *)malloc(sizeof(zz_value));
-        *p = zz_value_dup_inner(*v.payload, m);
+        if (!p) { if (err) *err = 1; return v; }
+        *p = zz_value_dup_inner(*v.payload, err, m);
         zz_value out = v;
         out.payload = p;
         return out;
@@ -1608,7 +1618,8 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
     case ZZ_RESULT_ERR:
     case ZZ_JSON: {
         if (!v.payload) return v;
-        zz_value *p = zz_vbox_new(zz_value_dup_inner(*v.payload, m));
+        zz_value *p = zz_vbox_new(zz_value_dup_inner(*v.payload, err, m));
+        if (!p) { if (err) *err = 1; return v; }
         zz_value out = v;
         out.payload = p;
         return out;
@@ -1624,6 +1635,7 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
         if (zz_dup_memo_get(m, v.obj, &hit)) return hit;
         size_t n = v.obj->len;
         zz_object *o = (zz_object *)malloc(sizeof(zz_object) + n * 2 * sizeof(zz_value));
+        if (!o) { if (err) *err = 1; return v; }
         o->refs = 1;
         o->type_name = v.obj->type_name; // static C string: share
         o->len = n;
@@ -1632,7 +1644,7 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
         out.obj = o;
         zz_dup_memo_put(m, v.obj, out);
         for (size_t i = 0; i < n * 2; i++) {
-            o->fields[i] = zz_value_dup_inner(v.obj->fields[i], m);
+            o->fields[i] = zz_value_dup_inner(v.obj->fields[i], err, m);
         }
         return out;
     }
@@ -1641,16 +1653,18 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
         zz_value hit;
         if (zz_dup_memo_get(m, v.fn, &hit)) return hit;
         zz_func *f = (zz_func *)malloc(sizeof(zz_func));
+        if (!f) { if (err) *err = 1; return v; }
         f->refs = 1;
-        f->fn = zz_value_dup_inner(v.fn->fn, m);
+        f->fn = zz_value_dup_inner(v.fn->fn, err, m);
         f->env_len = v.fn->env_len;
         f->env = f->env_len ? (zz_value *)malloc(f->env_len * sizeof(zz_value)) : NULL;
+        if (f->env_len && !f->env) { if (err) *err = 1; return v; }
         zz_value out;
         out.tag = ZZ_FUNC;
         out.fn = f;
         zz_dup_memo_put(m, v.fn, out);
         for (size_t i = 0; i < f->env_len; i++) {
-            f->env[i] = zz_value_dup_inner(v.fn->env[i], m);
+            f->env[i] = zz_value_dup_inner(v.fn->env[i], err, m);
         }
         return out;
     }
@@ -1682,7 +1696,7 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
             ss = sr->cell_size;
         }
         zz_value out = zz_closure_dup_build(fn, env, sk, ss, nenv,
-                                            is_green, m);
+                                            is_green, err, m);
         // `zz_closure_dup_build` degrades to the shared source on OOM;
         // only memoize real copies (the source never aliases a copy).
         if (out.payload != v.payload) {
@@ -1701,7 +1715,8 @@ static zz_value zz_value_dup_inner(zz_value v, zz_dup_memo *m) {
 zz_value zz_value_dup(zz_value v) {
     zz_dup_entry inline_store[ZZ_DUP_INLINE_CAP];
     zz_dup_memo m = {inline_store, 0, ZZ_DUP_INLINE_CAP, 0};
-    zz_value out = zz_value_dup_inner(v, &m);
+    int discarded_err = 0;
+    zz_value out = zz_value_dup_inner(v, &discarded_err, &m);
     if (m.owned) free(m.items);
     return out;
 }
@@ -3200,7 +3215,7 @@ zz_value zz_spawn_ex(zz_dispatch_fn fn, void **cells,
     zz_dup_entry inline_store[ZZ_DUP_INLINE_CAP];
     zz_dup_memo m = {inline_store, 0, ZZ_DUP_INLINE_CAP, 0};
     zz_value owned =
-        zz_closure_dup_build(fn, cells, kinds, sizes, nenv, is_green, &m);
+        zz_closure_dup_build(fn, cells, kinds, sizes, nenv, is_green, err, &m);
     if (m.owned) free(m.items);
     if (owned.tag != ZZ_NATIVE || !owned.payload) {
         *err = 1;
@@ -9068,8 +9083,11 @@ zz_value zz_typeof(zz_value v, int *err) {
 // a snapshot regardless of ownership analysis. Cycle-safe via the
 // dup memo (same helper as thread crossings).
 zz_value zz_clone_deep(zz_value v, int *err) {
-    (void)err;
-    return zz_value_dup(v);
+    zz_dup_entry inline_store[ZZ_DUP_INLINE_CAP];
+    zz_dup_memo m = {inline_store, 0, ZZ_DUP_INLINE_CAP, 0};
+    zz_value out = zz_value_dup_inner(v, err, &m);
+    if (m.owned) free(m.items);
+    return out;
 }
 
 // ---- weak references ----------------------------------------------------
