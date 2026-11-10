@@ -3472,6 +3472,9 @@ impl Lowerer {
                         if let Some(n) = names.array_len(name.as_str()) {
                             return format!("zz_int({n})");
                         }
+                        if let Some(n) = names.dict_len(name.as_str()) {
+                            return format!("zz_int({n})");
+                        }
                         // Flat array of unboxed structs: length is tracked in
                         // `name_len`, avoiding the `zz_len` native call.
                         if let Some(_sname) =
@@ -3519,17 +3522,20 @@ impl Lowerer {
         // forwarding (a store through the call would stale the texts).
         if let Some(Expr::Ident { name, .. }) = &method_receiver {
             names.invalidate_array_len(name);
+            names.invalidate_dict_len(name);
             names.invalidate_stack_array_elems(name);
         }
         for a in args {
             match a {
                 Expr::Ident { name, .. } => {
                     names.invalidate_array_len(name);
+                    names.invalidate_dict_len(name);
                     names.invalidate_stack_array_elems(name);
                 }
                 Expr::Path { parts, .. } => {
                     let joined = parts.join(".");
                     names.invalidate_array_len(&joined);
+                    names.invalidate_dict_len(&joined);
                     names.invalidate_stack_array_elems(&joined);
                 }
                 _ => {}

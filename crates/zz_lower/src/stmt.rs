@@ -588,6 +588,8 @@ impl Lowerer {
                 if let Expr::Array { elems, .. } = value {
                     names.set_array_len(&name.name, elems.len());
                     self.record_array_elems(&name.name, elems, &emitted_val, names);
+                } else if let Expr::Dict { entries, .. } = value {
+                    names.set_dict_len(&name.name, entries.len());
                 } else if let Expr::ListComp { iter, .. } = value {
                     // List comprehension `[x for _ in 0..n]` produces an array
                     // of length `n`. Record it so bounds-check elimination can
@@ -670,6 +672,7 @@ impl Lowerer {
                 // the C local is reused, so stored texts would go stale).
                 if let Expr::Ident { name, .. } = target {
                     names.invalidate_array_len(name);
+                    names.invalidate_dict_len(name);
                     names.invalidate_stack_array_elems(name);
                 }
                 // `x = arr` aliases the array: the target may mutate the

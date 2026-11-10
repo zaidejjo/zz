@@ -497,10 +497,11 @@ impl Lowerer {
                         names.set_array_len(zz_name, elems.len());
                     } else if !first_init {
                         // Reassignment to a non-literal value invalidates the
-                        // statically-known array length (e.g. `a = vec.push(a, 9)`),
+                        // statically-known array/dict length (e.g. `a = ...`),
                         // so `len(a)` calls `zz_len(a)` instead of a stale
                         // compile-time constant.
                         names.invalidate_array_len(zz_name);
+                        names.invalidate_dict_len(zz_name);
                     }
                     body.push_str(&out);
                 }
