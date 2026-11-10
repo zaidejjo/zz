@@ -1,4 +1,4 @@
-// features: arrays, comparison, floats, imports, locals, match, print, std-math, string-literal
+// features: arrays, comparison, float-arith, imports, locals, match, print, std-math, string-literal
 // tests/fixtures/stdlib/matrix_mul_test.zz — std.math.matrix_mul C twin.
 // Parity: VM and AOT must produce identical results.
 import std.math
