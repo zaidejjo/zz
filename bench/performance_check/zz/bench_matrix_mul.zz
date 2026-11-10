@@ -1,0 +1,71 @@
+// =====================================================================
+// bench_matrix_mul.zz
+// Dense n×n integer matrix multiply — the classic O(n³) numeric kernel.
+//
+// Exercises the flat-array fast paths this repo targets:
+//   * comprehensions build `int64_t *` buffers (`[0 for _ in range(n*n)]`)
+//   * arithmetic-index bounds elision (`a[i * n + k]`, `c[i * n + j]`)
+//   * raw scalar arithmetic on flat reads (`sum + a[..] * b[..]`)
+//   * raw loop-condition comparisons (`while k < n`)
+//
+// `result` is the sum of every product so the output is a stable
+// cross-engine checksum (not just the trace, which can be zero).
+// =====================================================================
+
+import std.time
+
+func matmul(n: int) -> int {
+    a := [0 for _ in range(n * n)]
+    b := [0 for _ in range(n * n)]
+    c := [0 for _ in range(n * n)]
+
+    i := 0
+    while i < n {
+        j := 0
+        while j < n {
+            a[i * n + j] = i + j
+            b[i * n + j] = i * 2 + j
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    i = 0
+    while i < n {
+        j := 0
+        while j < n {
+            sum := 0
+            k := 0
+            while k < n {
+                sum = sum + a[i * n + k] * b[k * n + j]
+                k = k + 1
+            }
+            c[i * n + j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    total := 0
+    i = 0
+    while i < n {
+        j := 0
+        while j < n {
+            total = total + c[i * n + j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return total
+}
+
+func main() {
+    n := 200
+    t0 := time.now_ms()
+    result := matmul(n)
+    t1 := time.now_ms()
+
+    println("result: " + str(result))
+    println("matmul_ms: " + str(t1 - t0))
+    println("bench_matrix_mul_ok")
+}

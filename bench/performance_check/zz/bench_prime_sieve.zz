@@ -1,0 +1,47 @@
+// =====================================================================
+// bench_prime_sieve.zz
+// Sieve of Eratosthenes over a flat `bool` array — a cache-sensitive
+// integer kernel that exercises:
+//   * flat comprehension storage (`[true for _ in range(N)]` → `bool *`)
+//   * raw loop-condition comparisons (`while i * i < N`)
+//   * elided bounds checks on flat bool reads/stores (`flags[j]`)
+//
+// The kernel matches the Go/Rust/C versions so wall-clock numbers are
+// comparable across engines.
+// =====================================================================
+
+import std.time
+
+func main() {
+    const N = 2_000_000
+    flags := [true for _ in range(N)]
+    flags[0] = false
+    flags[1] = false
+
+    t0 := time.now_ms()
+    i := 2
+    while i * i < N {
+        if flags[i] {
+            j := i * i
+            while j < N {
+                flags[j] = false
+                j = j + i
+            }
+        }
+        i = i + 1
+    }
+
+    count := 0
+    k := 0
+    while k < N {
+        if flags[k] {
+            count = count + 1
+        }
+        k = k + 1
+    }
+    t1 := time.now_ms()
+
+    println("primes: " + str(count))
+    println("sieve_ms: " + str(t1 - t0))
+    println("bench_prime_sieve_ok")
+}

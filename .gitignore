@@ -33,6 +33,10 @@ bench/performance_check/go/bench_go
 **/.zzbin/
 bench/performance_check/results.json
 bench/performance_check/RESULTS.md
+# Built benchmark binaries live next to their sources (no extension);
+# keep the `.zz` sources tracked.
+bench/performance_check/zz/bench_*
+!bench/performance_check/zz/bench_*.zz
 **/bin/
 
 # AUR render output (local only, CI regenerates per release)
