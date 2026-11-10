@@ -114,6 +114,9 @@ pub struct NameCtx {
     /// most recently bound to (straight-line code only). Used to fold
     /// `len(v)` to a constant so tight loops lower to raw scalar arith.
     pub(crate) array_lens: HashMap<String, usize>,
+    /// zz var name → dict literal entry count, for folding `len(dict_var)`
+    /// to a constant. Mirrors `array_lens`.
+    pub(crate) dict_lens: HashMap<String, usize>,
     /// zz var name → C expression for its runtime length (e.g. from
     /// `[val; N]` where N is a variable). Used by bounds-check elimination:
     /// when a loop var `i` is bounded by `limit` and `arr.len_expr == limit`,
@@ -178,6 +181,7 @@ impl NameCtx {
             flat_locals: HashSet::new(),
             scope_markers: Vec::new(),
             array_lens: HashMap::new(),
+            dict_lens: HashMap::new(),
             array_len_exprs: HashMap::new(),
             loop_bounds: HashMap::new(),
             stack_array_elems: HashMap::new(),
@@ -454,6 +458,17 @@ impl NameCtx {
     pub(crate) fn set_array_len(&mut self, name: &str, n: usize) {
         self.array_lens.insert(name.to_string(), n);
     }
+
+    /// Record that `name` currently holds a dict literal of length `n`.
+    pub(crate) fn set_dict_len(&mut self, name: &str, n: usize) {
+        self.dict_lens.insert(name.to_string(), n);
+    }
+
+    /// Statically-known length of `name` if it was most recently bound to
+    /// a dict literal in the current straight-line block.
+    pub(crate) fn dict_len(&self, name: &str) -> Option<usize> {
+        self.dict_lens.get(name).copied()
+    }
     /// Forget any statically-known literal length for `name`. Called when
     /// `name` is reassigned with a non-literal value or aliased into a call.
     /// Top-level globals may be namespaced (`mod.a`) while Assign targets
@@ -461,6 +476,13 @@ impl NameCtx {
     /// namespaced variant ending in `.{name}`.
     pub(crate) fn invalidate_array_len(&mut self, name: &str) {
         self.array_lens
+            .retain(|k, _| k != name && !k.ends_with(&format!(".{name}")));
+    }
+
+    /// Forget any statically-known literal length for `name` when it is
+    /// reassigned with a non-dict value.
+    pub(crate) fn invalidate_dict_len(&mut self, name: &str) {
+        self.dict_lens
             .retain(|k, _| k != name && !k.ends_with(&format!(".{name}")));
     }
 
@@ -475,6 +497,7 @@ impl NameCtx {
     /// merged path could have changed.
     pub(crate) fn clear_array_lens(&mut self) {
         self.array_lens.clear();
+        self.dict_lens.clear();
         self.stack_array_elems.clear();
         self.last_promoted_array = None;
     }
@@ -2726,6 +2749,32 @@ pub(crate) fn raw_scalar_text(
     emitted: &str,
     names: &NameCtx,
 ) -> Option<(String, &'static str)> {
+    // Recognize `len(var)` as a raw int64_t constant when `var` was bound
+    // to an array/dict literal of known length. This lets `sum + len(arr)`
+    // lower to raw C arithmetic instead of boxed zz_binop calls.
+    if let Expr::Call { callee, args, .. } = e {
+        if let Expr::Ident {
+            name: callee_name, ..
+        } = callee.as_ref()
+        {
+            if callee_name == "len" && args.len() == 1 {
+                if let Expr::Ident { name: arg_name, .. } = &args[0] {
+                    if let Some(n) = names.array_len(arg_name) {
+                        return Some((n.to_string(), "int64_t"));
+                    }
+                    if let Some(n) = names.dict_len(arg_name) {
+                        return Some((n.to_string(), "int64_t"));
+                    }
+                }
+            }
+            // Also recognize `zz_int(N)` as a raw int64_t constant.
+            if callee_name == "zz_int" && args.len() == 1 {
+                if let Expr::Int { value, .. } = &args[0] {
+                    return Some((value.to_string(), "int64_t"));
+                }
+            }
+        }
+    }
     if let (Some(raw), Some(t)) = (scalar_operand_c(e, names), scalar_operand_type(e, names)) {
         return Some((raw, t));
     }
