@@ -1612,6 +1612,8 @@ parity_strict!(parity_stdlib_path_join, "stdlib", "path_join.zz");
 parity_strict!(parity_stdlib_map_set, "stdlib", "map_set.zz");
 parity_strict!(parity_stdlib_dec_ops, "stdlib", "dec_ops.zz");
 parity_strict!(parity_stdlib_csv_test, "stdlib", "csv_test.zz");
+parity_strict!(parity_stdlib_colors_demo, "stdlib", "colors_demo.zz");
+parity_strict!(parity_stdlib_regexp_test, "stdlib", "regexp_test.zz");
 parity_strict!(parity_stdlib_builders, "stdlib", "builders.zz");
 parity_strict!(
     parity_stdlib_http_delete_put,
