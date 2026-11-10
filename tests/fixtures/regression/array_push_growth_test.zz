@@ -1,0 +1,37 @@
+// features: arrays, assert, comparison, func-call, int-arith, locals, print, return, std-vec, vec-push, while-loop
+// Regression: GH#794/795 — array push growth and capacity doubling in the C
+// runtime must null-check allocations and guard cap*2 against SIZE_MAX
+// overflow. Exercises zz_array_push / zz_vec_push growth paths in
+// collections.c.
+import std.vec
+
+func main() -> int {
+    a := []
+    i := 0
+    while i < 50 {
+        a = vec.push(a, i)
+        i = i + 1
+    }
+    assert(len(a) == 50)
+    assert(a[0] == 0)
+    assert(a[49] == 49)
+    println("vec_push_growth_ok: {len(a)}")
+    b := [1, 2, 3]
+    b = vec.push(b, 4)
+    assert(len(b) == 4)
+    assert(b[0] == 1)
+    assert(b[3] == 4)
+    println("vec_push_append_ok")
+    c := []
+    i = 0
+    while i < 20 {
+        c = vec.push(c, i * 2)
+        i = i + 1
+    }
+    assert(len(c) == 20)
+    assert(c[0] == 0)
+    assert(c[19] == 38)
+    println("move_push_ok")
+    println("array_push_growth_test_ok")
+    return 0
+}

@@ -4070,7 +4070,7 @@ impl Lowerer {
                             ));
                         } else {
                             out.push_str(&format!(
-                                "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n{grow}    }}\n",
+                                "    if ({len} >= {cap}) {{\n      if ({cap} != 0 && {cap} > SIZE_MAX / 2) {{ fprintf(stderr, \"zz error: array capacity overflow\\n\"); exit(1); }}\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n{grow}    }}\n",
                                 len = len_cid,
                                 cap = cap_cid,
                                 grow = grow,
@@ -4130,7 +4130,7 @@ impl Lowerer {
                             ));
                         } else {
                             out.push_str(&format!(
-                                "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n{grow}    }}\n",
+                                "    if ({len} >= {cap}) {{\n      if ({cap} != 0 && {cap} > SIZE_MAX / 2) {{ fprintf(stderr, \"zz error: array capacity overflow\\n\"); exit(1); }}\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n{grow}    }}\n",
                                 len = len_cid,
                                 cap = cap_cid,
                                 grow = grow,

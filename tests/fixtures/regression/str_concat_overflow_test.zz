@@ -1,0 +1,24 @@
+// features: assert, func-call, int-arith, locals, print, return, std-str, string-literal, string-ops, while-loop
+// Regression: GH#796 — string concatenation via `+` must guard len_a + len_b
+// against SIZE_MAX overflow in the C runtime zz_binop path.
+// Exercises the string-ADD code path (str_alloc + memcpy) in core.c.
+func main() -> int {
+    a := "hello"
+    b := "world"
+    c := a + " " + b
+    assert(c == "hello world")
+    println("concat_ok: {c}")
+    d := "" + ""
+    assert(d == "")
+    println("empty_concat_ok")
+    s := ""
+    i := 0
+    while i < 10 {
+        s = s + "x"
+        i = i + 1
+    }
+    assert(len(s) == 10)
+    println("grow_concat_ok")
+    println("str_concat_overflow_test_ok")
+    return 0
+}

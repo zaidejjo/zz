@@ -385,6 +385,10 @@ char *sb_take(SB *sb) {
 // malloc'd NUL-terminated copy of a (possibly embedded-NUL) buffer.
 char *copy_cstr(const char *s, size_t n) {
     char *out = (char *)malloc(n + 1);
+    if (!out) {
+        fprintf(stderr, "zz: out of memory\n");
+        exit(1);
+    }
     memcpy(out, s, n);
     out[n] = '\0';
     return out;
@@ -917,6 +921,10 @@ static void zz_print_value_display_depth(FILE *out, const zz_value *v, int depth
 // ---- formatting (malloc'd, caller frees) --------------------------------
 static char *strdup_len(const char *s, size_t len) {
     char *o = (char *)malloc(len + 1);
+    if (!o) {
+        fprintf(stderr, "zz: out of memory\n");
+        exit(1);
+    }
     memcpy(o, s, len);
     o[len] = '\0';
     return o;
@@ -933,6 +941,10 @@ static void sb_init(strbuf *sb) {
     sb->cap  = 256;
     sb->len  = 0;
     sb->buf = (char *)malloc(sb->cap);
+    if (!sb->buf) {
+        fprintf(stderr, "zz: out of memory\n");
+        exit(1);
+    }
     sb->buf[0] = '\0';
 }
 
@@ -940,6 +952,10 @@ static void sb_append(strbuf *sb, const char *s, size_t slen) {
     while (sb->len + slen + 1 > sb->cap) {
         sb->cap *= 2;
         sb->buf = (char *)realloc(sb->buf, sb->cap);
+        if (!sb->buf) {
+            fprintf(stderr, "zz: out of memory\n");
+            exit(1);
+        }
     }
     memcpy(sb->buf + sb->len, s, slen);
     sb->len += slen;
@@ -3052,6 +3068,12 @@ zz_value zz_str_join(zz_value items, zz_value sep, int *err) {
         if (i > 0) total += sep_len;
     }
     char *buf = (char *)malloc(total + 1);
+    if (!buf) {
+        free(parts);
+        free(lens);
+        free(owned);
+        return zz_str_static("");
+    }
     size_t pos = 0;
     for (size_t i = 0; i < n; i++) {
         if (i > 0) { memcpy(buf + pos, sep_d, sep_len); pos += sep_len; }
