@@ -365,8 +365,10 @@ static inline void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int 
         if (!fresh.arr) { if (err) *err = 1; zz_release(&item); return; }
         zz_release_array(obj->arr);
         obj->arr = fresh.arr;
-    } else if (obj->tag == ZZ_DICT && obj->dict && obj->dict->refs != 1
-        && !zz_dict_is_arena(obj->dict)) {
+    } else if (obj->tag == ZZ_DICT && obj->dict && obj->dict->refs != 1) {
+        // Arena dicts (`refs == ZZ_DICT_ARENA_MAGIC`, e.g. `d := {}`) are
+        // fixed-capacity and cannot grow in place. On first write dup them
+        // to a growable heap dict so `d[k] = v` persists (matches the VM).
         zz_value fresh = zz_dict_dup_value(obj->dict);
         if (!fresh.dict) { if (err) *err = 1; zz_release(&item); return; }
         zz_release_dict(obj->dict);
