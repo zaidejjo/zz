@@ -1356,13 +1356,21 @@ impl Lowerer {
                     let idx_raw = self.flat_index_expr(index, names, out);
                     let func = names.current_scope.clone();
 
-                    // Resolve array length: prefer array_len_exprs (raw bound
-                    // expression from list comprehension), fall back to {name}_len CID.
-                    let len_cid = names
-                        .array_len_exprs
-                        .get(arr_name.as_str())
-                        .cloned()
-                        .unwrap_or_else(|| names.lookup_or_name(&format!("{}_len", arr_name)));
+                    // Resolve array length: flat locals track the live length in
+                    // `{name}_len` (a `push` can grow the buffer, so the static
+                    // comprehension bound in `array_len_exprs` is only valid for
+                    // bounds-check elimination). Other flat buffers prefer the
+                    // raw bound expression from the list comprehension, then the
+                    // `{name}_len` counter.
+                    let len_cid = if names.flat_locals.contains(arr_name.as_str()) {
+                        names.lookup_or_name(&format!("{}_len", arr_name))
+                    } else {
+                        names
+                            .array_len_exprs
+                            .get(arr_name.as_str())
+                            .cloned()
+                            .unwrap_or_else(|| names.lookup_or_name(&format!("{}_len", arr_name)))
+                    };
 
                     // Check bounds-check elimination: index var bounded by array length.
                     let bounds_eliminated = match index.as_ref() {

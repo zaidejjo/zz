@@ -1252,13 +1252,20 @@ impl Lowerer {
                             };
                             if flat_home {
                                 let i_raw = self.flat_index_expr(index, names, out);
-                                let len_cid = names
-                                    .array_len_exprs
-                                    .get(&arr_name)
-                                    .cloned()
-                                    .unwrap_or_else(|| {
-                                        names.lookup_or_name(&format!("{arr_name}_len"))
-                                    });
+                                // Flat locals track the live length in
+                                // `{name}_len` (a `push` can grow the buffer);
+                                // `array_len_exprs` is the static elision bound.
+                                let len_cid = if names.flat_locals.contains(&arr_name) {
+                                    names.lookup_or_name(&format!("{arr_name}_len"))
+                                } else {
+                                    names
+                                        .array_len_exprs
+                                        .get(&arr_name)
+                                        .cloned()
+                                        .unwrap_or_else(|| {
+                                            names.lookup_or_name(&format!("{arr_name}_len"))
+                                        })
+                                };
                                 let func = names.current_scope.clone();
                                 let elem = names
                                     .lookup_type(&arr_name)
