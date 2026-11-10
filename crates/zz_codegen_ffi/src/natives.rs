@@ -369,6 +369,8 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "http.rate_limit" | "std.http.rate_limit" => Some("zz_http_rate_limit"),
         "http.listen" | "std.http.listen" => Some("zz_http_listen"),
         "http.listen_cfg" | "std.http.listen_cfg" => Some("zz_http_listen_cfg"),
+        "http.listen_tls" | "std.http.listen_tls" => Some("zz_http_listen_tls"),
+        "http.listen_tls_cfg" | "std.http.listen_tls_cfg" => Some("zz_http_listen_tls_cfg"),
         "http.serve_dir" | "std.http.serve_dir" => Some("zz_http_serve_dir"),
         "http.serve_dir_at" | "std.http.serve_dir_at" => Some("zz_http_serve_dir_at"),
         "http.hijack" | "std.http.hijack" => Some("zz_http_hijack"),

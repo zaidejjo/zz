@@ -8106,6 +8106,256 @@ zz_value zz_http_listen_cfg(zz_value server, zz_value port, zz_value opts, int *
     return http_listen_impl(port, err);
 }
 
+// zz_http_listen_tls(server, port, cert, key, err) — starts an HTTPS server
+// on `port` using the PEM cert/key files. Blocks until shutdown (SIGINT /
+// SIGTERM). Handles one connection at a time: accept → read HTTP request →
+// dispatch → write response → close. Mirrors the VM's rustls server
+// (TLS 1.2/1.3, no client auth, ALPN http/1.1).
+zz_value zz_http_listen_tls(zz_value server, zz_value port, zz_value cert,
+                            zz_value key, int *err) {
+    (void)server;
+    *err = 0;
+
+    if (!zz_tls_listen || !zz_tls_accept || !zz_tls_read || !zz_tls_write
+        || !zz_tls_close || !zz_tls_listener_close) {
+        return zz_variant_err(zz_str_static(
+            "http.listen_tls: TLS support not linked (native-rt archive missing)"));
+    }
+
+    if (port.tag != ZZ_INT || cert.tag != ZZ_STR || !cert.s
+        || key.tag != ZZ_STR || !key.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static(
+            "http.listen_tls: expected (port: int, cert: str, key: str)"));
+    }
+
+    // Return .ok(unit) on clean shutdown, .err(str) on failure.
+
+    int p = (int)port.i;
+    if (p <= 0 || p > 65535) p = 8443;
+
+    char addr[64];
+    int addrlen = snprintf(addr, sizeof addr, "127.0.0.1:%d", p);
+    zz_value addr_val = zz_str_new(addr, (size_t)addrlen);
+
+    zz_value listener = zz_tls_listen(addr_val, cert, key, err);
+    zz_release(&addr_val);
+    if (*err || listener.tag != ZZ_INT) {
+        if (!*err) *err = 1;
+        return zz_variant_err(zz_str_static("http.listen_tls: tls_listen failed"));
+    }
+    int listener_id = (int)listener.i;
+
+    signal(SIGPIPE, SIG_IGN);
+    http_install_shutdown_handlers();
+    g_http_server_running = 1;
+
+    while (g_http_server_running && !g_http_shutdown_requested) {
+        zz_value conn = zz_tls_accept(listener, err);
+        if (*err || conn.tag != ZZ_INT) {
+            if (g_http_shutdown_requested) break;
+            *err = 0;
+            continue;
+        }
+        int conn_id = (int)conn.i;
+
+        // Read the full HTTP request (headers + body) up to 64 KiB.
+        zz_value req_data = zz_tls_read(conn, zz_int(65536), err);
+        if (*err || req_data.tag != ZZ_STR || !req_data.s) {
+            zz_tls_close(conn, err);
+            *err = 0;
+            continue;
+        }
+        const char *req = zz_str_cptr(req_data.s);
+        size_t req_len = req_data.s->len;
+
+        // Minimal HTTP/1.1 parse: METHOD PATH HTTP/1.x\r\n...\r\n\r\n[body]
+        const char *method_end = memchr(req, ' ', req_len);
+        if (!method_end) {
+            zz_tls_close(conn, err);
+            zz_release(&req_data);
+            *err = 0;
+            continue;
+        }
+        size_t method_len = (size_t)(method_end - req);
+        const char *path_start = method_end + 1;
+        const char *path_end = memchr(path_start, ' ',
+                                      req_len - (size_t)(path_start - req));
+        if (!path_end) {
+            zz_tls_close(conn, err);
+            zz_release(&req_data);
+            *err = 0;
+            continue;
+        }
+        size_t path_len = (size_t)(path_end - path_start);
+
+        // Body starts after \r\n\r\n.
+        const char *header_end = memmem(req, req_len, "\r\n\r\n", 4);
+        const char *body_start =
+            header_end ? header_end + 4 : req + req_len;
+        size_t body_len =
+            header_end ? (size_t)(req + req_len - body_start) : 0;
+
+        zz_value headers = zz_dict_new();
+        zz_value body_val =
+            body_len > 0 ? zz_str_new(body_start, body_len)
+                         : zz_str_new("", 0);
+
+        int failed = 0;
+        zz_value resp = http_dispatch(req, path_start, path_len, body_val,
+                                      headers, "http.tls", &failed);
+        zz_release(&body_val);
+        zz_release(&headers);
+        zz_release(&req_data);
+
+        size_t wlen = 0;
+        char *wbuf = http_serialize_response(&resp, &wlen, 0);
+        long status = 500;
+        zz_value stv = zz_object_get_field(&resp, "status");
+        if (stv.tag == ZZ_INT) status = (long)stv.i;
+        zz_release(&stv);
+        zz_release(&resp);
+
+        if (wbuf && wlen > 0) {
+            zz_value data = zz_str_new(wbuf, wlen);
+            zz_tls_write(conn, data, err);
+            zz_release(&data);
+            free(wbuf);
+        }
+        zz_tls_close(conn, err);
+        *err = 0;
+    }
+
+    zz_tls_listener_close(listener, err);
+    g_http_shutdown_requested = 0;
+    g_http_server_running = 0;
+    return zz_unit();
+}
+
+// zz_http_listen_tls_cfg(server, port, cert, key, opts, err) — listen_tls
+// with per-server limits from `opts`.
+zz_value zz_http_listen_tls_cfg(zz_value server, zz_value port, zz_value cert,
+                                zz_value key, zz_value opts, int *err) {
+    (void)server;
+    *err = 0;
+
+    if (!zz_tls_listen || !zz_tls_accept || !zz_tls_read || !zz_tls_write
+        || !zz_tls_close || !zz_tls_listener_close) {
+        return zz_variant_err(zz_str_static(
+            "http.listen_tls_cfg: TLS support not linked (native-rt archive "
+            "missing)"));
+    }
+
+    if (port.tag != ZZ_INT || cert.tag != ZZ_STR || !cert.s
+        || key.tag != ZZ_STR || !key.s) {
+        *err = 1;
+        return zz_variant_err(zz_str_static(
+            "http.listen_tls_cfg: expected (port: int, cert: str, key: str)"));
+    }
+
+    int p = (int)port.i;
+    if (p <= 0 || p > 65535) p = 8443;
+
+    // Apply listen opts (read_ms, max_reqs_conn, max_body_bytes,
+    // shutdown_ms). These are best-effort for the single-connection TLS
+    // server; shutdown_ms is honored by the shutdown-handler loop above.
+    if (!http_apply_listen_opts(opts, err)) return zz_unit();
+
+    char addr[64];
+    int addrlen = snprintf(addr, sizeof addr, "127.0.0.1:%d", p);
+    zz_value addr_val = zz_str_new(addr, (size_t)addrlen);
+
+    zz_value listener = zz_tls_listen(addr_val, cert, key, err);
+    zz_release(&addr_val);
+    if (*err || listener.tag != ZZ_INT) {
+        if (!*err) *err = 1;
+        return zz_variant_err(zz_str_static("http.listen_tls_cfg: tls_listen failed"));
+    }
+    int listener_id = (int)listener.i;
+
+    signal(SIGPIPE, SIG_IGN);
+    http_install_shutdown_handlers();
+    g_http_server_running = 1;
+
+    while (g_http_server_running && !g_http_shutdown_requested) {
+        zz_value conn = zz_tls_accept(listener, err);
+        if (*err || conn.tag != ZZ_INT) {
+            if (g_http_shutdown_requested) break;
+            *err = 0;
+            continue;
+        }
+        int conn_id = (int)conn.i;
+
+        zz_value req_data = zz_tls_read(conn, zz_int(65536), err);
+        if (*err || req_data.tag != ZZ_STR || !req_data.s) {
+            zz_tls_close(conn, err);
+            *err = 0;
+            continue;
+        }
+        const char *req = zz_str_cptr(req_data.s);
+        size_t req_len = req_data.s->len;
+
+        const char *method_end = memchr(req, ' ', req_len);
+        if (!method_end) {
+            zz_tls_close(conn, err);
+            zz_release(&req_data);
+            *err = 0;
+            continue;
+        }
+        size_t method_len = (size_t)(method_end - req);
+        const char *path_start = method_end + 1;
+        const char *path_end = memchr(path_start, ' ',
+                                      req_len - (size_t)(path_start - req));
+        if (!path_end) {
+            zz_tls_close(conn, err);
+            zz_release(&req_data);
+            *err = 0;
+            continue;
+        }
+        size_t path_len = (size_t)(path_end - path_start);
+
+        const char *header_end = memmem(req, req_len, "\r\n\r\n", 4);
+        const char *body_start =
+            header_end ? header_end + 4 : req + req_len;
+        size_t body_len =
+            header_end ? (size_t)(req + req_len - body_start) : 0;
+
+        zz_value headers = zz_dict_new();
+        zz_value body_val =
+            body_len > 0 ? zz_str_new(body_start, body_len)
+                         : zz_str_new("", 0);
+
+        int failed = 0;
+        zz_value resp = http_dispatch(req, path_start, path_len, body_val,
+                                      headers, "http.tls", &failed);
+        zz_release(&body_val);
+        zz_release(&headers);
+        zz_release(&req_data);
+
+        size_t wlen = 0;
+        char *wbuf = http_serialize_response(&resp, &wlen, 0);
+        long status = 500;
+        zz_value stv = zz_object_get_field(&resp, "status");
+        if (stv.tag == ZZ_INT) status = (long)stv.i;
+        zz_release(&stv);
+        zz_release(&resp);
+
+        if (wbuf && wlen > 0) {
+            zz_value data = zz_str_new(wbuf, wlen);
+            zz_tls_write(conn, data, err);
+            zz_release(&data);
+            free(wbuf);
+        }
+        zz_tls_close(conn, err);
+        *err = 0;
+    }
+
+    zz_tls_listener_close(listener, err);
+    g_http_shutdown_requested = 0;
+    g_http_server_running = 0;
+    return zz_unit();
+}
+
 // ---- entry --------------------------------------------------------------
 // Process argv for env.args()/args.get_raw(): argv[0] is the binary,
 // everything after is script args (mirrors the VM's interp.args).

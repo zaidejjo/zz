@@ -516,22 +516,6 @@ pub(crate) const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // that does not exist in AOT (rustls TLS, WebSocket handshake + TCP
     // handoff, insecure curl client). They abort loudly (`zz_unimplemented_native`)
     // on AOT — never silently lower to unit.
-    (
-        "std.http.listen_tls",
-        "AOT exclusion (VM-only): TLS listener needs rustls server config + TLS accept loop in C",
-    ),
-    (
-        "http.listen_tls",
-        "AOT exclusion (VM-only): TLS listener needs rustls server config + TLS accept loop in C",
-    ),
-    (
-        "std.http.listen_tls_cfg",
-        "AOT exclusion (VM-only): TLS listener + listen_cfg limits; needs rustls in C",
-    ),
-    (
-        "http.listen_tls_cfg",
-        "AOT exclusion (VM-only): TLS listener + listen_cfg limits; needs rustls in C",
-    ),
     // MySQL wire driver — VM-only (no staticlib backend like PG has;
     // AOT lowers these to Unit like time.now_ms).
     ("std.sqlz.mysql.connect", "VM-only; no C socket driver"),

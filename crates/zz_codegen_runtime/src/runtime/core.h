@@ -1348,8 +1348,19 @@ zz_value zz_http_log(zz_value server, zz_value enabled, int *err);  // 2 args
 zz_value zz_http_rate_limit(zz_value server, zz_value max_requests, zz_value window_ms, int *err);  // 3 args
 zz_value zz_http_listen(zz_value server, zz_value port, int *err);  // 2 args
 zz_value zz_http_listen_cfg(zz_value server, zz_value port, zz_value opts, int *err);  // 3 args
+zz_value zz_http_listen_tls(zz_value server, zz_value port, zz_value cert, zz_value key, int *err);  // 4 args, TLS
+zz_value zz_http_listen_tls_cfg(zz_value server, zz_value port, zz_value cert, zz_value key, zz_value opts, int *err);  // 5 args, TLS+opts
 zz_value zz_http_serve_dir_at(zz_value server, zz_value prefix, zz_value dir, int *err);  // 3 args
 zz_value zz_http_serve_dir(zz_value server, zz_value dir, int *err);  // 2 args → prefix "/"
+
+// TLS listener (staticlib FFI symbols — weak so programs that don't use
+// listen_tls don't require the native-rt archive to be linked).
+__attribute__((weak)) zz_value zz_tls_listen(zz_value addr, zz_value cert, zz_value key, int *err);
+__attribute__((weak)) zz_value zz_tls_accept(zz_value id, int *err);
+__attribute__((weak)) zz_value zz_tls_read(zz_value id, zz_value max, int *err);
+__attribute__((weak)) zz_value zz_tls_write(zz_value id, zz_value data, int *err);
+__attribute__((weak)) zz_value zz_tls_close(zz_value id, int *err);
+__attribute__((weak)) zz_value zz_tls_listener_close(zz_value id, int *err);
 zz_value zz_http_test(zz_value server, zz_value method, zz_value path, zz_value body, int *err);  // 4 args
 zz_value zz_http_test_req(zz_value server, zz_value method, zz_value path,
                           zz_value headers, zz_value body, int *err);  // 5 args
