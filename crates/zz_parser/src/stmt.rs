@@ -1261,15 +1261,11 @@ impl<'a> Parser<'a> {
                     vname.span,
                 ));
             }
-            let payload = if self.eat(TokenKind::LParen) {
-                let ty = self.parse_type();
-                if !self.eat(TokenKind::RParen) {
-                    self.error_here(format!(
-                        "expected `)` after payload type of variant `{}`",
-                        vname.name
-                    ));
-                }
-                Some(ty)
+            // Payload type may be a single type `IntLit(int)` or a tuple
+            // `(str, int)` for multi-field variants. `parse_type` consumes
+            // the surrounding parens for both `(T)` and `(T1, T2, ...)`.
+            let payload = if self.at(TokenKind::LParen) {
+                Some(self.parse_type())
             } else {
                 None
             };
