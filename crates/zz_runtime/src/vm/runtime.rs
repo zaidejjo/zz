@@ -1723,29 +1723,42 @@ impl Vm {
                         vals.push(self.stack.pop().unwrap());
                     }
                     vals.reverse();
+                    let n = vals.len();
+                    // Defensive arity gate (checker already enforces this):
+                    // no-payload variants take no args; payload variants
+                    // take at least one.
+                    if !has_payload && n > 0 {
+                        return Err(self.error(
+                            format!("variant `{lookup}.{variant}` takes no arguments"),
+                            *span,
+                        ));
+                    }
+                    if has_payload && n == 0 {
+                        return Err(self.error(
+                            format!(
+                                "variant `{lookup}.{variant}` holds a value: construct it as `{lookup}.{variant}(...)`"
+                            ),
+                            *span,
+                        ));
+                    }
                     // Arity is a checker error; the runtime keeps a
                     // defensive gate so unchecked paths never silently
                     // build a wrong-shaped value.
-                    let fields = match (has_payload, vals.len()) {
-                        (false, 0) => Vec::new(),
-                        (true, 1) => {
-                            vec![(
-                                std::sync::Arc::from("value"),
-                                vals.into_iter().next().unwrap(),
-                            )]
-                        }
-                        _ => {
-                            return Err(self.error(
-                                format!(
-                                    "variant `{lookup}.{variant}` takes {} argument{} but {} given",
-                                    if has_payload { 1 } else { 0 },
-                                    if has_payload { "" } else { "s" },
-                                    vals.len(),
-                                ),
-                                *span,
-                            ));
-                        }
-                    };
+                    let fields: Vec<(std::sync::Arc<str>, Value)> = vals
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            // Single-field variants keep the classic field
+                            // name "value"; multi-field variants use
+                            // "value0", "value1", ...
+                            let name = if n == 1 {
+                                std::sync::Arc::from("value")
+                            } else {
+                                std::sync::Arc::from(format!("value{i}"))
+                            };
+                            (name, v)
+                        })
+                        .collect();
                     self.stack.push(Value::Object(std::sync::Arc::new(
                         crate::value::ObjectValue {
                             name: format!("{lookup}.{variant}"),
