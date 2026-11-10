@@ -454,10 +454,16 @@ fn main_inner() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let mut rest_filtered: Vec<String> = Vec::with_capacity(rest.len());
-            let mut rest_iter = rest.iter().peekable();
+            let (color_mode, rest_colorless) = match extract_color_flag(&rest) {
+                Ok(parsed) => parsed,
+                Err(msg) => {
+                    eprintln!("zz: {msg}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let mut rest_filtered: Vec<String> = Vec::with_capacity(rest_colorless.len());
+            let mut rest_iter = rest_colorless.iter().peekable();
             let mut format_value: Option<String> = None;
-            let mut color_mode: ColorMode = ColorMode::Auto;
             while let Some(a) = rest_iter.next() {
                 if a == "--format" {
                     if let Some(v) = rest_iter.next() {
@@ -468,41 +474,6 @@ fn main_inner() -> ExitCode {
                 if let Some(v) = a.strip_prefix("--format=") {
                     format_value = Some(v.to_string());
                     rest_filtered.push(a.clone());
-                    continue;
-                }
-                if a == "--color" {
-                    if let Some(v) = rest_iter.next() {
-                        color_mode = match v.to_string().as_str() {
-                            "auto" => ColorMode::Auto,
-                            "always" => ColorMode::Always,
-                            "never" => ColorMode::Never,
-                            other => {
-                                eprintln!(
-                                    "zz: unknown `--color` value `{}` (expected `auto`, `always`, or `never`)\n",
-                                    other
-                                );
-                                return ExitCode::FAILURE;
-                            }
-                        };
-                    } else {
-                        eprintln!("zz: `--color` requires a value (`auto`, `always`, or `never`)");
-                        return ExitCode::FAILURE;
-                    }
-                    continue;
-                }
-                if let Some(v) = a.strip_prefix("--color=") {
-                    color_mode = match v.to_string().as_str() {
-                        "auto" => ColorMode::Auto,
-                        "always" => ColorMode::Always,
-                        "never" => ColorMode::Never,
-                        other => {
-                            eprintln!(
-                                "zz: unknown `--color` value `{}` (expected `auto`, `always`, or `never`)\n",
-                                other
-                            );
-                            return ExitCode::FAILURE;
-                        }
-                    };
                     continue;
                 }
                 rest_filtered.push(a.clone());
@@ -589,45 +560,13 @@ fn main_inner() -> ExitCode {
             let has_hard = flags.contains(&"--hard".to_string());
             let has_interactive = flags.contains(&"--interactive".to_string());
             let interactive = has_interactive && !has_hard;
-            let mut rest_iter = flags.iter().peekable();
-            let mut color_mode = ColorMode::Auto;
-            while let Some(a) = rest_iter.next() {
-                if a == "--color" {
-                    if let Some(v) = rest_iter.next() {
-                        color_mode = match v.to_string().as_str() {
-                            "auto" => ColorMode::Auto,
-                            "always" => ColorMode::Always,
-                            "never" => ColorMode::Never,
-                            other => {
-                                eprintln!(
-                                    "zz: unknown `--color` value `{}` (expected `auto`, `always`, or `never`)\n",
-                                    other
-                                );
-                                return ExitCode::FAILURE;
-                            }
-                        };
-                    } else {
-                        eprintln!("zz: `--color` requires a value (`auto`, `always`, or `never`)");
-                        return ExitCode::FAILURE;
-                    }
-                    continue;
+            let (color_mode, _) = match extract_color_flag(&flags) {
+                Ok(parsed) => parsed,
+                Err(msg) => {
+                    eprintln!("zz: {msg}");
+                    return ExitCode::FAILURE;
                 }
-                if let Some(v) = a.strip_prefix("--color=") {
-                    color_mode = match v.to_string().as_str() {
-                        "auto" => ColorMode::Auto,
-                        "always" => ColorMode::Always,
-                        "never" => ColorMode::Never,
-                        other => {
-                            eprintln!(
-                                "zz: unknown `--color` value `{}` (expected `auto`, `always`, or `never`)\n",
-                                other
-                            );
-                            return ExitCode::FAILURE;
-                        }
-                    };
-                    continue;
-                }
-            }
+            };
             match check_or_fix_path(
                 &path,
                 true,
@@ -899,6 +838,52 @@ fn parse_path_and_flags(args: &[String]) -> (Option<String>, Vec<String>) {
 /// to scan or rewrite the whole project instead of printing usage (#586).
 fn wants_help(args: &[String]) -> bool {
     args.iter().any(|a| a == "--help" || a == "-h")
+}
+
+/// Extract `--color`/`--color=<value>` from args, returning the resolved
+/// `ColorMode` together with the remaining args (color entries removed).
+/// Shared by `check` and `fix` so the flag is parsed in one place (#D4).
+fn extract_color_flag(args: &[String]) -> Result<(ColorMode, Vec<String>), String> {
+    let mut color_mode = ColorMode::Auto;
+    let mut remaining = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--color" {
+            let v = match args.get(i + 1) {
+                Some(s) => s.as_ref(),
+                None => {
+                    return Err(
+                        "zz: `--color` requires a value (`auto`, `always`, or `never`)".to_string(),
+                    )
+                }
+            };
+            color_mode = match v {
+                "auto" => ColorMode::Auto,
+                "always" => ColorMode::Always,
+                "never" => ColorMode::Never,
+                other => return Err(format!(
+                    "zz: unknown `--color` value `{other}` (expected `auto`, `always`, or `never`)"
+                )),
+            };
+            i += 2;
+            continue;
+        } else if let Some(v) = a.strip_prefix("--color=") {
+            color_mode = match v {
+                "auto" => ColorMode::Auto,
+                "always" => ColorMode::Always,
+                "never" => ColorMode::Never,
+                other => return Err(format!(
+                    "zz: unknown `--color` value `{other}` (expected `auto`, `always`, or `never`)"
+                )),
+            };
+            i += 1;
+            continue;
+        }
+        remaining.push(a.clone());
+        i += 1;
+    }
+    Ok((color_mode, remaining))
 }
 
 /// Print the usage text of a subcommand on stdout.
