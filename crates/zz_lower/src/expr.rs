@@ -916,13 +916,20 @@ impl Lowerer {
                                         self.box_struct_operand(right, boxed_r, &r, names, out);
                                     return format!("zz_binop({c_op}, {boxed_l}, {boxed_r})");
                                 };
-                                // Div/Rem always route through zz_binop: they can
-                                // trap (zero divisor, MIN/-1), and raw C
-                                // `/`/`%` would be UB/SIGFPE (-fwrapv does
-                                // not save division). Operands are boxed
-                                // first: scalar locals/arith emit raw C,
-                                // which zz_binop cannot take directly.
-                                if matches!(
+                                // Div/Rem with a non-zero constant divisor cannot
+                                // trap (zero divisor or INT64_MIN / -1), so emit raw
+                                // C and keep operands unboxed. Otherwise route
+                                // through zz_binop which handles the traps.
+                                let div_is_safe_const = matches!(
+                                    op,
+                                    zz_frontend::ast::BinOp::Div | zz_frontend::ast::BinOp::Rem
+                                ) && matches!(
+                                    right.as_ref(),
+                                    zz_frontend::ast::Expr::Int { value, .. } if *value != 0
+                                );
+                                if div_is_safe_const {
+                                    format!("(int64_t)({lc} {c_op} {rc})")
+                                } else if matches!(
                                     op,
                                     zz_frontend::ast::BinOp::Div | zz_frontend::ast::BinOp::Rem
                                 ) {
