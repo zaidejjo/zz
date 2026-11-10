@@ -1,0 +1,24 @@
+// features: arrays, casts, for-loop, int-arith, locals, print, string-literal, string-ops, structs, vec-push
+// Regression for #790: `zz build --release` must compile arrays of unboxed structs
+// accessed by index field (`rows[i].val`), including `zz_binop` on the field read.
+struct Row {
+    id: int,
+    val: int,
+}
+
+func main() {
+    n := 50000
+    rows := []
+    for i in 0..n {
+        rows.push(Row{id: i, val: i * 7})
+    }
+    s := 0
+    m := len(rows)
+    i := 0
+    while i < m {
+        s = s + rows[i].val
+        i = i + 1
+    }
+    println("struct_array_index_field_ok")
+    println("sig: " + str(s))
+}

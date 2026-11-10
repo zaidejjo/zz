@@ -912,6 +912,11 @@ parity_strict!(
     "syntax",
     "closure_capture_struct_array.zz"
 );
+parity_strict!(
+    parity_syntax_struct_array_index_field,
+    "syntax",
+    "struct_array_index_field.zz"
+);
 parity_strict!(parity_stdlib_shadow_test, "stdlib", "shadow_test.zz");
 parity_strict!(parity_syntax_destructuring, "syntax", "destructuring.zz");
 parity_strict!(

@@ -869,7 +869,14 @@ impl Lowerer {
                                     || self.is_string_expr(right, names))
                                 && self.loop_arenas.borrow().last().is_some()
                             {
-                                let arena = self.loop_arenas.borrow().last().unwrap().clone();
+                                // `is_some()` is checked above; `unwrap_or_default`
+                                // avoids a panic on the unreachable None path.
+                                let arena = self
+                                    .loop_arenas
+                                    .borrow()
+                                    .last()
+                                    .cloned()
+                                    .unwrap_or_default();
                                 if let zz_frontend::ast::Expr::Binary {
                                     op: inner_op,
                                     left: ll,
@@ -1393,62 +1400,74 @@ impl Lowerer {
                 // the array's length equals `limit` (from `[x for _ in 0..limit]`),
                 // then `arr[i]` is provably in bounds and we elide `zz_flat_index`.
                 if let Some((arr_name, elem_ctype)) = self.flat_index_receiver(obj, names) {
-                    let arr_cid = names.lookup(arr_name.as_str()).unwrap().to_string();
-                    let idx_raw = self.flat_index_expr(index, names, out);
-                    let func = names.current_scope.clone();
-
-                    // Resolve array length: flat locals track the live length in
-                    // `{name}_len` (a `push` can grow the buffer, so the static
-                    // comprehension bound in `array_len_exprs` is only valid for
-                    // bounds-check elimination). Other flat buffers prefer the
-                    // raw bound expression from the list comprehension, then the
-                    // `{name}_len` counter.
-                    let len_cid = if names.flat_locals.contains(arr_name.as_str()) {
-                        names.lookup_or_name(&format!("{}_len", arr_name))
+                    // Guard the C-id lookup: if the array has no registered C
+                    // id (unusual but possible for flat_backing buffers), fall
+                    // through to the boxed `zz_index_get` path instead of
+                    // panicking.
+                    let arr_cid = names.lookup(arr_name.as_str()).unwrap_or("").to_string();
+                    if arr_cid.is_empty() {
+                        // No registered C id for this flat array: fall through
+                        // to the boxed `zz_index_get` path below.
                     } else {
-                        names
-                            .array_len_exprs
-                            .get(arr_name.as_str())
-                            .cloned()
-                            .unwrap_or_else(|| names.lookup_or_name(&format!("{}_len", arr_name)))
-                    };
+                        let idx_raw = self.flat_index_expr(index, names, out);
+                        let func = names.current_scope.clone();
 
-                    // Check bounds-check elimination: index var bounded by array length.
-                    let bounds_eliminated = match index.as_ref() {
-                        zz_frontend::ast::Expr::Ident { name, .. } => {
-                            if let Some(bound) = names.loop_bounds.get(name) {
-                                if let Some(len_expr) = names.array_len_exprs.get(arr_name.as_str())
-                                {
-                                    bound == len_expr
+                        // Resolve array length: flat locals track the live length in
+                        // `{name}_len` (a `push` can grow the buffer, so the static
+                        // comprehension bound in `array_len_exprs` is only valid for
+                        // bounds-check elimination). Other flat buffers prefer the
+                        // raw bound expression from the list comprehension, then the
+                        // `{name}_len` counter.
+                        let len_cid = if names.flat_locals.contains(arr_name.as_str()) {
+                            names.lookup_or_name(&format!("{}_len", arr_name))
+                        } else {
+                            names
+                                .array_len_exprs
+                                .get(arr_name.as_str())
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    names.lookup_or_name(&format!("{}_len", arr_name))
+                                })
+                        };
+
+                        // Check bounds-check elimination: index var bounded by array length.
+                        let bounds_eliminated = match index.as_ref() {
+                            zz_frontend::ast::Expr::Ident { name, .. } => {
+                                if let Some(bound) = names.loop_bounds.get(name) {
+                                    if let Some(len_expr) =
+                                        names.array_len_exprs.get(arr_name.as_str())
+                                    {
+                                        bound == len_expr
+                                    } else {
+                                        false
+                                    }
                                 } else {
                                     false
                                 }
-                            } else {
-                                false
                             }
-                        }
-                        // `a[i * n + k]` on an `n * n` buffer with `i < n`
-                        // and `k < n` is provably in bounds.
-                        _ => crate::context::flat_arith_index_in_bounds(
-                            index.as_ref(),
-                            arr_name.as_str(),
-                            names,
-                        ),
-                    };
+                            // `a[i * n + k]` on an `n * n` buffer with `i < n`
+                            // and `k < n` is provably in bounds.
+                            _ => crate::context::flat_arith_index_in_bounds(
+                                index.as_ref(),
+                                arr_name.as_str(),
+                                names,
+                            ),
+                        };
 
-                    let raw = if bounds_eliminated {
-                        // Direct access: no bounds check needed.
-                        format!("({arr_cid})[{idx_raw}]")
-                    } else {
-                        format!("({arr_cid})[zz_flat_index({idx_raw}, {len_cid}, \"{func}\")]")
-                    };
-                    // For flat bool arrays, return the raw C bool instead of
-                    // boxing it via zz_bool(). The caller (if/while condition)
-                    // can use the raw bool directly without zz_truthy().
-                    if elem_ctype == "bool" {
-                        return raw;
+                        let raw = if bounds_eliminated {
+                            // Direct access: no bounds check needed.
+                            format!("({arr_cid})[{idx_raw}]")
+                        } else {
+                            format!("({arr_cid})[zz_flat_index({idx_raw}, {len_cid}, \"{func}\")]")
+                        };
+                        // For flat bool arrays, return the raw C bool instead of
+                        // boxing it via zz_bool(). The caller (if/while condition)
+                        // can use the raw bool directly without zz_truthy().
+                        if elem_ctype == "bool" {
+                            return raw;
+                        }
+                        return auto_box(&raw, Some(elem_ctype.as_str()));
                     }
-                    return auto_box(&raw, Some(elem_ctype.as_str()));
                 }
                 // Two fast-paths over the naive
                 // `zz_call_native2(zz_index_get, zz_clone(o), boxed_i)`:
@@ -1634,14 +1653,22 @@ impl Lowerer {
                         _ => (String::new(), None),
                     };
                     if sname.is_some() {
-                        let arr_cid = names.lookup(&arr_name).unwrap().to_string();
-                        let idx_raw = self.flat_index_expr(index, names, out);
-                        let field_ctype = self.field_type_from_struct(
-                            &format!("zz_struct_{}", sname.as_deref().unwrap_or("")),
-                            name,
-                        );
-                        let raw = format!("({arr_cid})[{idx_raw}].{name}");
-                        return auto_box(&raw, field_ctype);
+                        // Guard the C-id lookup: if the array has no registered
+                        // C id, fall through to the boxed field-access path
+                        // below instead of panicking.
+                        if let Some(arr_cid) = names.lookup(&arr_name).map(str::to_string) {
+                            let idx_raw = self.flat_index_expr(index, names, out);
+                            // `sname` is the demangled/dotted ZZ name (e.g.
+                            // `struct_array.Row`); `field_type_from_struct` needs
+                            // the mangled C identifier (`struct_array_Row`) to
+                            // match `tp.structs` keys.
+                            let field_ctype = self.field_type_from_struct(
+                                &format!("zz_struct_{}", mangle(sname.as_deref().unwrap_or(""))),
+                                name,
+                            );
+                            let raw = format!("({arr_cid})[{idx_raw}].{name}");
+                            return auto_box(&raw, field_ctype);
+                        }
                     }
                 }
                 // Determine if the object is boxed (zz_value) or unboxed (C struct).
@@ -4740,7 +4767,9 @@ impl Lowerer {
             hits.dedup();
             if hits.len() == 1 {
                 owned_fallback = Some(hits[0].clone());
-                owned_fallback.as_deref().unwrap()
+                owned_fallback
+                    .as_deref()
+                    .unwrap_or(cname_for_native.as_str())
             } else {
                 owned_fallback = None;
                 cname_for_native.as_str()
@@ -5512,7 +5541,9 @@ impl Lowerer {
             zz_checker::Type::Struct(s, _) => s.clone(),
             _ => return false,
         };
-        let method = parts.last().unwrap();
+        let Some(method) = parts.last() else {
+            return false;
+        };
         let bare = sname.rsplit('.').next().unwrap_or(&sname).to_string();
         self.tp
             .structs
@@ -6011,7 +6042,7 @@ impl Lowerer {
         if parts.len() < 2 {
             return None;
         }
-        let method = parts.last().unwrap().clone();
+        let method = parts.last().cloned()?;
 
         // Strategy 1: longest-prefix local match.
         // parts = ["mod", "rect", "area"] → try "mod.rect" (no), then
@@ -6025,7 +6056,9 @@ impl Lowerer {
         for split in (1..parts.len()).rev() {
             let recv_parts = &parts[..split];
             let recv_joined = recv_parts.join(".");
-            let recv_tail = recv_parts.last().unwrap().clone();
+            let Some(recv_tail) = recv_parts.last().cloned() else {
+                continue;
+            };
             let (matched_key, matched_tail) = if names.lookup(&recv_joined).is_some() {
                 (recv_joined, recv_tail)
             } else if names.lookup(&recv_tail).is_some() {

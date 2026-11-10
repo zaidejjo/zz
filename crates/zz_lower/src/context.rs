@@ -843,7 +843,7 @@ impl Lowerer {
                                     Expr::Int { value, .. } => value.to_string(),
                                     _ => return None,
                                 };
-                                let arr_cid = names.lookup(arr_name).unwrap().to_string();
+                                let arr_cid = names.lookup(arr_name).map(str::to_string)?;
                                 return Some((format!("({arr_cid})[{idx_text}].{name}"), t));
                             }
                         }
@@ -877,7 +877,7 @@ impl Lowerer {
                                 "bool" => "bool",
                                 _ => return None,
                             };
-                            let cid = names.lookup(obj_name).unwrap().to_string();
+                            let cid = names.lookup(obj_name).map(str::to_string)?;
                             return Some((format!("({cid}).{name}"), t));
                         }
                     }

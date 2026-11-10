@@ -433,12 +433,10 @@ static inline zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
             zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
             for (size_t i = 0; i < a->len; i++)
                 new_items[i] = a->items[i];
-            // Free the previous heap-backed items buffer, if any. Arena
-            // buffers are reclaimed by the arena reset; NULL is a no-op.
-            // Only heap buffers (from a prior migration) must be freed, else
-            // every grow leaks the old buffer (alloc_churn: ~6 leaked bufs
-            // per iteration × 100k iterations ≈ 195 MB RSS).
-            if (a->items != NULL) free(a->items);
+            // Stack/lit/arena items live on the stack or an arena — they must
+            // NOT be freed (free() on stack/arena memory corrupts the heap).
+            // They're reclaimed when the frame/arena resets. On later grows
+            // `a->refs` is 0/1 so we take the realloc branch above.
             a->items = new_items;
             // Mark migration to heap so `zz_release_array` frees the items
             // buffer when this array is released (refs==0 path). Applies to
