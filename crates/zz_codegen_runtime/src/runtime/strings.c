@@ -85,6 +85,7 @@ static zz_str *intern_lookup_or_create(const char *src, size_t len) {
             if (e->src == NULL) {
                 zz_str *s = str_alloc(len);
                 s->interned = 1;
+                s->hash = h;  // cache FNV-1a hash for dict fast path
                 memcpy(zz_str_ptr(s), src, len);
                 zz_str_ptr(s)[len] = '\0';
                 e->src = src;
@@ -97,6 +98,7 @@ static zz_str *intern_lookup_or_create(const char *src, size_t len) {
         if (!found) {
             zz_str *s = str_alloc(len);
             s->interned = 1;
+            s->hash = h;  // cache FNV-1a hash for dict fast path
             memcpy(zz_str_ptr(s), src, len);
             zz_str_ptr(s)[len] = '\0';
             found = s;
@@ -1412,6 +1414,46 @@ zz_value zz_binop_cat_arena(zz_value a, zz_value b, zz_arena *arena) {
     }
     // Fallback: non-string or no arena — use heap path
     return zz_binop_cat(a, b);
+}
+
+// Three-operand string concatenation on the arena: a + b + c in a single
+// allocation. Eliminates the intermediate arena string + extra memcpy that
+// nested `zz_binop_cat_arena` calls pay for patterns like
+// `"item_" + str(i) + "_data"`. Returns `zz_unit()` on type mismatch.
+zz_value zz_str_cat3_arena(zz_value a, zz_value b, zz_value c, zz_arena *arena) {
+    if (a.tag != ZZ_STR || b.tag != ZZ_STR || c.tag != ZZ_STR || !arena) {
+        return zz_unit();
+    }
+    size_t la = a.s->len, lb = b.s->len, lc = c.s->len;
+    size_t need = la + lb + lc;
+    const char *pa = zz_str_cptr(a.s);
+    const char *pb = zz_str_cptr(b.s);
+    const char *pc = zz_str_cptr(c.s);
+    zz_str *out = (zz_str *)zz_arena_alloc(arena, sizeof(zz_str), 8);
+    out->refs = 0;
+    out->interned = 0;
+    out->len = need;
+    if (need <= ZZ_SSO_MAX) {
+        out->cap = 0;
+        memcpy(out->sso, pa, la);
+        memcpy(out->sso + la, pb, lb);
+        memcpy(out->sso + la + lb, pc, lc);
+        out->sso[need] = '\0';
+    } else {
+        out->cap = need;
+        out->heap = (char *)zz_arena_alloc(arena, need + 1, 1);
+        memcpy(out->heap, pa, la);
+        memcpy(out->heap + la, pb, lb);
+        memcpy(out->heap + la + lb, pc, lc);
+        out->heap[need] = '\0';
+    }
+    zz_release(&a);
+    zz_release(&b);
+    zz_release(&c);
+    zz_value v;
+    v.tag = ZZ_STR;
+    v.s = out;
+    return v;
 }
 
 

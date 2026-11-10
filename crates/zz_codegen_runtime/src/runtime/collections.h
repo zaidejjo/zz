@@ -155,17 +155,132 @@ static inline zz_value zz_bytes_get(const zz_bytes *b, zz_value idx, int *err) {
 void zz_retain_bytes(zz_bytes *b);
 void zz_release_bytes(zz_bytes *b);
 
-// Index expression support (lowered from `obj[idx]`). Dispatch on the
-// object tag at runtime: arrays and dicts. Returns unit + *err=1 on unsupported.
-// Out of line: it probes the dict's key index (open addressing over the
-// ordered entries) instead of walking them, so it no longer benefits from
-// inlining over a loop body.
-zz_value zz_dict_get(const zz_dict *d, zz_value key, int *err);
+// ---- dict helpers (inline for hot loop paths) --------------------------
 
-// Probe the dict's key index (open addressing over ordered entries) and
-// return the entry position via *out; 1 = found, 0 = not found. Falls back
-// to a linear scan when the index is not built. No value is cloned.
-int zz_dict_find(const zz_dict *d, zz_value key, size_t *out);
+static inline size_t zz_dict_cap_for(size_t len) {
+    size_t cap = 16;
+    while (cap - (cap >> 2) < len) cap <<= 1;
+    return cap;
+}
+
+static inline int zz_dict_key_hash(zz_value key, size_t *out) {
+    uint64_t h;
+    switch (key.tag) {
+    case ZZ_INT:
+        h = (uint64_t)key.i;
+        break;
+    case ZZ_BOOL:
+        h = (uint64_t)(key.b ? 1 : 0);
+        break;
+    case ZZ_STR: {
+        if (!key.s) return 0;
+        if (key.s->interned && key.s->hash != 0) {
+            h = key.s->hash;
+            break;
+        }
+        const unsigned char *p = (const unsigned char *)zz_str_cptr(key.s);
+        size_t n = key.s->len;
+        h = 1469598103934665603ULL;
+        for (size_t i = 0; i < n; i++) {
+            h ^= p[i];
+            h *= 1099511628211ULL;
+        }
+        break;
+    }
+    default:
+        return 0;
+    }
+    h ^= h >> 30;
+    h *= 0xbf58476d1ce4e5b9ULL;
+    h ^= h >> 27;
+    h *= 0x94d049bb133111ebULL;
+    h ^= h >> 31;
+    *out = (size_t)h;
+    return 1;
+}
+
+static inline void zz_dict_idx_place(zz_dict *d, size_t j) {
+    size_t h;
+    if (!d->idx || !zz_dict_key_hash(d->entries[j].key, &h)) return;
+    size_t mask = d->idx_cap - 1;
+    size_t p = h & mask;
+    while (d->idx[p] != 0) {
+        if (zz_key_eq(d->entries[d->idx[p] - 1].key, d->entries[j].key)) return;
+        p = (p + 1) & mask;
+    }
+    d->idx[p] = j + 1;
+}
+
+static inline void zz_dict_idx_build(zz_dict *d, zz_arena *arena, size_t cap) {
+    if (cap == 0) return;
+    size_t bytes = cap * sizeof(size_t);
+    size_t *slots = arena ? (size_t *)zz_arena_alloc(arena, bytes, 8)
+                          : (size_t *)calloc(1, bytes);
+    if (!slots) return;
+    if (arena) memset(slots, 0, bytes);
+    d->idx = slots;
+    d->idx_cap = cap;
+    for (size_t j = 0; j < d->len; j++) zz_dict_idx_place(d, j);
+}
+
+static inline void zz_dict_idx_insert(zz_dict *d, size_t i) {
+    size_t h;
+    if (!zz_dict_key_hash(d->entries[i].key, &h)) return;
+    if (!d->idx) {
+        if (d->len <= ZZ_DICT_INDEX_THRESHOLD) return;
+        zz_dict_idx_build(d, NULL, zz_dict_cap_for(d->len));
+        return;
+    }
+    if (d->len * 4 > d->idx_cap * 3) {
+        if (d->refs == ZZ_DICT_ARENA_MAGIC) {
+            d->idx = NULL;
+            d->idx_cap = 0;
+            return;
+        }
+        size_t cap = d->idx_cap << 1;
+        size_t *fresh = (size_t *)calloc(1, cap * sizeof(size_t));
+        if (!fresh) return;
+        free(d->idx);
+        d->idx = fresh;
+        d->idx_cap = cap;
+        for (size_t j = 0; j < d->len; j++) zz_dict_idx_place(d, j);
+        return;
+    }
+    zz_dict_idx_place(d, i);
+}
+
+static inline int zz_dict_find(const zz_dict *d, zz_value key, size_t *out) {
+    size_t h;
+    if (d->idx && zz_dict_key_hash(key, &h)) {
+        size_t mask = d->idx_cap - 1;
+        size_t p = h & mask;
+        while (d->idx[p] != 0) {
+            size_t j = d->idx[p] - 1;
+            if (zz_key_eq(d->entries[j].key, key)) {
+                *out = j;
+                return 1;
+            }
+            p = (p + 1) & mask;
+        }
+        return 0;
+    }
+    for (size_t i = 0; i < d->len; i++) {
+        if (zz_key_eq(d->entries[i].key, key)) {
+            *out = i;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static inline zz_value zz_dict_get(const zz_dict *d, zz_value key, int *err) {
+    *err = 0;
+    if (!d) { *err = 1; return zz_unit(); }
+    size_t pos;
+    if (zz_dict_find(d, key, &pos)) return zz_clone(d->entries[pos].val);
+    *err = 1;
+    return zz_unit();
+}
 
 static inline zz_value zz_index_get(zz_value obj, zz_value idx, int *err) {
     switch (obj.tag) {
@@ -191,7 +306,7 @@ zz_value zz_dict_dup_value(const zz_dict *d);
 // container buffer is shared (or a non-owned sentinel), replace this
 // slot's buffer with a private dup first. Uniquely-owned buffers
 // (`refs == 1`) write in place with zero copies.
-void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err);
+
 
 // Bounds-check trap with operands and enclosing function (#251).
 void zz_index_trap(zz_value obj, zz_value idx, const char *func);
@@ -214,7 +329,65 @@ static inline int64_t zz_flat_index(int64_t i, int64_t n, const char *func) {
 // Slice expression (`obj[a:b]`): arrays (items) and strings (bytes).
 zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err);
 
-void zz_dict_set(zz_dict *d, zz_value key, zz_value val);
+static inline void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
+    if (!d) return;
+    size_t pos;
+    if (zz_dict_find(d, key, &pos)) {
+        zz_assign(&d->entries[pos].val, val);
+        return;
+    }
+    if (d->len == d->cap) {
+        if (d->refs == ZZ_DICT_ARENA_MAGIC) return;
+        size_t nc = d->cap == 0 ? 4 : d->cap * 2;
+        size_t old_cap = d->cap;
+        d->entries = (zz_dict_entry *)realloc(d->entries, nc * sizeof(zz_dict_entry));
+        memset(&d->entries[old_cap], 0, (nc - old_cap) * sizeof(zz_dict_entry));
+        d->cap = nc;
+    }
+    zz_dict_entry *e = &d->entries[d->len++];
+    e->key = zz_clone_for_store(key);
+    zz_assign(&e->val, zz_heal_for_move(val));
+    if (val.tag != ZZ_INT && val.tag != ZZ_FLOAT && val.tag != ZZ_BOOL
+        && val.tag != ZZ_UNIT)
+        d->has_heap_values = 1;
+    if (!(key.tag == ZZ_STR && key.s && key.s->interned))
+        d->has_heap_keys = 1;
+    zz_dict_idx_insert(d, d->len - 1);
+}
+
+// Index expression support (lowered from `obj[idx]`). Dispatch on the
+// object tag at runtime: arrays and dicts. Arena buffers write in place.
+static inline void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err) {
+    if (!obj) { if (err) *err = 1; return; }
+    if (obj->tag == ZZ_ARRAY && obj->arr && obj->arr->refs != 1
+        && !zz_array_is_arena(obj->arr)) {
+        zz_value fresh = zz_array_dup(obj->arr);
+        if (!fresh.arr) { if (err) *err = 1; zz_release(&item); return; }
+        zz_release_array(obj->arr);
+        obj->arr = fresh.arr;
+    } else if (obj->tag == ZZ_DICT && obj->dict && obj->dict->refs != 1
+        && !zz_dict_is_arena(obj->dict)) {
+        zz_value fresh = zz_dict_dup_value(obj->dict);
+        if (!fresh.dict) { if (err) *err = 1; zz_release(&item); return; }
+        zz_release_dict(obj->dict);
+        obj->dict = fresh.dict;
+    }
+    switch (obj->tag) {
+    case ZZ_ARRAY:
+        zz_array_set(obj->arr, idx, item, err);
+        if (err && *err) { zz_release(&item); return; }
+        if (item.tag != ZZ_STR && item.tag != ZZ_MUTABLE_STR) zz_release(&item);
+        return;
+    case ZZ_DICT:
+        zz_dict_set(obj->dict, idx, item);
+        if (item.tag != ZZ_STR && item.tag != ZZ_MUTABLE_STR) zz_release(&item);
+        if (err) *err = 0;
+        return;
+    default:
+        if (err) *err = 1;
+    }
+}
+
 size_t zz_dict_len(const zz_dict *d);
 
 // ---- higher-order iterators --------------------------------------------
