@@ -196,7 +196,9 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
         "net.unix_listener_close"
         | "std.net.unix_listener_close"
         | "unix_listener.close"
-        | "std.unix_listener.close" => Some("zz_unix_listener_close"),
+        | "std.unix_listener.close"
+        | "unix_listener.shutdown"
+        | "std.unix_listener.shutdown" => Some("zz_unix_listener_close"),
         "net.unix_write" | "std.net.unix_write" | "unix.write" | "std.unix.write" => {
             Some("zz_unix_write")
         }
@@ -242,7 +244,9 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
         "net.tls_listener_close"
         | "std.net.tls_listener_close"
         | "tls_listener.close"
-        | "std.tls_listener.close" => Some("zz_tls_listener_close"),
+        | "std.tls_listener.close"
+        | "tls_listener.shutdown"
+        | "std.tls_listener.shutdown" => Some("zz_tls_listener_close"),
         "net.tls_peer_addr" | "std.net.tls_peer_addr" | "tls.peer_addr" | "std.tls.peer_addr" => {
             Some("zz_tls_peer_addr")
         }

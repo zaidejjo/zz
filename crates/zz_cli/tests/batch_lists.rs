@@ -97,6 +97,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "regexp_test.zz", false),
     ("stdlib", "map_set.zz", true),
     ("stdlib", "math_ops.zz", false),
+    ("stdlib", "matrix_mul_test.zz", true),
     ("stdlib", "path_join.zz", true),
     ("stdlib", "time_date.zz", true),
     ("stdlib", "math_consts.zz", false),

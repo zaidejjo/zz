@@ -49,7 +49,6 @@ pub use zz_codegen_types::{CodegenSink, NoopSink};
 /// test [`all_stdlib_funcs_have_c_impls`] enforces this.
 pub(crate) const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // Non-reachable from parity fixtures (no fixture uses them):
-    ("std.math.matrix_mul", "no fixture; niche math"),
     // Pure-ZZ stdlib functions — run in VM only, no C codegen
     ("std.math.sum", "pure ZZ; no C codegen"),
     ("std.math.product", "pure ZZ; no C codegen"),
@@ -535,9 +534,6 @@ pub(crate) const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // around the closure body); no native C implementation needed.
     ("std.sqlz.transaction", "AOT-inlined; no native C impl"),
     ("sqlz.transaction", "AOT-inlined; no native C impl"),
-    // Listener shutdown — VM-only, no C socket listener shutdown twin.
-    ("std.tls_listener.shutdown", "VM-only; no C listener shutdown twin"),
-    ("std.unix_listener.shutdown", "VM-only; no C listener shutdown twin"),
 ];
 
 /// Lower a pruned typed program to C without compiling.

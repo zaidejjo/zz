@@ -13,7 +13,7 @@ use crate::{
 };
 
 /// Seed the real stdlib signatures for typed building.
-use zz_stdlib::stdlib_funcs;
+use zz_stdlib::{stdlib_funcs, zz_stdlib_programs};
 
 fn build_reachable(src: &str) -> (TypedProgram, ReachableSet) {
     // Type-check with real stdlib func sigs.
@@ -1922,4 +1922,47 @@ func main() {
         !gen.contains("zz_clone(v0)") && !gen.contains("_field_obj"),
         "read-only call args must not clone, got:\n{gen}"
     );
+}
+
+/// Temporary census for gap-closure audit (removed before commit).
+#[test]
+fn census_dump_register() {
+    use zz_frontend::ast::Stmt;
+    let funcs = stdlib_funcs();
+    let programs = zz_stdlib_programs();
+    let mut zz_body: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (idx, tp) in programs.iter().enumerate() {
+        let tp = match tp {
+            Ok(tp) => tp,
+            Err(_) => continue,
+        };
+        for s in &tp.program.stmts {
+            if let Stmt::Func { name, .. } = s {
+                let key = name.join(".");
+                zz_body.insert(key.clone(), idx);
+                zz_body.insert(format!("std.{key}"), idx);
+            }
+        }
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for k in funcs.keys() {
+        let cls = if crate::native_impl(k).is_some() {
+            "C"
+        } else if crate::ffi_impl(k).is_some() {
+            "FFI"
+        } else if zz_body.contains_key(k) {
+            "ZZ-BODY"
+        } else if KNOWN_CODEGEN_GAPS.iter().any(|(g, _)| g == k) {
+            "GAP"
+        } else {
+            "UNSUPPORTED"
+        };
+        lines.push(format!("{cls}\t{k}"));
+    }
+    lines.sort();
+    println!("class\tfunc");
+    for l in lines {
+        println!("{l}");
+    }
+    eprintln!("census: {} func keys total", funcs.len());
 }

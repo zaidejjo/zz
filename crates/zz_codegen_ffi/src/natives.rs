@@ -167,6 +167,7 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "math.rand_range" | "std.math.rand_range" => Some("zz_math_rand_range"),
         "math.dot_product" | "std.math.dot_product" => Some("zz_math_dot_product"),
         "math.magnitude" | "std.math.magnitude" => Some("zz_math_magnitude"),
+        "math.matrix_mul" | "std.math.matrix_mul" => Some("zz_math_matrix_mul"),
         // json
         "json.parse" | "std.json.parse" => Some("zz_json_parse"),
         "json.stringify" | "std.json.stringify" => Some("zz_json_stringify"),

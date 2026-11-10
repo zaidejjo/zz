@@ -8684,10 +8684,133 @@ zz_value zz_math_magnitude(zz_value v, int *err) {
 }
 
 // math.matrix_mul(m1, m2) → .ok(array) or .err(str)
+// Mirrors the VM implementation: both args are arrays of arrays of
+// numbers; result is an array of arrays of float.
 zz_value zz_math_matrix_mul(zz_value m1, zz_value m2, int *err) {
-    (void)err;
-    (void)m1; (void)m2;
-    return zz_variant_err(zz_str_static("matrix_mul: not yet implemented in native"));
+    if (m1.tag != ZZ_ARRAY || m2.tag != ZZ_ARRAY || !m1.arr || !m2.arr)
+        return zz_variant_err(zz_str_static("matrix_mul: expected two matrices"));
+
+    size_t rows1 = m1.arr->len;
+    if (rows1 == 0) return zz_variant_err(zz_str_static("matrix_mul: empty matrix"));
+
+    // Parse m1 into a rows1 x cols1 double buffer; validate rectangular shape.
+    double **a = (double **)calloc(rows1, sizeof(double *));
+    if (!a) return zz_variant_err(zz_str_static("matrix_mul: out of memory"));
+    size_t cols1 = 0;
+    for (size_t i = 0; i < rows1; i++) {
+        zz_value row = m1.arr->items[i];
+        if (row.tag != ZZ_ARRAY || !row.arr) {
+            for (size_t j = 0; j < i; j++) free(a[j]);
+            free(a);
+            return zz_variant_err(zz_str_static("matrix_mul: expected a matrix (array of arrays)"));
+        }
+        if (i == 0) cols1 = row.arr->len;
+        else if (row.arr->len != cols1) {
+            for (size_t j = 0; j < rows1; j++) free(a[j]);
+            free(a);
+            return zz_variant_err(zz_str_static("matrix_mul: ragged matrix"));
+        }
+        a[i] = (double *)calloc(row.arr->len, sizeof(double));
+        if (!a[i]) {
+            for (size_t j = 0; j < rows1; j++) free(a[j]);
+            free(a);
+            return zz_variant_err(zz_str_static("matrix_mul: out of memory"));
+        }
+        for (size_t k = 0; k < row.arr->len; k++) {
+            zz_value v = row.arr->items[k];
+            a[i][k] = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
+        }
+    }
+
+    size_t rows2 = m2.arr->len;
+    if (rows2 == 0) {
+        for (size_t i = 0; i < rows1; i++) free(a[i]);
+        free(a);
+        return zz_variant_err(zz_str_static("matrix_mul: empty matrix"));
+    }
+    // Read m2's first row to get cols2 for the dimension-mismatch message.
+    zz_value m2_first = m2.arr->items[0];
+    size_t cols2 = 0;
+    if (m2_first.tag == ZZ_ARRAY && m2_first.arr) cols2 = m2_first.arr->len;
+    if (cols1 != rows2) {
+        for (size_t i = 0; i < rows1; i++) free(a[i]);
+        free(a);
+        // Match VM: "matrix_mul: dimension mismatch (RxC) * (RxC)"
+        char msg[128];
+        snprintf(msg, sizeof(msg), "matrix_mul: dimension mismatch (%zux%zu) * (%zux%zu)", rows1, cols1, rows2, cols2);
+        return zz_variant_err(zz_str_new(msg, strlen(msg)));
+    }
+
+    // Parse m2 into a rows2 x cols2 double buffer.
+    double **b = (double **)calloc(rows2, sizeof(double *));
+    if (!b) {
+        for (size_t i = 0; i < rows1; i++) free(a[i]);
+        free(a);
+        return zz_variant_err(zz_str_static("matrix_mul: out of memory"));
+    }
+    for (size_t i = 0; i < rows2; i++) {
+        zz_value row = m2.arr->items[i];
+        if (row.tag != ZZ_ARRAY || !row.arr) {
+            for (size_t j = 0; j < rows1; j++) free(a[j]);
+            free(a);
+            for (size_t j = 0; j < i; j++) free(b[j]);
+            free(b);
+            return zz_variant_err(zz_str_static("matrix_mul: expected a matrix (array of arrays)"));
+        }
+        if (i == 0) cols2 = row.arr->len;
+        else if (row.arr->len != cols2) {
+            for (size_t j = 0; j < rows1; j++) free(a[j]);
+            free(a);
+            for (size_t j = 0; j < rows2; j++) free(b[j]);
+            free(b);
+            return zz_variant_err(zz_str_static("matrix_mul: ragged matrix"));
+        }
+        b[i] = (double *)calloc(row.arr->len, sizeof(double));
+        if (!b[i]) {
+            for (size_t j = 0; j < rows1; j++) free(a[j]);
+            free(a);
+            for (size_t j = 0; j < rows2; j++) free(b[j]);
+            free(b);
+            return zz_variant_err(zz_str_static("matrix_mul: out of memory"));
+        }
+        for (size_t k = 0; k < row.arr->len; k++) {
+            zz_value v = row.arr->items[k];
+            b[i][k] = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
+        }
+    }
+
+    // Compute result = a * b: rows1 x cols2
+    zz_value result = zz_array_new_sized(rows1);
+    if (result.tag != ZZ_ARRAY || !result.arr) {
+        for (size_t i = 0; i < rows1; i++) free(a[i]);
+        free(a);
+        for (size_t i = 0; i < rows2; i++) free(b[i]);
+        free(b);
+        return zz_variant_err(zz_str_static("matrix_mul: out of memory"));
+    }
+    for (size_t i = 0; i < rows1; i++) {
+        zz_value row = zz_array_new_sized(cols2);
+        if (row.tag != ZZ_ARRAY || !row.arr) {
+            for (size_t j = 0; j < rows1; j++) free(a[j]);
+            free(a);
+            for (size_t j = 0; j < rows2; j++) free(b[j]);
+            free(b);
+            return zz_variant_err(zz_str_static("matrix_mul: out of memory"));
+        }
+        for (size_t j = 0; j < cols2; j++) {
+            double sum = 0.0;
+            for (size_t k = 0; k < cols1; k++) sum += a[i][k] * b[k][j];
+            zz_array_push(row.arr, (zz_value){ZZ_FLOAT, {.f = sum}});
+        }
+        zz_array_push(result.arr, row);
+    }
+
+    for (size_t i = 0; i < rows1; i++) free(a[i]);
+    free(a);
+    for (size_t i = 0; i < rows2; i++) free(b[i]);
+    free(b);
+
+    return zz_variant_ok(result);
 }
 
 // env.get(name) — returns .some(val) or .none
