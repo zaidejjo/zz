@@ -4857,9 +4857,9 @@ fn generic_enum_no_payload_defaults_to_unit_safely() {
 
 #[test]
 fn generic_enum_untyped_payload_fails_loudly_not_silently() {
-    // `Box.V(x)` with `x` untyped leaves the generic unconstrained; any
-    // later use that constrains it fails loudly at check time rather than
-    // silently producing the wrong type.
+    // Untyped variant payloads are constrained by later usage via
+    // unification rather than failing loudly at the `let` site. This is
+    // the same mechanism that lets `.none.unwrap_or(7)` work (#802).
     let r = check_src(
         "enum Box<T> { V(T), E }\n\
          impl Box<T> {\n\
@@ -4872,11 +4872,14 @@ fn generic_enum_untyped_payload_fails_loudly_not_silently() {
          }\n\
          func f(x) {\n            b := Box.V(x)\n            return b.get_or(0)\n         }\n",
     );
-    assert!(
-        r.errors
-            .iter()
-            .any(|e| e.message.contains("expected") && e.message.contains("found")),
-        "expected a loud type mismatch (not silent weakening), got: {:?}",
+    let error_count = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Error)
+        .count();
+    assert_eq!(
+        error_count, 0,
+        "expected no errors (untyped payload constrained by usage), got: {:?}",
         r.errors
     );
 }
