@@ -11,7 +11,7 @@ use std::collections::HashSet;
 
 use zz_frontend::ast::{Expr, ImportItem, Pattern, Stmt};
 
-use zz_codegen_types::mangle;
+use zz_codegen_types::{demangle, mangle};
 
 /// Extract the creation counter from a C identifier for scope tracking.
 /// Plain locals are `vN`; owner-cell derefs are `(*_cellN)`; green frame
@@ -1640,7 +1640,10 @@ impl Lowerer {
         ctype
             .strip_prefix("zz_struct_")?
             .strip_suffix(" *")
-            .map(|s| s.to_string())
+            // `ctype` carries the mangled identifier; callers feed the result
+            // back through `struct_c_type`/`mangle`, so undo it here to avoid
+            // double-escaping (`mod__X` → `mod____X`).
+            .map(demangle)
     }
 
     /// If `ctype` is a flat scalar array pointer (`int64_t *`, `double *`,
