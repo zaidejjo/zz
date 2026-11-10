@@ -574,7 +574,9 @@ impl Lowerer {
                         && names.lookup_type(&name.name) == Some(ctype.as_str())
                         && names.is_in_current_scope(&name.name);
                     if is_redecl {
-                        let cid = names.lookup(&name.name).unwrap();
+                        // `is_redecl` (above) guarantees `lookup` is Some;
+                        // `unwrap_or` avoids a panic on the unreachable path.
+                        let cid = names.lookup(&name.name).unwrap_or("");
                         out.push_str(&format!("    {cid} = {final_val};\n"));
                     } else {
                         let cid = if matches!(ctype.as_str(), "int64_t" | "double" | "bool") {
@@ -1039,16 +1041,22 @@ impl Lowerer {
                                                 let mut tmps = vec![base_cid];
                                                 for f in &chain[..chain.len() - 1] {
                                                     let tmp = names.fresh("_sobj");
-                                                    let parent = tmps.last().cloned().unwrap();
+                                                    // `tmps` is seeded with `base_cid`, so `last()` is
+                                                    // always Some; `unwrap_or_default` avoids a panic.
+                                                    let parent =
+                                                        tmps.last().cloned().unwrap_or_default();
                                                     out.push_str(&format!(
                                                         "    zz_value {tmp} = zz_object_get_field(&{parent}, \"{f}\");\n"
                                                     ));
                                                     tmps.push(tmp);
                                                 }
-                                                let leaf_parent = tmps.last().cloned().unwrap();
+                                                // `tmps` is non-empty here; `unwrap_or_default` avoids a panic.
+                                                let leaf_parent =
+                                                    tmps.last().cloned().unwrap_or_default();
+                                                let leaf_field =
+                                                    chain.last().map(String::as_str).unwrap_or("");
                                                 out.push_str(&format!(
-                                                    "    zz_object_set_field(&{leaf_parent}, \"{}\", {boxed});\n",
-                                                    chain.last().unwrap()
+                                                    "    zz_object_set_field(&{leaf_parent}, \"{leaf_field}\", {boxed});\n",
                                                 ));
                                                 for (i, f) in chain[..chain.len() - 1]
                                                     .iter()
@@ -2158,10 +2166,10 @@ impl Lowerer {
                                         || ctype == "int64_t *"
                                         || ctype == "double *"
                                     {
-                                        let arr_cid = names.lookup(arr_name).unwrap().to_string();
+                                        let arr_cid = names.lookup(arr_name).map(str::to_string);
                                         let elem_ctype =
                                             ctype.strip_suffix(" *").unwrap_or(ctype).to_string();
-                                        Some((arr_cid, elem_ctype))
+                                        arr_cid.map(|c| (c, elem_ctype))
                                     } else {
                                         None
                                     }
@@ -3236,6 +3244,27 @@ impl Lowerer {
                         .or_insert(index);
                 }
             }
+            // A dotted path (`a.len()`, `std.str.length`) reads its first
+            // segment when that segment names a local variable (e.g. a method
+            // call on a local). Record it as a use so the dead-variable
+            // release analysis doesn't free the variable too early.
+            // Non-variable segments (module namespaces, type names) are
+            // filtered out by `emit_dead_releases` via `names.lookup`.
+            Expr::Path { parts, .. } => {
+                for part in parts {
+                    if in_nested {
+                        max_nested
+                            .entry(part.clone())
+                            .and_modify(|v| *v = (*v).max(index))
+                            .or_insert(index);
+                    } else {
+                        last_top_level
+                            .entry(part.clone())
+                            .and_modify(|v| *v = (*v).max(index))
+                            .or_insert(index);
+                    }
+                }
+            }
             Expr::Block(block) => {
                 self.collect_block_uses(block, index, last_top_level, max_nested);
             }
@@ -3355,6 +3384,14 @@ impl Lowerer {
             // releasing. Scalars (int64_t/double/bool) and raw structs
             // (zz_struct_*) are Copy and must not be released.
             if ty != "zz_value" {
+                continue;
+            }
+            // Function-scope zz_value locals already carry a
+            // `cleanup(zz_release)` attribute that releases them at end of
+            // scope. Releasing here too would double-free. Loop-body locals
+            // (depth > 0) have no cleanup attribute and rely on dead-release
+            // plus `loop_scope_end`, so they are still released here.
+            if self.loop_scope_depth.get() == 0 {
                 continue;
             }
             out.push_str(&format!("    zz_release(&{});\n", cid));
