@@ -1636,8 +1636,10 @@ impl Lowerer {
                     if sname.is_some() {
                         let arr_cid = names.lookup(&arr_name).unwrap().to_string();
                         let idx_raw = self.flat_index_expr(index, names, out);
-                        let field_ctype =
-                            self.field_type_from_struct(&format!("zz_struct_{}", sname), name);
+                        let field_ctype = self.field_type_from_struct(
+                            &format!("zz_struct_{}", sname.as_deref().unwrap_or("")),
+                            name,
+                        );
                         let raw = format!("({arr_cid})[{idx_raw}].{name}");
                         return auto_box(&raw, field_ctype);
                     }
