@@ -21,6 +21,10 @@ static char *text_invalid_json(const char *inner) {
     size_t il = strlen(inner);
     static const char prefix[] = "invalid JSON: ";
     size_t pl = sizeof(prefix) - 1;
+    if (il > SIZE_MAX - pl - 1) {
+        fprintf(stderr, "zz error: JSON error message overflow\n");
+        exit(1);
+    }
     char *out = (char *)malloc(pl + il + 1);
     memcpy(out, prefix, pl);
     memcpy(out + pl, inner, il);
