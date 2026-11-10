@@ -791,6 +791,18 @@ e2e_success_test!(
     "regression",
     "struct_method_self_mutation.zz"
 );
+// GH#796: string concatenation must guard len_a + len_b against overflow.
+e2e_success_test!(
+    e2e_regression_str_concat_overflow,
+    "regression",
+    "str_concat_overflow_test.zz"
+);
+// GH#794/795: array push growth null-checks and cap*2 overflow guard.
+e2e_success_test!(
+    e2e_regression_array_push_growth,
+    "regression",
+    "array_push_growth_test.zz"
+);
 e2e_success_test!(
     e2e_syntax_method_shadow_free,
     "syntax",

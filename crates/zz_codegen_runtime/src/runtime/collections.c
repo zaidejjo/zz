@@ -312,7 +312,15 @@ void zz_array_reserve(zz_value arr, size_t additional, int *err) {
 
 void zz_array_push(zz_array *a, zz_value item) {
     if (a->len == a->cap) {
-        size_t nc = a->cap == 0 ? 4 : a->cap * 2;
+        size_t nc;
+        if (a->cap == 0) {
+            nc = 4;
+        } else if (a->cap > SIZE_MAX / 2) {
+            fprintf(stderr, "zz error: array capacity overflow\n");
+            exit(1);
+        } else {
+            nc = a->cap * 2;
+        }
         // Stack/lit/arena arrays need migration to malloc before realloc
         // (realloc on arena/stack memory corrupts the heap — SIGSEGV
         // class; ARENA_MAGIC was missing here while zz_vec_append
@@ -332,6 +340,10 @@ void zz_array_push(zz_array *a, zz_value item) {
             if (a->refs != 1) a->refs = 0;
         } else {
             a->items = (zz_value *)realloc(a->items, nc * sizeof(zz_value));
+            if (!a->items) {
+                fprintf(stderr, "zz: out of memory\n");
+                exit(1);
+            }
         }
         a->cap = nc;
     }
@@ -1213,10 +1225,19 @@ zz_value zz_vec_push(zz_value arr, zz_value item, int *err) {
     zz_value out = zz_array_dup(arr.arr);
     zz_array *a = out.arr;
     if (a->len >= a->cap) {
-        size_t new_cap = a->cap ? a->cap * 2 : 8;
+        size_t new_cap;
+        if (a->cap == 0) {
+            new_cap = 8;
+        } else if (a->cap > SIZE_MAX / 2) {
+            if (err) *err = 1;
+            return zz_unit();
+        } else {
+            new_cap = a->cap * 2;
+        }
         if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_STACK_MAGIC
             || a->refs == ZZ_ARRAY_ARENA_MAGIC || a->items == NULL) {
             zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
+            if (!new_items) { if (err) *err = 1; return zz_unit(); }
             for (size_t i = 0; i < a->len; i++) {
                 new_items[i] = a->items[i];
             }
@@ -1231,6 +1252,7 @@ zz_value zz_vec_push(zz_value arr, zz_value item, int *err) {
             if (a->refs != 1) a->refs = 0;
         } else {
             a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));
+            if (!a->items) { if (err) *err = 1; return zz_unit(); }
         }
         a->cap = new_cap;
     }
@@ -1364,16 +1386,26 @@ zz_value zz_vec_insert(zz_value arr, zz_value idx, zz_value item, int *err) {
     zz_value out = zz_array_dup(arr.arr);
     zz_array *o = out.arr;
     if (o->len >= o->cap) {
-        size_t new_cap = o->cap ? o->cap * 2 : 8;
+        size_t new_cap;
+        if (o->cap == 0) {
+            new_cap = 8;
+        } else if (o->cap > SIZE_MAX / 2) {
+            if (err) *err = 1;
+            return zz_unit();
+        } else {
+            new_cap = o->cap * 2;
+        }
         if (o->refs == ZZ_ARRAY_STACK_MAGIC || o->refs == ZZ_ARRAY_LIT_MAGIC
             || o->refs == ZZ_ARRAY_ARENA_MAGIC || o->items == NULL) {
             zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
+            if (!new_items) { if (err) *err = 1; return zz_unit(); }
             for (size_t j = 0; j < o->len; j++) new_items[j] = o->items[j];
             o->items = new_items;
             // Preserve `refs == 1` (see `zz_array_push`).
             if (o->refs != 1) o->refs = 0;
         } else {
             o->items = (zz_value *)realloc(o->items, new_cap * sizeof(zz_value));
+            if (!o->items) { if (err) *err = 1; return zz_unit(); }
         }
         o->cap = new_cap;
     }

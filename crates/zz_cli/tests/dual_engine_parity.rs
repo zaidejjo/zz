@@ -1087,6 +1087,18 @@ parity_strict!(
     "regression",
     "block_local_no_clobber.zz"
 );
+// GH#796: string concatenation must guard len_a + len_b against overflow.
+parity_strict!(
+    parity_regression_str_concat_overflow,
+    "regression",
+    "str_concat_overflow_test.zz"
+);
+// GH#794/795: array push growth null-checks and cap*2 overflow guard.
+parity_strict!(
+    parity_regression_array_push_growth,
+    "regression",
+    "array_push_growth_test.zz"
+);
 // M0 edge corpus: strict-parity probes (both engines agree).
 parity_strict!(
     parity_regression_edge_shift_mask,

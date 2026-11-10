@@ -306,6 +306,10 @@ zz_value zz_binop(int op, zz_value a, zz_value b) {
     // string ops
     if (a.tag == ZZ_STR && b.tag == ZZ_STR) {
         if (op == ZZOP_ADD) {
+            if (a.s->len > SIZE_MAX - b.s->len) {
+                fprintf(stderr, "zz error: string concatenation overflow\n");
+                exit(1);
+            }
             zz_str *out = str_alloc(a.s->len + b.s->len);
             memcpy(zz_str_ptr(out), zz_str_cptr(a.s), a.s->len);
             memcpy(zz_str_ptr(out) + a.s->len, zz_str_cptr(b.s), b.s->len);
@@ -1010,6 +1014,11 @@ zz_value zz_fail(zz_value v, int *err) {
     if (zz_current_task) {
         size_t s_len = strlen(s);
         char *fail_s = malloc(s_len + 7);
+        if (!fail_s) {
+            free(s);
+            fprintf(stderr, "zz: out of memory\n");
+            exit(1);
+        }
         memcpy(fail_s, "fail: ", 6);
         memcpy(fail_s + 6, s, s_len);
         fail_s[s_len + 6] = '\0';
