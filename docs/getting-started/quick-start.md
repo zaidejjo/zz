@@ -91,6 +91,7 @@ Then `curl http://localhost:8080/` and `curl http://localhost:8080/users/42`.
 zz check hello.zz   # type-check, rich errors + suggestions
 zz fmt hello.zz     # format in place
 zz eval "1 + 2"     # quick eval, prints 3
+zz explain Z0002    # explain a type-mismatch error code
 zz test             # run @test functions (uses ./tests/ if present, else .)
 ```
 

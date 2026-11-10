@@ -2259,7 +2259,19 @@ impl TypeCheckOps for Checker {
     fn param_mismatch_notes(param_names: &[String], ps: &[Type], i: usize) -> Vec<String> {
         match (param_names.get(i), ps.get(i)) {
             (Some(name), Some(ty)) => {
-                vec![format!("parameter `{name}` expects `{ty}`")]
+                let mut notes = vec![format!("parameter `{name}` expects `{ty}`")];
+                // Show the full expected signature so callers using named
+                // arguments can see every parameter at once (#713).
+                if ps.len() > 1 {
+                    let sig: String = param_names
+                        .iter()
+                        .zip(ps.iter())
+                        .map(|(n, t)| format!("{n}: {t}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    notes.push(format!("expected signature: {sig}"));
+                }
+                notes
             }
             _ => Vec::new(),
         }

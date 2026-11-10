@@ -95,6 +95,27 @@ structs, arrays, and other enums. A call to a plain function that
 returns an enum is always a call, never construction — even when the
 enum is declared first in the file.
 
+### Union Types
+
+ZZ supports union types written as `A | B | C`. A value of a union
+type is one of the member types; the checker tracks the union statically
+and method/field access resolves against the members. Unions are used in
+closure parameter types and delimited type positions (`(A | B)`,
+`<A | B>`, `[A | B]`).
+
+```zz
+func print_id(x: int | str) -> str {
+    return match x {
+        // match exhaustiveness covers the union members
+    }
+}
+```
+
+Union members must be named explicitly — a bare `Box` for a generic
+type is an error, as is the wrong argument count. The `|` operator in
+type position is distinct from bitwise-or `|` in expression position;
+the parser disambiguates by context.
+
 ## Type Inference Rules
 
 ### Short Declaration (`:=`)

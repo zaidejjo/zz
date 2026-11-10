@@ -236,6 +236,34 @@ pub(crate) fn check_call_print_builtin(
         ));
         checker.errors.push(diag);
     }
+    // #713: print/println does not take named arguments. ZZ interpolates with
+    // `{name}` inside the string instead:
+    //   println("{path}\t{size}", path=path, size=size)   // wrong
+    //   println("path={path} size={size}")                  // right
+    if !named.is_empty() {
+        let names: Vec<String> = named.iter().map(|(ident, _)| ident.name.clone()).collect();
+        let mut diag = error_at(
+            format!(
+                "`{name}` does not take named arguments; interpolate with `{{name}}` instead",
+                name = name
+            ),
+            named
+                .first()
+                .map(|(ident, _)| ident.span)
+                .unwrap_or(Span::new(0, 0)),
+        );
+        diag = diag.with_note(format!(
+            "use `{}={{{}}}` inside the string, e.g. `println(\"{}\")`",
+            names.join(", "),
+            names[0],
+            names
+                .iter()
+                .map(|n| format!("{n}={{{n}}}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+        checker.errors.push(diag);
+    }
     Some(Type::Unit)
 }
 

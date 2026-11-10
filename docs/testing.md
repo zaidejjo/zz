@@ -37,6 +37,9 @@ func setup_module() { }
 
 @teardown
 func teardown_module() { }
+
+@bench
+func bench_addition() { let x = 1 + 1; }
 ```
 
 Metadata flags (`@test(...)` named args only):
@@ -54,6 +57,8 @@ Metadata flags (`@test(...)` named args only):
 `@setup` / `@teardown` run with guaranteed cleanup even on failure/panic (defer-style). Module-level and per-test setup/teardown are supported. Validate at compile time; `should_panic + retry` together errors.
 
 `cases` requires array literal with literal elements; non-literal errors at compile time. Expansion happens at HIR build — each entry reports individually.
+
+`@bench` marks a function as a benchmark, run with `zz bench <file|dir>` (see `docs/bench.md`). Benchmark functions take no arguments and return nothing.
 
 ## Doc-tests
 
