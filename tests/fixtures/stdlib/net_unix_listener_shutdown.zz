@@ -1,0 +1,31 @@
+// features: imports, match, option-result, print, std-net, string-literal
+// platform: unix
+// tests/fixtures/stdlib/net_unix_listener_shutdown.zz — Unix listener shutdown C twin.
+// Create a unix listener, shut it down, verify .ok(true) on VM and AOT.
+import std.net
+
+func main() -> Result<int, str> {
+    sock := "/tmp/zz_unix_shutdown.sock"
+
+    l := net.unix_listen(sock)
+    match l {
+        .ok(h) => {
+            println("unix_listen_ok")
+            r := net.unix_listener_close(h)
+            match r {
+                .ok(v) => {
+                    println("unix_listener_shutdown_ok: {v}")
+                }
+                .err(e) => {
+                    println("unix_listener_shutdown_err: {e}")
+                }
+            }
+        }
+        .err(e) => {
+            println("unix_listen_err: {e}")
+        }
+    }
+
+    println("net_unix_listener_shutdown_ok")
+    return .ok(0)
+}

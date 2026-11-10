@@ -207,6 +207,14 @@ pub const EXCLUDED: &[(&str, &str)] = &[
         "stdlib/net_unix_test.zz",
         "binds socket files (collide in batch)",
     ),
+    (
+        "stdlib/net_tls_listener_shutdown.zz",
+        "binds TLS socket (collide in batch)",
+    ),
+    (
+        "stdlib/net_unix_listener_shutdown.zz",
+        "binds socket file (collide in batch)",
+    ),
     ("stdlib/input_chained.zz", "needs .stdin (shared in batch)"),
     (
         "stdlib/http_request_response.zz",

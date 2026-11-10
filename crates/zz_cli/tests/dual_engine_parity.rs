@@ -1682,6 +1682,16 @@ parity_strict!(
 );
 parity_strict!(parity_stdlib_net_tls_test, "stdlib", "net_tls_test.zz");
 parity_strict!(parity_stdlib_net_unix_test, "stdlib", "net_unix_test.zz");
+parity_strict!(
+    parity_stdlib_net_tls_listener_shutdown,
+    "stdlib",
+    "net_tls_listener_shutdown.zz"
+);
+parity_strict!(
+    parity_stdlib_net_unix_listener_shutdown,
+    "stdlib",
+    "net_unix_listener_shutdown.zz"
+);
 parity_strict!(parity_stdlib_cell_test, "stdlib", "cell_test.zz");
 parity_strict!(
     parity_stdlib_option_result_unwrap_test,
