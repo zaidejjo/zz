@@ -1478,6 +1478,7 @@ zz_value zz_binop_cat_arena(zz_value a, zz_value b, zz_arena *arena) {
         out->refs = 0;      // arena sentinel
         out->interned = 0;
         out->len = need;
+        out->charlen = ZZ_STR_CHARLEN_UNKNOWN; // not yet scanned; len() must rescan
         if (need <= ZZ_SSO_MAX) {
             out->cap = 0;
             memcpy(out->sso, pa, la);
