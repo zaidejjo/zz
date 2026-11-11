@@ -27,8 +27,8 @@ pub use chunk::{build_module as build_chunk_module, coverage as chunk_coverage, 
 pub use compile::{
     build_options_fingerprint, build_options_fingerprint_with, compile_and_run,
     compile_and_run_for_target, detect_clang, detect_clang_with, emit_c_plus_script, host_triple,
-    is_macos_target, is_windows_target, validate, BuildError, BuildOptions, Clang, ClangProvider,
-    EmbedAsset, PgoMode,
+    is_macos_target, is_windows_target, sanitize_list, validate, BuildError, BuildOptions, Clang,
+    ClangProvider, EmbedAsset, PgoMode,
 };
 pub use ffi::{ffi_decl, ffi_impl, native_impl, native_supported, FfiError, FFI_VERSION};
 pub use zz_codegen_runtime::{C_BUILD_VERSION, RUNTIME_C, RUNTIME_H, RUNTIME_SRC_HASH};

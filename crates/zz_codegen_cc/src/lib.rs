@@ -458,7 +458,15 @@ fn is_foreign_target(target: &str) -> bool {
 /// - `--pgo` + foreign `--target` → [`BuildError::PgoCross`].
 /// - `--static` on a macOS target (or macOS host without `--target`) →
 ///   [`BuildError::StaticMacos`].
-pub fn validate(opts: &BuildOptions, target: Option<&str>) -> Result<(), BuildError> {
+/// - `ZZ_SANITIZE` with `--static`, `--full` (full LTO), or `zig cc`
+///   provider → [`BuildError::SanitizerUnsupported`] (ASan/UBSan link
+///   against unresolved runtime symbols in those modes; `--dynamic`/thin
+///   LTO + `clang` works).
+pub fn validate(
+    opts: &BuildOptions,
+    target: Option<&str>,
+    provider: ClangProvider,
+) -> Result<(), BuildError> {
     if opts.pgo != PgoMode::None {
         if let Some(t) = target {
             if is_foreign_target(t) {
@@ -475,6 +483,34 @@ pub fn validate(opts: &BuildOptions, target: Option<&str>) -> Result<(), BuildEr
         };
         if macos {
             return Err(BuildError::StaticMacos);
+        }
+    }
+    // Sanitizers: static linking and full LTO each discard/omit the ASan
+    // module-ctor runtimes the instrumented program needs, and `zig cc`
+    // ships its own LLVM ASan build that mismatches clang's headers.
+    if !sanitize_list().is_empty() {
+        if opts.static_link {
+            return Err(BuildError::SanitizerUnsupported {
+                reason: "static linking discards the instrumented ASan/UBSan \
+                         runtime modules; use --dynamic instead"
+                    .to_string(),
+            });
+        }
+        if opts.full_lto {
+            return Err(BuildError::SanitizerUnsupported {
+                reason: "full LTO discards the ASan/UBSan module-ctor \
+                         sections; use --release (thin LTO) or --dynamic \
+                         instead"
+                    .to_string(),
+            });
+        }
+        if matches!(provider, ClangProvider::Zig) {
+            return Err(BuildError::SanitizerUnsupported {
+                reason: "zig cc bundles its own LLVM/ASan build which \
+                         mismatches clang's sanitizer headers; use --cc clang \
+                         instead"
+                    .to_string(),
+            });
         }
     }
     Ok(())
@@ -706,7 +742,12 @@ pub fn build_with(
     target: Option<&str>,
     clang: &Clang,
 ) -> Result<Clang, BuildError> {
-    validate(&opts, target)?;
+    let provider = if clang.zig {
+        ClangProvider::Zig
+    } else {
+        ClangProvider::Clang
+    };
+    validate(&opts, target, provider)?;
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -1161,7 +1202,12 @@ pub fn compile_units_with_sink(
     clang: &Clang,
     sink: &dyn CodegenSink,
 ) -> Result<Clang, BuildError> {
-    validate(opts, target)?;
+    let provider = if clang.zig {
+        ClangProvider::Zig
+    } else {
+        ClangProvider::Clang
+    };
+    validate(opts, target, provider)?;
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -1788,23 +1834,34 @@ mod tests {
         } else {
             "aarch64-unknown-linux-gnu"
         };
-        let err = validate(&BuildOptions::pgo_generate(), Some(foreign)).unwrap_err();
+        let err = validate(
+            &BuildOptions::pgo_generate(),
+            Some(foreign),
+            ClangProvider::Any,
+        )
+        .unwrap_err();
         assert_eq!(
             err.to_string(),
             "Error: --pgo requires a native build target"
         );
         // Same-triple-as-host explicit --target is native → allowed.
-        assert!(validate(&BuildOptions::pgo_generate(), Some(&host)).is_ok());
+        assert!(validate(
+            &BuildOptions::pgo_generate(),
+            Some(&host),
+            ClangProvider::Any
+        )
+        .is_ok());
         // No target at all → allowed.
-        assert!(validate(&BuildOptions::pgo_generate(), None).is_ok());
+        assert!(validate(&BuildOptions::pgo_generate(), None, ClangProvider::Any).is_ok());
         // Non-PGO builds never trip the guard.
-        assert!(validate(&release_opts(), Some(foreign)).is_ok());
+        assert!(validate(&release_opts(), Some(foreign), ClangProvider::Any).is_ok());
     }
 
     #[test]
     fn static_macos_rejected() {
         for t in ["x86_64-apple-darwin", "aarch64-apple-darwin"] {
-            let err = validate(&BuildOptions::static_lto(), Some(t)).unwrap_err();
+            let err =
+                validate(&BuildOptions::static_lto(), Some(t), ClangProvider::Any).unwrap_err();
             assert_eq!(
                 err.to_string(),
                 "Error: Static binaries are not supported on macOS targets"
@@ -1813,7 +1870,8 @@ mod tests {
         // Linux static is fine.
         assert!(validate(
             &BuildOptions::static_lto(),
-            Some("x86_64-unknown-linux-gnu")
+            Some("x86_64-unknown-linux-gnu"),
+            ClangProvider::Any,
         )
         .is_ok());
     }

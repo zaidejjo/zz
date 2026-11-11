@@ -2797,7 +2797,12 @@ impl Lowerer {
                 // Any boxed use site auto-boxes the raw value through the
                 // normal `auto_box` paths.
                 let elem_ctype_for_body = if raw_elem {
-                    format!("zz_struct_{}", elem_ctype)
+                    // `elem_ctype` is the demangled/dotted ZZ name (e.g.
+                    // `flat_arrays.Pt`) from `flat_array_from_ptr`; mangle it
+                    // to the real C typedef (`zz_struct_flat__arrays_Pt`) for
+                    // emission. Keep `elem_ctype` dotted: `box_raw_struct`
+                    // looks it up in `tp.structs` by un-mangled key below.
+                    format!("zz_struct_{}", mangle(&elem_ctype))
                 } else {
                     elem_ctype.to_string()
                 };
