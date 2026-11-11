@@ -1628,6 +1628,7 @@ parity_strict!(
 );
 parity_strict!(parity_syntax_string_build, "syntax", "string_build.zz");
 parity_strict!(parity_syntax_flat_arrays, "syntax", "flat_arrays.zz");
+parity_strict!(parity_syntax_flat_matrix, "syntax", "flat_matrix.zz");
 parity_strict!(parity_syntax_defer, "syntax", "defer.zz");
 parity_strict!(parity_syntax_dict_iteration, "syntax", "dict_iteration.zz");
 parity_strict!(parity_stdlib_vectors, "stdlib", "vectors.zz");

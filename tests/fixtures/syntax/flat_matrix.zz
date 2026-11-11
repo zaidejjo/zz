@@ -1,0 +1,35 @@
+// features: arrays, nested-index, for-loop, int-arith, locals, print
+// E2E: inferred nested arrays (`a := []` of inferred rows) lower to flat row
+// buffers; a row push snapshots the row, so mutating the row afterwards must
+// stay invisible through the outer array. Both engines must agree.
+
+func build(n: int) -> int {
+    a := []
+    for i in 0..n {
+        row := []
+        for j in 0..n {
+            row = vec.push(row, (i * n + j) % 97)
+        }
+        a = vec.push(a, row)
+        // `a` keeps the snapshot: this extra element only changes `row`.
+        row = vec.push(row, 7)
+    }
+    total := 0
+    for i in 0..n {
+        for j in 0..n {
+            total = total + a[i][j]
+        }
+    }
+    println(len(a))
+    println(total)
+    a[0][0] = 1000
+    println(a[0][0])
+    println(a[1][1])
+    return total
+}
+
+func main() {
+    t := build(6)
+    println(t)
+    println("flat_matrix_ok")
+}

@@ -426,6 +426,7 @@ e2e_success_test!(e2e_syntax_struct_access, "syntax", "struct_access.zz");
 e2e_success_test!(e2e_syntax_struct_debug_fwd, "syntax", "struct_debug_fwd.zz");
 e2e_success_test!(e2e_syntax_string_build, "syntax", "string_build.zz");
 e2e_success_test!(e2e_syntax_flat_arrays, "syntax", "flat_arrays.zz");
+e2e_success_test!(e2e_syntax_flat_matrix, "syntax", "flat_matrix.zz");
 e2e_success_test!(e2e_syntax_dicts, "syntax", "dicts.zz");
 e2e_success_test!(e2e_syntax_dict_eq_order, "syntax", "dict_eq_order.zz");
 e2e_success_test!(e2e_syntax_dicts_nonstr, "syntax", "dicts_nonstr.zz");

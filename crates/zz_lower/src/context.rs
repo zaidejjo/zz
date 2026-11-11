@@ -912,10 +912,23 @@ impl Lowerer {
         let Expr::Index { obj, .. } = e else {
             return None;
         };
-        let Expr::Ident { name, .. } = obj.as_ref() else {
-            return None;
+        let elem = match obj.as_ref() {
+            Expr::Ident { name, .. } => names.lookup_type(name)?.strip_suffix(" *")?,
+            // Nested flat rows: `rows[i][j]` lowers to a row-handle load plus a
+            // raw element read, then boxes it the same way a scalar flat read
+            // is boxed. Recover that raw text so arithmetic on matrix elements
+            // stays raw C instead of boxing through `zz_binop`.
+            Expr::Index { obj: root, .. } => {
+                let Expr::Ident { name, .. } = root.as_ref() else {
+                    return None;
+                };
+                if names.lookup_type(name)? != "zz_flat_row *" {
+                    return None;
+                }
+                names.flat_row_inner.get(name)?
+            }
+            _ => return None,
         };
-        let elem = names.lookup_type(name)?.strip_suffix(" *")?;
         let t: &'static str = match elem {
             "int64_t" => "int64_t",
             "double" => "double",
