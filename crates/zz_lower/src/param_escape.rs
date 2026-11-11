@@ -33,6 +33,7 @@ use std::collections::{HashMap, HashSet};
 
 use zz_checker::Type;
 use zz_frontend::ast::{Block, Expr, FmtPart, MatchArm, Pattern, Program, Stmt};
+use zz_frontend::move_elide::count_refs;
 
 /// Outcome of evaluating an expression: whether tainted storage escapes
 /// through it (calls into unknown code, captures, deferred runs), and
@@ -1165,11 +1166,93 @@ pub(crate) fn flat_array_locals(
             cand: &candidates,
             bad: &mut bad,
             escaping: false,
+            inferred_layout: false,
         };
         scan.block(block);
     }
     candidates.retain(|n, _| !bad.contains(n));
     candidates.into_keys().collect()
+}
+
+/// Use scan for arrays inferred from usage (untyped `name := []` declarations
+/// whose pushes reveal a flat element type).
+///
+/// This layout has no boxed fallback at any mention, so the scan is stricter
+/// than the typed contract in one direction (any plain mention disqualifies)
+/// and more permissive in another: the inferred layout implements
+/// `arr[i] = v` stores and the self-append assignment
+/// (`arr = vec.push(arr, x)` / `arr = arr.push(x)`), so those shapes are
+/// allowed here. `cand` maps each candidate to whether its element is a
+/// scalar (struct elements cannot be index-stored).
+///
+/// Returns the candidates with an unsupported mention; callers keep those
+/// boxed.
+pub(crate) fn untyped_flat_uses_ok(block: &Block, cand: &HashMap<String, bool>) -> HashSet<String> {
+    let mut bad: HashSet<String> = HashSet::new();
+    {
+        let mut scan = FlatUseScan {
+            cand,
+            bad: &mut bad,
+            escaping: false,
+            inferred_layout: true,
+        };
+        scan.block(block);
+    }
+    bad
+}
+
+/// Element expression of a self-append assignment
+/// `var = vec.push(var, e)` / `var = std.vec.push(var, e)` /
+/// `var = var.push(e)`.
+///
+/// Mirrors `zz_frontend::move_elide::classify_self_assign` so the scan never
+/// allows a shape the lowering cannot emit: no named arguments and exactly one
+/// reference to `var` (the receiver), which keeps the element from observing
+/// the moved-from slot.
+fn self_push_elem<'e>(var: &str, rhs: &'e Expr) -> Option<&'e Expr> {
+    let Expr::Call {
+        callee,
+        args,
+        named,
+        ..
+    } = rhs
+    else {
+        return None;
+    };
+    if !named.is_empty() {
+        return None;
+    }
+    // Exactly one reference to the array (the receiver): the lowering's
+    // take-before-store window is only sound when the element cannot
+    // observe the moved-from slot.
+    if count_refs(rhs, var) != 1 {
+        return None;
+    }
+    let fn_push = match callee.as_ref() {
+        Expr::Ident { name, .. } => name == "vec.push" || name == "std.vec.push",
+        Expr::Path { parts, .. } => {
+            matches!(parts.as_slice(), [m, p] if m == "vec" && p == "push")
+                || matches!(parts.as_slice(), [s, m, p] if s == "std" && m == "vec" && p == "push")
+        }
+        _ => false,
+    };
+    if fn_push && args.len() == 2 {
+        return match &args[0] {
+            Expr::Ident { name, .. } if name == var => Some(&args[1]),
+            _ => None,
+        };
+    }
+    let method_push = match callee.as_ref() {
+        Expr::Path { parts, .. } => parts.len() == 2 && parts[0] == var && parts[1] == "push",
+        Expr::Field { obj, name, .. } => {
+            name == "push" && matches!(obj.as_ref(), Expr::Ident { name: n, .. } if n == var)
+        }
+        _ => false,
+    };
+    if method_push && args.len() == 1 {
+        return Some(&args[0]);
+    }
+    None
 }
 
 /// Program-wide version of [`flat_array_locals`] for module-level arrays:
@@ -1235,6 +1318,7 @@ pub(crate) fn flat_global_arrays(
             cand: &candidates,
             bad: &mut bad,
             escaping: false,
+            inferred_layout: false,
         };
         for stmt in &program.stmts {
             match stmt {
@@ -1261,6 +1345,11 @@ struct FlatUseScan<'a> {
     cand: &'a HashMap<String, bool>,
     bad: &'a mut HashSet<String>,
     escaping: bool,
+    /// Enable the shapes only the inferred layout implements: `arr[i] = v`
+    /// stores (scalar elements only) and the self-append assignment. The
+    /// typed [`flat_array_locals`] contract keeps this off; see
+    /// [`untyped_flat_uses_ok`].
+    inferred_layout: bool,
 }
 
 impl<'a> FlatUseScan<'a> {
@@ -1358,9 +1447,44 @@ impl<'a> FlatUseScan<'a> {
                     self.poison_expr(v);
                 }
             }
-            Stmt::Assign { target, value, .. } | Stmt::CompoundAssign { target, value, .. } => {
-                // Stores (including `arr[i] = v`) are not implemented on
-                // the flat layout: the target is a poison position.
+            Stmt::Assign { target, value, .. } => {
+                // Self-append (`arr = vec.push(arr, x)` / `arr = arr.push(x)`):
+                // implemented only by the inferred layout, where the whole
+                // assignment lowers inline — scan just the element (it must
+                // not mention the array; the take precedes the store).
+                if self.inferred_layout && !self.escaping {
+                    if let Expr::Ident { name, .. } = target {
+                        if self.is_cand(name) {
+                            if let Some(elem) = self_push_elem(name, value) {
+                                self.expr(elem);
+                                return;
+                            }
+                        }
+                    }
+                }
+                // `arr[i] = v` (scalar flat elements): implemented as a direct
+                // buffer store, so the base is consumed and only the index and
+                // the value need scanning. Struct elements have no flat store
+                // yet, hence the scalar check.
+                if self.inferred_layout && !self.escaping {
+                    if let Expr::Index { obj, index, .. } = target {
+                        if let Expr::Ident { name, .. } = obj.as_ref() {
+                            if self.is_scalar_cand(name) {
+                                self.expr(index);
+                                self.expr(value);
+                                return;
+                            }
+                        }
+                    }
+                }
+                // Any other store (`b = arr`, `arr = other`, `arr += x`, …) is
+                // not implemented on the flat layout: the target is a poison
+                // position.
+                self.poison_expr(target);
+                self.expr(value);
+            }
+            Stmt::CompoundAssign { target, value, .. } => {
+                // Compounds are not implemented on the flat layout.
                 self.poison_expr(target);
                 self.expr(value);
             }
@@ -1731,6 +1855,31 @@ mod tests {
         flat_names_with(src, &|_| false)
     }
 
+    /// `untyped_flat_uses_ok` over the parsed `main` body of `src`, with
+    /// `cand` naming the inferred candidates (name, is-scalar-element).
+    fn untyped_bad(src: &str, cand: &[(&str, bool)]) -> HashSet<String> {
+        let parsed = zz_frontend::parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let body = parsed
+            .program
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                Stmt::Func { name, body, .. } if name.join(".") == "main" => Some(body),
+                _ => None,
+            })
+            .expect("main body");
+        let map: HashMap<String, bool> = cand
+            .iter()
+            .map(|(name, scalar)| (name.to_string(), *scalar))
+            .collect();
+        untyped_flat_uses_ok(body, &map)
+    }
+
     /// `flat_global_arrays` over a parsed program (bare globals only).
     fn flat_global_names(src: &str) -> HashSet<String> {
         let parsed = zz_frontend::parse(src);
@@ -1866,6 +2015,114 @@ mod tests {
             "func main() { arr: [int] = []\narr.push(1)\nif true { arr := [1, 2]\nprintln(len(arr)) } }",
         );
         assert!(names.is_empty(), "expected boxed, got {names:?}");
+    }
+
+    #[test]
+    fn untyped_self_push_and_index_store_are_eligible() {
+        let bad = untyped_bad(
+            "func main() {
+                flags := []
+                for i in 0..3 { flags = vec.push(flags, true) }
+                flags[0] = false
+                for x in flags { println(x) }
+                println(len(flags))
+                println(flags[1])
+            }",
+            &[("flags", true)],
+        );
+        assert!(bad.is_empty(), "expected flat, got {bad:?}");
+    }
+
+    #[test]
+    fn untyped_method_self_push_is_eligible() {
+        let bad = untyped_bad(
+            "func main() {
+                arr := []
+                for i in 0..3 { arr = arr.push(i) }
+                println(len(arr))
+            }",
+            &[("arr", true)],
+        );
+        assert!(bad.is_empty(), "expected flat, got {bad:?}");
+    }
+
+    #[test]
+    fn untyped_struct_index_store_disqualifies() {
+        // Struct elements have no flat index store yet.
+        let bad = untyped_bad(
+            "func main() {
+                pts := []
+                for i in 0..3 { pts = vec.push(pts, Pt{ x: 1, y: 2 }) }
+                pts[0] = Pt{ x: 3, y: 4 }
+            }",
+            &[("pts", false)],
+        );
+        assert!(bad.contains("pts"), "expected boxed, got {bad:?}");
+    }
+
+    #[test]
+    fn untyped_standalone_push_call_disqualifies() {
+        // Only the self-append *assignment* lowers; a bare push statement
+        // would reach the boxed native.
+        let bad = untyped_bad(
+            "func main() {
+                arr := []
+                vec.push(arr, 1)
+            }",
+            &[("arr", true)],
+        );
+        assert!(bad.contains("arr"), "expected boxed, got {bad:?}");
+    }
+
+    #[test]
+    fn untyped_whole_assignment_disqualifies() {
+        let bad = untyped_bad(
+            "func main() {
+                arr := []
+                other := []
+                arr = other
+            }",
+            &[("arr", true)],
+        );
+        assert!(bad.contains("arr"), "expected boxed, got {bad:?}");
+    }
+
+    #[test]
+    fn untyped_element_mentioning_array_disqualifies() {
+        // `arr = vec.push(arr, len(arr))` would read a moved-from slot; the
+        // single-reference check in `self_push_elem` catches it.
+        let bad = untyped_bad(
+            "func main() {
+                arr := []
+                arr = vec.push(arr, len(arr))
+            }",
+            &[("arr", true)],
+        );
+        assert!(bad.contains("arr"), "expected boxed, got {bad:?}");
+    }
+
+    #[test]
+    fn untyped_compound_index_store_disqualifies() {
+        let bad = untyped_bad(
+            "func main() {
+                arr := []
+                arr[0] += 1
+            }",
+            &[("arr", true)],
+        );
+        assert!(bad.contains("arr"), "expected boxed, got {bad:?}");
+    }
+
+    #[test]
+    fn untyped_plain_mention_disqualifies() {
+        let bad = untyped_bad(
+            "func main() {
+                arr := []
+                println(arr)
+            }",
+            &[("arr", true)],
+        );
+        assert!(bad.contains("arr"), "expected boxed, got {bad:?}");
     }
 
     #[test]

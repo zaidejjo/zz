@@ -918,6 +918,124 @@ mod tests {
         })
     }
 
+    /// A `name := []` declaration whose pushes reveal a scalar element type
+    /// through the self-append assignment (`name = vec.push(name, x)`) gets
+    /// the inferred flat layout: contiguous `bool *` buffer, inline push, and
+    /// a raw index store — no boxed `zz_vec_push_take` / `zz_index_set`.
+    #[test]
+    fn untyped_inferred_flat_bool_array_lowers_inline() {
+        let units = lower_merged(
+            "func main() {
+                n := 100
+                flags := []
+                for i in 0..n {
+                    flags = vec.push(flags, true)
+                }
+                flags[0] = false
+                count := 0
+                for i in 0..n {
+                    if flags[i] { count = count + 1 }
+                }
+                println(count)
+            }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        // Inferred flat declarations get a fresh C id, so assert on the shape
+        // of the emitted code rather than the source-level name.
+        assert!(
+            code.contains("bool * ") && code.contains(" = NULL;"),
+            "expected flat bool buffer:\n{code}"
+        );
+        assert!(
+            code.contains("= (zz_bool(true)).b;"),
+            "push must store directly into the flat buffer:\n{code}"
+        );
+        assert!(
+            code.contains("__flat_grow"),
+            "flat buffer must grow in place:\n{code}"
+        );
+        assert!(
+            !code.contains("zz_vec_push_take"),
+            "push must not go through the boxed move path:\n{code}"
+        );
+        assert!(
+            !code.contains("zz_index_set"),
+            "index store must use the flat buffer:\n{code}"
+        );
+        assert!(
+            code.contains("zz_flat_index("),
+            "index reads/stores must use the flat buffer:\n{code}"
+        );
+    }
+
+    /// The same inference for `name = vec.push(name, StructInit{...})` with an
+    /// all-scalar struct: flat `zz_struct_Pt *` buffer and direct element
+    /// field reads.
+    #[test]
+    fn untyped_inferred_flat_struct_array_lowers_inline() {
+        let units = lower_merged(
+            "struct Pt { x: int, y: int }
+             func main() {
+                 n := 100
+                 pts := []
+                 for i in 0..n {
+                     pts = vec.push(pts, Pt{ x: i, y: i * 2 })
+                 }
+                 total := 0
+                 for i in 0..n {
+                     total = total + pts[i].x
+                 }
+                 println(total)
+             }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        assert!(
+            code.contains("zz_struct_Pt * ") && code.contains(" = NULL;"),
+            "expected flat struct buffer:\n{code}"
+        );
+        assert!(
+            !code.contains("zz_vec_push_take"),
+            "push must not go through the boxed move path:\n{code}"
+        );
+        assert!(
+            !code.contains("zz_object_get_field"),
+            "field read must not go through the boxed object path:\n{code}"
+        );
+        assert!(
+            code.contains("].x"),
+            "field read must index the flat buffer:\n{code}"
+        );
+    }
+
+    /// Control: a push argument whose type is not known at body prelude (a
+    /// loop variable) keeps the array boxed — the inference only fires for
+    /// literals and struct literals.
+    #[test]
+    fn untyped_inferred_array_with_local_element_stays_boxed() {
+        let units = lower_merged(
+            "func main() {
+                n := 100
+                arr := []
+                for i in 0..n {
+                    arr = vec.push(arr, i)
+                }
+                println(len(arr))
+            }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        assert!(
+            code.contains("zz_vec_push_take"),
+            "boxed self-push must keep the take path:\n{code}"
+        );
+        assert!(
+            !code.contains("__flat_grow") && !code.contains("zz_flat_index("),
+            "expected the boxed layout:\n{code}"
+        );
+    }
+
     /// A module-level `arr: [int] = []` used only through the flat-array
     /// operations lowers to a contiguous pointer plus length/capacity
     /// counters (not a boxed `zz_value`).

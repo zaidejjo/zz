@@ -4025,127 +4025,15 @@ impl Lowerer {
                     }
                     _ => (String::new(), String::new()),
                 };
-                if !recv_name.is_empty() {
-                    // Struct element push
-                    if let Some(sname) = self.flat_array_from_ptr(&recv_type) {
-                        let Some(arg) = args.first() else {
-                            return "zz_unit()".to_string();
-                        };
-                        let arg_val = self.emit_expr(arg, names, out);
-                        // `sname` is the demangled/dotted ZZ name (e.g.
-                        // `struct_access.Pt`) from `flat_array_from_ptr`;
-                        // mangle it to the real C typedef (`zz_struct_struct__access_Pt`),
-                        // not a literal `zz_struct_struct_access.Pt`.
-                        let elem = format!("zz_struct_{}", mangle(&sname));
-                        let cid = names
-                            .lookup(&recv_name)
-                            .map(str::to_string)
-                            .unwrap_or_else(|| recv_name.clone());
-                        let len_cid = names.lookup_or_name(&format!("{}_len", recv_name));
-                        let cap_cid = names.lookup_or_name(&format!("{}_cap", recv_name));
-                        // Local flat buffers live in the function arena;
-                        // module globals outlive the frame, so growth must
-                        // survive a return → malloc-family realloc.
-                        let is_global = names.resolves_to_global(&recv_name);
-                        let grow = if is_global {
-                            format!(
-                                "      {cid} = ({elem}*)realloc({cid}, (size_t){cap} * sizeof({elem}));\n",
-                                cid = cid,
-                                cap = cap_cid,
-                                elem = elem,
-                            )
-                        } else {
-                            format!(
-                                "      {elem} *__flat_grow = ({elem}*)zz_arena_alloc(&_func_arena, (size_t){cap} * sizeof({elem}), 8);\n      if ({len} > 0) {{ memcpy(__flat_grow, {cid}, (size_t){len} * sizeof({elem})); }}\n      {cid} = __flat_grow;\n",
-                                len = len_cid,
-                                cap = cap_cid,
-                                cid = cid,
-                                elem = elem,
-                            )
-                        };
-                        // When emit_for pre-reserved capacity for a counted
-                        // loop, skip the per-iteration grow guard.
-                        if self.skip_flat_push_grow.get() {
-                            out.push_str(&format!(
-                                "    {cid}[{len}] = {arg_val};\n    {len}++;\n",
-                                cid = cid,
-                                len = len_cid,
-                                arg_val = arg_val
-                            ));
-                        } else {
-                            out.push_str(&format!(
-                                "    if ({len} >= {cap}) {{\n      if ({cap} != 0 && {cap} > SIZE_MAX / 2) {{ fprintf(stderr, \"zz error: array capacity overflow\\n\"); exit(1); }}\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n{grow}    }}\n",
-                                len = len_cid,
-                                cap = cap_cid,
-                                grow = grow,
-                            ));
-                            out.push_str(&format!(
-                                "    {cid}[{len}] = {arg_val};\n    {len}++;\n",
-                                cid = cid,
-                                len = len_cid,
-                                arg_val = arg_val
-                            ));
-                        }
+                if !recv_name.is_empty() && Self::is_flat_array_ctype(&recv_type) {
+                    let Some(arg) = args.first() else {
                         return "zz_unit()".to_string();
-                    }
-                    // Scalar element push
-                    if let Some(elem_ctype) = self.scalar_array_from_ptr(&recv_type) {
-                        let Some(arg) = args.first() else {
-                            return "zz_unit()".to_string();
-                        };
-                        let arg_val = self.emit_expr(arg, names, out);
-                        let elem_static: &'static str = match elem_ctype {
-                            "double" => "double",
-                            "bool" => "bool",
-                            _ => "int64_t",
-                        };
-                        let arg_raw = self.unbox_for_return(arg, arg_val, names, elem_static);
-                        let cid = names
-                            .lookup(&recv_name)
-                            .map(str::to_string)
-                            .unwrap_or_else(|| recv_name.clone());
-                        let len_cid = names.lookup_or_name(&format!("{}_len", recv_name));
-                        let cap_cid = names.lookup_or_name(&format!("{}_cap", recv_name));
-                        let is_global = names.resolves_to_global(&recv_name);
-                        let grow = if is_global {
-                            format!(
-                                "      {cid} = ({elem_ctype}*)realloc({cid}, (size_t){cap} * sizeof({elem_ctype}));\n",
-                                cid = cid,
-                                cap = cap_cid,
-                                elem_ctype = elem_ctype,
-                            )
-                        } else {
-                            format!(
-                                "      {elem_ctype} *__flat_grow = ({elem_ctype}*)zz_arena_alloc(&_func_arena, (size_t){cap} * sizeof({elem_ctype}), 8);\n      if ({len} > 0) {{ memcpy(__flat_grow, {cid}, (size_t){len} * sizeof({elem_ctype})); }}\n      {cid} = __flat_grow;\n",
-                                len = len_cid,
-                                cap = cap_cid,
-                                cid = cid,
-                                elem_ctype = elem_ctype,
-                            )
-                        };
-                        // When emit_for pre-reserved capacity for a counted
-                        // loop, skip the per-iteration grow guard.
-                        if self.skip_flat_push_grow.get() {
-                            out.push_str(&format!(
-                                "    {cid}[{len}] = {arg_raw};\n    {len}++;\n",
-                                cid = cid,
-                                len = len_cid,
-                                arg_raw = arg_raw
-                            ));
-                        } else {
-                            out.push_str(&format!(
-                                "    if ({len} >= {cap}) {{\n      if ({cap} != 0 && {cap} > SIZE_MAX / 2) {{ fprintf(stderr, \"zz error: array capacity overflow\\n\"); exit(1); }}\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n{grow}    }}\n",
-                                len = len_cid,
-                                cap = cap_cid,
-                                grow = grow,
-                            ));
-                            out.push_str(&format!(
-                                "    {cid}[{len}] = {arg_raw};\n    {len}++;\n",
-                                cid = cid,
-                                len = len_cid,
-                                arg_raw = arg_raw
-                            ));
-                        }
+                    };
+                    let cid = names
+                        .lookup(&recv_name)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| recv_name.clone());
+                    if self.emit_flat_push(&cid, &recv_name, &recv_type, arg, names, out) {
                         return "zz_unit()".to_string();
                     }
                 }
