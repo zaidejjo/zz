@@ -1702,46 +1702,85 @@ impl Lowerer {
 
         self.scan_pushes(block, &mut candidates, &mut bad, names);
 
-        // The inferred layout has no boxed fallback: every mention must be an
-        // operation the flat path implements (`arr[i] = v` stores and the
-        // self-append assignment included). Scan once for all candidates;
-        // any unsupported mention keeps that name boxed.
         let cand_map: std::collections::HashMap<String, bool> = candidates
             .iter()
             .filter(|(_, elem_type)| !elem_type.is_empty())
             .map(|(name, elem_type)| (name.clone(), !elem_type.starts_with("zz_struct_")))
             .collect();
-        let bad_uses = crate::param_escape::untyped_flat_uses_ok(block, &cand_map);
 
-        // Phase 1: flat scalar arrays.
-        let mut phase1: std::collections::HashMap<String, String> =
+        // Type-eligible row elements: candidates whose pushes revealed a
+        // scalar element type. Struct rows are not handled by the nested
+        // lowering, so they never qualify here.
+        let scalar_elem: std::collections::HashMap<String, String> = candidates
+            .iter()
+            .filter(|(name, elem_type)| {
+                !bad.contains(*name)
+                    && !elem_type.is_empty()
+                    && !elem_type.starts_with("zz_struct_")
+            })
+            .map(|(name, elem_type)| (name.clone(), elem_type.clone()))
+            .collect();
+
+        // Flat *row* arrays: `a := []` whose every push appends an in-scope
+        // candidate row local. Candidates that phase 1 rejected are scanned
+        // here too: an unknown push argument is exactly the row shape.
+        let row_cands: std::collections::HashSet<String> = candidates
+            .keys()
+            .filter(|n| !scalar_elem.contains_key(*n))
+            .cloned()
+            .collect();
+        let (mut rows, row_elems) = if row_cands.is_empty() || scalar_elem.is_empty() {
+            (
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+            )
+        } else {
+            crate::param_escape::untyped_flat_rows_uses_ok(block, &scalar_elem, &row_cands)
+        };
+
+        // Fixpoint: a row array is only representable while every element it
+        // pushes stays flat, and a scalar array may be pushed into a row
+        // array only once that row array is final (otherwise the push would
+        // feed a raw `T *` into a boxed `zz_value` slot). Dropping a row can
+        // disqualify its element arrays, which can drop more rows, so iterate
+        // until stable — each pass removes at least one name.
+        let mut scalars: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        for (name, elem_type) in &candidates {
-            if !bad.contains(name) && !bad_uses.contains(name) && !elem_type.is_empty() {
-                flat_names.insert(name.clone());
-                names
-                    .flat_scalar_types
-                    .insert(name.clone(), elem_type.clone());
-                phase1.insert(name.clone(), elem_type.clone());
+        loop {
+            let row_set: std::collections::HashSet<String> = rows.keys().cloned().collect();
+            let bad_uses = if row_set.is_empty() {
+                crate::param_escape::untyped_flat_uses_ok(block, &cand_map)
+            } else {
+                crate::param_escape::untyped_flat_uses_ok_with_rows(block, &cand_map, &row_set)
+            };
+            scalars.clear();
+            for (name, elem_type) in &candidates {
+                if !bad.contains(name) && !bad_uses.contains(name) && !elem_type.is_empty() {
+                    scalars.insert(name.clone(), elem_type.clone());
+                }
+            }
+            let dropped: Vec<String> = rows
+                .keys()
+                .filter(|outer| {
+                    row_elems
+                        .get(*outer)
+                        .is_some_and(|elems| elems.iter().any(|e| !scalars.contains_key(e)))
+                })
+                .cloned()
+                .collect();
+            if dropped.is_empty() {
+                break;
+            }
+            for outer in dropped {
+                rows.remove(&outer);
             }
         }
 
-        // Phase 2: flat *row* arrays. `a := []` whose every push appends a
-        // phase-1 flat scalar local lowers to `zz_flat_row *` (each element
-        // is a snapshot of a row buffer). Candidates that phase 1 rejected
-        // are re-scanned here: an unknown push argument is exactly the row
-        // shape, so phase-1's `bad` set carries no information for them —
-        // the row scan re-validates every push and every other mention.
-        let row_cands: std::collections::HashSet<String> = candidates
-            .keys()
-            .filter(|n| !flat_names.contains(*n))
-            .cloned()
-            .collect();
-        if row_cands.is_empty() || phase1.is_empty() {
-            return;
+        for (name, elem_type) in scalars {
+            flat_names.insert(name.clone());
+            names.flat_scalar_types.insert(name, elem_type);
         }
-        let row_ok = crate::param_escape::untyped_flat_rows_uses_ok(block, &phase1, &row_cands);
-        for (name, inner) in row_ok {
+        for (name, inner) in rows {
             flat_names.insert(name.clone());
             names.flat_rows.insert(name.clone());
             names.flat_row_inner.insert(name, inner);

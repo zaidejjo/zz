@@ -1009,17 +1009,17 @@ mod tests {
         );
     }
 
-    /// Control: a push argument whose type is not known at body prelude (a
-    /// loop variable) keeps the array boxed — the inference only fires for
-    /// literals and struct literals.
+    /// Control: a push argument with no flat representation (a string) keeps
+    /// the array boxed. Loop variables and arithmetic expressions no longer
+    /// disqualify a candidate: the checker's inferred type makes them scalars.
     #[test]
-    fn untyped_inferred_array_with_local_element_stays_boxed() {
+    fn untyped_inferred_array_with_string_element_stays_boxed() {
         let units = lower_merged(
             "func main() {
                 n := 100
                 arr := []
                 for i in 0..n {
-                    arr = vec.push(arr, i)
+                    arr = vec.push(arr, \"x\")
                 }
                 println(len(arr))
             }",
@@ -1033,6 +1033,84 @@ mod tests {
         assert!(
             !code.contains("__flat_grow") && !code.contains("zz_flat_index("),
             "expected the boxed layout:\n{code}"
+        );
+    }
+
+    /// A loop-variable element now resolves through the checker type, so the
+    /// inferred flat layout applies to `arr = vec.push(arr, i)`.
+    #[test]
+    fn untyped_inferred_array_with_loop_element_is_flat() {
+        let units = lower_merged(
+            "func main() {
+                n := 100
+                arr := []
+                for i in 0..n {
+                    arr = vec.push(arr, i)
+                }
+                total := 0
+                for i in 0..n { total = total + arr[i] }
+                println(total)
+            }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        assert!(
+            code.contains("int64_t * ") && code.contains(" = NULL;"),
+            "expected a flat int buffer:\n{code}"
+        );
+        assert!(
+            !code.contains("zz_vec_push_take"),
+            "push must stay inline:\n{code}"
+        );
+    }
+
+    /// Nested inferred arrays: `a := []` whose elements are flat scalar rows
+    /// lowers to `zz_flat_row *`, and `a[i][j]` reads/stores index the row
+    /// buffer directly instead of the boxed read-modify-write chain.
+    #[test]
+    fn untyped_inferred_flat_row_matrix_lowers_inline() {
+        let units = lower_merged(
+            "func main() {
+                n := 8
+                a := []
+                for i in 0..n {
+                    row := []
+                    for j in 0..n {
+                        row = vec.push(row, (i * n + j) % 1000)
+                    }
+                    a = vec.push(a, row)
+                }
+                total := 0
+                for i in 0..n {
+                    for j in 0..n {
+                        total = total + a[i][j]
+                    }
+                }
+                a[0][0] = 1
+                println(total)
+            }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        assert!(
+            code.contains("zz_flat_row * ") && code.contains(" = NULL;"),
+            "expected a flat row buffer:\n{code}"
+        );
+        assert!(
+            code.contains("zz_flat_row "),
+            "row snapshot temp missing:\n{code}"
+        );
+        assert!(
+            !code.contains("zz_vec_push_take"),
+            "pushes must not take the boxed path:\n{code}"
+        );
+        assert!(
+            !code.contains("zz_index_get") && !code.contains("zz_index_set"),
+            "nested reads/stores must stay raw:\n{code}"
+        );
+        assert!(
+            code.matches("zz_flat_index(").count() >= 4,
+            "both bounds checks missing:\n{code}"
         );
     }
 

@@ -1171,6 +1171,8 @@ pub(crate) fn flat_array_locals(
             rows: None,
             declared_rows: vec![HashSet::new()],
             row_ok: None,
+            row_elems: None,
+            transfer_into: None,
         };
         scan.block(block);
     }
@@ -1192,6 +1194,18 @@ pub(crate) fn flat_array_locals(
 /// Returns the candidates with an unsupported mention; callers keep those
 /// boxed.
 pub(crate) fn untyped_flat_uses_ok(block: &Block, cand: &HashMap<String, bool>) -> HashSet<String> {
+    untyped_flat_uses_ok_with_rows(block, cand, &HashSet::new())
+}
+
+/// Like [`untyped_flat_uses_ok`], but a bare candidate passed as the element
+/// of a push into one of `rows` (flat-row arrays) is a pure buffer read: the
+/// nested push lowering snapshots it. Callers pass the row set *after* it is
+/// final, so a scalar candidate is never transferred into a boxed array.
+pub(crate) fn untyped_flat_uses_ok_with_rows(
+    block: &Block,
+    cand: &HashMap<String, bool>,
+    rows: &HashSet<String>,
+) -> HashSet<String> {
     let mut bad: HashSet<String> = HashSet::new();
     {
         let mut scan = FlatUseScan {
@@ -1203,6 +1217,8 @@ pub(crate) fn untyped_flat_uses_ok(block: &Block, cand: &HashMap<String, bool>) 
             rows: None,
             declared_rows: vec![HashSet::new()],
             row_ok: None,
+            row_elems: None,
+            transfer_into: Some(rows),
         };
         scan.block(block);
     }
@@ -1230,10 +1246,11 @@ pub(crate) fn untyped_flat_rows_uses_ok(
     block: &Block,
     rows: &HashMap<String, String>,
     cand: &HashSet<String>,
-) -> HashMap<String, String> {
+) -> (HashMap<String, String>, HashMap<String, HashSet<String>>) {
     let scalar_cand: HashMap<String, bool> = HashMap::new();
     let mut bad: HashSet<String> = HashSet::new();
     let mut row_ok: HashMap<String, String> = HashMap::new();
+    let mut row_elems: HashMap<String, HashSet<String>> = HashMap::new();
     {
         let mut scan = FlatUseScan {
             cand: &scalar_cand,
@@ -1244,11 +1261,14 @@ pub(crate) fn untyped_flat_rows_uses_ok(
             rows: Some(rows),
             declared_rows: vec![HashSet::new()],
             row_ok: Some(&mut row_ok),
+            row_elems: Some(&mut row_elems),
+            transfer_into: None,
         };
         scan.block(block);
     }
     row_ok.retain(|n, _| !bad.contains(n));
-    row_ok
+    row_elems.retain(|n, _| row_ok.contains_key(n));
+    (row_ok, row_elems)
 }
 
 /// Element expression of a self-append assignment
@@ -1418,6 +1438,8 @@ pub(crate) fn flat_global_arrays(
             rows: None,
             declared_rows: vec![HashSet::new()],
             row_ok: None,
+            row_elems: None,
+            transfer_into: None,
         };
         for stmt in &program.stmts {
             match stmt {
@@ -1462,6 +1484,13 @@ struct FlatUseScan<'a> {
     declared_rows: Vec<HashSet<String>>,
     /// Accepted row candidates: name -> inner row element C type.
     row_ok: Option<&'a mut HashMap<String, String>>,
+    /// Element (row local) names used by every accepted row candidate. The
+    /// caller keeps a row only when all of them stay flat.
+    row_elems: Option<&'a mut HashMap<String, HashSet<String>>>,
+    /// Scalar scan only: row arrays whose element argument may be a bare flat
+    /// candidate. Appending a flat row element snapshots the buffer, so the
+    /// element mention is a pure read instead of an escape.
+    transfer_into: Option<&'a HashSet<String>>,
 }
 
 impl<'a> FlatUseScan<'a> {
@@ -1477,7 +1506,7 @@ impl<'a> FlatUseScan<'a> {
 
     /// True when `name` is a flat-row candidate of the current scan.
     fn is_row_cand(&self, name: &str) -> bool {
-        self.row_cand.map_or(false, |c| c.contains(name))
+        self.row_cand.is_some_and(|c| c.contains(name))
     }
 
     /// True when `name` was already declared in an enclosing block.
@@ -1498,10 +1527,16 @@ impl<'a> FlatUseScan<'a> {
             self.mention(outer);
             return;
         };
+        // The pushed row must be a flat scalar local of this body *declared
+        // before* the push: the lowering reads `row` + `row_len` here.
         let Some(inner) = self.rows.and_then(|r| r.get(row)).cloned() else {
             self.mention(outer);
             return;
         };
+        if !self.declared_in_scope(row) {
+            self.mention(outer);
+            return;
+        }
         match self.row_ok.as_ref().and_then(|m| m.get(outer)).cloned() {
             Some(prev) if prev != inner => self.mention(outer),
             Some(_) => {}
@@ -1512,6 +1547,12 @@ impl<'a> FlatUseScan<'a> {
                     self.mention(outer);
                 }
             }
+        }
+        if let Some(elems) = self.row_elems.as_mut() {
+            elems
+                .entry(outer.to_string())
+                .or_default()
+                .insert(row.to_string());
         }
     }
 
@@ -1584,7 +1625,7 @@ impl<'a> FlatUseScan<'a> {
                 self.expr(value);
                 // Row buffers must be declared before they are pushed (the
                 // lowering reads `row` + `row_len` at the push site).
-                if self.rows.map_or(false, |r| r.contains_key(&name.name)) {
+                if self.rows.is_some_and(|r| r.contains_key(&name.name)) {
                     if let Some(top) = self.declared_rows.last_mut() {
                         top.insert(name.name.clone());
                     }
@@ -1641,7 +1682,9 @@ impl<'a> FlatUseScan<'a> {
                 if !self.escaping {
                     if let Expr::Index { obj, index, .. } = target {
                         if let Expr::Index {
-                            obj: root, index: i, ..
+                            obj: root,
+                            index: i,
+                            ..
                         } = obj.as_ref()
                         {
                             if let Expr::Ident { name, .. } = root.as_ref() {
@@ -1736,6 +1779,25 @@ impl<'a> FlatUseScan<'a> {
                 named,
                 ..
             } => {
+                // Row transfer: a bare flat candidate passed as the element
+                // of a push into a flat-row array is snapshotted by the nested
+                // push lowering, so the mention is a pure read. Every other
+                // argument is still scanned (the receiver is consumed here).
+                if self.inferred_layout && !self.escaping {
+                    if let Some((recv, elem)) = push_recv_arg(e) {
+                        if self.transfer_into.is_some_and(|set| set.contains(recv)) {
+                            for a in args {
+                                if !std::ptr::eq(a, elem) {
+                                    self.expr(a);
+                                }
+                            }
+                            for (_, v) in named {
+                                self.expr(v);
+                            }
+                            return;
+                        }
+                    }
+                }
                 // `len(arr)` consumes its argument as a length read, so the
                 // generic argument scan below must skip it.
                 let mut args_consumed = false;
@@ -1788,7 +1850,9 @@ impl<'a> FlatUseScan<'a> {
                 // consumed (no boxed `rows[i]` value is ever materialized).
                 if !self.escaping {
                     if let Expr::Index {
-                        obj: root, index: i, ..
+                        obj: root,
+                        index: i,
+                        ..
                     } = obj.as_ref()
                     {
                         if let Expr::Ident { name, .. } = root.as_ref() {
@@ -2351,6 +2415,124 @@ mod tests {
             &[("arr", true)],
         );
         assert!(bad.contains("arr"), "expected boxed, got {bad:?}");
+    }
+
+    /// `untyped_flat_rows_uses_ok` over the parsed `main` body of `src`.
+    /// `rows` names flat scalar locals (inner element `int64_t`); `cand`
+    /// names the outer row-array candidates.
+    fn flat_rows_ok(src: &str, rows: &[&str], cand: &[&str]) -> HashMap<String, String> {
+        let parsed = zz_frontend::parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let body = parsed
+            .program
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                Stmt::Func { name, body, .. } if name.join(".") == "main" => Some(body),
+                _ => None,
+            })
+            .expect("main body");
+        let rows: HashMap<String, String> = rows
+            .iter()
+            .map(|n| (n.to_string(), "int64_t".to_string()))
+            .collect();
+        let cand: HashSet<String> = cand.iter().map(|n| n.to_string()).collect();
+        untyped_flat_rows_uses_ok(body, &rows, &cand).0
+    }
+
+    #[test]
+    fn flat_rows_matrix_shape_is_supported() {
+        let ok = flat_rows_ok(
+            "func main() {
+                n := 4
+                a := []
+                for i in 0..n {
+                    row := []
+                    for j in 0..n { row = vec.push(row, j) }
+                    a = vec.push(a, row)
+                }
+                total := 0
+                for i in 0..n {
+                    for j in 0..n { total = total + a[i][j] }
+                }
+                a[0][0] = 1
+                println(total)
+                println(len(a))
+            }",
+            &["row"],
+            &["a"],
+        );
+        assert_eq!(ok.get("a").map(String::as_str), Some("int64_t"));
+    }
+
+    #[test]
+    fn flat_rows_bare_row_value_disqualifies() {
+        // `a[0]` alone has no flat representation (the element is a row
+        // snapshot, not a `zz_value` array).
+        let ok = flat_rows_ok(
+            "func main() {
+                a := []
+                row := []
+                row = vec.push(row, 1)
+                a = vec.push(a, row)
+                first := a[0]
+                println(len(first))
+            }",
+            &["row"],
+            &["a"],
+        );
+        assert!(ok.is_empty(), "expected boxed, got {ok:?}");
+    }
+
+    #[test]
+    fn flat_rows_push_before_row_decl_disqualifies() {
+        // The lowering reads `row` + `row_len` at the push site; a push
+        // before the declaration would reference names outside C scope.
+        let ok = flat_rows_ok(
+            "func main() {
+                a := []
+                a = vec.push(a, row)
+                row := []
+                row = vec.push(row, 1)
+            }",
+            &["row"],
+            &["a"],
+        );
+        assert!(ok.is_empty(), "expected boxed, got {ok:?}");
+    }
+
+    #[test]
+    fn flat_rows_push_of_unknown_local_disqualifies() {
+        let ok = flat_rows_ok(
+            "func main() {
+                a := []
+                x := 1
+                a = vec.push(a, x)
+            }",
+            &["row"],
+            &["a"],
+        );
+        assert!(ok.is_empty(), "expected boxed, got {ok:?}");
+    }
+
+    #[test]
+    fn flat_rows_for_in_disqualifies() {
+        let ok = flat_rows_ok(
+            "func main() {
+                a := []
+                row := []
+                row = vec.push(row, 1)
+                a = vec.push(a, row)
+                for r in a { println(len(r)) }
+            }",
+            &["row"],
+            &["a"],
+        );
+        assert!(ok.is_empty(), "expected boxed, got {ok:?}");
     }
 
     #[test]

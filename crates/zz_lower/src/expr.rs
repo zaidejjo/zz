@@ -1398,7 +1398,9 @@ impl Lowerer {
                 // the row buffer. `bool` stays raw so `if a[i][j]` skips
                 // `zz_truthy`, mirroring the flat scalar bool path.
                 if let Expr::Index {
-                    obj: root, index: i_expr, ..
+                    obj: root,
+                    index: i_expr,
+                    ..
                 } = obj.as_ref()
                 {
                     if let Some((rows_name, inner)) = self.flat_rows_receiver(root, names) {

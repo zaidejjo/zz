@@ -297,10 +297,8 @@ impl Lowerer {
                     && matches!(value, Expr::Array { elems, .. } if elems.is_empty())
                 {
                     let cid = names.enter_with_type(&name.name, "zz_flat_row *");
-                    let len_cid =
-                        names.enter_with_type(&format!("{}_len", name.name), "int64_t");
-                    let cap_cid =
-                        names.enter_with_type(&format!("{}_cap", name.name), "int64_t");
+                    let len_cid = names.enter_with_type(&format!("{}_len", name.name), "int64_t");
+                    let cap_cid = names.enter_with_type(&format!("{}_cap", name.name), "int64_t");
                     out.push_str(&format!("    zz_flat_row * {cid} = NULL;\n"));
                     out.push_str(&format!("    int64_t {len_cid} = 0;\n"));
                     out.push_str(&format!("    int64_t {cap_cid} = 0;\n"));
@@ -1149,7 +1147,9 @@ impl Lowerer {
                         // read-modify-write chain and no copy-on-write.
                         if !self.green_active() {
                             if let Expr::Index {
-                                obj: root, index: i_expr, ..
+                                obj: root,
+                                index: i_expr,
+                                ..
                             } = obj.as_ref()
                             {
                                 if let Some((rows_name, inner)) =
@@ -1165,8 +1165,8 @@ impl Lowerer {
                                         let i_raw = self.flat_index_expr(i_expr, names, out);
                                         let j_raw = self.flat_index_expr(index, names, out);
                                         let rtmp = names.fresh("_frow");
-                                        let raw =
-                                            self.flat_store_raw_value(value, &val, &boxed_val, &inner);
+                                        let raw = self
+                                            .flat_store_raw_value(value, &val, &boxed_val, &inner);
                                         out.push_str(&format!(
                                             "    {{ zz_flat_row {rtmp} = ({buf_cid})[zz_flat_index({i_raw}, {len_cid}, \"{func}\")];\n      (({inner} *)({rtmp}).data)[zz_flat_index({j_raw}, ({rtmp}).len, \"{func}\")] = {raw}; }}\n"
                                         ));
