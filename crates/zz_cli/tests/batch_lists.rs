@@ -155,6 +155,9 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("regression", "edge_float_nan_display.zz", false),
     ("regression", "str_concat_overflow_test.zz", true),
     ("regression", "array_push_growth_test.zz", true),
+    ("stdlib", "interp_expr_test.zz", false),
+    ("stdlib", "nested_assign_test.zz", false),
+    ("stdlib", "nested_struct_field_test.zz", false),
 ];
 
 /// (category/file, reason). Everything strict outside regression/errors

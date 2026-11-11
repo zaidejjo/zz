@@ -124,14 +124,16 @@ impl Lowerer {
             Expr::Index {
                 obj, index, span, ..
             } => {
-                // Nested index home: store the temp into an owned copy
-                // of the base, then write that base back (recursion
-                // bottoms at a direct home or a drop). The base copy is
-                // an owned clone, so the inner set detaches exactly when
-                // truly shared and the outer assign+release balances.
+                // Nested index home: clone `obj` (e.g. `m[0]` → `[1,2]`),
+                // set `clone[index] = tmp` (the fully-modified inner value,
+                // e.g. `99`), then write the base back through `obj`. Recursion
+                // bottoms at a direct Ident/Path home, so `m[0][1] = 99`
+                // becomes: clone `m[0]` → `[1,2]`; `clone[1] = 99` → `[1,99]`;
+                // write `[1,99]` back through `m[0]` into `m`. `tmp` already
+                // holds the complete modified inner value.
                 let base = self.emit_expr(obj, names, out);
-                let idx = self.emit_expr(index, names, out);
-                let idx_boxed = self.box_index_arg(index, idx, names);
+                let idx_raw = self.emit_expr(index, names, out);
+                let idx_boxed = self.box_index_arg(index, idx_raw, names);
                 let base_tmp = names.fresh("_wbb");
                 let e = names.fresh("_wbe");
                 let itrap = names.fresh("_wbi");

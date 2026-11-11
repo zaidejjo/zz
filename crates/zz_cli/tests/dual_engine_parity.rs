@@ -1457,6 +1457,21 @@ parity_strict!(parity_stdlib_console, "stdlib", "console.zz");
 parity_strict!(parity_stdlib_envmod, "stdlib", "envmod.zz");
 parity_strict!(parity_stdlib_env_test, "stdlib", "env_test.zz");
 parity_strict!(
+    parity_stdlib_nested_assign_test,
+    "stdlib",
+    "nested_assign_test.zz"
+);
+parity_strict!(
+    parity_stdlib_nested_struct_field_test,
+    "stdlib",
+    "nested_struct_field_test.zz"
+);
+parity_strict!(
+    parity_stdlib_interp_expr_test,
+    "stdlib",
+    "interp_expr_test.zz"
+);
+parity_strict!(
     parity_stdlib_str_extended_test,
     "stdlib",
     "str_extended_test.zz"

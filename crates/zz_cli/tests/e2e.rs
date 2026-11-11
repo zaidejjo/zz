@@ -1178,6 +1178,17 @@ e2e_success_test!(e2e_stdlib_sqlz_transaction, "stdlib", "sqlz_transaction.zz");
 e2e_success_test!(e2e_stdlib_colors_demo, "stdlib", "colors_demo.zz");
 e2e_success_test!(e2e_stdlib_colors_styles, "stdlib", "colors_styles.zz");
 e2e_success_test!(
+    e2e_stdlib_nested_assign_test,
+    "stdlib",
+    "nested_assign_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_nested_struct_field_test,
+    "stdlib",
+    "nested_struct_field_test.zz"
+);
+e2e_success_test!(e2e_stdlib_interp_expr_test, "stdlib", "interp_expr_test.zz");
+e2e_success_test!(
     e2e_stdlib_option_interpolation,
     "stdlib",
     "option_interpolation.zz"
