@@ -1717,14 +1717,15 @@ pub(crate) fn is_ident_start(c: char) -> bool {
 
 /// Interpolation trigger for both single-line and triple-quoted strings:
 /// `{` opens an embedded expression when followed by an identifier start,
-/// a digit, or `(`. `{{`, `{}` and JSON-like `{"key"...` stay literal text.
+/// a digit, `(`, or a unary prefix operator (`-`, `+`, `!`). `{{`, `{}` and
+/// JSON-like `{"key"...` stay literal text.
 /// Callers test this on the first char after `{`, spaces and tabs skipped
 /// (#516 — see [`Lexer::interp_starts_after_brace`]).
 pub fn is_interp_start(c: Option<char>) -> bool {
     match c {
         Some(ch) if is_ident_start(ch) => true,
         Some(ch) if ch.is_ascii_digit() => true,
-        Some('(') => true,
+        Some('(') | Some('-') | Some('+') | Some('!') => true,
         _ => false,
     }
 }

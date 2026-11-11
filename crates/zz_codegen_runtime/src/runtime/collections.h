@@ -359,8 +359,7 @@ static inline void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
 // object tag at runtime: arrays and dicts. Arena buffers write in place.
 static inline void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err) {
     if (!obj) { if (err) *err = 1; return; }
-    if (obj->tag == ZZ_ARRAY && obj->arr && obj->arr->refs != 1
-        && !zz_array_is_arena(obj->arr)) {
+    if (obj->tag == ZZ_ARRAY && obj->arr && obj->arr->refs != 1) {
         zz_value fresh = zz_array_dup(obj->arr);
         if (!fresh.arr) { if (err) *err = 1; zz_release(&item); return; }
         zz_release_array(obj->arr);

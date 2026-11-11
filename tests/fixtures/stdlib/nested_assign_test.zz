@@ -1,0 +1,5 @@
+m := [[1, 2], [3, 4]]
+m[0][1] = 99 // valid: m[0] length 2, index 1 in range
+println("m01={m[0][1]}") // expect 99
+println("m00={m[0][0]}") // expect 1 (unchanged sibling element)
+println("m11={m[1][1]}") // expect 4 (unchanged row)

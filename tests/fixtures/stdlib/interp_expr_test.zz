@@ -1,0 +1,7 @@
+a := 10
+b := 3
+println("neg={-a}") // expect -10
+println("neg_expr={-a/b}") // expect -3
+println("paren={(-a)/b}") // expect -3
+println("pos={+a}") // expect 10
+println("not={!false}") // expect true
