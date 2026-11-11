@@ -2963,10 +2963,17 @@ impl Lowerer {
         Some(out_cid.to_string())
     }
 
-    /// Cast inlining: `float(int|float)` → `(double)(x)`, `int(int|float)` →
-    /// `(int64_t)(x)`. Only fires when the argument is provably scalar
-    /// (int64_t or double). `int()` used without `??` still needs the boxed
-    /// Option path; `int(X) ?? default` is handled in the Elvis arm.
+    /// Cast inlining: `float(int|float)` → `(double)(x)`.
+    ///
+    /// Only fires when the argument is provably scalar (int64_t or double).
+    /// `float()` returns `Float` (an unboxed `double`), so the raw cast matches
+    /// its C type. `int()` returns `Option<Int>` (a boxed `zz_value`), so it
+    /// must NOT be inlined to a raw `int64_t` here — doing so mis-types a
+    /// standalone `x := int(...)` global (declared `zz_value`) as a raw int
+    /// store. `int()` used without `??` still needs the boxed Option path via
+    /// `zz_call_native1(zz_int_cast, ...)`; `int(X) ?? default` is handled in
+    /// the Elvis arm; `int()` as a binary-op operand is folded separately in
+    /// `scalar_operand_c`.
     fn try_emit_cast_raw(effective_name: &str, args: &[Expr], names: &NameCtx) -> Option<String> {
         if args.len() != 1 {
             return None;
@@ -2986,16 +2993,9 @@ impl Lowerer {
                 };
                 Some(format!("(double)({c})"))
             }
-            "zz_int_cast" => {
-                // int(X) where X is int64_t → just X (identity).
-                // int(X) where X is double → saturating truncation (matches
-                // `zz_int_cast`/the VM for NaN, ±∞ and out-of-range values).
-                if t == "int64_t" {
-                    Some(c)
-                } else {
-                    Some(format!("(int64_t)(zz_i64_sat({c}))"))
-                }
-            }
+            // `zz_int_cast` returns `Option<Int>` (boxed `zz_value`), never a
+            // raw `int64_t` — leave it to the boxed native-call path.
+            "zz_int_cast" => None,
             _ => None,
         }
     }
@@ -4032,7 +4032,11 @@ impl Lowerer {
                             return "zz_unit()".to_string();
                         };
                         let arg_val = self.emit_expr(arg, names, out);
-                        let elem = format!("zz_struct_{}", sname);
+                        // `sname` is the demangled/dotted ZZ name (e.g.
+                        // `struct_access.Pt`) from `flat_array_from_ptr`;
+                        // mangle it to the real C typedef (`zz_struct_struct__access_Pt`),
+                        // not a literal `zz_struct_struct_access.Pt`.
+                        let elem = format!("zz_struct_{}", mangle(&sname));
                         let cid = names
                             .lookup(&recv_name)
                             .map(str::to_string)
