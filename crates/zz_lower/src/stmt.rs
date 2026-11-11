@@ -285,6 +285,28 @@ impl Lowerer {
                     return;
                 }
 
+                // ---- Flat row arrays (unboxed nested arrays) -----------------
+                // `a := []` whose every push appends a flat scalar row lowers
+                // to `zz_flat_row *`: each element carries a row buffer and
+                // its length, so `a[i][j]` reads/stores reach the row data
+                // directly. Rows are snapshotted on push (see the push
+                // lowering), which keeps the boxed layout's value semantics.
+                if !self.green_active()
+                    && ty.is_none()
+                    && names.flat_rows.contains(&name.name)
+                    && matches!(value, Expr::Array { elems, .. } if elems.is_empty())
+                {
+                    let cid = names.enter_with_type(&name.name, "zz_flat_row *");
+                    let len_cid =
+                        names.enter_with_type(&format!("{}_len", name.name), "int64_t");
+                    let cap_cid =
+                        names.enter_with_type(&format!("{}_cap", name.name), "int64_t");
+                    out.push_str(&format!("    zz_flat_row * {cid} = NULL;\n"));
+                    out.push_str(&format!("    int64_t {len_cid} = 0;\n"));
+                    out.push_str(&format!("    int64_t {cap_cid} = 0;\n"));
+                    return;
+                }
+
                 // ---- Flat arrays from ty: None declarations (inferred from push usage) ----
                 // `rows := []` where all `rows.push(...)` are struct literals of the
                 // same unboxed struct type (or scalar pushes) lowers to flat storage
@@ -1119,6 +1141,40 @@ impl Lowerer {
                         }
                         let (boxed_val, boxed_needs_release) =
                             self.box_index_store_value(value, val.clone(), names, out);
+
+                        // Nested flat rows: `rows[i][j] = v`. The row handle is
+                        // loaded through the outer element with the same
+                        // bounds trap as scalar flats, then the write is a
+                        // direct store into the row buffer — no boxed
+                        // read-modify-write chain and no copy-on-write.
+                        if !self.green_active() {
+                            if let Expr::Index {
+                                obj: root, index: i_expr, ..
+                            } = obj.as_ref()
+                            {
+                                if let Some((rows_name, inner)) =
+                                    self.flat_rows_receiver(root, names)
+                                {
+                                    if let (Some(buf_cid), Some(len_cid)) = (
+                                        names.lookup(&rows_name).map(str::to_string),
+                                        names
+                                            .lookup(&format!("{rows_name}_len"))
+                                            .map(str::to_string),
+                                    ) {
+                                        let func = names.current_scope.clone();
+                                        let i_raw = self.flat_index_expr(i_expr, names, out);
+                                        let j_raw = self.flat_index_expr(index, names, out);
+                                        let rtmp = names.fresh("_frow");
+                                        let raw =
+                                            self.flat_store_raw_value(value, &val, &boxed_val, &inner);
+                                        out.push_str(&format!(
+                                            "    {{ zz_flat_row {rtmp} = ({buf_cid})[zz_flat_index({i_raw}, {len_cid}, \"{func}\")];\n      (({inner} *)({rtmp}).data)[zz_flat_index({j_raw}, ({rtmp}).len, \"{func}\")] = {raw}; }}\n"
+                                        ));
+                                        return;
+                                    }
+                                }
+                            }
+                        }
 
                         // Bounds-check elimination for array writes:
                         // `for k in 0..n { ... flags[k] = ... }` where flags.len == n
@@ -3153,6 +3209,12 @@ impl Lowerer {
         // compute it before emitting any statement of this body. Nested
         // block/closure bodies recompute their own set; restore ours after.
         let outer_flat = std::mem::take(&mut names.flat_locals);
+        // Element types are per-body too: a stale entry from another function
+        // that happens to declare the same name must not pick the flat layout
+        // with the wrong element type.
+        let outer_flat_scalar = std::mem::take(&mut names.flat_scalar_types);
+        let outer_flat_rows = std::mem::take(&mut names.flat_rows);
+        let outer_flat_row_inner = std::mem::take(&mut names.flat_row_inner);
         names.flat_locals = self.body_flat_locals(block, names);
         // Dead-variable release: after a variable's last top-level use,
         // emit `zz_release` to free refcounted containers (arrays, dicts,
@@ -3170,6 +3232,9 @@ impl Lowerer {
             self.emit_dead_releases(i, &last_top_level, &max_nested, names, out);
         }
         names.flat_locals = outer_flat;
+        names.flat_scalar_types = outer_flat_scalar;
+        names.flat_rows = outer_flat_rows;
+        names.flat_row_inner = outer_flat_row_inner;
     }
 
     // ── Dead-variable release analysis ──────────────────────────────

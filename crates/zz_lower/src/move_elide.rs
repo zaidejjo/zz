@@ -263,6 +263,35 @@ impl Lowerer {
             let elem = format!("zz_struct_{}", mangle(&sname));
             let arg_val = self.emit_expr(arg, names, out);
             (elem, arg_val)
+        } else if recv_ctype == "zz_flat_row *" {
+            // Flat row array: the pushed element must be a flat scalar row in
+            // scope (the scan guarantees the shape). Store a *snapshot* of the
+            // row in the function arena — never the row's own buffer, which
+            // may live in a loop arena that resets and may be mutated later.
+            // Copy-on-push reproduces the boxed layout's detach-on-write, so
+            // the outer array can never observe later row mutation.
+            let Expr::Ident { name: row_name, .. } = arg else {
+                return false;
+            };
+            let Some(row_cid) = names.lookup(row_name).map(str::to_string) else {
+                return false;
+            };
+            let Some(inner) = names
+                .lookup_type(row_name)
+                .and_then(|ct| self.scalar_array_from_ptr(ct))
+                .map(str::to_string)
+            else {
+                return false;
+            };
+            let Some(row_len) = names.lookup(&format!("{row_name}_len")).map(str::to_string) else {
+                return false;
+            };
+            let flen = names.fresh("_frow_len");
+            let fval = names.fresh("_frow_val");
+            out.push_str(&format!(
+                "    int64_t {flen} = {row_len};\n    zz_flat_row {fval} = {{ NULL, {flen} }};\n    if ({flen} > 0) {{\n      {fval}.data = zz_arena_alloc(&_func_arena, (size_t){flen} * sizeof({inner}), 8);\n      memcpy({fval}.data, {row_cid}, (size_t){flen} * sizeof({inner}));\n    }}\n"
+            ));
+            ("zz_flat_row".to_string(), fval)
         } else {
             return false;
         };

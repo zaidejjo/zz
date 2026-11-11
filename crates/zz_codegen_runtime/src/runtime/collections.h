@@ -326,6 +326,28 @@ static inline int64_t zz_flat_index(int64_t i, int64_t n, const char *func) {
     return idx;
 }
 
+// ---- flat rows (unboxed nested arrays) ---------------------------------
+// `a := []` whose elements are themselves flat scalar arrays lowers to
+// `zz_flat_row *`: each element is a *snapshot* of a row buffer, taken from
+// the function arena when the row is pushed. Copy-on-push gives the same
+// value semantics as the boxed layout (which detaches on write), so mutating
+// the source row afterwards can never be observed through the outer array.
+typedef struct {
+    void *data;
+    int64_t len;
+} zz_flat_row;
+
+// ---- flat rows (unboxed nested arrays) ---------------------------------
+// `a := []` whose elements are themselves flat scalar arrays lowers to
+// `zz_flat_row *`: each element is a *snapshot* of a row buffer, taken from
+// the function arena when the row is pushed. Copy-on-push gives the same
+// value semantics as the boxed layout (which detaches on write), so mutating
+// the source row afterwards can never be observed through the outer array.
+typedef struct {
+    void *data;
+    int64_t len;
+} zz_flat_row;
+
 // Slice expression (`obj[a:b]`): arrays (items) and strings (bytes).
 zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err);
 

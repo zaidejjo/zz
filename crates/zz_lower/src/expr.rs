@@ -1391,6 +1391,40 @@ impl Lowerer {
                         return format!("{ctor}({raw})");
                     }
                 }
+                // Nested flat rows: `rows[i][j]` where `rows` is the
+                // `zz_flat_row *` inferred layout. The outer read loads the
+                // row handle (bounds-checked and trapped exactly like a
+                // scalar flat array), then the element is a direct load from
+                // the row buffer. `bool` stays raw so `if a[i][j]` skips
+                // `zz_truthy`, mirroring the flat scalar bool path.
+                if let Expr::Index {
+                    obj: root, index: i_expr, ..
+                } = obj.as_ref()
+                {
+                    if let Some((rows_name, inner)) = self.flat_rows_receiver(root, names) {
+                        if let (Some(buf_cid), Some(len_cid)) = (
+                            names.lookup(&rows_name).map(str::to_string),
+                            names
+                                .lookup(&format!("{rows_name}_len"))
+                                .map(str::to_string),
+                        ) {
+                            let func = names.current_scope.clone();
+                            let i_raw = self.flat_index_expr(i_expr, names, out);
+                            let j_raw = self.flat_index_expr(index, names, out);
+                            let rtmp = names.fresh("_frow");
+                            out.push_str(&format!(
+                                "    zz_flat_row {rtmp} = ({buf_cid})[zz_flat_index({i_raw}, {len_cid}, \"{func}\")];\n"
+                            ));
+                            let raw = format!(
+                                "(({inner} *)({rtmp}).data)[zz_flat_index({j_raw}, ({rtmp}).len, \"{func}\")]"
+                            );
+                            if inner == "bool" {
+                                return raw;
+                            }
+                            return auto_box(&raw, Some(inner.as_str()));
+                        }
+                    }
+                }
                 // Flat scalar array index: `arr[k]` where `arr` is `[int]`/`[float]`/`[bool]`
                 // → direct `({cid})[{i}]` read, no `zz_index_get` bounds-check/clone.
                 // Handles both `arr[k]` (Ident) and `ns.arr[k]` (Path for namespaced globals).
@@ -3701,6 +3735,11 @@ impl Lowerer {
                             let len_cid = names.lookup_or_name(&format!("{}_len", name));
                             return format!("zz_int({len_cid})");
                         }
+                        // Flat row array: length tracked in `name_len`.
+                        if names.lookup_type(name) == Some("zz_flat_row *") {
+                            let len_cid = names.lookup_or_name(&format!("{}_len", name));
+                            return format!("zz_int({len_cid})");
+                        }
                     }
                     // `len(ns.arr)` for namespaced globals: same folds as
                     // the Ident arm above, using the joined name.
@@ -3718,6 +3757,10 @@ impl Lowerer {
                         if let Some(_elem_ctype) =
                             self.scalar_array_from_ptr(names.lookup_type(&joined).unwrap_or(""))
                         {
+                            let len_cid = names.lookup_or_name(&format!("{}_len", joined));
+                            return format!("zz_int({len_cid})");
+                        }
+                        if names.lookup_type(&joined) == Some("zz_flat_row *") {
                             let len_cid = names.lookup_or_name(&format!("{}_len", joined));
                             return format!("zz_int({len_cid})");
                         }
