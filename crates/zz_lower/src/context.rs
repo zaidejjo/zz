@@ -1639,9 +1639,17 @@ impl Lowerer {
     }
 
     /// Scan `block` (recursively into nested blocks) for `name := []`
-    /// declarations where every `name.push(...)` has a scalar argument.
-    /// Adds qualifying names to `flat_names` and records their element types
-    /// in `flat_scalar_types`.
+    /// declarations whose pushes reveal a flat element type: every push
+    /// (`name.push(x)`, `name = vec.push(name, x)`, …) must carry an argument
+    /// with a statically known scalar or unboxed-struct C type. Adds
+    /// qualifying names to `flat_names` and records their element types in
+    /// `flat_scalar_types`.
+    ///
+    /// Runs before any statement of the body is emitted, so local bindings
+    /// are not in scope yet: an element type is only known for literals and
+    /// `StructInit`s. The second gate — [`crate::param_escape::untyped_flat_uses_ok`]
+    /// — requires every mention of the name to be an operation the inferred
+    /// flat layout implements (this layout has no boxed fallback).
     fn infer_flat_from_push_usage(
         &self,
         block: &zz_frontend::ast::Block,
@@ -1660,14 +1668,32 @@ impl Lowerer {
 
         self.scan_pushes(block, &mut candidates, &mut bad, names);
 
+        // The inferred layout has no boxed fallback: every mention must be an
+        // operation the flat path implements (`arr[i] = v` stores and the
+        // self-append assignment included). Scan once for all candidates;
+        // any unsupported mention keeps that name boxed.
+        let cand_map: std::collections::HashMap<String, bool> = candidates
+            .iter()
+            .filter(|(_, elem_type)| !elem_type.is_empty())
+            .map(|(name, elem_type)| (name.clone(), !elem_type.starts_with("zz_struct_")))
+            .collect();
+        let bad_uses = crate::param_escape::untyped_flat_uses_ok(block, &cand_map);
+
         for (name, elem_type) in &candidates {
-            if !bad.contains(name) && !elem_type.is_empty() {
+            if !bad.contains(name) && !bad_uses.contains(name) && !elem_type.is_empty() {
                 flat_names.insert(name.clone());
                 names
                     .flat_scalar_types
                     .insert(name.clone(), elem_type.clone());
             }
         }
+    }
+
+    /// True for the function-form push callees `vec.push` and
+    /// `std.vec.push`.
+    fn is_vec_push_path(parts: &[String]) -> bool {
+        matches!(parts, [m, p] if m == "vec" && p == "push")
+            || matches!(parts, [s, m, p] if s == "std" && m == "vec" && p == "push")
     }
 
     /// Collect `name := []` (ty: None, empty array literal) declarations.
@@ -1710,6 +1736,12 @@ impl Lowerer {
 
     /// Scan all statements (recursively) for `name.push(...)` usage and
     /// disqualify candidates with incompatible argument types.
+    ///
+    /// Both push spellings are in-place mutations of the same array and both
+    /// must be seen: the statement form `name.push(x)` and the take-and-store
+    /// assignment `name = vec.push(name, x)` (also `name = name.push(x)`).
+    /// Missing the assignment form used to leave every inferred array with an
+    /// empty element type — boxed, even when every element is a literal.
     fn scan_pushes(
         &self,
         block: &zz_frontend::ast::Block,
@@ -1717,57 +1749,70 @@ impl Lowerer {
         bad: &mut std::collections::HashSet<String>,
         names: &mut NameCtx,
     ) {
-        'outer: for stmt in &block.stmts {
+        for stmt in &block.stmts {
             match stmt {
                 Stmt::Expr(Expr::Call { callee, args, .. }) => {
-                    let (push_name, is_push) = match callee.as_ref() {
-                        Expr::Path { parts, .. } if parts.len() == 2 => {
-                            if parts[1] == "push" {
-                                (parts[0].clone(), true)
-                            } else {
-                                (String::new(), false)
-                            }
+                    // Three push spellings reach the lowering:
+                    // - `vec.push(arr, x)` / `std.vec.push(arr, x)` (function
+                    //   form; the receiver is `args[0]`, the element `args[1]`)
+                    // - `arr.push(x)` (method form)
+                    // - `ns.push(arr, x)` (two-part path; only candidates are
+                    //   considered, so a namespace head never matches)
+                    let (push_name, elem, malformed) = match callee.as_ref() {
+                        Expr::Path { parts, .. } if Self::is_vec_push_path(parts) => {
+                            let target = match args.first() {
+                                Some(Expr::Ident { name, .. }) => name.clone(),
+                                _ => String::new(),
+                            };
+                            (target, args.get(1), args.len() != 2)
+                        }
+                        Expr::Path { parts, .. } if parts.len() == 2 && parts[1] == "push" => {
+                            (parts[0].clone(), args.first(), args.len() != 1)
                         }
                         Expr::Field {
                             obj, name: mname, ..
                         } if mname == "push" => match obj.as_ref() {
-                            Expr::Ident { name: obj_name, .. } => (obj_name.clone(), true),
-                            _ => (String::new(), false),
-                        },
-                        _ => (String::new(), false),
-                    };
-                    if !is_push || push_name.is_empty() {
-                        continue;
-                    }
-                    if !candidates.contains_key(&push_name) {
-                        continue;
-                    }
-                    let Some(arg) = args.first() else {
-                        bad.insert(push_name.clone());
-                        continue 'outer;
-                    };
-                    // Determine element type from push argument
-                    let elem_type = match self.infer_scalar_push_ctype(arg, names) {
-                        Some(ctype) => ctype,
-                        None => {
-                            bad.insert(push_name.clone());
-                            continue 'outer;
-                        }
-                    };
-                    // Record element type (first push wins; mixed types disqualify)
-                    match candidates.get_mut(&push_name) {
-                        Some(existing) => {
-                            if existing.is_empty() {
-                                *existing = elem_type.clone();
-                            } else if *existing != elem_type {
-                                bad.insert(push_name.clone());
-                                continue 'outer;
+                            Expr::Ident { name: obj_name, .. } => {
+                                (obj_name.clone(), args.first(), args.len() != 1)
                             }
-                        }
-                        None => {
-                            bad.insert(push_name.clone());
-                            continue 'outer;
-                        }
+                            _ => (String::new(), None, false),
+                        },
+                        _ => (String::new(), None, false),
+                    };
+                    if push_name.is_empty() || !candidates.contains_key(&push_name) {
+                        continue;
+                    }
+                    if malformed {
+                        bad.insert(push_name);
+                        continue;
+                    }
+                    let Some(arg) = elem else {
+                        bad.insert(push_name);
+                        continue;
+                    };
+                    self.note_push_elem(&push_name, arg, candidates, bad, names);
+                }
+                Stmt::Assign { target, value, .. } => {
+                    let Expr::Ident { name: tname, .. } = target else {
+                        continue;
+                    };
+                    if !candidates.contains_key(tname) {
+                        continue;
+                    }
+                    let Expr::Call {
+                        callee,
+                        args,
+                        named,
+                        ..
+                    } = value
+                    else {
+                        continue;
+                    };
+                    if !named.is_empty() {
+                        continue;
+                    }
+                    if let Some(arg) = Self::self_push_arg(tname, callee, args) {
+                        self.note_push_elem(tname, arg, candidates, bad, names);
                     }
                 }
                 Stmt::For { body, .. } => {
@@ -1786,6 +1831,64 @@ impl Lowerer {
                     self.scan_pushes(body, candidates, bad, names);
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// Element expression of the self-append assignment forms
+    /// `name = vec.push(name, e)` / `name = std.vec.push(name, e)` /
+    /// `name = name.push(e)`. Other assignment shapes return `None` (the use
+    /// scan judges them), and only a same-name receiver counts — a push into
+    /// a *different* array must not teach `name` an element type.
+    fn self_push_arg<'e>(name: &str, callee: &Expr, args: &'e [Expr]) -> Option<&'e Expr> {
+        let fn_push = match callee {
+            Expr::Ident { name: cname, .. } => cname == "vec.push" || cname == "std.vec.push",
+            Expr::Path { parts, .. } => Self::is_vec_push_path(parts),
+            _ => false,
+        };
+        if fn_push {
+            return match args {
+                [Expr::Ident { name: recv, .. }, arg] if recv == name => Some(arg),
+                _ => None,
+            };
+        }
+        let method_push = match callee {
+            Expr::Path { parts, .. } => parts.len() == 2 && parts[0] == name && parts[1] == "push",
+            Expr::Field {
+                obj, name: mname, ..
+            } => {
+                mname == "push"
+                    && matches!(obj.as_ref(), Expr::Ident { name: recv, .. } if recv == name)
+            }
+            _ => false,
+        };
+        if method_push && args.len() == 1 {
+            return args.first();
+        }
+        None
+    }
+
+    /// Record the element C type `arg` implies for `push_name`, or disqualify
+    /// the candidate when the type is unknown (a local that is out of scope at
+    /// body prelude) or conflicts with an earlier push.
+    fn note_push_elem(
+        &self,
+        push_name: &str,
+        arg: &Expr,
+        candidates: &mut std::collections::HashMap<String, String>,
+        bad: &mut std::collections::HashSet<String>,
+        names: &mut NameCtx,
+    ) {
+        let Some(elem_type) = self.infer_scalar_push_ctype(arg, names) else {
+            bad.insert(push_name.to_string());
+            return;
+        };
+        // First push wins; mixed element types disqualify.
+        match candidates.get_mut(push_name) {
+            Some(existing) if existing.is_empty() => *existing = elem_type,
+            Some(existing) if *existing == elem_type => {}
+            _ => {
+                bad.insert(push_name.to_string());
             }
         }
     }

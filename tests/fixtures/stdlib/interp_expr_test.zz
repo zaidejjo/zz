@@ -1,3 +1,4 @@
+// features: bool-logic, fstrings, int-arith, locals, print
 a := 10
 b := 3
 println("neg={-a}") // expect -10
