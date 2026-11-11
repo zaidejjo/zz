@@ -357,37 +357,12 @@ static inline void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
 
 // Index expression support (lowered from `obj[idx]`). Dispatch on the
 // object tag at runtime: arrays and dicts. Arena buffers write in place.
-static inline void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err) {
-    if (!obj) { if (err) *err = 1; return; }
-    if (obj->tag == ZZ_ARRAY && obj->arr && obj->arr->refs != 1) {
-        zz_value fresh = zz_array_dup(obj->arr);
-        if (!fresh.arr) { if (err) *err = 1; zz_release(&item); return; }
-        zz_release_array(obj->arr);
-        obj->arr = fresh.arr;
-    } else if (obj->tag == ZZ_DICT && obj->dict && obj->dict->refs != 1) {
-        // Arena dicts (`refs == ZZ_DICT_ARENA_MAGIC`, e.g. `d := {}`) are
-        // fixed-capacity and cannot grow in place. On first write dup them
-        // to a growable heap dict so `d[k] = v` persists (matches the VM).
-        zz_value fresh = zz_dict_dup_value(obj->dict);
-        if (!fresh.dict) { if (err) *err = 1; zz_release(&item); return; }
-        zz_release_dict(obj->dict);
-        obj->dict = fresh.dict;
-    }
-    switch (obj->tag) {
-    case ZZ_ARRAY:
-        zz_array_set(obj->arr, idx, item, err);
-        if (err && *err) { zz_release(&item); return; }
-        if (item.tag != ZZ_STR && item.tag != ZZ_MUTABLE_STR) zz_release(&item);
-        return;
-    case ZZ_DICT:
-        zz_dict_set(obj->dict, idx, item);
-        if (item.tag != ZZ_STR && item.tag != ZZ_MUTABLE_STR) zz_release(&item);
-        if (err) *err = 0;
-        return;
-    default:
-        if (err) *err = 1;
-    }
-}
+//
+// Defined out-of-line in collections.c (not `static inline`) because it is
+// called through the C-ABI from Rust (`zz_native_rt::pg::dict_insert`) and
+// therefore needs an external symbol to link against — `static inline` gives
+// it internal linkage only.
+void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err);
 
 size_t zz_dict_len(const zz_dict *d);
 

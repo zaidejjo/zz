@@ -271,12 +271,12 @@ fn reject_unimplemented_natives_allows_gap() {
             "known gap {gap} must be allowed by the preflight"
         );
     }
-    // Multiple names: only non-gap ones are reported.
-    let err = reject_unimplemented_natives(&[
-        "std.http.listen_tls".to_string(),
-        "std.fake.native".to_string(),
-    ])
-    .unwrap_err();
+    // Multiple names: only non-gap ones are reported. `std.math.sum` is
+    // still a VM-only gap (pure ZZ, no C impl) so it must be allowed;
+    // `std.fake.native` is neither a gap nor implemented, so it is reported.
+    let err =
+        reject_unimplemented_natives(&["std.math.sum".to_string(), "std.fake.native".to_string()])
+            .unwrap_err();
     let BuildError::UnimplementedNative { names } = err else {
         panic!("expected UnimplementedNative, got: {err}");
     };
@@ -502,10 +502,15 @@ func main() {
 }
 "#,
     );
-    assert_len_is_live(&c, "post-if join");
+    // `len(arr)` at the post-if join must be a live runtime call, not folded
+    // to a constant (the untaken branch's arity 4). `c` also includes the C
+    // runtime, so substring-matching `zz_int(4)` is unreliable: the runtime
+    // itself emits incidental `zz_int(4)` (e.g. `zz_tcp_read(stream, zz_int(4), err)`).
+    // Assert the live `zz_len` call site instead, which only appears in
+    // generated program call sites.
     assert!(
-        !c.contains("zz_int(4)"),
-        "post-if `len(arr)` must not fold to the untaken branch arity"
+        c.contains("zz_call_native1(zz_len,"),
+        "post-if `len(arr)` must be a live zz_len call, not folded to a constant"
     );
 }
 
