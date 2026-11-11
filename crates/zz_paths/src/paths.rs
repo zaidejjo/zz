@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::pathsafe::escapes_root;
 
@@ -182,11 +182,14 @@ pub fn known_projects_path() -> PathBuf {
 /// paths, Windows prefixes) to prevent directory traversal. Such hashes
 /// are redirected to a safe "blocked" entry under the packages dir.
 pub fn cas_entry(hash: &str) -> PathBuf {
-    let path = packages_dir().join(hash);
-    if escapes_root(path.as_path()) {
+    // Validate the untrusted hash component only — `packages_dir()` is an
+    // internal, always-absolute prefix, so running `escapes_root()` on the
+    // joined path would reject every legitimate entry (it is always
+    // absolute) and redirect them all to `packages/blocked`.
+    if escapes_root(Path::new(hash)) {
         return packages_dir().join("blocked");
     }
-    path
+    packages_dir().join(hash)
 }
 
 /// `(entries, bytes)` under `dir`, best effort: unreadable subtrees count
