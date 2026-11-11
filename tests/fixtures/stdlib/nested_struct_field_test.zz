@@ -1,3 +1,4 @@
+// features: arrays, field-store, fstrings, indexing, locals, print, struct-literal, structs
 struct Inner {
     v: int,
 }

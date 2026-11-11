@@ -1,3 +1,4 @@
+// features: arrays, fstrings, indexing, locals, print
 m := [[1, 2], [3, 4]]
 m[0][1] = 99 // valid: m[0] length 2, index 1 in range
 println("m01={m[0][1]}") // expect 99
