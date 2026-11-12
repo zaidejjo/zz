@@ -3605,12 +3605,36 @@ impl TypeCheckOps for Checker {
                 if !named.is_empty() {
                     self.errors.push(error_at(
                         format!(
-                            "variant `{enum_name}.{variant}` takes one positional argument, not named arguments"
+                            "variant `{enum_name}.{variant}` takes positional arguments, not named arguments"
                         ),
                         span,
                     ));
                 }
-                if args.len() != 1 {
+                // Tuple payloads `(T1, T2, ...)` accept one argument per
+                // tuple element; single payloads accept exactly one.
+                if let Type::Tuple(elem_types) = &pty {
+                    if args.len() != elem_types.len() {
+                        self.errors.push(error_at(
+                            format!(
+                                "variant `{enum_name}.{variant}` takes {} arguments but {} given",
+                                elem_types.len(),
+                                args.len(),
+                            ),
+                            span,
+                        ));
+                        for arg in args {
+                            self.check_expr(arg);
+                        }
+                    } else {
+                        for (i, arg) in args.iter().enumerate() {
+                            let at = self.check_expr(arg);
+                            let exp = zz_infer::subst(&elem_types[i], &gen_map);
+                            if let Err(e) = self.unifier.unify(&at, &exp) {
+                                self.report_mismatch(e, arg.span());
+                            }
+                        }
+                    }
+                } else if args.len() != 1 {
                     self.errors.push(error_at(
                         format!(
                             "variant `{enum_name}.{variant}` takes 1 argument but {} given",

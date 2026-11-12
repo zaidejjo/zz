@@ -1741,14 +1741,40 @@ impl<'a> Parser<'a> {
                 }
                 self.advance();
                 let arg = if self.eat(TokenKind::LParen) {
-                    let p = self.parse_pattern();
-                    let end = if self.eat_close(TokenKind::RParen) {
-                        self.previous().span
+                    let first = self.parse_pattern();
+                    let first_span = first.span();
+                    let comma_result = self.eat(TokenKind::Comma);
+                    let p = if comma_result {
+                        let mut pats = vec![first];
+                        pats.push(self.parse_pattern());
+                        while self.eat(TokenKind::Comma) {
+                            if self.at(TokenKind::RParen) {
+                                break;
+                            }
+                            pats.push(self.parse_pattern());
+                        }
+                        let end = if self.eat(TokenKind::RParen) {
+                            self.previous().span
+                        } else {
+                            self.error_missing_close(")", "expected `)` to close pattern");
+                            self.peek().span
+                        };
+                        Pattern::Tuple {
+                            pats,
+                            span: first_span.join(end),
+                        }
                     } else {
-                        self.error_missing_close(")", "expected `)` to close pattern");
-                        p.span()
+                        let end = if self.eat(TokenKind::RParen) {
+                            self.previous().span
+                        } else {
+                            self.error_missing_close(")", "expected `)` to close pattern");
+                            first_span
+                        };
+                        let _ = end;
+                        first
                     };
-                    Some((Box::new(p), end))
+                    let p_span = p.span();
+                    Some((Box::new(p), p_span))
                 } else {
                     None
                 };

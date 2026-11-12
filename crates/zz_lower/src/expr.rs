@@ -5134,31 +5134,41 @@ impl Lowerer {
             out.push_str(&format!(
                 "    zz_value {obj_tmp} = zz_object_new(\"{qualified}\", NULL, 0);\n",
             ));
-        } else {
-            // The checker enforces ≤1 positional and no named args; emit
-            // positionally in order so nothing is silently dropped.
-            let payload_expr: &Expr = args
-                .first()
-                .or_else(|| named.first().map(|(_, v)| v))
-                .expect("enum payload expr");
-            // `zz_object_set_field` below retains the payload.
+            return obj_tmp;
+        }
+        // Multi-field tuple payloads: emit one field per positional arg,
+        // named "value0", "value1", ... (single field keeps "value").
+        let n = args.len();
+        let names_arr_tmp = names.fresh("__enum_fields");
+        // Declare field names array
+        out.push_str(&format!("    zz_value {names_arr_tmp}[{n}];\n"));
+        for (i, arg) in args.iter().enumerate() {
+            let field_name = if n == 1 {
+                "value".to_string()
+            } else {
+                format!("value{i}")
+            };
+            out.push_str(&format!(
+                "    {names_arr_tmp}[{i}] = zz_str_static(\"{field_name}\");\n",
+            ));
+        }
+        // Create the object first (mirrors boxed struct init ordering)
+        out.push_str(&format!(
+            "    zz_value {obj_tmp} = zz_object_new(\"{qualified}\", {names_arr_tmp}, {n});\n",
+        ));
+        // Then set each field from the evaluated arg expressions
+        for (i, arg) in args.iter().enumerate() {
             self.fmt_borrow.set(true);
-            let raw = self.emit_expr(payload_expr, names, out);
-            // Box scalars AND unboxed structs (a struct payload lowers to
-            // a raw C struct — same two-step boxing as struct fields and
-            // binop operands).
-            let boxed = box_scalar_operand(payload_expr, names, &raw);
-            let boxed = self.box_struct_operand(payload_expr, boxed, &raw, names, out);
-            let names_arr_tmp = names.fresh("__enum_fields");
-            out.push_str(&format!("    zz_value {names_arr_tmp}[1];\n"));
+            let raw = self.emit_expr(arg, names, out);
+            let boxed = box_scalar_operand(arg, names, &raw);
+            let boxed = self.box_struct_operand(arg, boxed, &raw, names, out);
+            let field_name = if n == 1 {
+                "value".to_string()
+            } else {
+                format!("value{i}")
+            };
             out.push_str(&format!(
-                "    {names_arr_tmp}[0] = zz_str_static(\"value\");\n",
-            ));
-            out.push_str(&format!(
-                "    zz_value {obj_tmp} = zz_object_new(\"{qualified}\", {names_arr_tmp}, 1);\n",
-            ));
-            out.push_str(&format!(
-                "    zz_object_set_field(&{obj_tmp}, \"value\", {boxed});\n",
+                "    zz_object_set_field(&{obj_tmp}, \"{field_name}\", {boxed});\n",
             ));
         }
         obj_tmp
@@ -6703,26 +6713,49 @@ impl Lowerer {
                         .join(" || ");
                     out.push_str(&format!("        if ({cond}) {{\n"));
                     let inner_open = if let Some(inner) = arg {
-                        let payload_tmp: String = if self.green_active() {
-                            let (_, deref, _) = self.green_cell(
-                                names,
-                                "zz_value",
-                                false,
-                                out,
-                                Some("_green_arena"),
-                            );
-                            out.push_str(&format!(
-                                "            {deref} = zz_object_get_field(&{scrut}, \"value\");\n"
-                            ));
-                            deref
-                        } else {
-                            let payload_tmp = names.fresh("_payload");
-                            out.push_str(&format!(
-                                "            zz_value {payload_tmp} = zz_object_get_field(&{scrut}, \"value\");\n"
-                            ));
-                            payload_tmp
-                        };
-                        self.emit_pattern_bind(inner, &payload_tmp, names, out)
+                        match inner.as_ref() {
+                            Pattern::Tuple { pats, .. } => {
+                                // Multi-field pattern `.Op(k, p)`: extract
+                                // value0, value1, ... and bind each element.
+                                for (i, pat) in pats.iter().enumerate() {
+                                    let field_name = if pats.len() == 1 {
+                                        "value".to_string()
+                                    } else {
+                                        format!("value{i}")
+                                    };
+                                    let field_tmp = names.fresh("_field");
+                                    out.push_str(&format!(
+                                        "            zz_value {field_tmp} = zz_object_get_field(&{scrut}, \"{field_name}\");\n"
+                                    ));
+                                    self.emit_pattern_bind(pat, &field_tmp, names, out);
+                                }
+                                0
+                            }
+                            _ => {
+                                // Single-field pattern `.Op(x)`: extract "value" field
+                                // (backward compatible with single-payload variants).
+                                let payload_tmp: String = if self.green_active() {
+                                    let (_, deref, _) = self.green_cell(
+                                        names,
+                                        "zz_value",
+                                        false,
+                                        out,
+                                        Some("_green_arena"),
+                                    );
+                                    out.push_str(&format!(
+                                        "            {deref} = zz_object_get_field(&{scrut}, \"value\");\n"
+                                    ));
+                                    deref
+                                } else {
+                                    let payload_tmp = names.fresh("_payload");
+                                    out.push_str(&format!(
+                                        "            zz_value {payload_tmp} = zz_object_get_field(&{scrut}, \"value\");\n"
+                                    ));
+                                    payload_tmp
+                                };
+                                self.emit_pattern_bind(inner, &payload_tmp, names, out)
+                            }
+                        }
                     } else {
                         0
                     };
@@ -6982,21 +7015,69 @@ impl Lowerer {
                     .join(" || ");
                 conds.push(format!("({or})"));
                 if let Some(inner) = arg {
-                    if self.green_active() {
-                        let (_, deref, _) =
-                            self.green_cell(names, "zz_value", false, out, Some("_green_arena"));
-                        out.push_str(&format!(
-                            "        {deref} = zz_object_get_field(&{scrut}, \"value\");\n"
-                        ));
-                        return self.flatten_match_pat(inner, &deref, names, out, conds, binds);
+                    match inner.as_ref() {
+                        Pattern::Tuple { pats, .. } => {
+                            // Multi-field pattern .Op(k, p): extract
+                            // value0, value1, ... and bind each element.
+                            for (i, p) in pats.iter().enumerate() {
+                                let field_name = if pats.len() == 1 {
+                                    "value".to_string()
+                                } else {
+                                    format!("value{i}")
+                                };
+                                let field_tmp = if self.green_active() {
+                                    let (_, deref, _) = self.green_cell(
+                                        names,
+                                        "zz_value",
+                                        false,
+                                        out,
+                                        Some("_green_arena"),
+                                    );
+                                    out.push_str(&format!(
+                                        "        {deref} = zz_object_get_field(&{scrut}, \"{field_name}\");\n"
+                                    ));
+                                    deref
+                                } else {
+                                    let field_tmp = names.fresh("_field");
+                                    out.push_str(&format!(
+                                        "        zz_value {field_tmp} = zz_object_get_field(&{scrut}, \"{field_name}\");\n"
+                                    ));
+                                    field_tmp
+                                };
+                                if !self.flatten_match_pat(p, &field_tmp, names, out, conds, binds)
+                                {
+                                    return false;
+                                }
+                            }
+                            true
+                        }
+                        _ => {
+                            // Single-field pattern: extract "value" field
+                            // (backward compatible with single-payload variants).
+                            if self.green_active() {
+                                let (_, deref, _) = self.green_cell(
+                                    names,
+                                    "zz_value",
+                                    false,
+                                    out,
+                                    Some("_green_arena"),
+                                );
+                                out.push_str(&format!(
+                                    "        {deref} = zz_object_get_field(&{scrut}, \"value\");\n"
+                                ));
+                                return self
+                                    .flatten_match_pat(inner, &deref, names, out, conds, binds);
+                            }
+                            let payload_tmp = names.fresh("_payload");
+                            out.push_str(&format!(
+                                "        zz_value {payload_tmp} = zz_object_get_field(&{scrut}, \"value\");\n"
+                            ));
+                            self.flatten_match_pat(inner, &payload_tmp, names, out, conds, binds)
+                        }
                     }
-                    let payload_tmp = names.fresh("_payload");
-                    out.push_str(&format!(
-                        "        zz_value {payload_tmp} = zz_object_get_field(&{scrut}, \"value\");\n"
-                    ));
-                    return self.flatten_match_pat(inner, &payload_tmp, names, out, conds, binds);
+                } else {
+                    true
                 }
-                true
             }
             Pattern::Literal { value, .. } => {
                 let lit_c = match value {

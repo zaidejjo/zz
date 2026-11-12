@@ -792,25 +792,20 @@ impl Interp {
                 span,
             ));
         }
-        // Payload presence is structural: 0 args = unit variant, 1 arg =
-        // payload variant. Arity mismatches are checker errors; here a
-        // second positional is never silently dropped.
-        let fields = match args {
-            [] => Vec::new(),
-            [payload] => vec![(
-                std::sync::Arc::from("value"),
-                self.eval(payload)?.into_value()?,
-            )],
-            _ => {
-                return Err(EvalError::new(
-                    format!(
-                        "variant `{enum_name}.{variant}` takes at most 1 argument but {} given",
-                        args.len(),
-                    ),
-                    span,
-                ));
-            }
-        };
+        // Payload presence is structural: 0 args = unit variant, N args =
+        // N payload fields. Arity mismatches are checker errors; here a
+        // wrong count is never silently dropped.
+        let mut fields: Vec<(std::sync::Arc<str>, Value)> = Vec::with_capacity(args.len());
+        for (i, arg) in args.iter().enumerate() {
+            // Single-field variants keep the classic field name "value";
+            // multi-field variants use "value0", "value1", ...
+            let name = if args.len() == 1 {
+                std::sync::Arc::from("value")
+            } else {
+                std::sync::Arc::from(format!("value{i}"))
+            };
+            fields.push((name, self.eval(arg)?.into_value()?));
+        }
         Ok(Value::Object(std::sync::Arc::new(ObjectValue {
             name: format!("{enum_name}.{variant}"),
             fields,
@@ -1757,16 +1752,23 @@ impl Interp {
                     (vname, Value::Object(obj))
                         if obj.name.rsplit('.').next().unwrap_or("") == vname =>
                     {
-                        match (
-                            arg.as_deref(),
-                            obj.fields
-                                .iter()
-                                .find(|(k, _)| &**k == "value")
-                                .map(|(_, v)| v),
-                        ) {
-                            (Some(p), Some(v)) => Self::match_pattern(p, v, scope),
-                            (None, None) => true,
-                            (None, Some(_)) => true,
+                        let field_values: Vec<&Value> = obj.fields.iter().map(|(_, v)| v).collect();
+                        match arg.as_deref() {
+                            // Bare pattern `.Op` — unit match, no payload.
+                            None => field_values.is_empty(),
+                            // Single field (backward compat: field "value").
+                            Some(p) if field_values.len() == 1 => {
+                                Self::match_pattern(p, field_values[0], scope)
+                            }
+                            // Multi-field tuple pattern `.Op(k, p)` —
+                            // positional match against value0, value1, ...
+                            Some(Pattern::Tuple { pats, .. })
+                                if pats.len() == field_values.len() =>
+                            {
+                                pats.iter()
+                                    .zip(field_values.iter())
+                                    .all(|(pat, val)| Self::match_pattern(pat, val, scope))
+                            }
                             _ => false,
                         }
                     }
