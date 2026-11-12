@@ -195,4 +195,28 @@ ZZ_INLINE int zz_setsockopt(int fd, int level, int optname, const void *optval,
     return setsockopt(fd, level, optname, optval, optlen);
 }
 
+// ---- string helpers (POSIX vs Win32) -------------------------------------
+// strcasecmp/strncasecmp are POSIX; Windows CRT has _stricmp/_strnicmp.
+// memmem is a GNU extension; Windows doesn't have it at all.
+#ifdef ZZ_OS_WINDOWS
+#define zz_strcasecmp(a, b) _stricmp((a), (b))
+#define zz_strncasecmp(a, b, n) _strnicmp((a), (b), (n))
+#else
+#define zz_strcasecmp(a, b) strcasecmp((a), (b))
+#define zz_strncasecmp(a, b, n) strncasecmp((a), (b), (n))
+#endif
+
+ZZ_INLINE void *zz_memmem(const void *haystack, size_t haystack_len,
+                          const void *needle, size_t needle_len) {
+    if (needle_len == 0) return (void *)haystack;
+    if (haystack_len < needle_len) return NULL;
+    const unsigned char *h = (const unsigned char *)haystack;
+    const unsigned char *n = (const unsigned char *)needle;
+    size_t limit = haystack_len - needle_len;
+    for (size_t i = 0; i <= limit; i++) {
+        if (memcmp(h + i, n, needle_len) == 0) return (void *)(h + i);
+    }
+    return NULL;
+}
+
 #endif // ZZ_RUNTIME_SOCKET_H
