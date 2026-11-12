@@ -3,11 +3,11 @@ first module that broke: <path> <path>
 error: no conversion path for `try`: error type `try_no_convert.ErrA` cannot convert to `try_no_convert.ErrB`
 hint: add `impl try_no_convert.ErrA { func convert_to_try_no_convert.ErrB(self) -> try_no_convert.ErrB { ... } }`
 
-  --> <path>
-    |
-   11 |     x := try fetch()
-      |          ^^^^^^^^^^^
+--> <path>
+|
+11 | x := try fetch()
+| ^^^^^^^^^^^
 warning: unused private function `try_no_convert.load`, consider prefixing with `_try_no_convert.load` or removing it
 
-    = function is never called or referenced
+= function is never called or referenced
 zz: 1 file(s) failed type-check

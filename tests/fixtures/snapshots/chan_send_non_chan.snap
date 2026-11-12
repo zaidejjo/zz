@@ -2,9 +2,10 @@ first module that broke: <path> <path>
 
 error: type mismatch: expected `chan`, found `int`
 
-  --> <path>
-    |
-    6 |     std.chan.send(1, 2)
-      |                   ^
-    = parameter `ch` expects `chan`
+--> <path>
+|
+6 | std.chan.send(1, 2)
+| ^
+= parameter `ch` expects `chan`
+= expected signature: ch: chan, v: _
 zz: 1 file(s) failed type-check

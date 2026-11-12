@@ -2,9 +2,9 @@ first module that broke: <path> <path>
 
 error: Z0006: function returns `int` but its body can fall through; add `return `
 
-  --> <path>
-    |
-    5 |     if c {
-      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    = named functions return a value only through `return`; the last expression is discarded
+--> <path>
+|
+5 | if c {
+| ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+= named functions return a value only through `return`; the last expression is discarded
 zz: 1 file(s) failed type-check

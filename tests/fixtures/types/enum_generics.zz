@@ -41,9 +41,9 @@ func main() {
     s := Box.V("hi")
     println(s.get_or("dflt"))
     // Multi-parameter enums with tuple payloads.
-    p := Pair.Both((1, "x"))
+    p := Pair.Both(1, "x")
     match p {
-        .Both((n, _t)) => println(n)
+        .Both(n, _t) => println(n)
         .First(n) => println(n)
         .Second(t) => println(t)
         .Neither => println("neither")

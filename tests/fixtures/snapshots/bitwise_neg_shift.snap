@@ -2,9 +2,9 @@ first module that broke: <path> <path>
 
 warning: unused variable `x` is never read, consider prefixing with `_x`
 
-  --> <path>
-    |
-    3 | x := 1 << -1
-      | ^ help: replace with `_x`
+--> <path>
+|
+3 | x := 1 << -1
+| ^ help: replace with `_x`
 
 help: run `zz check --fix <path> to automatically apply safe fixes

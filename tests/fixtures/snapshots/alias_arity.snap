@@ -2,15 +2,15 @@ first module that broke: <path> <path>
 
 error: type alias `alias_arity.Pair` takes 1 type argument but 2 given
 
-  --> <path>
-    |
-    6 |     p: Pair<int, str> = (1, "a")
-      |        ^^^^
+--> <path>
+|
+6 | p: Pair<int, str> = (1, "a")
+| ^^^^
 error: type mismatch: expected `int`, found `str`
 
-  --> <path>
-    |
-    6 |     p: Pair<int, str> = (1, "a")
-      |        ^^^^
-    = to fix: change the annotation to `(int, str)` or convert the value
+--> <path>
+|
+6 | p: Pair<int, str> = (1, "a")
+| ^^^^
+= to fix: change the annotation to `(int, str)` or convert the value
 zz: 1 file(s) failed type-check

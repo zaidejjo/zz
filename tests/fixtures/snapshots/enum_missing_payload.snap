@@ -2,8 +2,8 @@ first module that broke: <path> <path>
 
 error: variant `enum_missing_payload.Token.IntLit` holds a value: construct it as `enum_missing_payload.Token.IntLit(...)`
 
-  --> <path>
-    |
-    9 |     t: Token = Token.IntLit
-      |                ^^^^^^^^^^^^
+--> <path>
+|
+9 | t: Token = Token.IntLit
+| ^^^^^^^^^^^^
 zz: 1 file(s) failed type-check

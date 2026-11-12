@@ -3,16 +3,16 @@ first module that broke: <path> <path>
 error: bitwise `&` requires `int` operands, found `float` and `int`
 hint: use `int(x)` to cast, <path> for boolean logic
 
-  --> <path>
-    |
-    3 | x := 1.5 & 2
-      |      ^^^^^^^
-    = cast the left operand to `int` with `int(...)`
+--> <path>
+|
+3 | x := 1.5 & 2
+| ^^^^^^^
+= cast the left operand to `int` with `int(...)`
 warning: unused variable `x` is never read, consider prefixing with `_x`
 
-  --> <path>
-    |
-    3 | x := 1.5 & 2
-      | ^ help: replace with `_x`
+--> <path>
+|
+3 | x := 1.5 & 2
+| ^ help: replace with `_x`
 
 zz: 1 file(s) failed type-check

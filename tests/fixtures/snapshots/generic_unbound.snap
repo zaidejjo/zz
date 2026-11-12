@@ -2,8 +2,8 @@ first module that broke: <path> <path>
 
 error: Z0003: generic parameter `T` needs a `Num` bound for `+`; write `func ...<T: Num>`
 
-  --> <path>
-    |
-    4 |     x + y
-      |     ^^^^^
+--> <path>
+|
+4 | x + y
+| ^^^^^
 zz: 1 file(s) failed type-check

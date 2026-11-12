@@ -2,8 +2,8 @@ first module that broke: <path> <path>
 
 error: `std.http.route`: unknown method `FROB` (expected GET, POST, PUT, DELETE, PATCH, HEAD or OPTIONS)
 
-  --> <path>
-    |
-    7 |     s = s.route("FROB", <path> |_req| "bad-method")
-      |                 ^^^^^^
+--> <path>
+|
+7 | s = s.route("FROB", <path> |_req| "bad-method")
+| ^^^^^^
 zz: 1 file(s) failed type-check

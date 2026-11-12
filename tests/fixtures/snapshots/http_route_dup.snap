@@ -2,8 +2,8 @@ first module that broke: <path> <path>
 
 error: duplicate route `GET <path>
 
-  --> <path>
-    |
-    8 |     s = s.route("GET", <path> |_req| "dup")
-      |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+--> <path>
+|
+8 | s = s.route("GET", <path> |_req| "dup")
+| ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 zz: 1 file(s) failed type-check

@@ -2,8 +2,8 @@ first module that broke: <path> <path>
 
 error: type mismatch: expected `int`, found `float`
 
-  --> <path>
-    |
-    4 | x += 1.5
-      | ^^^^^^^^
+--> <path>
+|
+4 | x += 1.5
+| ^^^^^^^^
 zz: 1 file(s) failed type-check

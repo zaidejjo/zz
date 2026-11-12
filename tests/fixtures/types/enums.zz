@@ -54,9 +54,9 @@ enum ShapeWrap {
 
 func describe_shape(w: ShapeWrap) -> int {
     return match w {
-        .S(.Circle(r)) => r,
-        .S(_) => -1,
-        .N(n) => n,
+        .S(.Circle(r)) => r
+        .S(_) => -1
+        .N(n) => n
     }
 }
 
@@ -67,7 +67,7 @@ func main() {
     println(b)
     println(describe(b))
     println(describe(Token.Name("hi")))
-    println(describe(Token.Pair((1, 2))))
+    println(describe(Token.Pair(1, 2)))
     // Equality is structural.
     println(b == Token.IntLit(42))
     println(b == a)

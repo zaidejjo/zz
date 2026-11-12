@@ -2,8 +2,8 @@ first module that broke: <path> <path>
 
 error: integer remainder by zero (divisor is literal `0`)
 
-  --> <path>
-    |
-    3 | println(5 % 0)
-      |             ^
+--> <path>
+|
+3 | println(5 % 0)
+| ^
 zz: 1 file(s) failed type-check

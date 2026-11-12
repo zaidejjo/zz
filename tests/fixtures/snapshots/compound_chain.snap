@@ -3,8 +3,8 @@ first module that broke: <path> <path>
 error: cannot chain compound assignment
 hint: split into separate statements
 
-  --> <path>
-    |
-    5 | x += y += 1
-      |        ^^
+--> <path>
+|
+5 | x += y += 1
+| ^^
 zz: 1 file(s) failed type-check

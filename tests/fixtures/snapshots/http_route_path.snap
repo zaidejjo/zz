@@ -2,8 +2,8 @@ first module that broke: <path> <path>
 
 error: route path <path> greedy `:name...` must be the last segment
 
-  --> <path>
-    |
-    7 |     s = s.route("GET", <path> |_req| "bad-tail")
-      |                        ^^^^^^^^^^^^^^^^
+--> <path>
+|
+7 | s = s.route("GET", <path> |_req| "bad-tail")
+| ^^^^^^^^^^^^^^^^
 zz: 1 file(s) failed type-check

@@ -2,22 +2,22 @@ first module that broke: <path> <path>
 
 error: ambiguous conversion from `try_ambiguous_convert.ErrA`: already converts to `ErrB`
 
-  --> <path>
-    |
-   10 |     func convert_to_ErrB2(self) -> ErrB {
-      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+--> <path>
+|
+10 | func convert_to_ErrB2(self) -> ErrB {
+| ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 error: previous conversion here
 
-  --> <path>
-    |
-    7 |     func convert_to_ErrB(self) -> ErrB {
-      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+--> <path>
+|
+7 | func convert_to_ErrB(self) -> ErrB {
+| ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 error: Z0006: function returns `try_ambiguous_convert.ErrB` but its body can fall through; add `return `
 
-  --> <path>
-    |
-   11 |         ErrB{msg: self.msg}
-      |         ^^^^^^^^^^^^^^^^^^^ help: replace with `return `
+--> <path>
+|
+11 | ErrB{msg: self.msg}
+| ^^^^^^^^^^^^^^^^^^^ help: replace with `return `
 
-    = named functions return a value only through `return`; the last expression is discarded
+= named functions return a value only through `return`; the last expression is discarded
 zz: 1 file(s) failed type-check
