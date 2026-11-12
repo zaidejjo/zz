@@ -178,7 +178,6 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "concurrency_matchbind_test.zz", false),
     ("stdlib", "concurrency_vartrip_test.zz", false),
     ("stdlib", "concurrency_panic_test.zz", false),
-    ("stdlib", "concurrent_http_test.zz", false),
 ];
 
 /// (category/file, reason). Everything strict outside regression/errors
