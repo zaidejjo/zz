@@ -1,0 +1,27 @@
+// features: arrays, comparison, func-call, imports, print, std-str, string-literal
+// E2E: std.str pure-ZZ gap functions (repeat/is_empty/reverse/pad_left/pad_right + str.* aliases).
+import std.str
+
+func main() {
+    // ── Repetition ──
+    println("repeat(ab, 3): [{str.repeat("ab", 3)}]")
+    println("repeat(x, 0): [{str.repeat("x", 0)}]")
+    println("repeat(x, 1): [{str.repeat("x", 1)}]")
+    // ── Queries ──
+    empty := ""
+    e := str.is_empty(empty)
+    println("is_empty(empty): {e}")
+    n := str.is_empty("a")
+    println("is_empty(a): {n}")
+    // ── Transform ──
+    println("reverse(hello): {str.reverse("hello")}")
+    println("reverse(a): {str.reverse("a")}")
+    r := str.reverse(empty)
+    println("reverse(empty): [{r}]")
+    // ── Padding ──
+    println("pad_left(x, 5, -): [{str.pad_left("x", 5, "-")}]")
+    println("pad_left(hello, 3, -): [{str.pad_left("hello", 3, "-")}]")
+    println("pad_right(x, 5, -): [{str.pad_right("x", 5, "-")}]")
+    println("pad_right(hello, 3, -): [{str.pad_right("hello", 3, "-")}]")
+    println("str_gaps_ok")
+}
