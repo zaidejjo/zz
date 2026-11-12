@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use zz_frontend::ast::{Block, Expr, FmtPart, Pattern, Stmt, Ty, TyKind};
+use zz_frontend::visitor::{AstVisitor, VisitControl};
 
 use super::*;
 
@@ -683,6 +684,12 @@ impl Lowerer {
                         }
                     }
                 }
+                // Non-negative flow fact for the binding just entered (see
+                // `NameCtx::nonneg`). Recorded here, after the C id exists, so
+                // the fact attaches to this binding and never to a shadowed
+                // one; the early-returning layouts above (flat arrays/rows,
+                // structs, comprehensions) do not hold index values.
+                self.track_nonneg_assign(&name.name, value, names);
             }
             Stmt::Assign { target, value, .. } => {
                 // `_ = expr` — evaluate `expr` for effect, drop the value.
@@ -707,6 +714,13 @@ impl Lowerer {
                         }
                         return;
                     }
+                }
+
+                // Flow fact for the flat-index fast path: a plain `=` sets it
+                // from the RHS (`x = x + 1` keeps `x` non-negative), every
+                // other write form clears it (see `track_nonneg_assign`).
+                if let Expr::Ident { name, .. } = target {
+                    self.track_nonneg_assign(name, value, names);
                 }
 
                 // Fast-path: `s = s + <rhs>` where `s` is a string
@@ -1162,13 +1176,21 @@ impl Lowerer {
                                             .map(str::to_string),
                                     ) {
                                         let func = names.current_scope.clone();
-                                        let i_raw = self.flat_index_expr(i_expr, names, out);
-                                        let j_raw = self.flat_index_expr(index, names, out);
+                                        let i_chk = self.flat_index_checked(
+                                            i_expr, &len_cid, &func, names, out,
+                                        );
                                         let rtmp = names.fresh("_frow");
+                                        let j_chk = self.flat_index_checked(
+                                            index,
+                                            &format!("({rtmp}).len"),
+                                            &func,
+                                            names,
+                                            out,
+                                        );
                                         let raw = self
                                             .flat_store_raw_value(value, &val, &boxed_val, &inner);
                                         out.push_str(&format!(
-                                            "    {{ zz_flat_row {rtmp} = ({buf_cid})[zz_flat_index({i_raw}, {len_cid}, \"{func}\")];\n      (({inner} *)({rtmp}).data)[zz_flat_index({j_raw}, ({rtmp}).len, \"{func}\")] = {raw}; }}\n"
+                                            "    {{ zz_flat_row {rtmp} = ({buf_cid})[{i_chk}];\n      (({inner} *)({rtmp}).data)[{j_chk}] = {raw}; }}\n"
                                         ));
                                         return;
                                     }
@@ -1387,8 +1409,10 @@ impl Lowerer {
                                     .unwrap_or("int64_t");
                                 let raw_val =
                                     self.flat_store_raw_value(value, &val, &boxed_val, elem);
+                                let i_chk =
+                                    self.flat_index_wrap(index, &i_raw, &len_cid, &func, names);
                                 out.push_str(&format!(
-                                    "    {{ int _e = 0; {home}[zz_flat_index({i_raw}, {len_cid}, \"{func}\")] = {raw_val}; }}\n"
+                                    "    {{ int _e = 0; {home}[{i_chk}] = {raw_val}; }}\n"
                                 ));
                                 return;
                             }
@@ -2200,13 +2224,68 @@ impl Lowerer {
         };
 
         if let Some((start_expr, end_expr)) = bounds {
+            // Constant-fill fast path: `for _ in 0..N { arr = vec.push(arr, C) }`
+            // on a flat scalar array appends N copies of a constant, which is
+            // exactly a `memset` over the new tail. Rust's `vec![c; n]` lowers
+            // to this natively, so without it a pure fill pays a compare, a
+            // capacity branch, and a store per element (2M iterations for a
+            // bool sieve table).
+            if !self.green_active()
+                && vars.len() == 1
+                && body.stmts.len() == 1
+                && matches!(&start_expr, Expr::Int { value: 0, .. })
+            {
+                if let Some((arr_name, arr_ctype, value)) =
+                    flat_fill_target(&body.stmts[0], names, self)
+                {
+                    if let Some(byte) = fill_byte(value, &arr_ctype) {
+                        if let (Some(cid), Some(len_cid), Some(cap_cid)) = (
+                            names.lookup(&arr_name).map(str::to_string),
+                            names.lookup(&format!("{arr_name}_len")).map(str::to_string),
+                            names.lookup(&format!("{arr_name}_cap")).map(str::to_string),
+                        ) {
+                            let elem = arr_ctype.strip_suffix(" *").unwrap_or(&arr_ctype);
+                            let n_raw = self.flat_index_expr(&end_expr, names, out);
+                            let grow = if names.resolves_to_global(&arr_name) {
+                                format!(
+                                    "{cap_cid} = __new; {cid} = ({arr_ctype})realloc({cid}, (size_t)__new * sizeof({elem}));"
+                                )
+                            } else {
+                                format!(
+                                    "{cap_cid} = __new; {arr_ctype} __fill = ({arr_ctype})zz_arena_alloc(&_func_arena, (size_t)__new * sizeof({elem}), 8);\n        if (__old > 0) {{ memcpy(__fill, {cid}, (size_t)__old * sizeof({elem})); }}\n        {cid} = __fill;"
+                                )
+                            };
+                            out.push_str(&format!(
+                                "    {{ int64_t __n = {n}; if (__n > 0) {{ int64_t __old = {len}; int64_t __new = __old + __n;\n      if (__new > {cap}) {{ if ((uint64_t)__new > SIZE_MAX / sizeof({elem})) {{ fprintf(stderr, \"zz error: array capacity overflow\\n\"); exit(1); }} {grow} }}\n      memset({cid} + __old, {byte}, (size_t)__n * sizeof({elem}));\n      {len} = __new; }} }}\n",
+                                n = n_raw,
+                                len = len_cid,
+                                cap = cap_cid,
+                                cid = cid,
+                                elem = elem,
+                                grow = grow,
+                                byte = byte,
+                            ));
+                            // The fill never reads the loop variable, so the
+                            // loop (and its sub-arena) is not emitted at all.
+                            return;
+                        }
+                    }
+                }
+            }
             // Loop-scoped sub-arena: loops whose body contains non-escaping
             // allocations get their own arena so the per-iteration reset can
             // reuse the buffer without touching objects an enclosing scope or
             // an outer loop iteration may have placed on the function arena.
             // Skipped in green closures: stack arenas cannot survive a
             // suspend (heap-only there).
-            let loop_arena: Option<String> =
+            // The declaration/init is emitted lazily below: the body is
+            // emitted first and the arena scaffolding only kept when the body
+            // actually allocates into it. Tight loops whose allocations were
+            // optimized away (flat pushes, raw stores) would otherwise pay a
+            // per-iteration `zz_arena_reset` over the class table for nothing
+            // — 2M of those dominate a fill loop.
+            let arena_decl_at = out.len();
+            let loop_arena: Option<(String, usize)> =
                 if !self.green_active() && self.escape.loop_spans.contains(&span) {
                     let ac = names.bump_counter();
                     let name = format!("_loop_arena{ac}");
@@ -2214,9 +2293,7 @@ impl Lowerer {
                     // Count allocating expressions in the body × 128 bytes each.
                     let alloc_count = count_allocating_exprs(body);
                     let arena_size = (alloc_count * 128).max(65536);
-                    out.push_str(&format!("    zz_arena {name};\n"));
-                    out.push_str(&format!("    zz_arena_init(&{name}, {arena_size});\n"));
-                    Some(name)
+                    Some((name, arena_size))
                 } else {
                     None
                 };
@@ -2303,6 +2380,18 @@ impl Lowerer {
                 }
                 cid
             };
+            // Non-negative flow fact for the flat-index fast path: an
+            // ascending loop starting at a non-negative value can never make
+            // its counter negative (checked before the body is emitted, so
+            // the body's index expressions see it).
+            let start_nonneg = self.is_nonneg_expr(&start_expr, names);
+            names.set_nonneg_name(v, start_nonneg);
+
+            // The VM re-binds the loop variable on every iteration, so a body
+            // assignment writes a per-iteration copy, not the iteration state.
+            // A captured loop variable already gets a per-iteration cell
+            // below; otherwise a direct write must not drive the C counter.
+            let loop_var_written = !names.capture_set.contains(v) && block_assigns_ident(body, v);
 
             // Captured upper bound of a scalar-terminated loop, recorded into
             // the body scope for bounds-check elimination (see
@@ -2356,7 +2445,7 @@ impl Lowerer {
                     // Some other expression, unbox it
                     format!("({ev}).i")
                 };
-                if !green {
+                if !green && !loop_var_written {
                     for_loop_bound = Some(ev_unboxed.clone());
                 }
 
@@ -2398,6 +2487,22 @@ impl Lowerer {
                     // For other expressions, assume they need unboxing
                     format!("({sv}).i")
                 };
+
+                // Hidden induction variable used when the body assigns the
+                // loop variable: the counter stays private to the loop and the
+                // binding is re-created per iteration (VM semantics). Green
+                // loops drive a frame cell, so the counter is a fresh cell.
+                let counter: Option<String> = if loop_var_written {
+                    Some(if green {
+                        let (_, deref, _) = self.green_cell(names, "int64_t", true, out, None);
+                        deref
+                    } else {
+                        names.fresh("_lf")
+                    })
+                } else {
+                    None
+                };
+                let ind: &str = counter.as_deref().unwrap_or(&cid);
 
                 let s = if green {
                     // Resume-safety: the end bound is re-read every
@@ -2456,15 +2561,15 @@ impl Lowerer {
                     // Green loops never use the flat-array `ptr` walk
                     // (`ptr_store` is `None` for green, see line 2097), so
                     // the increment never touches `ptr`.
-                    format!("for ({cid} = {sv_unboxed}; {cid} < {end_ref}; {cid}++) {{\n")
+                    format!("for ({ind} = {sv_unboxed}; {ind} < {end_ref}; {ind}++) {{\n")
                 } else {
                     if let Some((ref _arr_cid, ref _elem_ctype)) = ptr_store {
                         format!(
-                            "for (int64_t {cid} = {sv_unboxed}; {cid} < {ev_unboxed}; {cid}++, ptr += 1) {{\n"
+                            "for (int64_t {ind} = {sv_unboxed}; {ind} < {ev_unboxed}; {ind}++, ptr += 1) {{\n"
                         )
                     } else {
                         format!(
-                            "for (int64_t {cid} = {sv_unboxed}; {cid} < {ev_unboxed}; {cid}++) {{\n"
+                            "for (int64_t {ind} = {sv_unboxed}; {ind} < {ev_unboxed}; {ind}++) {{\n"
                         )
                     }
                 };
@@ -2477,6 +2582,16 @@ impl Lowerer {
                     out.push_str(&format!("    {elem_ctype} *ptr = {arr_cid};\n"));
                 }
                 out.push_str(&s);
+                // Per-iteration copy of the induction variable: the body sees
+                // a fresh binding, so its writes cannot rewind or stall the
+                // loop (matches the VM, and the boxed path below).
+                if let Some(ind) = &counter {
+                    if green {
+                        out.push_str(&format!("    {cid} = {ind};\n"));
+                    } else {
+                        out.push_str(&format!("    int64_t {cid} = {ind};\n"));
+                    }
+                }
                 // Loop-top safepoint (mirrors the VM's `Op::Safepoint`),
                 // elided for concurrency-free programs (see
                 // `needs_safepoint`): the call barrier blocks clang from
@@ -2704,7 +2819,7 @@ impl Lowerer {
             } else {
                 None
             };
-            if let Some(ref name) = loop_arena {
+            if let Some((name, _)) = &loop_arena {
                 self.loop_arenas.borrow_mut().push(name.clone());
                 *self.current_loop_arena.borrow_mut() = Some(name.clone());
             }
@@ -2764,13 +2879,28 @@ impl Lowerer {
             }
             self.loop_scope_end(names, out, body_scope);
             names.clear_array_lens();
-            if let Some(ref name) = loop_arena {
+            // Keep the arena scaffolding only when the body actually
+            // allocated into it (see the note at `arena_decl_at`).
+            let arena_used = match &loop_arena {
+                Some((name, _)) => out[arena_decl_at..].contains(name.as_str()),
+                None => false,
+            };
+            if let Some((name, arena_size)) = &loop_arena {
                 self.loop_arenas.borrow_mut().pop();
                 *self.current_loop_arena.borrow_mut() = self.loop_arenas.borrow().last().cloned();
-                // Per-iteration reset: every arena allocation made inside this
-                // iteration is reclaimed in O(1), so the sub-arena's buffer is
-                // reused indefinitely without growing the heap footprint.
-                out.push_str(&format!("    zz_arena_reset(&{name});\n"));
+                if arena_used {
+                    out.insert_str(
+                        arena_decl_at,
+                        &format!(
+                            "    zz_arena {name};\n    zz_arena_init(&{name}, {arena_size});\n"
+                        ),
+                    );
+                    // Per-iteration reset: every arena allocation made inside
+                    // this iteration is reclaimed in O(1), so the sub-arena's
+                    // buffer is reused indefinitely without growing the heap
+                    // footprint.
+                    out.push_str(&format!("    zz_arena_reset(&{name});\n"));
+                }
             }
             out.push_str("    }\n");
             if !end_is_scalar {
@@ -2780,8 +2910,10 @@ impl Lowerer {
             // loop regain the grow guard.
             self.skip_flat_push_grow.set(false);
             // Free the sub-arena's buffer once the loop completes.
-            if let Some(ref name) = loop_arena {
-                out.push_str(&format!("    zz_arena_destroy(&{name});\n"));
+            if let Some((name, _)) = &loop_arena {
+                if arena_used {
+                    out.push_str(&format!("    zz_arena_destroy(&{name});\n"));
+                }
             }
             if let Some(cell_name) = loop_cell {
                 // Pop the per-iteration cell shadow, then the raw loop var.
@@ -3215,6 +3347,9 @@ impl Lowerer {
         let outer_flat_scalar = std::mem::take(&mut names.flat_scalar_types);
         let outer_flat_rows = std::mem::take(&mut names.flat_rows);
         let outer_flat_row_inner = std::mem::take(&mut names.flat_row_inner);
+        // Flow facts are per body too: a non-negative loop counter from
+        // another function must never reach an index check here.
+        let outer_nonneg = std::mem::take(&mut names.nonneg);
         names.flat_locals = self.body_flat_locals(block, names);
         // Dead-variable release: after a variable's last top-level use,
         // emit `zz_release` to free refcounted containers (arrays, dicts,
@@ -3235,6 +3370,7 @@ impl Lowerer {
         names.flat_scalar_types = outer_flat_scalar;
         names.flat_rows = outer_flat_rows;
         names.flat_row_inner = outer_flat_row_inner;
+        names.nonneg = outer_nonneg;
     }
 
     // ── Dead-variable release analysis ──────────────────────────────
@@ -3755,6 +3891,124 @@ fn flat_push_receiver(
     let is_flat = lowerer.scalar_array_from_ptr(&recv_ctype).is_some()
         || lowerer.flat_array_from_ptr(&recv_ctype).is_some();
     is_flat.then_some((recv_name, recv_ctype))
+}
+
+/// Match a single flat push statement in all three surface forms —
+/// `arr.push(c)`, `vec.push(arr, c)`, `arr = vec.push(arr, c)` — returning the
+/// receiver name, its pointer C type, and the pushed expression. Only scalar
+/// flat arrays qualify (struct rows have no byte fill).
+fn flat_fill_target<'a>(
+    stmt: &'a Stmt,
+    names: &NameCtx,
+    lowerer: &Lowerer,
+) -> Option<(String, String, &'a Expr)> {
+    // `vec.push(arr, c)` — receiver is the first argument, not the callee.
+    fn function_push<'a>(callee: &Expr, args: &'a [Expr]) -> Option<(&'a str, &'a Expr)> {
+        let Expr::Path { parts, .. } = callee else {
+            return None;
+        };
+        if parts.len() != 2 || parts[0] != "vec" || parts[1] != "push" || args.len() != 2 {
+            return None;
+        }
+        let Expr::Ident { name, .. } = &args[0] else {
+            return None;
+        };
+        Some((name.as_str(), &args[1]))
+    }
+    // Method form `arr.push(c)`: one argument, receiver from the callee path.
+    fn method_push<'a>(
+        callee: &Expr,
+        args: &'a [Expr],
+        names: &NameCtx,
+        lowerer: &Lowerer,
+    ) -> Option<(String, &'a Expr)> {
+        let (recv, _ctype) = flat_push_receiver(callee, args, "", names, lowerer)?;
+        Some((recv, args.first()?))
+    }
+    let (recv, value) = match stmt {
+        Stmt::Expr(Expr::Call { callee, args, .. }) => {
+            if let Some((name, value)) = function_push(callee, args) {
+                (name.to_string(), value)
+            } else {
+                let (name, value) = method_push(callee, args, names, lowerer)?;
+                (name, value)
+            }
+        }
+        Stmt::Assign {
+            target: Expr::Ident { name, .. },
+            value: Expr::Call { callee, args, .. },
+            ..
+        } => {
+            if let Some((recv, value)) = function_push(callee, args) {
+                if recv != name {
+                    return None;
+                }
+                (name.clone(), value)
+            } else {
+                let (recv, value) = method_push(callee, args, names, lowerer)?;
+                if &recv != name {
+                    return None;
+                }
+                (name.clone(), value)
+            }
+        }
+        _ => return None,
+    };
+    let ctype = names.lookup_type(&recv)?.to_string();
+    lowerer.scalar_array_from_ptr(&ctype)?;
+    Some((recv, ctype, value))
+}
+
+/// True when `block` assigns the binding `name` itself
+/// (`for k in 0..n { k = … }`, including inside nested blocks and closures).
+///
+/// The VM re-binds the loop variable every iteration, so a body assignment is
+/// a write to a per-iteration copy. A C `for (int64_t v = …; …; v++)` instead
+/// shares one variable with the body: `k = -1` would reset the counter (an
+/// infinite loop at runtime) and `k = 0` would rewind it.
+fn block_assigns_ident(block: &Block, name: &str) -> bool {
+    struct AssignScan<'a> {
+        name: &'a str,
+        found: bool,
+    }
+    impl AstVisitor for AssignScan<'_> {
+        fn visit_stmt(&mut self, stmt: &Stmt) -> VisitControl {
+            if !self.found {
+                let target = match stmt {
+                    Stmt::Assign { target, .. } | Stmt::CompoundAssign { target, .. } => {
+                        Some(target)
+                    }
+                    _ => None,
+                };
+                if let Some(Expr::Ident { name, .. }) = target {
+                    self.found = name == self.name;
+                }
+            }
+            if self.found {
+                VisitControl::Skip
+            } else {
+                VisitControl::Recurse
+            }
+        }
+    }
+    let mut scan = AssignScan { name, found: false };
+    scan.walk_block(block);
+    scan.found
+}
+
+/// Byte value for a `memset` fill of `elem` with the constant `value`, or
+/// `None` when the constant has no byte-uniform representation (any non-zero
+/// int or float, string, struct…).
+fn fill_byte(value: &Expr, ctype: &str) -> Option<u8> {
+    let elem = ctype.strip_suffix(" *")?;
+    match (elem, value) {
+        ("bool", Expr::Bool { value, .. }) => Some(u8::from(*value)),
+        ("int64_t", Expr::Int { value: 0, .. }) => Some(0),
+        // `+0.0` only: `-0.0` compares equal but has a non-zero sign bit, so a
+        // zero-byte fill would change the value (observable via `1.0 / x`).
+        ("double", Expr::Float { value, .. }) if value.to_bits() == 0 => Some(0),
+        _ => None,
+    }
 }
 
 /// Find the integer value of a `const name = <literal>` or `let name = <literal>`

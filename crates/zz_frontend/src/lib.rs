@@ -20,7 +20,7 @@ pub mod tests;
 
 // Syntax data lives in `zz_span_ast`; re-exported as modules so every
 // existing `zz_frontend::ast::…` / `zz_frontend::span::…` path keeps working.
-pub use zz_span_ast::{ast, span};
+pub use zz_span_ast::{ast, span, visitor};
 pub use zz_suggest as levenshtein;
 
 pub use ast::{BinOp, Decorator, Expr, Ident, ImportItem, Program, Stmt, UnOp};

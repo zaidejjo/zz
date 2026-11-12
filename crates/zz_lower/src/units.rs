@@ -948,12 +948,12 @@ mod tests {
             "expected flat bool buffer:\n{code}"
         );
         assert!(
-            code.contains("= (zz_bool(true)).b;"),
-            "push must store directly into the flat buffer:\n{code}"
+            code.contains("memset(") && code.contains("sizeof(bool)"),
+            "constant fill must lower to a single memset:\n{code}"
         );
         assert!(
-            code.contains("__flat_grow"),
-            "flat buffer must grow in place:\n{code}"
+            code.matches("for (int64_t ").count() == 1,
+            "the fill loop must be replaced by the memset:\n{code}"
         );
         assert!(
             !code.contains("zz_vec_push_take"),
@@ -964,7 +964,7 @@ mod tests {
             "index store must use the flat buffer:\n{code}"
         );
         assert!(
-            code.contains("zz_flat_index("),
+            code.contains("zz_flat_index(") || code.contains("zz_flat_index_nn("),
             "index reads/stores must use the flat buffer:\n{code}"
         );
     }
@@ -1064,6 +1064,57 @@ mod tests {
         );
     }
 
+    /// A body assignment to the loop variable writes a per-iteration copy in
+    /// the VM, so lowering must not let it drive the C induction variable
+    /// (`k = -1` would otherwise reset the counter and hang).
+    #[test]
+    fn for_loop_var_write_uses_hidden_counter() {
+        let units = lower_merged(
+            "func main() {
+                total := 0
+                for k in 0..3 {
+                    k = 0 - 1
+                    total = total + k
+                }
+                println(total)
+            }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        assert!(
+            code.contains("for (int64_t _lf"),
+            "the counter must be a hidden induction variable:\n{code}"
+        );
+        assert!(
+            code.lines()
+                .any(|l| l.trim_start().starts_with("int64_t v") && l.contains("= _lf")),
+            "the loop binding must be re-created inside the body:\n{code}"
+        );
+    }
+
+    /// The hidden counter is only for bodies that assign the binding: an
+    /// ordinary counted loop keeps the direct (unboxed) counter.
+    #[test]
+    fn for_loop_without_var_write_keeps_direct_counter() {
+        let units = lower_merged(
+            "func main() {
+                total := 0
+                for k in 0..3 { total = total + k }
+                println(total)
+            }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        assert!(
+            !code.contains("_lf"),
+            "a read-only loop variable must drive the counter directly:\n{code}"
+        );
+        assert!(
+            code.contains("for (int64_t v"),
+            "expected the direct counter header:\n{code}"
+        );
+    }
+
     /// Nested inferred arrays: `a := []` whose elements are flat scalar rows
     /// lowers to `zz_flat_row *`, and `a[i][j]` reads/stores index the row
     /// buffer directly instead of the boxed read-modify-write chain.
@@ -1109,8 +1160,90 @@ mod tests {
             "nested reads/stores must stay raw:\n{code}"
         );
         assert!(
-            code.matches("zz_flat_index(").count() >= 4,
+            code.matches("zz_flat_index").count() >= 4,
             "both bounds checks missing:\n{code}"
+        );
+    }
+
+    /// The non-negative index fact is bound to the C id of the binding: an
+    /// inner shadow must not mark the outer variable, which still needs the
+    /// sign-folding check (a negative index counts from the end, it is not an
+    /// out-of-bounds trap).
+    #[test]
+    fn flat_index_fast_path_survives_shadowing() {
+        let units = lower_merged(
+            "func main() {
+                arr := []
+                for i in 0..3 { arr = vec.push(arr, i) }
+                j := -1
+                {
+                    j := 5
+                    println(j)
+                }
+                println(arr[j])
+            }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        assert!(
+            !code.contains("zz_flat_index_nn("),
+            "a shadowed binding must not inherit the non-negative fact:\n{code}"
+        );
+        assert!(
+            code.contains("zz_flat_index("),
+            "negative index needs the sign-folding check:\n{code}"
+        );
+    }
+
+    /// A constant fill lowers to one `memset`; a constant without a
+    /// byte-uniform representation (`5` in an int array) keeps the loop.
+    #[test]
+    fn flat_constant_fill_uses_memset_only_for_byte_values() {
+        let units = lower_merged(
+            "func main() {
+                zeros := []
+                for i in 0..100 { zeros = vec.push(zeros, 0) }
+                fives := []
+                for i in 0..100 { fives = vec.push(fives, 5) }
+                println(zeros[0])
+                println(fives[0])
+            }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        assert!(
+            code.contains("memset("),
+            "zero fill must lower to a memset:\n{code}"
+        );
+        assert!(
+            code.matches("for (int64_t ").count() == 1,
+            "only the non-byte fill may keep its loop:\n{code}"
+        );
+    }
+
+    /// The non-negative index fast path is a flow fact, not a property of the
+    /// name: a negative local keeps the general check (which folds from the
+    /// end), while a literal uses the single-compare variant.
+    #[test]
+    fn flat_index_fast_path_tracks_sign() {
+        let units = lower_merged(
+            "func main() {
+                arr := []
+                for i in 0..4 { arr = vec.push(arr, i) }
+                j := -1
+                println(arr[j])
+                println(arr[1])
+            }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        assert!(
+            code.contains("zz_flat_index("),
+            "negative local needs the general check:\n{code}"
+        );
+        assert!(
+            code.contains("zz_flat_index_nn(1"),
+            "literal index should use the unsigned fast path:\n{code}"
         );
     }
 

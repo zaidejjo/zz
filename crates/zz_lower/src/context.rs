@@ -139,6 +139,16 @@ pub struct NameCtx {
     /// each scope introduced, so `pop_scope` removes exactly those (outer
     /// loop bounds survive nested-loop scopes). See `set_loop_bound`.
     pub(crate) loop_bounds_scopes: Vec<Vec<String>>,
+    /// C identifiers whose current value is statically known to be
+    /// non-negative: loop counters from `for i in <non-negative start>`, plus
+    /// locals whose last assignment was a literal or a sum/product of
+    /// non-negative values. Flat index lowering emits `zz_flat_index_nn`
+    /// (single unsigned range check) for these instead of the general
+    /// `zz_flat_index` (which must also fold negative indices). Sound because
+    /// every plain reassignment re-evaluates the flag and any other form
+    /// clears it; keyed by C id, the set is per function body and dies with
+    /// the binding's scope.
+    pub(crate) nonneg: HashSet<String>,
     /// zz var name → pure-scalar array literal elements it was most
     /// recently bound to (straight-line code only). Used to forward
     /// `arr[lit]` reads to the element's raw C expression, eliminating
@@ -201,6 +211,7 @@ impl NameCtx {
             array_len_exprs: HashMap::new(),
             loop_bounds: HashMap::new(),
             loop_bounds_scopes: Vec::new(),
+            nonneg: HashSet::new(),
             stack_array_elems: HashMap::new(),
             last_promoted_array: None,
             checker_types: HashMap::new(),
@@ -446,6 +457,20 @@ impl NameCtx {
         self.loop_bounds_scopes.push(Vec::new());
     }
 
+    /// Mark (or unmark) the variable currently bound to `name` as
+    /// non-negative. Keyed by C identifier so the fact dies with its binding:
+    /// a shadowing declaration gets a fresh id and never inherits it.
+    pub(crate) fn set_nonneg_name(&mut self, name: &str, nonneg: bool) {
+        let Some(cid) = self.lookup(name).map(str::to_string) else {
+            return;
+        };
+        if nonneg {
+            self.nonneg.insert(cid);
+        } else {
+            self.nonneg.remove(&cid);
+        }
+    }
+
     /// Record a loop-variable upper bound for bounds-check elimination,
     /// attributing it to the current scope so `pop_scope` retires it with
     /// the loop's body scope (outer loop bounds survive nested loops).
@@ -486,6 +511,9 @@ impl NameCtx {
                 vec.retain(|(ctr, _, _)| *ctr < marker);
             }
             self.cell_ptrs.retain(|_, v| !v.is_empty());
+            // Non-negative facts belong to the binding that established them;
+            // drop the ones introduced by the scope being closed.
+            self.nonneg.retain(|cid| cid_counter(cid) < marker);
         }
     }
 
@@ -2262,6 +2290,87 @@ impl Lowerer {
             return format!("({emitted}).i");
         }
         emitted
+    }
+
+    /// True when `e` is statically non-negative: a non-negative literal, a
+    /// name tracked in [`NameCtx::nonneg`], or a sum/product/rem of
+    /// non-negative operands (C's `%` keeps the left operand's sign).
+    pub(crate) fn is_nonneg_expr(&self, e: &zz_frontend::ast::Expr, names: &NameCtx) -> bool {
+        use zz_frontend::ast::{BinOp, Expr};
+        match e {
+            Expr::Int { value, .. } => *value >= 0,
+            // Keyed by the C identifier, not the source name: a shadowed
+            // binding gets a fresh id, so a fact can never transfer to the
+            // other variable that happens to share the name.
+            Expr::Ident { name, .. } => names
+                .lookup(name)
+                .is_some_and(|cid| names.nonneg.contains(cid)),
+            Expr::Path { parts, .. } => names
+                .lookup(&parts.join("."))
+                .is_some_and(|cid| names.nonneg.contains(cid)),
+            Expr::Binary {
+                op, left, right, ..
+            } => {
+                matches!(op, BinOp::Add | BinOp::Mul | BinOp::Rem)
+                    && self.is_nonneg_expr(left, names)
+                    && self.is_nonneg_expr(right, names)
+            }
+            _ => false,
+        }
+    }
+
+    /// Record the non-negative flow fact for a plain assignment (or a `:=`
+    /// declaration) of `value` to `name`. Any value that is not provably
+    /// non-negative clears the fact, so a later flat index never skips the
+    /// negative-index normalization for a value that could be negative.
+    /// Globals and captured locals are never tracked: a call in between can
+    /// mutate them without a visible assignment at this level.
+    pub(crate) fn track_nonneg_assign(
+        &self,
+        name: &str,
+        value: &zz_frontend::ast::Expr,
+        names: &mut NameCtx,
+    ) {
+        let trackable = !names.resolves_to_global(name) && !names.capture_set.contains(name);
+        // Evaluate the RHS fact before mutating the set: `x = x + 1` reads
+        // the old fact.
+        let nonneg = trackable && self.is_nonneg_expr(value, names);
+        names.set_nonneg_name(name, nonneg);
+    }
+
+    /// Wrap a flat index in the bounds check that matches what is statically
+    /// known about it: `zz_flat_index_nn` (one unsigned compare) when the
+    /// index cannot be negative, otherwise the general form that also folds
+    /// negative indices.
+    pub(crate) fn flat_index_checked(
+        &self,
+        index: &zz_frontend::ast::Expr,
+        len: &str,
+        func: &str,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        let raw = self.flat_index_expr(index, names, out);
+        self.flat_index_wrap(index, &raw, len, func, names)
+    }
+
+    /// Wrap an already-emitted raw index text in the matching flat bounds
+    /// check. Use this when the index expression has side effects that must
+    /// not be evaluated twice.
+    pub(crate) fn flat_index_wrap(
+        &self,
+        index: &zz_frontend::ast::Expr,
+        raw: &str,
+        len: &str,
+        func: &str,
+        names: &NameCtx,
+    ) -> String {
+        let f = if self.is_nonneg_expr(index, names) {
+            "zz_flat_index_nn"
+        } else {
+            "zz_flat_index"
+        };
+        format!("{f}({raw}, {len}, \"{func}\")")
     }
 
     /// Check if a type string is a struct type.

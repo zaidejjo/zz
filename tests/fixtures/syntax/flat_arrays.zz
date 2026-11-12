@@ -59,6 +59,43 @@ func main() {
     passed.push(10)
     passed.push(20)
     println(sum_of(passed))
+    // Negative indices still count from the end: the non-negative index
+    // fast path is a flow fact bound to the C id, so an inner shadow or a
+    // reassignment to a negative value must restore the folding check.
+    neg:[int] = []
+    neg.push(1)
+    neg.push(2)
+    neg.push(3)
+    j := -1
+    {
+        j := 5
+        println(j)
+    }
+    println(neg[j])
+    // A plain assignment clears the fact too: `j = 0 - 1` must fold again.
+    j = 0 - 1
+    println(neg[j])
+    // Constant fills lower to one memset (both push spellings): length and
+    // values must match the element-by-element loop exactly.
+    filled:[bool] = []
+    for i in 0..7 {
+        filled.push(true)
+    }
+    gone:[int] = []
+    for i in 0..5 {
+        gone = vec.push(gone, 0)
+    }
+    println(len(filled))
+    println(filled[6])
+    println(len(gone))
+    println(gone[4])
+    // A body assignment to the loop variable is a per-iteration copy: it must
+    // neither rewind nor stall the counter, and the flat index read below
+    // still counts from the end (VM and native must agree).
+    for k in 0..3 {
+        k = 0 - 1
+        println(neg[k])
+    }
     // Untyped empty literal keeps the boxed layout.
     untyped := []
     untyped.push("a")

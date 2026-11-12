@@ -326,6 +326,16 @@ static inline int64_t zz_flat_index(int64_t i, int64_t n, const char *func) {
     return idx;
 }
 
+// Fast path for indices the lowerer proved non-negative (non-negative
+// literals, loop counters from `for i in 0..x`, and sums/products of those):
+// the negative-index normalization cannot apply, so the whole check is one
+// unsigned compare.
+static inline int64_t zz_flat_index_nn(int64_t i, int64_t n, const char *func) {
+    if ((uint64_t)i >= (uint64_t)n)
+        zz_index_trap_flat((long long)i, (long long)n, func);
+    return i;
+}
+
 // ---- flat rows (unboxed nested arrays) ---------------------------------
 // `a := []` whose elements are themselves flat scalar arrays lowers to
 // `zz_flat_row *`: each element is a *snapshot* of a row buffer, taken from
