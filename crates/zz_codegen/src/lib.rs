@@ -50,44 +50,11 @@ pub use zz_codegen_types::{CodegenSink, NoopSink};
 pub(crate) const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // Non-reachable from parity fixtures (no fixture uses them):
     // Pure-ZZ stdlib functions — run in VM only, no C codegen
-    ("std.math.sum", "pure ZZ; no C codegen"),
-    ("std.math.product", "pure ZZ; no C codegen"),
-    ("std.math.count", "pure ZZ; no C codegen"),
-    ("std.math.min", "pure ZZ; no C codegen"),
-    ("std.math.max", "pure ZZ; no C codegen"),
-    ("std.math.is_even", "pure ZZ; no C codegen"),
-    ("std.math.is_odd", "pure ZZ; no C codegen"),
-    ("std.math.min_arr", "pure ZZ; no C codegen"),
-    ("std.math.max_arr", "pure ZZ; no C codegen"),
-    ("std.math.sum_f", "pure ZZ; no C codegen"),
-    ("std.math.product_f", "pure ZZ; no C codegen"),
-    ("std.math.mean_f", "pure ZZ; no C codegen"),
-    ("std.math.median_f", "pure ZZ; no C codegen"),
-    // Math numeric constants without a zero-arg C entry (`PI`/`E`/`TAU`/
-    // `INF`/`NAN` have one; these never needed it): value uses lower to
-    // float literals, and the checker rejects calls.
-    (
-        "std.math.SQRT_2",
-        "numeric constant; lowers to float literal",
-    ),
-    (
-        "std.math.SQRT_1_2",
-        "numeric constant; lowers to float literal",
-    ),
-    ("std.math.LN_2", "numeric constant; lowers to float literal"),
-    (
-        "std.math.LN_10",
-        "numeric constant; lowers to float literal",
-    ),
-    (
-        "std.math.LOG10_E",
-        "numeric constant; lowers to float literal",
-    ),
-    (
-        "std.math.LOG2_E",
-        "numeric constant; lowers to float literal",
-    ),
     ("std.str.repeat", "pure ZZ; no C codegen"),
+    ("std.str.is_empty", "pure ZZ; no C codegen"),
+    ("std.str.reverse", "pure ZZ; no C codegen"),
+    ("std.str.pad_left", "pure ZZ; no C codegen"),
+    ("std.str.pad_right", "pure ZZ; no C codegen"),
     ("std.str.is_empty", "pure ZZ; no C codegen"),
     ("std.str.reverse", "pure ZZ; no C codegen"),
     ("std.str.pad_left", "pure ZZ; no C codegen"),
@@ -117,19 +84,6 @@ pub(crate) const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("std.json.is_object", "pure ZZ; no C codegen"),
     ("std.json.is_empty", "pure ZZ; no C codegen"),
     // Method-dispatch aliases for pure-ZZ functions
-    ("math.sum", "pure ZZ alias"),
-    ("math.product", "pure ZZ alias"),
-    ("math.count", "pure ZZ alias"),
-    ("math.min", "pure ZZ alias"),
-    ("math.max", "pure ZZ alias"),
-    ("math.is_even", "pure ZZ alias"),
-    ("math.is_odd", "pure ZZ alias"),
-    ("math.min_arr", "pure ZZ alias"),
-    ("math.max_arr", "pure ZZ alias"),
-    ("math.sum_f", "pure ZZ alias"),
-    ("math.product_f", "pure ZZ alias"),
-    ("math.mean_f", "pure ZZ alias"),
-    ("math.median_f", "pure ZZ alias"),
     ("str.repeat", "pure ZZ alias"),
     ("str.is_empty", "pure ZZ alias"),
     ("str.reverse", "pure ZZ alias"),

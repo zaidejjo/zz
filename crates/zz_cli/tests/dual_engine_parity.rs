@@ -1634,6 +1634,7 @@ parity_strict!(parity_syntax_dict_iteration, "syntax", "dict_iteration.zz");
 parity_strict!(parity_stdlib_vectors, "stdlib", "vectors.zz");
 parity_strict!(parity_stdlib_vec_sort, "stdlib", "vec_sort.zz");
 parity_strict!(parity_stdlib_math_ops, "stdlib", "math_ops.zz");
+parity_strict!(parity_stdlib_math_gaps, "stdlib", "math_gaps_test.zz");
 parity_strict!(
     parity_stdlib_matrix_mul_test,
     "stdlib",
