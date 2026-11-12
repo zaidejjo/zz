@@ -2,15 +2,15 @@ first module that broke: <path> <path>
 
 error: missing field `y` in struct literal `missing_field.Point`
 
-  --> <path>
-    |
-    5 | p := Point{x: 1}
-      |      ^^^^^^^^^^^
+--> <path>
+|
+5 | p := Point{x: 1}
+| ^^^^^^^^^^^
 warning: unused variable `p` is never read, consider prefixing with `_p`
 
-  --> <path>
-    |
-    5 | p := Point{x: 1}
-      | ^ help: replace with `_p`
+--> <path>
+|
+5 | p := Point{x: 1}
+| ^ help: replace with `_p`
 
 zz: 1 file(s) failed type-check

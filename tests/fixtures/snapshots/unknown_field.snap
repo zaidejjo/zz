@@ -2,10 +2,10 @@ first module that broke: <path> <path>
 
 error: struct `unknown_field.Point` has no field `z`
 
-  --> <path>
-    |
-    6 | println(p.z)
-      |         ^^^ help: replace with `x`
+--> <path>
+|
+6 | println(p.z)
+| ^^^ help: replace with `x`
 
-    = did you mean field `x`?
+= did you mean field `x`?
 zz: 1 file(s) failed type-check

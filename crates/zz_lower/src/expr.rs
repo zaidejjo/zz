@@ -5142,7 +5142,7 @@ impl Lowerer {
         let names_arr_tmp = names.fresh("__enum_fields");
         // Declare field names array
         out.push_str(&format!("    zz_value {names_arr_tmp}[{n}];\n"));
-        for (i, arg) in args.iter().enumerate() {
+        for (i, _arg) in args.iter().enumerate() {
             let field_name = if n == 1 {
                 "value".to_string()
             } else {

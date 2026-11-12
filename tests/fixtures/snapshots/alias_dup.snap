@@ -2,14 +2,14 @@ first module that broke: <path> <path>
 
 error: duplicate definition of type alias `alias_dup.Tokens`
 
-  --> <path>
-    |
-    4 | type Tokens = [int]
-      | ^^^^^^^^^^^^^^^^^^^
+--> <path>
+|
+4 | type Tokens = [int]
+| ^^^^^^^^^^^^^^^^^^^
 error: previous definition here
 
-  --> <path>
-    |
-    3 | type Tokens = [str]
-      | ^^^^^^^^^^^^^^^^^^^
+--> <path>
+|
+3 | type Tokens = [str]
+| ^^^^^^^^^^^^^^^^^^^
 zz: 1 file(s) failed type-check

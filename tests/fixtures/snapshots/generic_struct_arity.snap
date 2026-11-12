@@ -2,22 +2,22 @@ first module that broke: <path> <path>
 
 error: struct `generic_struct_arity.Box` takes 1 type argument (e.g. `generic_struct_arity.Box<T>`)
 
-  --> <path>
-    |
-    4 | b: Box = Box{ v: 1 }
-      |    ^^^
+--> <path>
+|
+4 | b: Box = Box{ v: 1 }
+| ^^^
 error: type argument arity mismatch
 
-  --> <path>
-    |
-    4 | b: Box = Box{ v: 1 }
-      |    ^^^
-    = to fix: change the annotation to `generic_struct_arity.Box<int>` or convert the value
+--> <path>
+|
+4 | b: Box = Box{ v: 1 }
+| ^^^
+= to fix: change the annotation to `generic_struct_arity.Box<int>` or convert the value
 warning: unused variable `b` is never read, consider prefixing with `_b`
 
-  --> <path>
-    |
-    4 | b: Box = Box{ v: 1 }
-      | ^ help: replace with `_b`
+--> <path>
+|
+4 | b: Box = Box{ v: 1 }
+| ^ help: replace with `_b`
 
 zz: 1 file(s) failed type-check

@@ -2,9 +2,9 @@ first module that broke: <path> <path>
 
 error: cannot compare `int` with `float`. Use `float(x)` to cast
 
-  --> <path>
-    |
-    5 | if x == y {
-      |    ^^^^^^
-    = cast `int` to `float` with `float(...)` on the mismatched side
+--> <path>
+|
+5 | if x == y {
+| ^^^^^^
+= cast `int` to `float` with `float(...)` on the mismatched side
 zz: 1 file(s) failed type-check

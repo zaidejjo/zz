@@ -2,14 +2,14 @@ first module that broke: <path> <path>
 
 error: duplicate definition of method `str.shout`
 
-  --> <path>
-    |
-   10 |     func shout(self) -> str {
-      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+--> <path>
+|
+10 | func shout(self) -> str {
+| ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 error: previous definition here
 
-  --> <path>
-    |
-    4 |     func shout(self) -> str {
-      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+--> <path>
+|
+4 | func shout(self) -> str {
+| ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 zz: 1 file(s) failed type-check

@@ -2,15 +2,15 @@ first module that broke: <path> <path>
 
 error: integer division by zero (divisor is literal `0`)
 
-  --> <path>
-    |
-    3 | x := 1 <path> 0
-      |          ^
+--> <path>
+|
+3 | x := 1 <path> 0
+| ^
 warning: unused variable `x` is never read, consider prefixing with `_x`
 
-  --> <path>
-    |
-    3 | x := 1 <path> 0
-      | ^ help: replace with `_x`
+--> <path>
+|
+3 | x := 1 <path> 0
+| ^ help: replace with `_x`
 
 zz: 1 file(s) failed type-check

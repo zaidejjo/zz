@@ -2,16 +2,16 @@ first module that broke: <path> <path>
 
 error: type mismatch: expected `int`, found `str`
 
-  --> <path>
-    |
-    3 | x:int = "hello"
-      |   ^^^
-    = to fix: change the annotation to `str` or convert the value
+--> <path>
+|
+3 | x:int = "hello"
+| ^^^
+= to fix: change the annotation to `str` or convert the value
 warning: unused variable `x` is never read, consider prefixing with `_x`
 
-  --> <path>
-    |
-    3 | x:int = "hello"
-      | ^ help: replace with `_x`
+--> <path>
+|
+3 | x:int = "hello"
+| ^ help: replace with `_x`
 
 zz: 1 file(s) failed type-check

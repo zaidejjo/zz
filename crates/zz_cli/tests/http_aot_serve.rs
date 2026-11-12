@@ -10,7 +10,7 @@
 //! `ZZ_SKIP_NATIVE=1`, same as the other native suites.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -150,36 +150,25 @@ fn start_server() -> Server {
             continue;
         };
 
-        // `http.listen` prints SERVER_READY to stderr once bound.
-        let stderr = child.stderr.take().expect("piped stderr");
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut reader = BufReader::new(stderr);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line) {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        if line.contains("SERVER_READY") {
-                            let _ = tx.send(true);
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
+        // Wait for the server to accept connections: poll the port until
+        // TCP connect succeeds. This is more robust than a magic stderr
+        // string and works regardless of what the server prints.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut connected = false;
+        while std::time::Instant::now() < deadline {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                connected = true;
+                break;
             }
-        });
-        match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(true) => return Server { child, port, bin },
-            Ok(false) => unreachable!(),
-            Err(_) => {
-                last_err = "SERVER_READY timeout".to_string();
-                let _ = child.kill();
-                let _ = child.wait();
-                kill_family(&bin);
-            }
+            std::thread::sleep(Duration::from_millis(50));
         }
+        if connected {
+            return Server { child, port, bin };
+        }
+        last_err = "server did not accept connections in time".to_string();
+        let _ = child.kill();
+        let _ = child.wait();
+        kill_family(&bin);
     }
     panic!("could not start AOT server: {last_err}");
 }
@@ -450,27 +439,18 @@ func main() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn collision server");
-    let stderr = child.stderr.take().expect("piped stderr");
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(stderr);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {
-                    if line.contains("SERVER_READY") {
-                        let _ = tx.send(true);
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
+    // Wait for the server to accept connections: poll the port until
+    // TCP connect succeeds. SERVER_READY is no longer printed to stderr.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut connected = false;
+    while std::time::Instant::now() < deadline {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            connected = true;
+            break;
         }
-    });
-    rx.recv_timeout(Duration::from_secs(30))
-        .expect("SERVER_READY timeout");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(connected, "server did not accept connections in time");
     let (status, _, body) = get(port, "/hello/zaid", &[]);
     assert_eq!(status, 200);
     assert_eq!(

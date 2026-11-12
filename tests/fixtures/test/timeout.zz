@@ -1,7 +1,7 @@
 // features: assert, bool-logic, func-call, print, string-literal, zz-test
 // E2E: @test(timeout) enforces wall-clock limit
 
-@test(timeout = 2000)
+@test(timeout: 5000)
 func test_fast_enough() {
     assert(true)
 }

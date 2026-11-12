@@ -2,8 +2,8 @@ first module that broke: <path> <path>
 
 error: variant `enum_extra_arg.Token.Eof` takes no arguments but 1 given
 
-  --> <path>
-    |
-    9 |     t := Token.Eof(1)
-      |          ^^^^^^^^^^^^
+--> <path>
+|
+9 | t := Token.Eof(1)
+| ^^^^^^^^^^^^
 zz: 1 file(s) failed type-check

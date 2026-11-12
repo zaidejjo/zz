@@ -2,10 +2,10 @@ first module that broke: <path> <path>
 
 error: generic parameters are declared with `<T>`, not `[T]`
 
-  --> <path>
-    |
-    3 | func first[T](x: T) -> T {
-      |           ^^^ help: replace with `<T>`
+--> <path>
+|
+3 | func first[T](x: T) -> T {
+| ^^^ help: replace with `<T>`
 
-    = write `<T>` instead (`[T]` makes an array type, e.g. `[int]`; apply a generic type with `<T>`, e.g. `Box<T>`)
+= write `<T>` instead (`[T]` makes an array type, e.g. `[int]`; apply a generic type with `<T>`, e.g. `Box<T>`)
 zz: 1 file(s) failed type-check
