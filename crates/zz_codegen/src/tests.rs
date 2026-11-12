@@ -110,11 +110,25 @@ fn all_stdlib_funcs_have_c_impls() {
         .flat_map(|(k, canon)| [k, canon])
         .collect();
     let is_purezz = |k: &String| purezz_names.contains(k);
+    // Math numeric constants lowered to float literals by zz_lower — no
+    // C runtime impl needed, checker rejects calls to them.
+    let math_consts: std::collections::HashSet<&str> = [
+        "std.math.SQRT_2",
+        "std.math.SQRT_1_2",
+        "std.math.LN_2",
+        "std.math.LN_10",
+        "std.math.LOG10_E",
+        "std.math.LOG2_E",
+    ]
+    .into_iter()
+    .collect();
+    let is_math_const = |k: &String| math_consts.contains(k.as_str());
     let mut unlisted_gap: Vec<&String> = funcs
         .keys()
         .filter(|k| !supported(k))
         .filter(|k| !KNOWN_CODEGEN_GAPS.iter().any(|(g, _)| g == k))
         .filter(|k| !is_purezz(k))
+        .filter(|k| !is_math_const(k))
         .collect();
     unlisted_gap.sort();
     assert!(
