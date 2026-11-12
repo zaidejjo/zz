@@ -11427,7 +11427,11 @@ zz_value zz_fs_move(zz_value src, zz_value dst, int *err) {
     zz_fs_cache_invalidate_value(src);
     zz_fs_cache_invalidate_value(dst);
     zz_fs_top_up();
+#ifdef ZZ_OS_WINDOWS
+    if (!MoveFileA(s, d)) return zz_fs_err2("move", s, d, (int)GetLastError());
+#else
     if (rename(s, d) != 0) return zz_fs_err2("move", s, d, errno);
+#endif
     return zz_variant_ok(zz_unit());
 }
 
