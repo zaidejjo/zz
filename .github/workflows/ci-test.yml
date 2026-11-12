@@ -264,12 +264,12 @@ jobs:
         run: cargo test -p zz_cli --bins
 
       - name: 'test (PR: batched native parity)'
-        if: github.event_name == 'pull_request' && matrix.native && (inputs.test_scope == 'full' || inputs.test_scope == 'parity')
+        if: github.event_name == 'pull_request' && matrix.native && (inputs.test_scope == 'full' || inputs.test_scope == 'fast' || inputs.test_scope == 'parity')
         shell: bash
         run: ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity
 
       - name: 'ASan+UBSan AOT leg (pinned clang leg only)'
-        if: matrix.clang_pin != '' && (inputs.test_scope == 'full' || inputs.test_scope == 'misc')
+        if: matrix.clang_pin != '' && (inputs.test_scope == 'full' || inputs.test_scope == 'fast' || inputs.test_scope == 'misc')
         shell: bash
         run: cargo test -p zz_cli --test sanitizer_aot -- --nocapture
 
@@ -335,7 +335,7 @@ jobs:
         run: cargo test -p zz_cli --test sanitizer_aot -- --nocapture
 
       - name: 'lsp parity (LSP ↔ checker diagnostics)'
-        if: inputs.test_scope == 'full' || inputs.test_scope == 'lsp'
+        if: inputs.test_scope == 'full' || inputs.test_scope == 'fast' || inputs.test_scope == 'lsp' || inputs.test_scope == 'misc'
         shell: bash
         run: |
           cargo build -p zz_cli
