@@ -3520,18 +3520,19 @@ zz_value zz_tcp_listen(zz_value addr, int *err) {
         int n = snprintf(buf, sizeof buf, "tcp_listen failed: invalid address `%s`", zz_str_cptr(addr.s));
         return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
     }
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = zz_socket_open(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return zz_variant_err(zz_str_static("tcp_listen failed: socket"));
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
+    if (zz_bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
         char buf[192];
-        int n = snprintf(buf, sizeof buf, "tcp_listen failed: %s", strerror(errno));
-        close(fd);
+        int n = snprintf(buf, sizeof buf, "tcp_listen failed: %s",
+                         zz_socket_strerror(zz_socket_errno()));
+        zz_close_socket(fd);
         return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
     }
-    if (listen(fd, 16) != 0) {
-        close(fd);
+    if (zz_listen(fd, 16) != 0) {
+        zz_close_socket(fd);
         return zz_variant_err(zz_str_static("tcp_listen failed: listen"));
     }
     return zz_variant_ok((zz_value){ZZ_TCP_LISTENER, {.net = tcp_alloc(fd)}});
@@ -3581,21 +3582,21 @@ zz_value zz_tcp_connect(zz_value addr, zz_value timeout_ms, int *err) {
     int fd = -1;
     for (struct addrinfo *ai = list; ai; ai = ai->ai_next) {
         any = 1;
-        int cfd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        int cfd = zz_socket_open(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (cfd < 0) {
-            snprintf(last_err, sizeof last_err, "tcp_connect failed: %s", strerror(errno));
+            snprintf(last_err, sizeof last_err, "tcp_connect failed: %s",
+                     zz_socket_strerror(zz_socket_errno()));
             continue;
         }
         // Non-blocking connect so the timeout is honored.
-        int flags = fcntl(cfd, F_GETFL, 0);
-        fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
+        zz_set_nonblock(cfd);
         int ok = 0;
-        int rc = connect(cfd, ai->ai_addr, ai->ai_addrlen);
+        int rc = zz_connect(cfd, ai->ai_addr, ai->ai_addrlen);
         if (rc == 0) {
             ok = 1;
-        } else if (errno == EINPROGRESS) {
-            struct pollfd pfd = { cfd, POLLOUT, 0 };
-            int pr = poll(&pfd, 1, (int)toms);
+        } else if (zz_socket_errno() == ZZ_EINPROGRESS) {
+            struct pollfd pfd = { cfd, ZZ_POLLOUT, 0 };
+            int pr = zz_poll(&pfd, 1, (int)toms);
             if (pr > 0) {
                 int soerr = 0;
                 socklen_t slen = sizeof soerr;
@@ -3603,22 +3604,25 @@ zz_value zz_tcp_connect(zz_value addr, zz_value timeout_ms, int *err) {
                 if (soerr == 0) {
                     ok = 1;
                 } else {
-                    snprintf(last_err, sizeof last_err, "tcp_connect failed: %s", strerror(soerr));
+                    snprintf(last_err, sizeof last_err, "tcp_connect failed: %s",
+                             zz_socket_strerror(soerr));
                 }
             } else if (pr == 0) {
                 snprintf(last_err, sizeof last_err, "tcp_connect failed: timed out");
             } else {
-                snprintf(last_err, sizeof last_err, "tcp_connect failed: %s", strerror(errno));
+                snprintf(last_err, sizeof last_err, "tcp_connect failed: %s",
+                         zz_socket_strerror(zz_socket_errno()));
             }
         } else {
-            snprintf(last_err, sizeof last_err, "tcp_connect failed: %s", strerror(errno));
+            snprintf(last_err, sizeof last_err, "tcp_connect failed: %s",
+                     zz_socket_strerror(zz_socket_errno()));
         }
         if (ok) {
             fd = cfd;
-            fcntl(fd, F_SETFL, flags);
+            zz_set_blocking(fd);
             break;
         }
-        close(cfd);
+        zz_close_socket(cfd);
     }
     freeaddrinfo(list);
     if (fd < 0) {
@@ -3634,10 +3638,11 @@ zz_value zz_tcp_accept(zz_value listener, int *err) {
     if (listener.tag != ZZ_TCP_LISTENER || !listener.net || listener.net->closed) {
         return zz_variant_err(zz_str_static("tcp_accept failed: not a listener"));
     }
-    int cfd = accept(listener.net->fd, NULL, NULL);
+    int cfd = zz_accept(listener.net->fd, NULL, NULL);
     if (cfd < 0) {
         char buf[192];
-        int n = snprintf(buf, sizeof buf, "tcp_accept failed: %s", strerror(errno));
+        int n = snprintf(buf, sizeof buf, "tcp_accept failed: %s",
+                         zz_socket_strerror(zz_socket_errno()));
         return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
     }
     return zz_variant_ok((zz_value){ZZ_TCP_STREAM, {.net = tcp_alloc(cfd)}});
@@ -3652,10 +3657,12 @@ zz_value zz_tcp_write(zz_value stream, zz_value data, int *err) {
     if (data.tag != ZZ_STR) return zz_variant_err(zz_str_static("tcp_write failed: expected a string"));
     size_t total = 0;
     while (total < data.s->len) {
-        ssize_t w = send(stream.net->fd, zz_str_cptr(data.s) + total, data.s->len - total, 0);
+        ssize_t w = zz_sock_send(stream.net->fd, zz_str_cptr(data.s) + total,
+                                 data.s->len - total, 0);
         if (w <= 0) {
             char buf[192];
-            int n = snprintf(buf, sizeof buf, "tcp_write failed: %s", strerror(errno));
+            int n = snprintf(buf, sizeof buf, "tcp_write failed: %s",
+                             zz_socket_strerror(zz_socket_errno()));
             return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
         }
         total += (size_t)w;
@@ -3671,14 +3678,15 @@ zz_value zz_tcp_read(zz_value stream, zz_value max_bytes, int *err) {
     }
     size_t cap = max_bytes.tag == ZZ_INT && max_bytes.i > 0 ? (size_t)max_bytes.i : 1024;
     char *buf = (char *)malloc(cap);
-    ssize_t n = recv(stream.net->fd, buf, cap, 0);
+    ssize_t n = zz_sock_recv(stream.net->fd, buf, cap, 0);
     if (n < 0) {
         free(buf);
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        if (zz_socket_errno() == ZZ_EAGAIN || zz_socket_errno() == ZZ_EWOULDBLOCK) {
             return zz_variant_err(zz_str_static("tcp_read failed: timed out"));
         }
         char msg[192];
-        int m = snprintf(msg, sizeof msg, "tcp_read failed: %s", strerror(errno));
+        int m = snprintf(msg, sizeof msg, "tcp_read failed: %s",
+                         zz_socket_strerror(zz_socket_errno()));
         return zz_variant_err(zz_str_owned(copy_cstr(msg, (size_t)m)));
     }
     if (n == 0) {
@@ -3697,7 +3705,7 @@ zz_value zz_tcp_readline(zz_value stream, int *err) {
     SB sb = {0};
     char b;
     for (;;) {
-        ssize_t n = recv(stream.net->fd, &b, 1, 0);
+        ssize_t n = zz_sock_recv(stream.net->fd, &b, 1, 0);
         if (n <= 0) {
             if (sb.len > 0) break;  // EOF after partial line
             char *msg = sb_take(&sb);
@@ -3722,14 +3730,15 @@ zz_value zz_tcp_read_bytes(zz_value stream, zz_value max_bytes, int *err) {
     size_t cap = max_bytes.tag == ZZ_INT && max_bytes.i > 0 ? (size_t)max_bytes.i : 1024;
     char *buf = (char *)malloc(cap);
     if (!buf) return zz_variant_err(zz_str_static("tcp_read_bytes failed: out of memory"));
-    ssize_t n = recv(stream.net->fd, buf, cap, 0);
+    ssize_t n = zz_sock_recv(stream.net->fd, buf, cap, 0);
     if (n < 0) {
         free(buf);
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        if (zz_socket_errno() == ZZ_EAGAIN || zz_socket_errno() == ZZ_EWOULDBLOCK) {
             return zz_variant_err(zz_str_static("tcp_read_bytes failed: timed out"));
         }
         char msg[192];
-        int m = snprintf(msg, sizeof msg, "tcp_read_bytes failed: %s", strerror(errno));
+        int m = snprintf(msg, sizeof msg, "tcp_read_bytes failed: %s",
+                         zz_socket_strerror(zz_socket_errno()));
         return zz_variant_err(zz_str_owned(copy_cstr(msg, (size_t)m)));
     }
     if (n == 0) {
@@ -3757,10 +3766,11 @@ zz_value zz_tcp_write_bytes(zz_value stream, zz_value data, int *err) {
     size_t len = data.bytes->len;
     size_t total = 0;
     while (total < len) {
-        ssize_t w = send(stream.net->fd, p + total, len - total, 0);
+        ssize_t w = zz_sock_send(stream.net->fd, p + total, len - total, 0);
         if (w <= 0) {
             char buf[192];
-            int n = snprintf(buf, sizeof buf, "tcp_write_bytes failed: %s", strerror(errno));
+            int n = snprintf(buf, sizeof buf, "tcp_write_bytes failed: %s",
+                             zz_socket_strerror(zz_socket_errno()));
             return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
         }
         total += (size_t)w;
@@ -3785,14 +3795,15 @@ zz_value zz_tcp_read_exact(zz_value stream, zz_value n, int *err) {
     if (!buf) return zz_variant_err(zz_str_static("tcp_read_exact failed: out of memory"));
     size_t got = 0;
     while (got < want) {
-        ssize_t r = recv(stream.net->fd, buf + got, want - got, 0);
+        ssize_t r = zz_sock_recv(stream.net->fd, buf + got, want - got, 0);
         if (r < 0) {
             free(buf);
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (zz_socket_errno() == ZZ_EAGAIN || zz_socket_errno() == ZZ_EWOULDBLOCK) {
                 return zz_variant_err(zz_str_static("tcp_read_exact failed: timed out"));
             }
             char msg[192];
-            int m = snprintf(msg, sizeof msg, "tcp_read_exact failed: %s", strerror(errno));
+            int m = snprintf(msg, sizeof msg, "tcp_read_exact failed: %s",
+                             zz_socket_strerror(zz_socket_errno()));
             return zz_variant_err(zz_str_owned(copy_cstr(msg, (size_t)m)));
         }
         if (r == 0) {
@@ -3822,9 +3833,10 @@ zz_value zz_tcp_shutdown(zz_value stream, int *err) {
 #else
     int how = SHUT_RDWR;
 #endif
-    if (shutdown(stream.net->fd, how) != 0 && errno != ENOTCONN) {
+    if (shutdown(stream.net->fd, how) != 0 && zz_socket_errno() != ZZ_ENOTCONN) {
         char msg[192];
-        int m = snprintf(msg, sizeof msg, "tcp_shutdown failed: %s", strerror(errno));
+        int m = snprintf(msg, sizeof msg, "tcp_shutdown failed: %s",
+                         zz_socket_strerror(zz_socket_errno()));
         return zz_variant_err(zz_str_owned(copy_cstr(msg, (size_t)m)));
     }
     return zz_variant_ok(zz_unit());
@@ -3990,11 +4002,12 @@ static zz_value tcp_addr(zz_value stream, int peer, int *err) {
         return zz_variant_err(zz_str_static("addr_failed"));
     }
     struct sockaddr_in sa;
-    socklen_t slen = sizeof sa;
+    zz_socklen_t slen = sizeof sa;
     if (peer ? getpeername(stream.net->fd, (struct sockaddr *)&sa, &slen) != 0
              : getsockname(stream.net->fd, (struct sockaddr *)&sa, &slen) != 0) {
         char msg[192];
-        int m = snprintf(msg, sizeof msg, "%s failed: %s", peer ? "peer_addr" : "local_addr", strerror(errno));
+        int m = snprintf(msg, sizeof msg, "%s failed: %s", peer ? "peer_addr" : "local_addr",
+                         zz_socket_strerror(zz_socket_errno()));
         return zz_variant_err(zz_str_owned(copy_cstr(msg, (size_t)m)));
     }
     char ip[INET_ADDRSTRLEN];
@@ -4012,12 +4025,20 @@ zz_value zz_tcp_set_read_timeout(zz_value stream, zz_value ms, int *err) {
     if (stream.tag != ZZ_TCP_STREAM || !stream.net || stream.net->closed) {
         return zz_variant_err(zz_str_static("set_read_timeout failed"));
     }
+#ifdef ZZ_OS_WINDOWS
+    DWORD tv = (DWORD)(ms.tag == ZZ_INT ? ms.i : 0);
+    if (setsockopt(stream.net->fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv,
+                   sizeof tv) != 0) {
+        return zz_variant_err(zz_str_static("set_read_timeout failed"));
+    }
+#else
     struct timeval tv;
     tv.tv_sec = (ms.tag == ZZ_INT ? ms.i : 0) / 1000;
     tv.tv_usec = (ms.tag == ZZ_INT ? ms.i : 0) % 1000 * 1000;
     if (setsockopt(stream.net->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) != 0) {
         return zz_variant_err(zz_str_static("set_read_timeout failed"));
     }
+#endif
     return zz_variant_ok((zz_value){ZZ_BOOL, {.b = true}});
 }
 
@@ -4025,12 +4046,20 @@ zz_value zz_tcp_set_write_timeout(zz_value stream, zz_value ms, int *err) {
     if (stream.tag != ZZ_TCP_STREAM || !stream.net || stream.net->closed) {
         return zz_variant_err(zz_str_static("set_write_timeout failed"));
     }
+#ifdef ZZ_OS_WINDOWS
+    DWORD tv = (DWORD)(ms.tag == ZZ_INT ? ms.i : 0);
+    if (setsockopt(stream.net->fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv,
+                   sizeof tv) != 0) {
+        return zz_variant_err(zz_str_static("set_write_timeout failed"));
+    }
+#else
     struct timeval tv;
     tv.tv_sec = (ms.tag == ZZ_INT ? ms.i : 0) / 1000;
     tv.tv_usec = (ms.tag == ZZ_INT ? ms.i : 0) % 1000 * 1000;
     if (setsockopt(stream.net->fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv) != 0) {
         return zz_variant_err(zz_str_static("set_write_timeout failed"));
     }
+#endif
     return zz_variant_ok((zz_value){ZZ_BOOL, {.b = true}});
 }
 
@@ -4651,7 +4680,7 @@ static void http_conn_free_dyn(Connection *c) {
 static void free_connection(Connection *c) {
     if (c->fd >= 0) {
         // fprintf(stderr, "closing fd=%d\n", c->fd);
-        close(c->fd);
+        zz_close_socket(c->fd);
         c->fd = -1;
     }
     http_conn_free_dyn(c);
@@ -4676,8 +4705,7 @@ static void init_connections(void) {
 // ---- Non-blocking helpers ----
 
 static void set_nonblock(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    zz_set_nonblock(fd);
 }
 
 // ---- HTTP head/body buffering (Step-2 true-AOT dispatch) ----
@@ -4839,7 +4867,7 @@ static int read_from_socket(Connection *c) {
         // Append straight into the exact-size body buffer.
         size_t room = c->body_need - c->body_len;
         if (room == 0) return 1;
-        ssize_t n = read(c->fd, c->body_buf + c->body_len, room);
+        ssize_t n = zz_sock_read(c->fd, c->body_buf + c->body_len, room);
         if (n > 0) {
             c->body_len += (size_t)n;
             http_note_read(c);
@@ -4850,13 +4878,14 @@ static int read_from_socket(Connection *c) {
             connection_to_closed(c);
             return 0;
         }
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return 1;
+        if (zz_socket_errno() == ZZ_EAGAIN || zz_socket_errno() == ZZ_EWOULDBLOCK)
+            return 1;
         connection_to_closed(c);
         return 0;
     }
     // Head phase: fill the static buffer, growing past it when needed.
     char tmp[8192];
-    ssize_t n = read(c->fd, tmp, sizeof tmp);
+    ssize_t n = zz_sock_read(c->fd, tmp, sizeof tmp);
     if (n > 0) {
         int rc = http_head_append(c, tmp, (size_t)n);
         http_note_read(c);
@@ -4867,7 +4896,8 @@ static int read_from_socket(Connection *c) {
         connection_to_closed(c); // client closed: free the slot now
         return 0;
     }
-    if (errno == EAGAIN || errno == EWOULDBLOCK) return 1;
+    if (zz_socket_errno() == ZZ_EAGAIN || zz_socket_errno() == ZZ_EWOULDBLOCK)
+        return 1;
     connection_to_closed(c);
     return 0;
 }
@@ -4884,25 +4914,27 @@ static int http_write_pending(Connection *c) {
 static int write_to_socket(Connection *c) {
     if (c->wbuf) {
         if (c->wpos >= c->wlen) return 1;
-        ssize_t n = write(c->fd, c->wbuf + c->wpos, c->wlen - c->wpos);
+        ssize_t n = zz_sock_write(c->fd, c->wbuf + c->wpos, c->wlen - c->wpos);
         if (n > 0) {
             c->wpos += (size_t)n;
             return 1;
         }
         if (n == 0) return 0;
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return 1;
+        if (zz_socket_errno() == ZZ_EAGAIN || zz_socket_errno() == ZZ_EWOULDBLOCK)
+            return 1;
         return 0;
     }
     int remaining = c->response_len - c->write_pos;
     if (remaining <= 0) return 1;
-    ssize_t n = write(c->fd, c->write_buf + c->write_pos, remaining);
+    ssize_t n = zz_sock_write(c->fd, c->write_buf + c->write_pos, remaining);
     if (n > 0) {
         c->write_pos += (int)n;
         return 1;
     } else if (n == 0) {
         return 0;
     } else {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return 1;
+        if (zz_socket_errno() == ZZ_EAGAIN || zz_socket_errno() == ZZ_EWOULDBLOCK)
+            return 1;
         return 0;
     }
 }
@@ -4952,8 +4984,15 @@ static void http_cold_dep_trim(void) {
 // ---- Get CPU core count ----
 
 static int get_cpu_count(void) {
+#ifdef ZZ_OS_WINDOWS
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    int n = (int)si.dwNumberOfProcessors;
+    return (n > 0) ? n : 4;
+#else
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return (n > 0) ? (int)n : 4;
+#endif
 }
 
 // ---- Graceful shutdown (SIGINT/SIGTERM) ----
@@ -4961,10 +5000,11 @@ static int get_cpu_count(void) {
 // signal force-exits so a wedged keep-alive client cannot trap Ctrl+C.
 // POSIX-only: the AOT HTTP server itself is Linux-only, but the runtime
 // still has to compile on Windows/macOS.
+static volatile int g_http_shutdown_requested = 0;
+static volatile int g_http_shutdown_signals = 0;
+
 #ifndef ZZ_OS_WINDOWS
 #include <signal.h>
-static volatile sig_atomic_t g_http_shutdown_requested = 0;
-static volatile sig_atomic_t g_http_shutdown_signals = 0;
 
 static void http_shutdown_handler(int sig) {
     (void)sig;
@@ -8006,17 +8046,18 @@ static zz_value http_listen_impl(zz_value port, int *err) {
     int p = (port.tag == ZZ_INT) ? (int)port.i : 8080;
     if (p <= 0 || p > 65535) p = 8080;
 
+#ifndef ZZ_OS_WINDOWS
     // Ignore SIGPIPE to avoid crash on closed connections.
     signal(SIGPIPE, SIG_IGN);
-#ifndef ZZ_OS_WINDOWS
     g_http_shutdown_requested = 0;
     g_http_shutdown_signals = 0;
 #endif
     http_install_shutdown_handlers();
 
-    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    int listen_fd = zz_socket_open(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
-        fprintf(stderr, "zz_http_listen: socket() failed: %s\n", strerror(errno));
+        fprintf(stderr, "zz_http_listen: socket() failed: %s\n",
+                zz_socket_strerror(zz_socket_errno()));
         return zz_unit();
     }
 
@@ -8029,20 +8070,20 @@ static zz_value http_listen_impl(zz_value port, int *err) {
     // Probe first: if something already answers on 127.0.0.1:port, warn
     // so the operator kills the stale workers or picks a free port.
     {
-        int probe = socket(AF_INET, SOCK_STREAM, 0);
+        int probe = zz_socket_open(AF_INET, SOCK_STREAM, 0);
         if (probe >= 0) {
             struct sockaddr_in paddr;
             memset(&paddr, 0, sizeof(paddr));
             paddr.sin_family = AF_INET;
             paddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
             paddr.sin_port = htons((unsigned short)p);
-            if (connect(probe, (struct sockaddr *)&paddr, sizeof(paddr)) == 0) {
+            if (zz_connect(probe, (struct sockaddr *)&paddr, sizeof(paddr)) == 0) {
                 fprintf(stderr,
                     "zz_http_listen: WARNING port %d already in use;"
                     " kill the old server or use a free port\n", p);
                 fflush(stderr);
             }
-            close(probe);
+            zz_close_socket(probe);
         }
     }
 
@@ -8055,15 +8096,17 @@ static zz_value http_listen_impl(zz_value port, int *err) {
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons((unsigned short)p);
 
-    if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        fprintf(stderr, "zz_http_listen: bind() failed on port %d: %s\n", p, strerror(errno));
-        close(listen_fd);
+    if (zz_bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        fprintf(stderr, "zz_http_listen: bind() failed on port %d: %s\n", p,
+                zz_socket_strerror(zz_socket_errno()));
+        zz_close_socket(listen_fd);
         return zz_unit();
     }
 
-    if (listen(listen_fd, 1024) < 0) {
-        fprintf(stderr, "zz_http_listen: listen() failed: %s\n", strerror(errno));
-        close(listen_fd);
+    if (zz_listen(listen_fd, 1024) < 0) {
+        fprintf(stderr, "zz_http_listen: listen() failed: %s\n",
+                zz_socket_strerror(zz_socket_errno()));
+        zz_close_socket(listen_fd);
         return zz_unit();
     }
 
@@ -8159,7 +8202,9 @@ zz_value zz_http_listen_tls(zz_value server, zz_value port, zz_value cert,
     }
     int listener_id = (int)listener.i;
 
+#ifndef ZZ_OS_WINDOWS
     signal(SIGPIPE, SIG_IGN);
+#endif
     http_install_shutdown_handlers();
     g_http_server_running = 1;
 
@@ -8286,7 +8331,9 @@ zz_value zz_http_listen_tls_cfg(zz_value server, zz_value port, zz_value cert,
     }
     int listener_id = (int)listener.i;
 
+#ifndef ZZ_OS_WINDOWS
     signal(SIGPIPE, SIG_IGN);
+#endif
     http_install_shutdown_handlers();
     g_http_server_running = 1;
 
@@ -10089,27 +10136,28 @@ zz_value zz_test_temp_dir(zz_value prefix, int *err) {
 zz_value zz_test_free_port(zz_value unused, int *err) {
     (void)unused;
     (void)err;
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = zz_socket_open(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return zz_variant_err(zz_str_static("test.free_port:socket"));
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof sa);
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     sa.sin_port = 0;
-    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
+    if (zz_bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
         char buf[192];
-        int n = snprintf(buf, sizeof buf, "test.free_port:bind: %s", strerror(errno));
-        close(fd);
+        int n = snprintf(buf, sizeof buf, "test.free_port:bind: %s",
+                         zz_socket_strerror(zz_socket_errno()));
+        zz_close_socket(fd);
         if (n < 0) return zz_variant_err(zz_str_static("test.free_port:bind"));
         return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
     }
-    socklen_t sl = sizeof sa;
+    zz_socklen_t sl = sizeof sa;
     if (getsockname(fd, (struct sockaddr *)&sa, &sl) != 0) {
-        close(fd);
+        zz_close_socket(fd);
         return zz_variant_err(zz_str_static("test.free_port:addr"));
     }
     int port = ntohs(sa.sin_port);
-    close(fd);
+    zz_close_socket(fd);
     if (port <= 0 || port > 65535) {
         return zz_variant_err(zz_str_static("test.free_port:addr"));
     }

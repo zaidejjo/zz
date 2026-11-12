@@ -15,6 +15,7 @@
 pub const RUNTIME_H: &str = concat!(
     include_str!("runtime/runtime.h"),
     include_str!("runtime/platform.h"),
+    include_str!("runtime/socket.h"),
     include_str!("runtime/core.h"),
     include_str!("runtime/memory.h"),
     include_str!("runtime/strings.h"),
