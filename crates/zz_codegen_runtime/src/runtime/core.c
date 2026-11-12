@@ -3427,6 +3427,12 @@ void zz_safepoint(void) {
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <io.h>
+#include <direct.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <signal.h>
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -3454,6 +3460,7 @@ void zz_safepoint(void) {
 #ifdef __linux__
 #include <malloc.h>
 #endif
+#endif // ZZ_OS_WINDOWS (socket/include set above)
 
 // One-time network startup (WSAStartup on Windows, no-op on POSIX).
 // Called lazily from the TCP natives so binaries pay nothing when the
@@ -3601,8 +3608,7 @@ zz_value zz_tcp_connect(zz_value addr, zz_value timeout_ms, int *err) {
             int pr = zz_poll(&pfd, 1, (int)toms);
             if (pr > 0) {
                 int soerr = 0;
-                socklen_t slen = sizeof soerr;
-                getsockopt(cfd, SOL_SOCKET, SO_ERROR, &soerr, &slen);
+                zz_getsockopt_int(cfd, SOL_SOCKET, SO_ERROR, &soerr);
                 if (soerr == 0) {
                     ok = 1;
                 } else {
@@ -5507,7 +5513,6 @@ static int spawn_workers(int listen_fd, int port) {
     return 0;
 }
 #endif
-#endif
 
 // ---- HTTP routes + request/response natives (AOT) ----
 //
@@ -5730,7 +5735,7 @@ zz_value zz_http_serve_dir_at(zz_value server, zz_value prefix, zz_value dir, in
         return zz_int(0);
     }
     if (g_http_static_dir_count >= HTTP_MAX_STATIC_DIRS) return zz_int(0);
-    char *dcopy = strndup(zz_str_cptr(dir.s), dir.s->len);
+    char *dcopy = zz_strndup(zz_str_cptr(dir.s), dir.s->len);
     char *pcopy = malloc(256);
     if (!dcopy || !pcopy) {
         free(dcopy);
@@ -5754,8 +5759,8 @@ static zz_value http_route_add(const char *method, zz_value path, zz_value handl
     if (path.tag != ZZ_STR || !path.s) return zz_int(0);
     if (g_http_route_count >= HTTP_MAX_ROUTES - 1) return zz_int(0);
     http_route_entry *e = &g_http_route_table[g_http_route_count++];
-    e->method = strndup(method, strlen(method));
-    e->pattern = strndup(zz_str_cptr(path.s), path.s->len);
+    e->method = zz_strndup(method, strlen(method));
+    e->pattern = zz_strndup(zz_str_cptr(path.s), path.s->len);
     e->handler = zz_clone(handler);
     e->uses_req = uses_req;
     e->plen = strlen(e->pattern);
@@ -5889,7 +5894,7 @@ zz_value zz_http_hijack(zz_value server, zz_value path, zz_value handler, int *e
     }
     if (g_http_hijack_count >= HTTP_MAX_HIJACK_ROUTES) return zz_int(0);
     http_hijack_entry *e = &g_http_hijack_table[g_http_hijack_count++];
-    e->pattern = strndup(zz_str_cptr(path.s), path.s->len);
+    e->pattern = zz_strndup(zz_str_cptr(path.s), path.s->len);
     e->plen = strlen(e->pattern);
     e->handler = zz_clone(handler);
     return zz_int(0);

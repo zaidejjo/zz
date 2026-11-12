@@ -82,20 +82,41 @@ fn workspace_root() -> PathBuf {
 }
 
 fn zz_bin() -> PathBuf {
-    // `CARGO_BIN_EXE_zz` is set by Cargo for integration tests when the
-    // `zz` binary (package zz_cli) is built in the same invocation.
-    // Cross-package targets like zz_lsp don't get it at compile time
-    // (env! would fail), so read it at runtime and fall back to the
-    // workspace debug output path.
-    if let Ok(p) = std::env::var("CARGO_BIN_EXE_zz") {
-        return PathBuf::from(p);
+    let name = if cfg!(windows) { "zz.exe" } else { "zz" };
+
+    // 1. Cargo sets this for integration tests of the package that owns the
+    //    binary; zz_lsp does not, but a workspace-wide `cargo test` might.
+    if let Some(p) = std::env::var_os("CARGO_BIN_EXE_zz") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return p;
+        }
     }
-    let exe = std::env::current_exe().expect("current exe");
-    exe.parent()
-        .expect("deps dir")
-        .parent()
-        .expect("debug dir")
-        .join(if cfg!(windows) { "zz.exe" } else { "zz" })
+
+    // 2. CI builds `zz_cli` before this test, so the binary sits in the
+    //    workspace target dir. Honor CARGO_TARGET_DIR when set.
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root().join("target"));
+    let candidate = target.join("debug").join(name);
+    if candidate.is_file() {
+        return candidate;
+    }
+
+    // 3. Cargo may run this test from target/debug/build/<pkg>/<hash>/out,
+    //    so walking up from current_exe() finds the target root.
+    if let Ok(exe) = std::env::current_exe() {
+        for dir in exe.ancestors() {
+            if dir.file_name().and_then(|n| n.to_str()) == Some("target") {
+                let p = dir.join("debug").join(name);
+                if p.is_file() {
+                    return p;
+                }
+            }
+        }
+    }
+
+    candidate
 }
 
 fn fixture_files() -> Vec<PathBuf> {

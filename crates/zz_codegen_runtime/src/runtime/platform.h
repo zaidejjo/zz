@@ -47,6 +47,8 @@
 // it harmlessly.
 #include <winsock2.h>
 #include <windows.h>
+#include <io.h>   // _isatty/_fileno (UCRT declares these outside <unistd.h>)
+#include <stdlib.h>
 #include <stdatomic.h>
 
 // ---- C11 <threads.h> vs Win32 fallback ----------------------------------
@@ -82,7 +84,7 @@ ZZ_INLINE void zz_mtx_init(zz_mtx_t *m) {
     mtx_init(&m->m, mtx_plain);
     atomic_store_explicit(&m->ready, 1, memory_order_release);
 }
-ZZ_INLINE void zz_mtx_lock(zz_mtx_t *m) {
+ZZ_INLINE int zz_mtx_lock(zz_mtx_t *m) {
     if (!atomic_load_explicit(&m->ready, memory_order_acquire)) {
         while (atomic_flag_test_and_set_explicit(&zz_mtx_init_flag,
                                                  memory_order_acquire)) {
@@ -94,9 +96,11 @@ ZZ_INLINE void zz_mtx_lock(zz_mtx_t *m) {
         }
         atomic_flag_clear_explicit(&zz_mtx_init_flag, memory_order_release);
     }
-    mtx_lock(&m->m);
+    return mtx_lock(&m->m) == thrd_success ? 0 : -1;
 }
-ZZ_INLINE void zz_mtx_unlock(zz_mtx_t *m) { mtx_unlock(&m->m); }
+ZZ_INLINE int zz_mtx_unlock(zz_mtx_t *m) {
+    return mtx_unlock(&m->m) == thrd_success ? 0 : -1;
+}
 ZZ_INLINE void zz_mtx_destroy(zz_mtx_t *m) { mtx_destroy(&m->m); }
 ZZ_INLINE void zz_cnd_init(zz_cnd_t *c) { cnd_init(c); }
 ZZ_INLINE int  zz_cnd_wait(zz_cnd_t *c, zz_mtx_t *m) {
@@ -105,7 +109,7 @@ ZZ_INLINE int  zz_cnd_wait(zz_cnd_t *c, zz_mtx_t *m) {
 ZZ_INLINE void zz_cnd_signal(zz_cnd_t *c) { cnd_signal(c); }
 ZZ_INLINE void zz_cnd_broadcast(zz_cnd_t *c) { cnd_broadcast(c); }
 ZZ_INLINE void zz_cnd_destroy(zz_cnd_t *c) { cnd_destroy(c); }
-ZZ_INLINE int zz_thrd_create(zz_thrd_t *t, int (*fn)(void *), void *arg) {
+ZZ_INLINE int zz_thrd_create(zz_thrd_t *t, void *(*fn)(void *), void *arg) {
     return thrd_create(t, (thrd_start_t)fn, arg) == thrd_success ? 0 : -1;
 }
 ZZ_INLINE void zz_thrd_detach(zz_thrd_t t) { thrd_detach(t); }
@@ -126,7 +130,7 @@ ZZ_INLINE void zz_mtx_init(zz_mtx_t *m) {
     InitializeCriticalSection(&m->cs);
     atomic_store_explicit(&m->ready, 1, memory_order_release);
 }
-ZZ_INLINE void zz_mtx_lock(zz_mtx_t *m) {
+ZZ_INLINE int zz_mtx_lock(zz_mtx_t *m) {
     if (!atomic_load_explicit(&m->ready, memory_order_acquire)) {
         while (atomic_flag_test_and_set_explicit(&zz_mtx_init_flag,
                                                  memory_order_acquire)) {
@@ -139,8 +143,12 @@ ZZ_INLINE void zz_mtx_lock(zz_mtx_t *m) {
         atomic_flag_clear_explicit(&zz_mtx_init_flag, memory_order_release);
     }
     EnterCriticalSection(&m->cs);
+    return 0;
 }
-ZZ_INLINE void zz_mtx_unlock(zz_mtx_t *m) { LeaveCriticalSection(&m->cs); }
+ZZ_INLINE int zz_mtx_unlock(zz_mtx_t *m) {
+    LeaveCriticalSection(&m->cs);
+    return 0;
+}
 ZZ_INLINE void zz_mtx_destroy(zz_mtx_t *m) { DeleteCriticalSection(&m->cs); }
 ZZ_INLINE void zz_cnd_init(zz_cnd_t *c) { InitializeConditionVariable(c); }
 ZZ_INLINE int zz_cnd_wait(zz_cnd_t *c, zz_mtx_t *m) {
@@ -150,9 +158,33 @@ ZZ_INLINE int zz_cnd_wait(zz_cnd_t *c, zz_mtx_t *m) {
 ZZ_INLINE void zz_cnd_signal(zz_cnd_t *c) { WakeConditionVariable(c); }
 ZZ_INLINE void zz_cnd_broadcast(zz_cnd_t *c) { WakeAllConditionVariable(c); }
 ZZ_INLINE void zz_cnd_destroy(zz_cnd_t *c) { (void)c; } // no resources to free
-ZZ_INLINE int zz_thrd_create(zz_thrd_t *t, int (*fn)(void *), void *arg) {
-    *t = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)fn, arg, 0, NULL);
-    return *t != NULL ? 0 : -1;
+// CreateThread takes `DWORD (WINAPI *)(LPVOID)`, but the runtime's thread
+// entry points follow the pthread shape (`void *(*)(void *)`). A tiny
+// trampoline bridges the two without a function-pointer cast (the cast
+// would be UB on 32-bit x86 __stdcall and trips -Wcast-function-type).
+typedef struct {
+    void *(*fn)(void *);
+    void *arg;
+} zz_thrd_start_t;
+ZZ_INLINE DWORD WINAPI zz_thrd_tramp(LPVOID p) {
+    zz_thrd_start_t *s = (zz_thrd_start_t *)p;
+    void *(*fn)(void *) = s->fn;
+    void *arg = s->arg;
+    free(s);
+    fn(arg);
+    return 0;
+}
+ZZ_INLINE int zz_thrd_create(zz_thrd_t *t, void *(*fn)(void *), void *arg) {
+    zz_thrd_start_t *s = (zz_thrd_start_t *)malloc(sizeof *s);
+    if (!s) return -1;
+    s->fn = fn;
+    s->arg = arg;
+    *t = CreateThread(NULL, 0, zz_thrd_tramp, s, 0, NULL);
+    if (*t == NULL) {
+        free(s);
+        return -1;
+    }
+    return 0;
 }
 ZZ_INLINE void zz_thrd_detach(zz_thrd_t t) { CloseHandle(t); }
 ZZ_INLINE void zz_thrd_join(zz_thrd_t t) {
