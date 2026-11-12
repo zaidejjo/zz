@@ -1285,22 +1285,14 @@ zz_value zz_math_pow(zz_value a, zz_value b, int *err) {
 zz_value zz_time_now_ms(zz_value unused, int *err) {
     (void)unused;
     (void)err;
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    int64_t ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-    return zz_int(ms);
+    return zz_int(zz_mono_now());
 }
 
 /// `time.sleep_ms(ms)` — sleep for the given number of milliseconds.
 zz_value zz_time_sleep_ms(zz_value ms, int *err) {
     (void)err;
     int64_t m = ms.tag == ZZ_INT ? ms.i : 0;
-    if (m > 0) {
-        struct timespec ts;
-        ts.tv_sec = m / 1000;
-        ts.tv_nsec = (m % 1000) * 1000000;
-        nanosleep(&ts, NULL);
-    }
+    zz_sleep_ms(m);
     return zz_unit();
 }
 // =====================================================================
@@ -1377,17 +1369,17 @@ static const size_t zz_rep_pool_buckets[ZZ_REP_POOL_CLASSES] = {
 #define ZZ_REP_POOL_CAP 256 // max cached blocks per class
 
 typedef struct {
-    pthread_mutex_t lock;
+    zz_mtx_t lock;
     void *head;   // stack of free blocks (next pointer in first word)
     size_t count;
 } zz_rep_pool_t;
 
 static zz_rep_pool_t zz_rep_pools[ZZ_REP_POOL_CLASSES];
-static pthread_once_t zz_rep_pool_once = PTHREAD_ONCE_INIT;
+static zz_once_t zz_rep_pool_once = ZZ_ONCE_INIT;
 
 static void zz_rep_pool_init(void) {
     for (int i = 0; i < ZZ_REP_POOL_CLASSES; i++) {
-        pthread_mutex_init(&zz_rep_pools[i].lock, NULL);
+        zz_mtx_init(&zz_rep_pools[i].lock);
         zz_rep_pools[i].head = NULL;
         zz_rep_pools[i].count = 0;
     }
@@ -1405,17 +1397,17 @@ static int zz_rep_pool_class(size_t need) {
 // (the caller lays out by needed dims — a bigger bucket's prefix is
 // identical), exact malloc on overflow. NULL only when malloc fails.
 static void *zz_rep_block_checkout(size_t need) {
-    pthread_once(&zz_rep_pool_once, zz_rep_pool_init);
+    zz_once(&zz_rep_pool_once, zz_rep_pool_init);
     int c = zz_rep_pool_class(need);
     if (c < 0) return malloc(need);
     zz_rep_pool_t *p = &zz_rep_pools[c];
-    pthread_mutex_lock(&p->lock);
+    zz_mtx_lock(&p->lock);
     void *b = p->head;
     if (b) {
         p->head = *(void **)b;
         p->count--;
     }
-    pthread_mutex_unlock(&p->lock);
+    zz_mtx_unlock(&p->lock);
     if (b) return b;
     return malloc(zz_rep_pool_buckets[c]);
 }
@@ -1431,14 +1423,14 @@ static void zz_rep_block_checkin(void *block, size_t size) {
         return;
     }
     zz_rep_pool_t *p = &zz_rep_pools[c];
-    pthread_mutex_lock(&p->lock);
+    zz_mtx_lock(&p->lock);
     if (p->count < ZZ_REP_POOL_CAP) {
         *(void **)block = p->head;
         p->head = block;
         p->count++;
         block = NULL;
     }
-    pthread_mutex_unlock(&p->lock);
+    zz_mtx_unlock(&p->lock);
     if (block) free(block);
 }
 
@@ -1784,8 +1776,8 @@ zz_value zz_chan_new(zz_value unused, int *err) {
     }
     __atomic_store_n(&ch->ring_head, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&ch->ring_tail, 0, __ATOMIC_RELAXED);
-    pthread_mutex_init(&ch->lock, NULL);
-    pthread_cond_init(&ch->cond, NULL);
+    zz_mtx_init(&ch->lock);
+    zz_cnd_init(&ch->cond);
     ch->len = 0;
     ch->cap = 16;
     ch->head = 0;
@@ -1912,14 +1904,14 @@ zz_value zz_chan_send(zz_value chan, zz_value val, int *err) {
     // a suspended waiter). One uncontended mutex (~20ns) per send is
     // the same trade Go's channels make; receives keep their fully
     // lock-free fast path.
-    pthread_mutex_lock(&ch->lock);
+    zz_mtx_lock(&ch->lock);
     {
         zz_task_t wt;
         int wis_task = 0;
         if (zz_chan_handoff_locked(ch, owned, &wt, &wis_task)) {
             int gparked =
                 __atomic_load_n(&ch->gparked, __ATOMIC_ACQUIRE) > 0;
-            pthread_mutex_unlock(&ch->lock);
+            zz_mtx_unlock(&ch->lock);
             // Direct worker handoff: run a suspended task waiter
             // synchronously on this thread instead of routing it through
             // the executor queue. In the rendezvous steady state (ping-pong)
@@ -1929,9 +1921,9 @@ zz_value zz_chan_send(zz_value chan, zz_value val, int *err) {
             // Falls back to queueing past the nesting budget.
             if (wis_task && !zz_handoff_run_inline(wt)) zz_enqueue_task(wt);
             if (gparked) {
-                pthread_mutex_lock(&ch->lock);
-                pthread_cond_broadcast(&ch->cond);
-                pthread_mutex_unlock(&ch->lock);
+                zz_mtx_lock(&ch->lock);
+                zz_cnd_broadcast(&ch->cond);
+                zz_mtx_unlock(&ch->lock);
             }
             *err = 0;
             return zz_unit();
@@ -1941,11 +1933,11 @@ zz_value zz_chan_send(zz_value chan, zz_value val, int *err) {
         // Counted sleepers: sends skip the condvar notify when zero, so
         // waiter-free traffic pays no futex wake.
         int wake = __atomic_load_n(&ch->sleepers, __ATOMIC_ACQUIRE) > 0;
-        pthread_mutex_unlock(&ch->lock);
+        zz_mtx_unlock(&ch->lock);
         if (wake) {
-            pthread_mutex_lock(&ch->lock);
-            pthread_cond_signal(&ch->cond);
-            pthread_mutex_unlock(&ch->lock);
+            zz_mtx_lock(&ch->lock);
+            zz_cnd_signal(&ch->cond);
+            zz_mtx_unlock(&ch->lock);
         }
         *err = 0;
         return zz_unit();
@@ -1954,7 +1946,7 @@ zz_value zz_chan_send(zz_value chan, zz_value val, int *err) {
         size_t new_cap = ch->cap * 2;
         zz_value *new_queue = (zz_value *)malloc(sizeof(zz_value) * new_cap);
         if (!new_queue) {
-            pthread_mutex_unlock(&ch->lock);
+            zz_mtx_unlock(&ch->lock);
             *err = 1;
             return zz_unit();
         }
@@ -1979,8 +1971,8 @@ zz_value zz_chan_send(zz_value chan, zz_value val, int *err) {
     // never parks; one registered before is seen and woken).
     int wspill = __atomic_load_n(&ch->sleepers, __ATOMIC_ACQUIRE) > 0
         || __atomic_load_n(&ch->gparked, __ATOMIC_ACQUIRE) > 0;
-    if (wspill) pthread_cond_signal(&ch->cond);
-    pthread_mutex_unlock(&ch->lock);
+    if (wspill) zz_cnd_signal(&ch->cond);
+    zz_mtx_unlock(&ch->lock);
     *err = 0;
     return zz_unit();
 }
@@ -2025,7 +2017,7 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
 #elif defined(__aarch64__)
         __asm__ volatile("yield");
 #else
-        sched_yield();
+        zz_yield();
 #endif
         }
     }
@@ -2047,18 +2039,18 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
     // per blocking recv — 100k latency round-trips = 100k threads.
     int topped_up = 0;
     for (;;) {
-        pthread_mutex_lock(&ch->lock);
+        zz_mtx_lock(&ch->lock);
         if (ch->len > 0) {
             // O(1) pop from the spill head — no memmove.
             v = ch->queue[ch->head];
             ch->head = (ch->head + 1) % ch->cap;
             ch->len--;
             __atomic_sub_fetch(&ch->spill_count, 1, __ATOMIC_RELEASE);
-            pthread_mutex_unlock(&ch->lock);
+            zz_mtx_unlock(&ch->lock);
             return v;
         }
         if (zz_ring_try_dequeue(ch, &v)) {
-            pthread_mutex_unlock(&ch->lock);
+            zz_mtx_unlock(&ch->lock);
             return v;
         }
         if (zz_is_worker && !topped_up) {
@@ -2072,19 +2064,19 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
         // below is unchanged, so no wakeup can be lost: we only sleep
         // while announced, and any sender in between either enqueued
         // (seen on recheck) or signaled (sleepers > 0).
-        pthread_mutex_unlock(&ch->lock);
+        zz_mtx_unlock(&ch->lock);
         if (zz_worker_help_once()) continue;
-        pthread_mutex_lock(&ch->lock);
+        zz_mtx_lock(&ch->lock);
         if (ch->len > 0 || zz_ring_len_estimate(ch) > 0) {
-            pthread_mutex_unlock(&ch->lock);
+            zz_mtx_unlock(&ch->lock);
             continue;
         }
         __atomic_add_fetch(&ch->sleepers, 1, __ATOMIC_ACQ_REL);
         while (ch->len == 0 && zz_ring_len_estimate(ch) == 0) {
-            pthread_cond_wait(&ch->cond, &ch->lock);
+            zz_cnd_wait(&ch->cond, &ch->lock);
         }
         __atomic_sub_fetch(&ch->sleepers, 1, __ATOMIC_ACQ_REL);
-        pthread_mutex_unlock(&ch->lock);
+        zz_mtx_unlock(&ch->lock);
     }
 }
 
@@ -2107,14 +2099,14 @@ zz_value zz_chan_send_batch(zz_value chan, zz_value arr, int *err) {
         return zz_unit();
     }
     // Mutex path: enqueue remaining items (ring or spill), serve waiters.
-    pthread_mutex_lock(&ch->lock);
+    zz_mtx_lock(&ch->lock);
     for (size_t i = enqueued; i < a->len; i++) {
         if (!zz_ring_try_enqueue(ch, a->items[i])) {
             // Ring full — spill this and all remaining items.
             if (ch->len == ch->cap) {
                 size_t new_cap = ch->cap * 2;
                 zz_value *new_queue = (zz_value *)malloc(sizeof(zz_value) * new_cap);
-                if (!new_queue) { pthread_mutex_unlock(&ch->lock); *err = 1; return zz_unit(); }
+                if (!new_queue) { zz_mtx_unlock(&ch->lock); *err = 1; return zz_unit(); }
                 for (size_t j = 0; j < ch->len; j++)
                     new_queue[j] = ch->queue[(ch->head + j) % ch->cap];
                 free(ch->queue);
@@ -2135,12 +2127,12 @@ zz_value zz_chan_send_batch(zz_value chan, zz_value arr, int *err) {
         int wis_task = 0;
         if (zz_chan_handoff_locked(ch, zz_unit(), &wt, &wis_task)) {
             int gparked = __atomic_load_n(&ch->gparked, __ATOMIC_ACQUIRE) > 0;
-            pthread_mutex_unlock(&ch->lock);
+            zz_mtx_unlock(&ch->lock);
             if (wis_task && !zz_handoff_run_inline(wt)) zz_enqueue_task(wt);
             if (gparked) {
-                pthread_mutex_lock(&ch->lock);
-                pthread_cond_broadcast(&ch->cond);
-                pthread_mutex_unlock(&ch->lock);
+                zz_mtx_lock(&ch->lock);
+                zz_cnd_broadcast(&ch->cond);
+                zz_mtx_unlock(&ch->lock);
             }
             *err = 0;
             return zz_unit();
@@ -2148,8 +2140,8 @@ zz_value zz_chan_send_batch(zz_value chan, zz_value arr, int *err) {
     }
     int wspill = __atomic_load_n(&ch->sleepers, __ATOMIC_ACQUIRE) > 0
         || __atomic_load_n(&ch->gparked, __ATOMIC_ACQUIRE) > 0;
-    if (wspill) pthread_cond_signal(&ch->cond);
-    pthread_mutex_unlock(&ch->lock);
+    if (wspill) zz_cnd_signal(&ch->cond);
+    zz_mtx_unlock(&ch->lock);
     *err = 0;
     return zz_unit();
 }
@@ -2170,7 +2162,7 @@ zz_value zz_chan_recv_batch(zz_value chan, zz_value n, int *err) {
     }
     if (out.arr->len == want) { *err = 0; return out; }
     // Slow path: drain spill (older), then ring, under one mutex.
-    pthread_mutex_lock(&ch->lock);
+    zz_mtx_lock(&ch->lock);
     while (out.arr->len < want && ch->len > 0) {
         zz_array_push(out.arr, ch->queue[ch->head]);
         ch->head = (ch->head + 1) % ch->cap;
@@ -2182,7 +2174,7 @@ zz_value zz_chan_recv_batch(zz_value chan, zz_value n, int *err) {
         if (!zz_ring_try_dequeue(ch, &v)) break;
         zz_array_push(out.arr, v);
     }
-    pthread_mutex_unlock(&ch->lock);
+    zz_mtx_unlock(&ch->lock);
     *err = 0;
     return out;
 }
@@ -2201,23 +2193,23 @@ zz_value zz_chan_try_recv(zz_value chan, int *err) {
         *err = 0;
         return zz_variant_some(v);
     }
-    pthread_mutex_lock(&ch->lock);
+    zz_mtx_lock(&ch->lock);
     // Spill first (older), then the ring — same order as recv.
     if (ch->len > 0) {
         v = ch->queue[ch->head];
         ch->head = (ch->head + 1) % ch->cap;
         ch->len--;
         __atomic_sub_fetch(&ch->spill_count, 1, __ATOMIC_RELEASE);
-        pthread_mutex_unlock(&ch->lock);
+        zz_mtx_unlock(&ch->lock);
         *err = 0;
         return zz_variant_some(v);
     }
     if (zz_ring_try_dequeue(ch, &v)) {
-        pthread_mutex_unlock(&ch->lock);
+        zz_mtx_unlock(&ch->lock);
         *err = 0;
         return zz_variant_some(v);
     }
-    pthread_mutex_unlock(&ch->lock);
+    zz_mtx_unlock(&ch->lock);
     // Match the VM (`chan.try_recv` yields `.none`): return the variant
     // directly instead of signaling through `err` (the call shims drop
     // `err`, which used to turn empty channels into a bare unit).
@@ -2372,19 +2364,19 @@ zz_value zz_chan_recv_green(zz_value chan, zz_task_frame *fr, int resume_id, int
         zz_suspend_verdict = 0;
         return v;
     }
-    pthread_mutex_lock(&ch->lock);
+    zz_mtx_lock(&ch->lock);
     if (ch->len > 0) {
         v = ch->queue[ch->head];
         ch->head = (ch->head + 1) % ch->cap;
         ch->len--;
         __atomic_sub_fetch(&ch->spill_count, 1, __ATOMIC_RELEASE);
-        pthread_mutex_unlock(&ch->lock);
+        zz_mtx_unlock(&ch->lock);
         *err = 0;
         zz_suspend_verdict = 0;
         return v;
     }
     if (zz_ring_try_dequeue(ch, &v)) {
-        pthread_mutex_unlock(&ch->lock);
+        zz_mtx_unlock(&ch->lock);
         *err = 0;
         zz_suspend_verdict = 0;
         return v;
@@ -2405,19 +2397,19 @@ zz_value zz_chan_recv_green(zz_value chan, zz_task_frame *fr, int resume_id, int
             ch->len--;
             __atomic_sub_fetch(&ch->spill_count, 1, __ATOMIC_RELEASE);
             zz_gwait_unregister_tail(ch, fr);
-            pthread_mutex_unlock(&ch->lock);
+            zz_mtx_unlock(&ch->lock);
             *err = 0;
             zz_suspend_verdict = 0;
             return v;
         }
         if (zz_ring_try_dequeue(ch, &v)) {
             zz_gwait_unregister_tail(ch, fr);
-            pthread_mutex_unlock(&ch->lock);
+            zz_mtx_unlock(&ch->lock);
             *err = 0;
             zz_suspend_verdict = 0;
             return v;
         }
-        pthread_mutex_unlock(&ch->lock);
+        zz_mtx_unlock(&ch->lock);
         *err = 0;
         zz_suspend_verdict = 1;
         return zz_unit();
@@ -2437,37 +2429,37 @@ zz_value zz_chan_recv_green(zz_value chan, zz_task_frame *fr, int resume_id, int
         ch->len--;
         __atomic_sub_fetch(&ch->spill_count, 1, __ATOMIC_RELEASE);
         zz_gwait_unregister_tail(ch, fr);
-        pthread_mutex_unlock(&ch->lock);
+        zz_mtx_unlock(&ch->lock);
         *err = 0;
         zz_suspend_verdict = 0;
         return v;
     }
     if (zz_ring_try_dequeue(ch, &v)) {
         zz_gwait_unregister_tail(ch, fr);
-        pthread_mutex_unlock(&ch->lock);
+        zz_mtx_unlock(&ch->lock);
         *err = 0;
         zz_suspend_verdict = 0;
         return v;
     }
     for (;;) {
         if (fr->has_value) break;
-        pthread_mutex_unlock(&ch->lock);
+        zz_mtx_unlock(&ch->lock);
         if (zz_worker_help_once()) {
-            pthread_mutex_lock(&ch->lock);
+            zz_mtx_lock(&ch->lock);
             continue;
         }
-        pthread_mutex_lock(&ch->lock);
+        zz_mtx_lock(&ch->lock);
         if (fr->has_value) break;
         __atomic_add_fetch(&ch->gparked, 1, __ATOMIC_ACQ_REL);
         while (!fr->has_value) {
-            pthread_cond_wait(&ch->cond, &ch->lock);
+            zz_cnd_wait(&ch->cond, &ch->lock);
         }
         __atomic_sub_fetch(&ch->gparked, 1, __ATOMIC_ACQ_REL);
         break;
     }
     fr->has_value = 0;
     v = fr->value;
-    pthread_mutex_unlock(&ch->lock);
+    zz_mtx_unlock(&ch->lock);
     *err = 0;
     return v;
 }
@@ -2514,8 +2506,8 @@ typedef struct {
     size_t nworkers;
     // Global injector: main-thread spawns + deque overflow. Mutex-guarded
     // (spawns are rarer than steals; one uncontended lock ~25ns).
-    pthread_mutex_t inj_lock;
-    pthread_cond_t inj_cond;
+    zz_mtx_t inj_lock;
+    zz_cnd_t inj_cond;
     zz_task_t *inj_buf;
     size_t inj_len; // __atomic: stealers pre-check this lock-free (see below)
     size_t inj_cap;
@@ -2524,7 +2516,7 @@ typedef struct {
 } zz_executor_t;
 
 static zz_executor_t zz_executor;
-static pthread_once_t zz_executor_once = PTHREAD_ONCE_INIT;
+static zz_once_t zz_executor_once = ZZ_ONCE_INIT;
 // This thread's deque (NULL off workers, e.g. the main thread).
 static __thread zz_deque_t *zz_local_deque = NULL;
 // This thread's steal seed (xorshift64 — no dep, no lock).
@@ -2602,7 +2594,7 @@ static int zz_deque_steal(zz_deque_t *dq, zz_task_t *out) {
 // sleeper wake when someone sleeps (skipped entirely when nobody does).
 static void zz_injector_push(zz_task_t task) {
     zz_executor_t *ex = &zz_executor;
-    pthread_mutex_lock(&ex->inj_lock);
+    zz_mtx_lock(&ex->inj_lock);
     size_t ilen = __atomic_load_n(&ex->inj_len, __ATOMIC_RELAXED);
     if (ilen == ex->inj_cap) {
         size_t new_cap = ex->inj_cap == 0 ? 64 : ex->inj_cap * 2;
@@ -2635,11 +2627,11 @@ static void zz_injector_push(zz_task_t task) {
     // Wake one sleeper per push (round-robin thundering is pointless for
     // a single task); skipped when nobody sleeps.
     int wake = __atomic_load_n(&ex->sleepers, __ATOMIC_ACQUIRE) > 0;
-    pthread_mutex_unlock(&ex->inj_lock);
+    zz_mtx_unlock(&ex->inj_lock);
     if (wake) {
-        pthread_mutex_lock(&ex->inj_lock);
-        pthread_cond_signal(&ex->inj_cond);
-        pthread_mutex_unlock(&ex->inj_lock);
+        zz_mtx_lock(&ex->inj_lock);
+        zz_cnd_signal(&ex->inj_cond);
+        zz_mtx_unlock(&ex->inj_lock);
     }
 }
 
@@ -2657,7 +2649,7 @@ static int zz_injector_steal(zz_task_t *out) {
     zz_executor_t *ex = &zz_executor;
     if (__atomic_load_n(&ex->inj_len, __ATOMIC_ACQUIRE) == 0) return 0;
     int got = 0;
-    pthread_mutex_lock(&ex->inj_lock);
+    zz_mtx_lock(&ex->inj_lock);
     size_t ilen = __atomic_load_n(&ex->inj_len, __ATOMIC_RELAXED);
     if (ilen > 0) {
         *out = ex->inj_buf[ex->inj_head];
@@ -2665,7 +2657,7 @@ static int zz_injector_steal(zz_task_t *out) {
         __atomic_store_n(&ex->inj_len, ilen - 1, __ATOMIC_RELAXED);
         got = 1;
     }
-    pthread_mutex_unlock(&ex->inj_lock);
+    zz_mtx_unlock(&ex->inj_lock);
     return got;
 }
 
@@ -2689,9 +2681,9 @@ static void zz_enqueue_task(zz_task_t task) {
             // the parker verifies every sibling deque while holding it.
             if (__atomic_load_n(&zz_executor.sleepers, __ATOMIC_ACQUIRE)
                 > 0) {
-                pthread_mutex_lock(&zz_executor.inj_lock);
-                pthread_cond_signal(&zz_executor.inj_cond);
-                pthread_mutex_unlock(&zz_executor.inj_lock);
+                zz_mtx_lock(&zz_executor.inj_lock);
+                zz_cnd_signal(&zz_executor.inj_cond);
+                zz_mtx_unlock(&zz_executor.inj_lock);
             }
             return;
         }
@@ -2908,7 +2900,7 @@ static int zz_worker_help_once(void) {
 // (FIFO, shallow value copies — same convention as the blocking path's
 // multi-recv aliasing). Old-style condvar sleepers get one signal.
 void zz_task_join_complete(zz_task_join *join, zz_value result) {
-    pthread_mutex_lock(&join->lock);
+    zz_mtx_lock(&join->lock);
     join->result = zz_clone(result);
     join->completed = 1;
     zz_green_waiter *w = join->gwait_head;
@@ -2958,9 +2950,9 @@ void zz_task_join_complete(zz_task_join *join, zz_value result) {
     // are multi-recv by design, so N parked joiners must ALL wake
     // (audit MAJOR-2: a single signal stranded every joiner but one).
     if (__atomic_load_n(&join->sleepers, __ATOMIC_ACQUIRE) > 0) {
-        pthread_cond_broadcast(&join->cond);
+        zz_cnd_broadcast(&join->cond);
     }
-    pthread_mutex_unlock(&join->lock);
+    zz_mtx_unlock(&join->lock);
     for (size_t i = 0; i < ntasks; i++) {
         // Direct handoff applies to join waiters too: a completion that
         // releases a suspended joiner runs it inline instead of queueing.
@@ -2972,9 +2964,9 @@ void zz_task_join_complete(zz_task_join *join, zz_value result) {
     // them all — broadcast to be exact, but only when any exist
     // (completion is one-shot, so this runs once per join handle).
     if (__atomic_load_n(&join->gparked, __ATOMIC_ACQUIRE) > 0) {
-        pthread_mutex_lock(&join->lock);
-        pthread_cond_broadcast(&join->cond);
-        pthread_mutex_unlock(&join->lock);
+        zz_mtx_lock(&join->lock);
+        zz_cnd_broadcast(&join->cond);
+        zz_mtx_unlock(&join->lock);
     }
 }
 
@@ -3022,18 +3014,14 @@ static void zz_executor_top_up(void) {
         __atomic_sub_fetch(&zz_topup_count, 1, __ATOMIC_ACQ_REL);
         return;
     }
-    pthread_t thread;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 1024 * 1024);
-    if (pthread_create(&thread, &attr, zz_worker_loop, dq) == 0) {
-        pthread_detach(thread);
+    zz_thrd_t thread;
+    if (zz_thrd_create(&thread, zz_worker_loop, dq) == 0) {
+        zz_thrd_detach(thread);
     } else {
         free(dq->buf);
         free(dq);
         __atomic_sub_fetch(&zz_topup_count, 1, __ATOMIC_ACQ_REL);
     }
-    pthread_attr_destroy(&attr);
 }
 
 static void *zz_worker_loop(void *arg) {
@@ -3070,7 +3058,7 @@ static void *zz_worker_loop(void *arg) {
 #elif defined(__aarch64__)
             __asm__ volatile("yield");
 #else
-            sched_yield();
+            zz_yield();
 #endif
         }
         if (found) {
@@ -3082,7 +3070,7 @@ static void *zz_worker_loop(void *arg) {
         // (sibling steals are pure CAS; the injector is read directly
         // under the held lock). The old code called the full steal round
         // while holding `inj_lock` — self-deadlock on first idle.
-        pthread_mutex_lock(&ex->inj_lock);
+        zz_mtx_lock(&ex->inj_lock);
         __atomic_add_fetch(&ex->sleepers, 1, __ATOMIC_ACQ_REL);
         for (;;) {
             if (zz_deque_pop(dq, &task) || zz_steal_siblings(&task)) {
@@ -3097,9 +3085,9 @@ static void *zz_worker_loop(void *arg) {
             // Announce-then-verify: a push landing between the last steal
             // and this park signals the condvar (sleepers > 0), so no
             // wakeup is lost by construction.
-            pthread_cond_wait(&ex->inj_cond, &ex->inj_lock);
+            zz_cnd_wait(&ex->inj_cond, &ex->inj_lock);
         }
-        pthread_mutex_unlock(&ex->inj_lock);
+        zz_mtx_unlock(&ex->inj_lock);
         __atomic_sub_fetch(&ex->sleepers, 1, __ATOMIC_ACQ_REL);
         zz_run_task(task);
     }
@@ -3132,8 +3120,8 @@ static void zz_executor_init(void) {
             exit(1);
         }
     }
-    pthread_mutex_init(&ex->inj_lock, NULL);
-    pthread_cond_init(&ex->inj_cond, NULL);
+    zz_mtx_init(&ex->inj_lock);
+    zz_cnd_init(&ex->inj_cond);
     ex->inj_buf = NULL;
     __atomic_store_n(&ex->inj_len, 0, __ATOMIC_RELAXED);
     ex->inj_cap = 0;
@@ -3145,19 +3133,15 @@ static void zz_executor_init(void) {
     if (cap < 32) cap = 32;
     if (cap > 256) cap = 256;
     __atomic_store_n(&zz_topup_cap, cap, __ATOMIC_RELAXED);
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 1024 * 1024);
     for (size_t i = 0; i < n; i++) {
-        pthread_t thread;
-        if (pthread_create(&thread, &attr, zz_worker_loop,
+        zz_thrd_t thread;
+        if (zz_thrd_create(&thread, zz_worker_loop,
                            &ex->deques[i]) != 0) {
             fprintf(stderr, "zz: out of memory (executor thread)\n");
             exit(1);
         }
-        pthread_detach(thread);
+        zz_thrd_detach(thread);
     }
-    pthread_attr_destroy(&attr);
 }
 
 zz_value zz_spawn(zz_value fn, int *err) {
@@ -3167,7 +3151,7 @@ zz_value zz_spawn(zz_value fn, int *err) {
     // M:N executor (Phase B2): enqueue instead of creating a pthread.
     // Lazily initialized once; workers are detached and live for the
     // process (same lifetime discipline as the old detached threads).
-    pthread_once(&zz_executor_once, zz_executor_init);
+    zz_once(&zz_executor_once, zz_executor_init);
     // Create task join handle.
     zz_task_join *join = (zz_task_join *)malloc(sizeof(zz_task_join));
     if (!join) {
@@ -3177,8 +3161,8 @@ zz_value zz_spawn(zz_value fn, int *err) {
     // Static initialization (assignment, no init call): handles are never
     // destroyed (intentionally leaked, like before), so dynamic init buys
     // nothing — this skips two libc calls per spawn on the hot path.
-    join->lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
-    join->cond = (pthread_cond_t)PTHREAD_COND_INITIALIZER;
+    ZZ_MTX_SET(&join->lock);
+    ZZ_CND_SET(&join->cond);
     join->result = zz_unit();
     join->completed = 0;
     join->consumed = 0;
@@ -3220,7 +3204,7 @@ zz_value zz_spawn_ex(zz_dispatch_fn fn, void **cells,
                      const unsigned char *kinds, const size_t *sizes,
                      size_t nenv, int is_green, int *err) {
     if (!fn) { *err = 1; return zz_unit(); }
-    pthread_once(&zz_executor_once, zz_executor_init);
+    zz_once(&zz_executor_once, zz_executor_init);
     zz_dup_entry inline_store[ZZ_DUP_INLINE_CAP];
     zz_dup_memo m = {inline_store, 0, ZZ_DUP_INLINE_CAP, 0};
     zz_value owned =
@@ -3236,8 +3220,8 @@ zz_value zz_spawn_ex(zz_dispatch_fn fn, void **cells,
         exit(1);
     }
     // Static initialization (see `zz_spawn`): assignment, no libc call.
-    join->lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
-    join->cond = (pthread_cond_t)PTHREAD_COND_INITIALIZER;
+    ZZ_MTX_SET(&join->lock);
+    ZZ_CND_SET(&join->cond);
     join->result = zz_unit();
     join->completed = 0;
     join->consumed = 0;
@@ -3269,10 +3253,10 @@ zz_value zz_task_join_recv_green(zz_value join_val, zz_task_frame *fr, int resum
     }
     if (join_val.tag != ZZ_TASK_JOIN) { *err = 1; return zz_unit(); }
     zz_task_join *join = join_val.task;
-    pthread_mutex_lock(&join->lock);
+    zz_mtx_lock(&join->lock);
     if (join->completed) {
         zz_value result = join->result;
-        pthread_mutex_unlock(&join->lock);
+        zz_mtx_unlock(&join->lock);
         *err = 0;
         zz_suspend_verdict = 0;
         return result;
@@ -3308,7 +3292,7 @@ zz_value zz_task_join_recv_green(zz_value join_val, zz_task_frame *fr, int resum
     __atomic_add_fetch(&join->green_waiters, 1, __ATOMIC_ACQ_REL);
     fr->resume = resume_id;
     if (w->is_task) {
-        pthread_mutex_unlock(&join->lock);
+        zz_mtx_unlock(&join->lock);
         *err = 0;
         zz_suspend_verdict = 1;
         return zz_unit();
@@ -3317,23 +3301,23 @@ zz_value zz_task_join_recv_green(zz_value join_val, zz_task_frame *fr, int resum
     // help first, sleep only while announced on `gparked`.
     for (;;) {
         if (fr->has_value) break;
-        pthread_mutex_unlock(&join->lock);
+        zz_mtx_unlock(&join->lock);
         if (zz_worker_help_once()) {
-            pthread_mutex_lock(&join->lock);
+            zz_mtx_lock(&join->lock);
             continue;
         }
-        pthread_mutex_lock(&join->lock);
+        zz_mtx_lock(&join->lock);
         if (fr->has_value) break;
         __atomic_add_fetch(&join->gparked, 1, __ATOMIC_ACQ_REL);
         while (!fr->has_value) {
-            pthread_cond_wait(&join->cond, &join->lock);
+            zz_cnd_wait(&join->cond, &join->lock);
         }
         __atomic_sub_fetch(&join->gparked, 1, __ATOMIC_ACQ_REL);
         break;
     }
     fr->has_value = 0;
     zz_value result = fr->value;
-    pthread_mutex_unlock(&join->lock);
+    zz_mtx_unlock(&join->lock);
     *err = 0;
     zz_suspend_verdict = 0;
     return result;
@@ -3342,7 +3326,7 @@ zz_value zz_task_join_recv_green(zz_value join_val, zz_task_frame *fr, int resum
 zz_value zz_task_join_recv(zz_value join_val, int *err) {
     if (join_val.tag != ZZ_TASK_JOIN) { *err = 1; return zz_unit(); }
     zz_task_join *join = join_val.task;
-    pthread_mutex_lock(&join->lock);
+    zz_mtx_lock(&join->lock);
     // Same top-up discipline as channel recv: only when genuinely about
     // to park (!completed), at most once; the parked-worker gate + hard
     // cap inside zz_executor_top_up bound the total.
@@ -3363,22 +3347,22 @@ zz_value zz_task_join_recv(zz_value join_val, int *err) {
         // Helping (audit CRITICAL-1): same discipline as channel recv —
         // run stranded work instead of parking; the lock is released
         // across the run. Announce-then-verify below is unchanged.
-        pthread_mutex_unlock(&join->lock);
+        zz_mtx_unlock(&join->lock);
         if (zz_worker_help_once()) {
-            pthread_mutex_lock(&join->lock);
+            zz_mtx_lock(&join->lock);
             continue;
         }
-        pthread_mutex_lock(&join->lock);
+        zz_mtx_lock(&join->lock);
         if (join->completed) break;
         __atomic_add_fetch(&join->sleepers, 1, __ATOMIC_ACQ_REL);
         while (!join->completed) {
-            pthread_cond_wait(&join->cond, &join->lock);
+            zz_cnd_wait(&join->cond, &join->lock);
         }
         __atomic_sub_fetch(&join->sleepers, 1, __ATOMIC_ACQ_REL);
         break;
     }
     zz_value result = join->result;
-    pthread_mutex_unlock(&join->lock);
+    zz_mtx_unlock(&join->lock);
     // Note: join handle is intentionally not freed here to allow multiple recv.
     // The handle is leaked at process exit (acceptable for now).
     *err = 0;
@@ -3390,14 +3374,14 @@ zz_value zz_task_try_join(zz_value join_val, int *err) {
         return (zz_value){ZZ_OPTION_NONE, {.payload = NULL}};
     }
     zz_task_join *join = join_val.task;
-    pthread_mutex_lock(&join->lock);
+    zz_mtx_lock(&join->lock);
     if (!join->completed || join->consumed) {
-        pthread_mutex_unlock(&join->lock);
+        zz_mtx_unlock(&join->lock);
         return (zz_value){ZZ_OPTION_NONE, {.payload = NULL}};
     }
     join->consumed = 1;
     zz_value result = zz_clone(join->result);
-    pthread_mutex_unlock(&join->lock);
+    zz_mtx_unlock(&join->lock);
     return zz_variant_some(result);
 }
 
@@ -3413,22 +3397,16 @@ zz_value zz_task_try_join(zz_value join_val, int *err) {
 #endif
 
 static __thread unsigned zz_sp_budget = 1024;
-static __thread long long zz_sp_start_ns = 0;
+static __thread long long zz_sp_start_ms = 0;
 
 void zz_safepoint(void) {
     if (zz_sp_budget != 0) { zz_sp_budget--; return; }
     zz_sp_budget = 1024;
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    long long now_ns = (long long)now.tv_sec * 1000000000LL + now.tv_nsec;
-    if (zz_sp_start_ns == 0) { zz_sp_start_ns = now_ns; return; }
-    if (now_ns - zz_sp_start_ns >= 1000000LL) {
-        zz_sp_start_ns = now_ns;
-#ifdef ZZ_OS_WINDOWS
-        SwitchToThread();
-#else
-        sched_yield();
-#endif
+    long long now_ms = zz_mono_now();
+    if (zz_sp_start_ms == 0) { zz_sp_start_ms = now_ms; return; }
+    if (now_ms - zz_sp_start_ms >= 1) {
+        zz_sp_start_ms = now_ms;
+        zz_yield();
     }
 }
 
@@ -3863,7 +3841,7 @@ static zz_cell_slot *zz_cells = NULL;
 static size_t zz_cell_n = 0;
 static size_t zz_cell_cap = 0;
 static uint64_t zz_cell_next = 1;
-static pthread_mutex_t zz_cell_mu = PTHREAD_MUTEX_INITIALIZER;
+static zz_mtx_t zz_cell_mu = ZZ_MTX_INIT;
 
 static zz_cell_slot *zz_cell_find(uint64_t id) {
     for (size_t i = 0; i < zz_cell_n; i++) {
@@ -3913,12 +3891,12 @@ zz_value zz_cell_new(zz_value v, int *err) {
     // share; the pool takes exactly one of its own (heap bump, or a fresh
     // heap copy for arena-owned values — see issue #410).
     zz_value stored = zz_clone_for_store(v);
-    pthread_mutex_lock(&zz_cell_mu);
+    zz_mtx_lock(&zz_cell_mu);
     if (zz_cell_n == zz_cell_cap) {
         size_t nc = zz_cell_cap == 0 ? 16 : zz_cell_cap * 2;
         zz_cell_slot *ns = (zz_cell_slot *)realloc(zz_cells, nc * sizeof(zz_cell_slot));
         if (!ns) {
-            pthread_mutex_unlock(&zz_cell_mu);
+            zz_mtx_unlock(&zz_cell_mu);
             zz_release(&stored);
             return zz_variant_err(zz_str_static("cell.new: out of memory"));
         }
@@ -3931,7 +3909,7 @@ zz_value zz_cell_new(zz_value v, int *err) {
             zz_cells[i].val = stored;
             uint64_t id = zz_cell_fresh_id();
             zz_cells[i].id = id;
-            pthread_mutex_unlock(&zz_cell_mu);
+            zz_mtx_unlock(&zz_cell_mu);
             return (zz_value){ZZ_INT, {.i = (int64_t)id}};
         }
     }
@@ -3940,7 +3918,7 @@ zz_value zz_cell_new(zz_value v, int *err) {
     zz_cells[zz_cell_n].live = 1;
     zz_cells[zz_cell_n].val = stored;
     zz_cell_n++;
-    pthread_mutex_unlock(&zz_cell_mu);
+    zz_mtx_unlock(&zz_cell_mu);
     return (zz_value){ZZ_INT, {.i = (int64_t)id}};
 }
 
@@ -3950,14 +3928,14 @@ zz_value zz_cell_get(zz_value id, int *err) {
     if (id.tag != ZZ_INT || id.i <= 0) {
         return zz_variant_err(zz_str_static("cell.get: not a cell"));
     }
-    pthread_mutex_lock(&zz_cell_mu);
+    zz_mtx_lock(&zz_cell_mu);
     zz_cell_slot *s = zz_cell_find((uint64_t)id.i);
     if (!s) {
-        pthread_mutex_unlock(&zz_cell_mu);
+        zz_mtx_unlock(&zz_cell_mu);
         return zz_variant_err(zz_str_static("cell.get: cell was dropped"));
     }
     zz_value out = zz_clone(s->val);
-    pthread_mutex_unlock(&zz_cell_mu);
+    zz_mtx_unlock(&zz_cell_mu);
     return zz_variant_ok(out);
 }
 
@@ -3971,16 +3949,16 @@ zz_value zz_cell_set(zz_value id, zz_value v, int *err) {
     // value to heap ownership before publishing it into the pool, so a
     // loop-arena alias can never dangle past the iteration reset.
     zz_value stored = zz_clone_for_store(v);
-    pthread_mutex_lock(&zz_cell_mu);
+    zz_mtx_lock(&zz_cell_mu);
     zz_cell_slot *s = zz_cell_find((uint64_t)id.i);
     if (!s) {
-        pthread_mutex_unlock(&zz_cell_mu);
+        zz_mtx_unlock(&zz_cell_mu);
         zz_release(&stored);
         return zz_variant_err(zz_str_static("cell.set: cell was dropped"));
     }
     zz_release(&s->val);
     s->val = stored;
-    pthread_mutex_unlock(&zz_cell_mu);
+    zz_mtx_unlock(&zz_cell_mu);
     return zz_variant_ok((zz_value){ZZ_BOOL, {.b = true}});
 }
 
@@ -3993,16 +3971,16 @@ zz_value zz_cell_drop(zz_value id, int *err) {
     if (id.tag != ZZ_INT || id.i <= 0) {
         return (zz_value){ZZ_BOOL, {.b = false}};
     }
-    pthread_mutex_lock(&zz_cell_mu);
+    zz_mtx_lock(&zz_cell_mu);
     zz_cell_slot *s = zz_cell_find((uint64_t)id.i);
     if (!s) {
-        pthread_mutex_unlock(&zz_cell_mu);
+        zz_mtx_unlock(&zz_cell_mu);
         return (zz_value){ZZ_BOOL, {.b = false}};
     }
     zz_release(&s->val);
     s->val = zz_unit();
     s->live = 0;
-    pthread_mutex_unlock(&zz_cell_mu);
+    zz_mtx_unlock(&zz_cell_mu);
     return (zz_value){ZZ_BOOL, {.b = true}};
 }
 
@@ -4558,9 +4536,7 @@ static void http_limits_default(void) {
 }
 
 static int64_t http_monotonic_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return zz_mono_now();
 }
 
 typedef struct {
@@ -5426,14 +5402,15 @@ static void *worker_loop_poll(void *arg) {
 #endif
 
 // ---- Main server startup: one process, one thread per CPU ----
+// The worker loops (epoll on Linux, poll on macOS) are POSIX-only; Windows
+// AOT runs the HTTP server without dedicated worker threads (accept happens
+// in the caller), so spawn_workers is a no-op there.
+#ifndef ZZ_OS_WINDOWS
 static int spawn_workers(int listen_fd, int port) {
     (void)port;
     int workers = get_cpu_count();
-    pthread_t *threads = (pthread_t *)calloc((size_t)workers, sizeof(pthread_t));
+    zz_thrd_t *threads = (zz_thrd_t *)calloc((size_t)workers, sizeof(zz_thrd_t));
     if (!threads) return -1;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 256 * 1024);
     int launched = 0;
     for (int w = 0; w < workers; w++) {
         http_worker_arg *a = (http_worker_arg *)malloc(sizeof(http_worker_arg));
@@ -5441,27 +5418,33 @@ static int spawn_workers(int listen_fd, int port) {
         a->listen_fd = listen_fd;
         a->worker_id = w;
 #if defined(__linux__)
-        if (pthread_create(&threads[w], &attr, worker_loop_linux, a) != 0) {
+        if (zz_thrd_create(&threads[w], worker_loop_linux, a) != 0) {
 #elif defined(__APPLE__)
-        if (pthread_create(&threads[w], &attr, worker_loop_poll, a) != 0) {
+        if (zz_thrd_create(&threads[w], worker_loop_poll, a) != 0) {
 #else
-        if (pthread_create(&threads[w], &attr, worker_loop_linux, a) != 0) {
+        if (zz_thrd_create(&threads[w], worker_loop_linux, a) != 0) {
 #endif
             free(a);
             break;
         }
         launched++;
     }
-    pthread_attr_destroy(&attr);
     if (launched == 0) {
         free(threads);
         return -1;
     }
     // Join (blocks until killed): workers run until the process dies.
-    for (int w = 0; w < launched; w++) pthread_join(threads[w], NULL);
+    for (int w = 0; w < launched; w++) zz_thrd_join(threads[w]);
     free(threads);
     return 0;
 }
+#else
+static int spawn_workers(int listen_fd, int port) {
+    (void)listen_fd;
+    (void)port;
+    return 0;
+}
+#endif
 #endif
 
 // ---- HTTP routes + request/response natives (AOT) ----
@@ -5528,7 +5511,7 @@ static uint64_t g_http_rate_max_requests = 0;
 static uint64_t g_http_rate_window_ms = 0;
 static http_rate_bucket g_http_rate_buckets[HTTP_RATE_MAX_KEYS];
 static size_t g_http_rate_count = 0;
-static pthread_mutex_t g_http_rate_lock = PTHREAD_MUTEX_INITIALIZER;
+static zz_mtx_t g_http_rate_lock = ZZ_MTX_INIT;
 
 // Returns 1 when the request is limited (and stores a Retry-After in
 // seconds), 0 when admitted. Mirrors the VM bucket_take/check_rate_limit
@@ -5536,7 +5519,7 @@ static pthread_mutex_t g_http_rate_lock = PTHREAD_MUTEX_INITIALIZER;
 static int http_rate_check(const char *key, uint64_t *retry_after) {
     if (!g_http_rate_enabled) return 0;
     if (!key) key = "";
-    if (pthread_mutex_lock(&g_http_rate_lock) != 0) return 0;
+    if (zz_mtx_lock(&g_http_rate_lock) != 0) return 0;
 
     int64_t now = http_monotonic_ms();
     size_t slot = HTTP_RATE_MAX_KEYS;
@@ -5571,7 +5554,7 @@ static int http_rate_check(const char *key, uint64_t *retry_after) {
     }
     if (b->tokens >= 1.0) {
         b->tokens -= 1.0;
-        pthread_mutex_unlock(&g_http_rate_lock);
+        zz_mtx_unlock(&g_http_rate_lock);
         return 0;
     }
     uint64_t wait_ms = (uint64_t)ceil(
@@ -5583,7 +5566,7 @@ static int http_rate_check(const char *key, uint64_t *retry_after) {
     uint64_t retry = wait_ms / 1000 + (wait_ms % 1000 != 0);
     if (retry == 0) retry = 1;
     *retry_after = retry;
-    pthread_mutex_unlock(&g_http_rate_lock);
+    zz_mtx_unlock(&g_http_rate_lock);
     return 1;
 }
 
@@ -5644,10 +5627,10 @@ static void http_server_reset(void) {
         zz_release(&g_http_hijack_table[i].handler);
     }
     g_http_hijack_count = 0;
-    if (pthread_mutex_lock(&g_http_rate_lock) == 0) {
+    if (zz_mtx_lock(&g_http_rate_lock) == 0) {
         memset(g_http_rate_buckets, 0, sizeof g_http_rate_buckets);
         g_http_rate_count = 0;
-        pthread_mutex_unlock(&g_http_rate_lock);
+        zz_mtx_unlock(&g_http_rate_lock);
     }
     g_http_rate_enabled = 0;
     g_http_rate_max_requests = 0;
@@ -7611,8 +7594,8 @@ static void http_on_head(Connection *c) {
 // worker; the response lands in wbuf (large) or the static write_buf
 // (small). Persistence follows the fused head scan (HTTP/1.1 default).
 static void http_run_handler(Connection *c) {
-    struct timespec t0;
-    if (g_http_log_enabled) clock_gettime(CLOCK_MONOTONIC, &t0);
+    long long t0 = 0;
+    if (g_http_log_enabled) t0 = zz_mono_now();
     size_t req_bytes = c->body_need;
     // Request line stashed at head time (parse once): the head buffer is
     // still alive here; target length rides along for dispatch.
@@ -7786,10 +7769,8 @@ static void http_run_handler(Connection *c) {
     c->keep_alive = keep_alive;
     c->state = CONN_WRITING;
     if (g_http_log_enabled) {
-        struct timespec t1;
-        clock_gettime(CLOCK_MONOTONIC, &t1);
-        double ms = (double)(t1.tv_sec - t0.tv_sec) * 1000.0
-            + (double)(t1.tv_nsec - t0.tv_nsec) / 1000000.0;
+        long long t1 = zz_mono_now();
+        double ms = (double)(t1 - t0);
         const char *cs = "\x1b[0m";
         if (status >= 200 && status < 300) cs = "\x1b[32m";
         else if (status >= 300 && status < 400) cs = "\x1b[33m";
@@ -7973,10 +7954,10 @@ zz_value zz_http_rate_limit(zz_value server, zz_value max_requests,
         *err = 1;
         return server;
     }
-    if (pthread_mutex_lock(&g_http_rate_lock) == 0) {
+    if (zz_mtx_lock(&g_http_rate_lock) == 0) {
         memset(g_http_rate_buckets, 0, sizeof g_http_rate_buckets);
         g_http_rate_count = 0;
-        pthread_mutex_unlock(&g_http_rate_lock);
+        zz_mtx_unlock(&g_http_rate_lock);
     }
     g_http_rate_max_requests = (uint64_t)max_requests.i;
     g_http_rate_window_ms = (uint64_t)window_ms.i;
@@ -10568,8 +10549,8 @@ typedef struct {
 } zz_fs_cache_shard;
 
 static zz_fs_cache_shard zz_fs_cache_shards[ZZ_FS_CACHE_SHARDS];
-static pthread_mutex_t zz_fs_cache_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_once_t zz_fs_cache_once = PTHREAD_ONCE_INIT;
+static zz_mtx_t zz_fs_cache_mu = ZZ_MTX_INIT;
+static zz_once_t zz_fs_cache_once = ZZ_ONCE_INIT;
 static int zz_fs_cache_state = 0;
 static size_t zz_fs_cache_shard_budget =
     ((size_t)ZZ_FS_CACHE_DEFAULT_MB * 1024 * 1024) / ZZ_FS_CACHE_SHARDS;
@@ -10599,7 +10580,7 @@ static void zz_fs_cache_init(void) {
 }
 
 static int zz_fs_cache_on(void) {
-    pthread_once(&zz_fs_cache_once, zz_fs_cache_init);
+    zz_once(&zz_fs_cache_once, zz_fs_cache_init);
     return zz_fs_cache_state == 1;
 }
 
@@ -10670,9 +10651,9 @@ static void zz_fs_cache_store_bytes(const char *p, size_t plen,
     if (b->len != (size_t)before->st_size) return;
     struct stat after;
     if (stat(p, &after) != 0 || !zz_fs_fp_same(before, &after)) return;
-    pthread_mutex_lock(&zz_fs_cache_mu);
+    zz_mtx_lock(&zz_fs_cache_mu);
     zz_fs_cache_put(p, plen, before, NULL, b);
-    pthread_mutex_unlock(&zz_fs_cache_mu);
+    zz_mtx_unlock(&zz_fs_cache_mu);
 }
 
 // Cacheable: regular, non-empty, bounded, and no embedded NUL in the path.
@@ -10734,14 +10715,14 @@ static zz_str *zz_fs_cache_take_str(const char *p, size_t n, const struct stat *
     *nul_known = 0;
     *utf8_known = 0;
     if (!zz_fs_cacheable(p, n, st)) return NULL;
-    pthread_mutex_lock(&zz_fs_cache_mu);
+    zz_mtx_lock(&zz_fs_cache_mu);
     zz_fs_cache_ent *e = zz_fs_cache_find(p, n);
     if (e == NULL || !zz_fs_fp_match(e, st)) {
         if (e != NULL) {
             zz_fs_cache_shard *sh = &zz_fs_cache_shards[zz_fs_cache_bucket(p, n)];
             zz_fs_cache_unlink(sh, e);
         }
-        pthread_mutex_unlock(&zz_fs_cache_mu);
+        zz_mtx_unlock(&zz_fs_cache_mu);
         return NULL;
     }
     if (e->str == NULL && e->bytes != NULL) {
@@ -10758,33 +10739,33 @@ static zz_str *zz_fs_cache_take_str(const char *p, size_t n, const struct stat *
     if (out != NULL) __atomic_add_fetch(&out->refs, 1, __ATOMIC_RELAXED);
     if (e->nul_known) { *nul_known = 1; *nul = e->nul; }
     if (e->utf8_known) { *utf8_known = 1; *utf8 = e->utf8; }
-    pthread_mutex_unlock(&zz_fs_cache_mu);
+    zz_mtx_unlock(&zz_fs_cache_mu);
     return out;
 }
 
 static zz_bytes *zz_fs_cache_take_bytes(const char *p, size_t n, const struct stat *st) {
     if (!zz_fs_cacheable(p, n, st)) return NULL;
-    pthread_mutex_lock(&zz_fs_cache_mu);
+    zz_mtx_lock(&zz_fs_cache_mu);
     zz_fs_cache_ent *e = zz_fs_cache_find(p, n);
     if (e == NULL || !zz_fs_fp_match(e, st)) {
         if (e != NULL) {
             zz_fs_cache_shard *sh = &zz_fs_cache_shards[zz_fs_cache_bucket(p, n)];
             zz_fs_cache_unlink(sh, e);
         }
-        pthread_mutex_unlock(&zz_fs_cache_mu);
+        zz_mtx_unlock(&zz_fs_cache_mu);
         return NULL;
     }
     if (e->bytes == NULL && e->str != NULL) {
         zz_value v = zz_bytes_new((const unsigned char *)zz_str_ptr(e->str), e->str->len);
         if (v.tag != ZZ_BYTES) {
-            pthread_mutex_unlock(&zz_fs_cache_mu);
+            zz_mtx_unlock(&zz_fs_cache_mu);
             return NULL;
         }
         e->bytes = v.bytes; // cache owns the initial reference
     }
     zz_bytes *out = e->bytes;
     if (out != NULL) zz_retain_bytes(out);
-    pthread_mutex_unlock(&zz_fs_cache_mu);
+    zz_mtx_unlock(&zz_fs_cache_mu);
     return out;
 }
 
@@ -10837,24 +10818,24 @@ static void zz_fs_cache_note(const char *p, size_t n,
                              int nul_known, int nul,
                              int utf8_known, int utf8) {
     if (!zz_fs_cache_on() || strlen(p) != n) return;
-    pthread_mutex_lock(&zz_fs_cache_mu);
+    zz_mtx_lock(&zz_fs_cache_mu);
     zz_fs_cache_note_locked(p, n, nul_known, nul, utf8_known, utf8);
-    pthread_mutex_unlock(&zz_fs_cache_mu);
+    zz_mtx_unlock(&zz_fs_cache_mu);
 }
 
 static void zz_fs_cache_remove_n(const char *p, size_t n) {
     if (!zz_fs_cache_on() || p == NULL) return;
-    pthread_mutex_lock(&zz_fs_cache_mu);
+    zz_mtx_lock(&zz_fs_cache_mu);
     zz_fs_cache_ent *e = zz_fs_cache_find(p, n);
     if (e != NULL) {
         zz_fs_cache_unlink(&zz_fs_cache_shards[zz_fs_cache_bucket(p, n)], e);
     }
-    pthread_mutex_unlock(&zz_fs_cache_mu);
+    zz_mtx_unlock(&zz_fs_cache_mu);
 }
 
 static void zz_fs_cache_invalidate_n(const char *p, size_t n) {
     if (!zz_fs_cache_on() || p == NULL) return;
-    pthread_mutex_lock(&zz_fs_cache_mu);
+    zz_mtx_lock(&zz_fs_cache_mu);
     for (size_t i = 0; i < ZZ_FS_CACHE_SHARDS; i++) {
         zz_fs_cache_ent *e = zz_fs_cache_shards[i].head;
         while (e != NULL) {
@@ -10865,7 +10846,7 @@ static void zz_fs_cache_invalidate_n(const char *p, size_t n) {
             e = next;
         }
     }
-    pthread_mutex_unlock(&zz_fs_cache_mu);
+    zz_mtx_unlock(&zz_fs_cache_mu);
 }
 
 static void zz_fs_cache_invalidate(const char *p) {
@@ -10883,7 +10864,7 @@ static void zz_fs_cache_invalidate_prefix(const char *p) {
     size_t n = strlen(p);
     if (n == 0) return;
     while (n > 1 && (p[n - 1] == '/' || p[n - 1] == '\\')) n--;
-    pthread_mutex_lock(&zz_fs_cache_mu);
+    zz_mtx_lock(&zz_fs_cache_mu);
     for (size_t i = 0; i < ZZ_FS_CACHE_SHARDS; i++) {
         zz_fs_cache_ent *e = zz_fs_cache_shards[i].head;
         while (e != NULL) {
@@ -10898,7 +10879,7 @@ static void zz_fs_cache_invalidate_prefix(const char *p) {
             e = next;
         }
     }
-    pthread_mutex_unlock(&zz_fs_cache_mu);
+    zz_mtx_unlock(&zz_fs_cache_mu);
 }
 
 // Read a file into a `zz_str`, using the cache when possible. `*e_out` is
@@ -11000,9 +10981,9 @@ static zz_str *zz_fs_load_str(const char *p, size_t plen, int *e_out,
     if (n == (size_t)before.st_size && zz_fs_cacheable(p, plen, &before)) {
         struct stat after;
         if (stat(p, &after) == 0 && zz_fs_fp_same(&before, &after)) {
-            pthread_mutex_lock(&zz_fs_cache_mu);
+            zz_mtx_lock(&zz_fs_cache_mu);
             zz_fs_cache_put(p, plen, &before, out, NULL);
-            pthread_mutex_unlock(&zz_fs_cache_mu);
+            zz_mtx_unlock(&zz_fs_cache_mu);
         }
     }
     return out;
