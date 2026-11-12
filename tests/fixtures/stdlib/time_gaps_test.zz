@@ -1,0 +1,39 @@
+// features: comparison, date-time, imports, print, std-time, string-literal
+// E2E: std.time pure-ZZ gap helpers (duration conversions + calendar date math + time.* aliases).
+import std.time
+
+func main() {
+    // ── Duration conversions ──
+    println("time.millis(1): {time.millis(1)}")
+    println("time.secs(1): {time.secs(1)}")
+    println("time.to_millis(1500): {time.to_millis(1500)}")
+    println("time.to_secs(2000000): {time.to_secs(2000000)}")
+    println("time.to_nanos(1): {time.to_nanos(1)}")
+    // ── Calendar dates ──
+    d := time.make_date(2026, 11, 12, 10, 30, 0)
+    println("time.format_rfc3339: {time.format_rfc3339(d)}")
+    println("time.is_leap(2024): {time.is_leap(2024)}")
+    println("time.is_leap(2025): {time.is_leap(2025)}")
+    println("time.days_in_month(2024, 2): {time.days_in_month(2024, 2)}")
+    println("time.days_in_month(2025, 2): {time.days_in_month(2025, 2)}")
+    println("time.date_valid(2026, 11, 12): {time.date_valid(2026, 11, 12)}")
+    println("time.date_valid(2026, 2, 30): {time.date_valid(2026, 2, 30)}")
+    ef := time.epoch_fallback()
+    println("time.epoch_fallback year: {ef["year"]}")
+    d2 := time.days_from_civil(2026, 11, 12)
+    println("time.days_from_civil(2026, 11, 12): {d2}")
+    d3 := time.civil_from_days(d2)
+    println("time.civil_from_days year: {d3["year"]}")
+    println("time.civil_from_days month: {d3["month"]}")
+    println("time.civil_from_days day: {d3["day"]}")
+    d4 := time.add_days(d, 5)
+    println("time.add_days(+5) year: {d4["year"]}")
+    println("time.add_days(+5) month: {d4["month"]}")
+    println("time.add_days(+5) day: {d4["day"]}")
+    println("time.diff_days(d, d4): {time.diff_days(d, d4)}")
+    p := time.parse_rfc3339("2026-11-12T10:30:00Z")
+    println("time.parse_rfc3339 year: {p["year"]}")
+    println("time.parse_rfc3339 month: {p["month"]}")
+    println("time.parse_rfc3339 day: {p["day"]}")
+    println("time_gaps_ok")
+}
