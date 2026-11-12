@@ -190,5 +190,9 @@ ZZ_INLINE int zz_poll(struct pollfd *pfds, int nfds, int timeout) {
     return poll(pfds, nfds, timeout);
 #endif
 }
+ZZ_INLINE int zz_setsockopt(int fd, int level, int optname, const void *optval,
+                           socklen_t optlen) {
+    return setsockopt(fd, level, optname, optval, optlen);
+}
 
 #endif // ZZ_RUNTIME_SOCKET_H

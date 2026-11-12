@@ -3523,7 +3523,7 @@ zz_value zz_tcp_listen(zz_value addr, int *err) {
     int fd = zz_socket_open(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return zz_variant_err(zz_str_static("tcp_listen failed: socket"));
     int one = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    zz_setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     if (zz_bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
         char buf[192];
         int n = snprintf(buf, sizeof buf, "tcp_listen failed: %s",
@@ -5062,7 +5062,7 @@ static void *worker_loop_linux(void *arg) {
     ev.data.ptr = NULL;
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev) < 0) {
         fprintf(stderr, "worker %d: epoll_ctl ADD listen_fd failed: %s\n", worker_id, strerror(errno));
-        close(epfd);
+        zz_close_socket(epfd);
         return NULL;
     }
 
@@ -5109,16 +5109,16 @@ static void *worker_loop_linux(void *arg) {
                 while (1) {
                     struct sockaddr_in client_addr;
                     socklen_t client_len = sizeof(client_addr);
-                    int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
+                    int client_fd = zz_accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
                     if (client_fd < 0) break;
 
                     int flag = 1;
-                    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-                    setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+                    zz_setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+                    zz_setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
 
                     Connection *c = alloc_connection(client_fd);
                     if (!c) {
-                        close(client_fd);
+                        zz_close_socket(client_fd);
                         continue;
                     }
                     if (!inet_ntop(AF_INET, &client_addr.sin_addr, c->peer, sizeof c->peer)) {
@@ -5244,7 +5244,7 @@ static void *worker_loop_linux(void *arg) {
         }
     }
 
-    close(epfd);
+    zz_close_socket(epfd);
     return NULL;
 }
 #endif
@@ -5332,15 +5332,15 @@ static void *worker_loop_poll(void *arg) {
                 while (1) {
                     struct sockaddr_in client_addr;
                     socklen_t client_len = sizeof(client_addr);
-                    int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
+                    int client_fd = zz_accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
                     if (client_fd < 0) break;
 
                     int flag = 1;
-                    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-                    setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+                    zz_setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+                    zz_setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
 
                     Connection *c = alloc_connection(client_fd);
-                    if (!c) { close(client_fd); continue; }
+                    if (!c) { zz_close_socket(client_fd); continue; }
                     if (!inet_ntop(AF_INET, &client_addr.sin_addr, c->peer, sizeof c->peer)) {
                         snprintf(c->peer, sizeof c->peer, "%s", "unknown");
                     }
@@ -5443,8 +5443,7 @@ static void *worker_loop_poll(void *arg) {
 
 // ---- Main server startup: one process, one thread per CPU ----
 // The worker loops (epoll on Linux, poll on macOS) are POSIX-only; Windows
-// AOT runs the HTTP server without dedicated worker threads (accept happens
-// in the caller), so spawn_workers is a no-op there.
+// AOT runs a single-threaded blocking accept loop in spawn_workers below.
 #ifndef ZZ_OS_WINDOWS
 static int spawn_workers(int listen_fd, int port) {
     (void)port;
@@ -5480,8 +5479,29 @@ static int spawn_workers(int listen_fd, int port) {
 }
 #else
 static int spawn_workers(int listen_fd, int port) {
-    (void)listen_fd;
     (void)port;
+    // Windows: single-threaded blocking accept loop. No epoll/poll on
+    // Windows; accept one connection at a time, read, dispatch, write,
+    // then close — mirroring the VM's rustls server model for Windows.
+    while (g_http_server_running) {
+        struct sockaddr_in client_addr;
+        zz_socklen_t client_len = sizeof(client_addr);
+        int client_fd = zz_accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
+        if (client_fd < 0) {
+            if (zz_socket_errno() == ZZ_EINTR) continue;
+            break;
+        }
+        Connection *c = alloc_connection(client_fd);
+        if (!c) { zz_close_socket(client_fd); continue; }
+        set_nonblock(client_fd);
+        while (g_http_server_running) {
+            if (!read_from_socket(c)) break;
+            process_connection(c);
+            if (c->state != CONN_READING && c->state != CONN_KEEP_ALIVE
+                && c->state != CONN_READING_BODY) break;
+        }
+        free_connection(c);
+    }
     return 0;
 }
 #endif
@@ -7600,7 +7620,7 @@ static void http_on_head(Connection *c) {
         const char *cont = "HTTP/1.1 100 Continue\r\n\r\n";
         size_t off = 0;
         while (off < 25) {
-            ssize_t n = write(c->fd, cont + off, 25 - off);
+            ssize_t n = zz_sock_write(c->fd, cont + off, 25 - off);
             if (n <= 0) break;
             off += (size_t)n;
         }
@@ -8062,7 +8082,7 @@ static zz_value http_listen_impl(zz_value port, int *err) {
     }
 
     int opt = 1;
-    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    zz_setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     // SO_REUSEPORT lets bind() succeed even when a stale server still
     // holds the port, silently splitting traffic between old and new
@@ -8139,7 +8159,7 @@ static zz_value http_listen_impl(zz_value port, int *err) {
     spawn_workers(listen_fd, p);
 
     g_http_server_running = 0;
-    close(listen_fd);
+    zz_close_socket(listen_fd);
     return zz_unit();
 }
 
