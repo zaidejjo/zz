@@ -147,48 +147,232 @@ jobs:
             echo "$family=$picked" >> "$GITHUB_OUTPUT"
           done
 
-  # --- linux: x86_64 (full incl. sanitizer/docker) + aarch64 -------------
-  linux:
-    name: linux
+  # --- per-family, per-scope jobs (parallel runners) ---------------------
+  # On PRs: one `fast` job per family (test-fast.sh, VM-focused).
+  # On merge/push: one job per scope per family, all running in parallel
+  # on separate runners. Wall time = slowest scope, not sum of all scopes.
+  # On nightly/schedule: `full` scope runs `cargo test --all` for completeness.
+
+  # Linux scopes
+  linux-fast:
+    name: linux (fast)
     needs: plan
+    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/ci-test.yml
     with:
       family: linux
       legs: ${{ needs.plan.outputs.linux }}
+      test_scope: fast
 
-  # --- macos: apple silicon + intel --------------------------------------
-  # Runner labels verified 2026: Apple silicon is `macos-26` (`macos-latest`
-  # also points at macOS 26 arm64); Intel is `macos-26-intel`. The old arm64
-  # image was `macos-14`: a release behind its `macos-15-intel` counterpart
-  # and slow to schedule, so the pair never matched.
-  macos:
-    name: macos
+  linux-unit:
+    name: linux (unit)
     needs: plan
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: linux
+      legs: ${{ needs.plan.outputs.linux }}
+      test_scope: unit
+
+  linux-cli:
+    name: linux (cli)
+    needs: plan
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: linux
+      legs: ${{ needs.plan.outputs.linux }}
+      test_scope: cli
+
+  linux-parity:
+    name: linux (parity)
+    needs: plan
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: linux
+      legs: ${{ needs.plan.outputs.linux }}
+      test_scope: parity
+
+  linux-e2e:
+    name: linux (e2e)
+    needs: plan
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: linux
+      legs: ${{ needs.plan.outputs.linux }}
+      test_scope: e2e
+
+  linux-misc:
+    name: linux (misc)
+    needs: plan
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: linux
+      legs: ${{ needs.plan.outputs.linux }}
+      test_scope: misc
+
+  linux-lsp:
+    name: linux (lsp)
+    needs: plan
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: linux
+      legs: ${{ needs.plan.outputs.linux }}
+      test_scope: lsp
+
+  # macOS scopes
+  macos-fast:
+    name: macos (fast)
+    needs: plan
+    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/ci-test.yml
     with:
       family: macos
       legs: ${{ needs.plan.outputs.macos }}
+      test_scope: fast
 
-  # --- windows: x86_64 + arm64 -------------------------------------------
-  # `native: false`: the AOT backend cannot build on Windows yet. The C11
-  # <threads.h> shim (mutex/cond/once/clock/sleep), the Winsock socket
-  # shim (socket/bind/listen/accept/connect/recv/send/close/fcntl/poll/
-  # setsockopt), and the filesystem layer (stat/lstat/opendir/readdir/
-  # unlink/rename/remove/mkdir, S_ISDIR/S_ISREG) are all ported, so
-  # concurrency (chan/task/spawn), the HTTP/net socket layer, and fs.*
-  # natives compile on Windows. The Windows spawn_workers now runs a
-  # blocking accept loop instead of being a no-op.
-  # Remaining limitations: C11 <threads.h> conformance on clang-cl/mingw is
-  # assumed (needs a CRITICAL_SECTION/SRWLOCK fallback if missing), and
-  # zz_thrd_join is a no-op on Windows (threads run to process death).
-  # These legs keep ZZ_SKIP_NATIVE=1 and run every VM, CLI, PM and LSP
-  # suite. Flip native: true once Windows CI passes; concurrency fixtures
-  # are already batch-eligible and parity-registered so they run natively
-  # then.
-  windows:
-    name: windows
+  macos-unit:
+    name: macos (unit)
     needs: plan
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: macos
+      legs: ${{ needs.plan.outputs.macos }}
+      test_scope: unit
+
+  macos-cli:
+    name: macos (cli)
+    needs: plan
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: macos
+      legs: ${{ needs.plan.outputs.macos }}
+      test_scope: cli
+
+  macos-parity:
+    name: macos (parity)
+    needs: plan
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: macos
+      legs: ${{ needs.plan.outputs.macos }}
+      test_scope: parity
+
+  macos-e2e:
+    name: macos (e2e)
+    needs: plan
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: macos
+      legs: ${{ needs.plan.outputs.macos }}
+      test_scope: e2e
+
+  macos-misc:
+    name: macos (misc)
+    needs: plan
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: macos
+      legs: ${{ needs.plan.outputs.macos }}
+      test_scope: misc
+
+  macos-lsp:
+    name: macos (lsp)
+    needs: plan
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: macos
+      legs: ${{ needs.plan.outputs.macos }}
+      test_scope: lsp
+
+  # Windows scopes
+  windows-fast:
+    name: windows (fast)
+    needs: plan
+    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/ci-test.yml
     with:
       family: windows
       legs: ${{ needs.plan.outputs.windows }}
+      test_scope: fast
+
+  windows-unit:
+    name: windows (unit)
+    needs: plan
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: windows
+      legs: ${{ needs.plan.outputs.windows }}
+      test_scope: unit
+
+  windows-cli:
+    name: windows (cli)
+    needs: plan
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: windows
+      legs: ${{ needs.plan.outputs.windows }}
+      test_scope: cli
+
+  windows-parity:
+    name: windows (parity)
+    needs: plan
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: windows
+      legs: ${{ needs.plan.outputs.windows }}
+      test_scope: parity
+
+  windows-e2e:
+    name: windows (e2e)
+    needs: plan
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: windows
+      legs: ${{ needs.plan.outputs.windows }}
+      test_scope: e2e
+
+  windows-misc:
+    name: windows (misc)
+    needs: plan
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: windows
+      legs: ${{ needs.plan.outputs.windows }}
+      test_scope: misc
+
+  windows-lsp:
+    name: windows (lsp)
+    needs: plan
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: windows
+      legs: ${{ needs.plan.outputs.windows }}
+      test_scope: lsp
+
+  # Nightly full-suite gate (runs on schedule only)
+  nightly-full:
+    name: nightly (full suite)
+    needs: plan
+    if: github.event_name == 'schedule'
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      family: linux
+      legs: ${{ needs.plan.outputs.linux }}
+      test_scope: full

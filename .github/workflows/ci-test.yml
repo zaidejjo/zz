@@ -27,6 +27,13 @@ on:
           `docker_smoke`.
         required: true
         type: string
+      test_scope:
+        description: >-
+          Which test scope to run: fast (test-fast.sh), parity,
+          e2e, misc, lsp, or full (cargo test --all). Defaults to full.
+        required: false
+        type: string
+        default: full
 
 env:
   CARGO_TERM_COLOR: always
@@ -228,12 +235,12 @@ jobs:
       # doesn't trigger a cold, lock-serialized `cargo build --release` while
       # every quad worker idles. Reuses the per-leg rust-cache.
       - name: prebuild release zz driver (quad matrix)
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && (inputs.test_scope == 'full' || inputs.test_scope == 'fast' || inputs.test_scope == 'parity')
         shell: bash
         run: cargo build --release -p zz_cli
 
       - name: 'test (PR: fast suite, native allowed)'
-        if: github.event_name == 'pull_request' && matrix.native
+        if: github.event_name == 'pull_request' && matrix.native && (inputs.test_scope == 'full' || inputs.test_scope == 'fast')
         shell: bash
         env:
           ZZ_CI_SKIP_LINT: "1"
@@ -241,7 +248,7 @@ jobs:
         run: ./scripts/test-fast.sh
 
       - name: 'test (PR: fast suite, native skipped)'
-        if: github.event_name == 'pull_request' && !matrix.native
+        if: github.event_name == 'pull_request' && !matrix.native && (inputs.test_scope == 'full' || inputs.test_scope == 'fast')
         shell: bash
         env:
           ZZ_CI_SKIP_LINT: "1"
@@ -250,48 +257,85 @@ jobs:
         run: ./scripts/test-fast.sh
 
       - name: 'test (PR: zz_cli unit tests inside the binary)'
-        # `test-fast.sh` runs `-p zz_cli --lib` (5 tests); the CLI's own
-        # unit tests (upgrade, doctor, setup, arg parsing — ~280) live in
-        # the binary target and only ran on push via `cargo test --all`,
-        # so PRs could break them unnoticed. CI-only: the debug binary is
-        # large and this is heavy for a laptop.
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && (inputs.test_scope == 'full' || inputs.test_scope == 'fast' || inputs.test_scope == 'misc')
         shell: bash
         env:
           ZZ_CI_SKIP_LINT: "1"
         run: cargo test -p zz_cli --bins
 
       - name: 'test (PR: batched native parity)'
-        if: github.event_name == 'pull_request' && matrix.native
+        if: github.event_name == 'pull_request' && matrix.native && (inputs.test_scope == 'full' || inputs.test_scope == 'parity')
         shell: bash
         run: ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity
 
       - name: 'ASan+UBSan AOT leg (pinned clang leg only)'
-        if: matrix.clang_pin != ''
+        if: matrix.clang_pin != '' && (inputs.test_scope == 'full' || inputs.test_scope == 'misc')
         shell: bash
         run: cargo test -p zz_cli --test sanitizer_aot -- --nocapture
 
-      # --- merge/push: full suite --------------------------------------
-      # Prebuild the release VM driver once so release_vm_bin() (quad matrix)
-      # doesn't trigger a cold, lock-serialized `cargo build --release`.
+      # --- merge/push: scoped suites (parallel jobs in ci.yml) ----------
+      # Each scope runs a subset of the suite so ci.yml can dispatch them
+      # to separate runners. `full` runs everything (current behavior).
       - name: prebuild release zz driver (quad matrix)
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && (inputs.test_scope == 'full' || inputs.test_scope == 'parity')
         shell: bash
         run: cargo build --release -p zz_cli
 
-      - name: 'test (merge: full suite, native allowed)'
-        if: github.event_name != 'pull_request' && matrix.native
+      - name: 'test (merge: unit tests, native allowed)'
+        if: github.event_name != 'pull_request' && matrix.native && inputs.test_scope == 'unit'
         shell: bash
-        run: ZZ_BATCH_NATIVE=1 cargo test --all
+        run: cargo test --workspace --lib
 
-      - name: 'test (merge: full suite, native skipped)'
-        if: github.event_name != 'pull_request' && !matrix.native
+      - name: 'test (merge: unit tests, native skipped)'
+        if: github.event_name != 'pull_request' && !matrix.native && inputs.test_scope == 'unit'
         shell: bash
         env:
           ZZ_SKIP_NATIVE: "1"
+        run: cargo test --workspace --lib
+
+      - name: 'test (merge: zz_cli lib + bins)'
+        if: github.event_name != 'pull_request' && inputs.test_scope == 'cli'
+        shell: bash
+        run: cargo test -p zz_cli --lib --bins
+
+      - name: 'test (merge: dual engine parity)'
+        if: github.event_name != 'pull_request' && inputs.test_scope == 'parity'
+        shell: bash
+        env:
+          ZZ_QUAD_JOBS: "16"
+        run: ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity --test batched_parity
+
+      - name: 'test (merge: e2e + bytecode parity)'
+        if: github.event_name != 'pull_request' && inputs.test_scope == 'e2e'
+        shell: bash
+        run: cargo test -p zz_cli --test e2e --test bytecode_parity
+
+      - name: 'test (merge: misc integration targets)'
+        if: github.event_name != 'pull_request' && inputs.test_scope == 'misc'
+        shell: bash
+        run: |
+          cargo test -p zz_cli \
+            --test bug_hunter \
+            --test build_e2e \
+            --test chunk_aot_diff \
+            --test collections_e2e \
+            --test concurrency_audit_regression \
+            --test native_build \
+            --test performance_check_regression \
+            --test rust_plugin_e2e
+
+      - name: 'test (merge: full suite, cargo test --all)'
+        if: github.event_name != 'pull_request' && inputs.test_scope == 'full'
+        shell: bash
         run: ZZ_BATCH_NATIVE=1 cargo test --all
 
+      - name: 'ASan+UBSan AOT leg (pinned clang leg only)'
+        if: matrix.clang_pin != '' && (inputs.test_scope == 'full' || inputs.test_scope == 'misc')
+        shell: bash
+        run: cargo test -p zz_cli --test sanitizer_aot -- --nocapture
+
       - name: 'lsp parity (LSP ↔ checker diagnostics)'
+        if: inputs.test_scope == 'full' || inputs.test_scope == 'lsp'
         shell: bash
         run: |
           cargo build -p zz_cli
