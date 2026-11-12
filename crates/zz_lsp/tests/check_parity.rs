@@ -82,9 +82,20 @@ fn workspace_root() -> PathBuf {
 }
 
 fn zz_bin() -> PathBuf {
-    // `CARGO_BIN_EXE_zz` is the built `zz` binary for this test run and
-    // carries the platform executable suffix (`zz.exe` on Windows).
-    PathBuf::from(env!("CARGO_BIN_EXE_zz"))
+    // `CARGO_BIN_EXE_zz` is set by Cargo for integration tests when the
+    // `zz` binary (package zz_cli) is built in the same invocation.
+    // Cross-package targets like zz_lsp don't get it at compile time
+    // (env! would fail), so read it at runtime and fall back to the
+    // workspace debug output path.
+    if let Ok(p) = std::env::var("CARGO_BIN_EXE_zz") {
+        return PathBuf::from(p);
+    }
+    let exe = std::env::current_exe().expect("current exe");
+    exe.parent()
+        .expect("deps dir")
+        .parent()
+        .expect("debug dir")
+        .join(if cfg!(windows) { "zz.exe" } else { "zz" })
 }
 
 fn fixture_files() -> Vec<PathBuf> {
