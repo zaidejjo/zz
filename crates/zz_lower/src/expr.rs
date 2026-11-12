@@ -3225,8 +3225,10 @@ impl Lowerer {
                             // Try type-based dispatch: check NameCtx's checker_types
                             // (populated at Decl) for the receiver variable's resolved
                             // type, then map to the matching namespace.
-                            let recv_type_ns =
-                                names.checker_types.get(obj_name).and_then(|ty| match ty {
+                            let recv_type_ns = names
+                                .checker_types
+                                .get(obj_name.rsplit('.').next().unwrap_or(obj_name))
+                                .and_then(|ty| match ty {
                                     zz_checker::Type::Str => Some("str"),
                                     zz_checker::Type::Array(_) => Some("vec"),
                                     zz_checker::Type::Dict(_, _) => Some("dict"),
@@ -3313,7 +3315,39 @@ impl Lowerer {
                                                 || self.reachable_natives.contains(&std_candidate))
                                     })
                                     .collect();
-                                if let Some(ns) = crate::pick_arity(reachable_ns, method, nvalues) {
+                                let typed_ns = if reachable_ns.contains(&"option")
+                                    && reachable_ns.contains(&"result")
+                                {
+                                    let bare = obj_name.rsplit('.').next().unwrap_or(obj_name);
+                                    self.tp
+                                        .bindings
+                                        .get(bare)
+                                        .and_then(|ty| match ty {
+                                            zz_checker::Type::Result(_, _) => Some("result"),
+                                            zz_checker::Type::Option(_) => Some("option"),
+                                            _ => None,
+                                        })
+                                        .or_else(|| {
+                                            // Result bindings often missing (e.g. `.ok(x)` error type
+                                            // unresolved at binding time). For unwrap methods,
+                                            // `.ok(x)`/`.err(x)` create Results — default to "result".
+                                            if method == "unwrap"
+                                                || method == "unwrap_or"
+                                                || method == "expect"
+                                            {
+                                                Some("result")
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                } else {
+                                    None
+                                };
+                                if let Some(ns) = typed_ns {
+                                    found_ns = ns;
+                                } else if let Some(ns) =
+                                    crate::pick_arity(reachable_ns, method, nvalues)
+                                {
                                     found_ns = ns;
                                 }
                             }

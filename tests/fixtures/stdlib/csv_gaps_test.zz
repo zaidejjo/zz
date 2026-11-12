@@ -1,0 +1,28 @@
+// features: arrays, comparison, imports, json, print, std-csv, std-json, string-literal
+// E2E: std.csv pure-ZZ gap helpers (parse/parse_delim/stringify/stringify_delim/header/records/len/get_cell/validate/to_json + csv.* aliases).
+import std.csv
+import std.json
+
+func main() {
+    rows := csv.parse("a,b,c\n1,2,3\n")
+    println("csv.len(rows): {csv.len(rows)}")
+    println("csv.header(rows): {csv.header(rows)}")
+    println("csv.get_cell(rows, 1, 0, ?): {csv.get_cell(rows, 1, 0, "?")}")
+    println("csv.get_cell(rows, 9, 9, dflt): {csv.get_cell(rows, 9, 9, "dflt")}")
+    println("csv.stringify(rows): {csv.stringify(rows)}")
+    r := csv.parse(csv.stringify(rows))
+    println("csv.len(r): {csv.len(r)}")
+    println("csv.get_cell(r, 1, 2, ?): {csv.get_cell(r, 1, 2, "?")}")
+    semi := csv.parse_delim("a;b\n1;2\n", ";")
+    println("csv.get_cell(semi, 1, 1, ?): {csv.get_cell(semi, 1, 1, "?")}")
+    semi_sep := ";"
+    println("csv.stringify_delim(semi, ;): {csv.stringify_delim(semi, semi_sep)}")
+    empty_src := ""
+    println("csv.header(empty): {csv.header(csv.parse(empty_src))}")
+    println("csv.records(rows): {csv.records(rows)}")
+    println("csv.validate(a,b\n1,2\n): {csv.validate("a,b\n1,2\n")}")
+    println("csv.validate(empty): {csv.validate(empty_src)}")
+    j := csv.to_json(rows)
+    println("csv.to_json: {json.stringify(j)}")
+    println("csv_gaps_ok")
+}

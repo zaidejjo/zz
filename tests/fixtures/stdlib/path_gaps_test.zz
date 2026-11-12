@@ -1,0 +1,18 @@
+// features: arrays, comparison, func-call, imports, print, std-path, string-literal
+// E2E: std.path pure-ZZ gap helpers (join/join_all/normalize/basename/dirname/is_absolute/extension + path.* aliases).
+import std.path
+
+func main() {
+    println("path.normalize(a//b/./c/../d): {path.normalize("a//b/./c/../d")}")
+    println("path.normalize(a/b/../../c): {path.normalize("a/b/../../c")}")
+    println("path.join(a/b, c/d): {path.join("a/b", "c/d")}")
+    println("path.join(a/b, /c): {path.join("a/b", "/c")}")
+    println("path.join_all([a, b, c]): {path.join_all(["a", "b", "c"])}")
+    println("path.basename(a/b/c.txt): {path.basename("a/b/c.txt")}")
+    println("path.dirname(a/b/c.txt): {path.dirname("a/b/c.txt")}")
+    println("path.is_absolute(/a): {path.is_absolute("/a")}")
+    println("path.is_absolute(a/b): {path.is_absolute("a/b")}")
+    println("path.extension(archive.tar.gz): {path.extension("archive.tar.gz")}")
+    println("path.extension(README): {path.extension("README")}")
+    println("path_gaps_ok")
+}

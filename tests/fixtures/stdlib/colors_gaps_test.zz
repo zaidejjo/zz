@@ -1,0 +1,57 @@
+// features: arrays, comparison, imports, print, std-colors, string-literal
+// E2E: std.colors pure-ZZ gap helpers (black/red/green/yellow/blue/magenta/cyan/white +
+// bright_*/bg_*/bold/dim/italic/underline/blink/reverse/strikethrough/reset/strip/
+// clamp255/rgb/bg_rgb/color256/bg_256/hex_val/hex_byte/hex/hex6/hex3 + colors.* aliases).
+import std.colors
+
+func main() {
+    s := "hello"
+    // ── Standard palette ──
+    println("colors.black(s): {colors.black(s)}")
+    println("colors.red(s): {colors.red(s)}")
+    println("colors.green(s): {colors.green(s)}")
+    println("colors.yellow(s): {colors.yellow(s)}")
+    println("colors.blue(s): {colors.blue(s)}")
+    println("colors.magenta(s): {colors.magenta(s)}")
+    println("colors.cyan(s): {colors.cyan(s)}")
+    println("colors.white(s): {colors.white(s)}")
+    // ── Bright ──
+    println("colors.bright_red(s): {colors.bright_red(s)}")
+    println("colors.bright_green(s): {colors.bright_green(s)}")
+    println("colors.bright_blue(s): {colors.bright_blue(s)}")
+    println("colors.bright_yellow(s): {colors.bright_yellow(s)}")
+    println("colors.bright_magenta(s): {colors.bright_magenta(s)}")
+    println("colors.bright_cyan(s): {colors.bright_cyan(s)}")
+    println("colors.bright_white(s): {colors.bright_white(s)}")
+    // ── Background ──
+    println("colors.bg_red(s): {colors.bg_red(s)}")
+    println("colors.bg_green(s): {colors.bg_green(s)}")
+    println("colors.bg_blue(s): {colors.bg_blue(s)}")
+    // ── Styles ──
+    println("colors.bold(s): {colors.bold(s)}")
+    println("colors.dim(s): {colors.dim(s)}")
+    println("colors.italic(s): {colors.italic(s)}")
+    println("colors.underline(s): {colors.underline(s)}")
+    println("colors.blink(s): {colors.blink(s)}")
+    println("colors.reverse(s): {colors.reverse(s)}")
+    println("colors.strikethrough(s): {colors.strikethrough(s)}")
+    // ── Reset / strip ──
+    println("colors.reset(s): {colors.reset(s)}")
+    println("colors.strip(colors.red(s)): {colors.strip(colors.red(s))}")
+    // ── 256-color / rgb ──
+    println("colors.rgb(s, 1, 2, 3): {colors.rgb(s, 1, 2, 3)}")
+    println("colors.bg_rgb(s, 4, 5, 6): {colors.bg_rgb(s, 4, 5, 6)}")
+    println("colors.color256(s, 200): {colors.color256(s, 200)}")
+    println("colors.bg_256(s, 201): {colors.bg_256(s, 201)}")
+    // ── hex ──
+    println("colors.hex_val(f): {colors.hex_val("f")}")
+    println("colors.hex_byte(f, f): {colors.hex_byte("f", "f")}")
+    println("colors.hex(s, ff0000): {colors.hex(s, "ff0000")}")
+    println("colors.hex6(s, [0,0,f,f,0,0]): {colors.hex6(s, ["0", "0", "f", "f", "0", "0"])}")
+    println("colors.hex3(s, [f,0,f]): {colors.hex3(s, ["f", "0", "f"])}")
+    // ── clamp255 ──
+    println("colors.clamp255(300): {colors.clamp255(300)}")
+    println("colors.clamp255(-5): {colors.clamp255(-5)}")
+    println("colors.clamp255(128): {colors.clamp255(128)}")
+    println("colors_gaps_ok")
+}

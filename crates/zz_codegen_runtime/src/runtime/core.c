@@ -7153,12 +7153,20 @@ static zz_value http_dispatch(const char *method, const char *path, size_t pathl
         if (r.tag == ZZ_RESULT_OK && r.payload) {
             zz_value inner = *r.payload;
             if (inner.tag == ZZ_DICT && inner.dict) {
-                // Clone first: `.ok(req)` moves our only reference into the
-                // Result payload, so releasing before cloning would free it.
-                zz_value next = zz_clone(inner);
+                // Middleware returned a request dict. If it aliases req
+                // (.ok(req) pass-through), retain req's dict so it survives
+                // zz_release(&r) below (the Result's vbox releases its inner
+                // value without having retained it). Otherwise deep-clone so
+                // nested values (e.g. `query`) are independently owned.
+                if (inner.dict != req.dict) {
+                    int _dup_err = 0;
+                    zz_value next = zz_clone_deep(inner, &_dup_err);
+                    zz_release(&req);
+                    req = next;
+                } else {
+                    zz_retain_dict(inner.dict);
+                }
                 zz_release(&r);
-                zz_release(&req);
-                req = next;
                 continue;
             }
             char *disp = zz_value_to_string(&inner);

@@ -1,0 +1,29 @@
+// features: comparison, imports, locals, match, option-result, print, std-regexp, string-literal
+// E2E: std.regexp pure-ZZ gap helpers (Regexp.new + regexp.is_email + regexp.* aliases).
+import std.regexp
+
+func main() {
+    hello := "hello"
+    upper := "HELLO"
+    goodmail := "user@example.com"
+    badmail := "not-an-email"
+    // ── Regexp.new + is_match ──
+    w := Regexp.new("[a-z]+")
+    match w {
+        .ok(word) => println("lower_match: {word.is_match(hello)}")
+        .err(_) => println("compile_bad")
+    }
+    match w {
+        .ok(word) => println("lower_reject: {word.is_match(upper)}")
+        .err(_) => println("compile_bad")
+    }
+    // ── invalid pattern surfaces .err ──
+    match Regexp.new("([a-z") {
+        .ok(_) => println("invalid_bad")
+        .err(_) => println("invalid_ok")
+    }
+    // ── email validation helper ──
+    println("email_ok: {regexp.is_email(goodmail)}")
+    println("email_bad: {regexp.is_email(badmail)}")
+    println("regexp_gaps_ok")
+}

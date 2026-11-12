@@ -1,0 +1,36 @@
+// features: arrays, bool-logic, comparison, dicts, imports, print, std-map, std-set, string-literal
+// E2E: std.map pure-ZZ gap helpers (has/get_or/get_str/keys/keys_str/values/values_str/len/is_empty/merge/merge_str/remove + map.* aliases).
+import std.map
+
+func main() {
+    m:{str: int} = {}
+    m["a"] = 1
+    m["b"] = 2
+    m["c"] = 3
+    println("map.has(m, b): {map.has(m, "b")}")
+    println("map.has(m, z): {map.has(m, "z")}")
+    println("map.get_or(m, b, 0): {map.get_or(m, "b", 0)}")
+    println("map.get_or(m, z, 42): {map.get_or(m, "z", 42)}")
+    println("map.keys(m): {map.keys(m)}")
+    println("map.len(m): {map.len(m)}")
+    println("map.is_empty(m): {map.is_empty(m)}")
+    println("map.is_empty({}): {map.is_empty({})}")
+    ms:{str: str} = {}
+    ms["x"] = "X"
+    ms["y"] = "Y"
+    println("map.get_str(ms, x, ?): {map.get_str(ms, "x", "?")}")
+    println("map.get_str(ms, z, ?): {map.get_str(ms, "z", "?")}")
+    println("map.keys_str(ms): {map.keys_str(ms)}")
+    println("map.values_str(ms): {map.values_str(ms)}")
+    println("map.values(m): {map.values(m)}")
+    m2:{str: int} = {}
+    m2["b"] = 20
+    m2["d"] = 40
+    merged := map.merge(m, m2)
+    println("map.merge(m, m2): {merged}")
+    println("map.get_or(merged, d, 0): {map.get_or(merged, "d", 0)}")
+    removed := map.remove(m, "b")
+    println("map.remove(m, b): {removed}")
+    println("map.len(removed): {map.len(removed)}")
+    println("map_gaps_ok")
+}
