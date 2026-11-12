@@ -1649,6 +1649,13 @@ parity_strict!(
     "property_gaps_test.zz"
 );
 parity_strict!(parity_stdlib_dec_gaps, "stdlib", "dec_gaps_test.zz");
+parity_strict!(parity_stdlib_map_gaps, "stdlib", "map_gaps_test.zz");
+parity_strict!(parity_stdlib_set_gaps, "stdlib", "set_gaps_test.zz");
+parity_strict!(
+    parity_stdlib_str_builder_gaps,
+    "stdlib",
+    "str_builder_gaps_test.zz"
+);
 parity_strict!(
     parity_stdlib_matrix_mul_test,
     "stdlib",

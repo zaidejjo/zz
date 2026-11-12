@@ -884,6 +884,13 @@ e2e_success_test!(e2e_stdlib_bytes_gaps, "stdlib", "bytes_gaps_test.zz");
 e2e_success_test!(e2e_stdlib_csv_gaps, "stdlib", "csv_gaps_test.zz");
 e2e_success_test!(e2e_stdlib_property_gaps, "stdlib", "property_gaps_test.zz");
 e2e_success_test!(e2e_stdlib_dec_gaps, "stdlib", "dec_gaps_test.zz");
+e2e_success_test!(e2e_stdlib_map_gaps, "stdlib", "map_gaps_test.zz");
+e2e_success_test!(e2e_stdlib_set_gaps, "stdlib", "set_gaps_test.zz");
+e2e_success_test!(
+    e2e_stdlib_str_builder_gaps,
+    "stdlib",
+    "str_builder_gaps_test.zz"
+);
 e2e_success_test!(e2e_stdlib_matrix_mul_test, "stdlib", "matrix_mul_test.zz");
 e2e_success_test!(e2e_stdlib_math_consts, "stdlib", "math_consts.zz");
 e2e_success_test!(e2e_stdlib_const_index_test, "stdlib", "const_index_test.zz");
