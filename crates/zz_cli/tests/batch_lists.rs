@@ -80,6 +80,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("syntax", "struct_access.zz", true),
     ("syntax", "string_build.zz", true),
     ("syntax", "flat_arrays.zz", true),
+    ("syntax", "flat_matrix.zz", true),
     ("syntax", "defer.zz", false),
     ("syntax", "dict_iteration.zz", true),
     ("stdlib", "vectors.zz", false),

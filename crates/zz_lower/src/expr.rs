@@ -1118,19 +1118,21 @@ impl Lowerer {
                 // allocations are reused instead of growing the heap.
                 // Skipped in green closures (stack arenas cannot survive
                 // a suspend; heap-only there).
-                let loop_arena: Option<String> =
+                // The declaration/init is emitted lazily (see the `for`
+                // lowering): a body whose allocations were optimized away
+                // (e.g. flat pushes) must not pay a per-iteration reset.
+                let arena_decl_at = out.len();
+                let loop_arena: Option<(String, usize)> =
                     if !self.green_active() && self.escape.loop_spans.contains(span) {
                         let ac = names.bump_counter();
                         let name = format!("_loop_arena{ac}");
                         let alloc_count = count_allocating_exprs(body);
                         let arena_size = (alloc_count * 128).max(65536);
-                        out.push_str(&format!("    zz_arena {name};\n"));
-                        out.push_str(&format!("    zz_arena_init(&{name}, {arena_size});\n"));
-                        Some(name)
+                        Some((name, arena_size))
                     } else {
                         None
                     };
-                if let Some(ref name) = loop_arena {
+                if let Some((name, _)) = &loop_arena {
                     self.loop_arenas.borrow_mut().push(name.clone());
                     *self.current_loop_arena.borrow_mut() = Some(name.clone());
                 }
@@ -1256,15 +1258,28 @@ impl Lowerer {
                 // cleared above), and zero-trip loops skip the body
                 // entirely, so post-loop reads re-evaluate at runtime.
                 names.clear_array_lens();
-                if let Some(ref name) = loop_arena {
+                let arena_used = loop_arena
+                    .as_ref()
+                    .is_some_and(|(name, _)| out[arena_decl_at..].contains(name.as_str()));
+                if let Some((name, arena_size)) = &loop_arena {
                     self.loop_arenas.borrow_mut().pop();
                     *self.current_loop_arena.borrow_mut() =
                         self.loop_arenas.borrow().last().cloned();
-                    out.push_str(&format!("        zz_arena_reset(&{name});\n"));
+                    if arena_used {
+                        out.insert_str(
+                            arena_decl_at,
+                            &format!(
+                                "    zz_arena {name};\n    zz_arena_init(&{name}, {arena_size});\n"
+                            ),
+                        );
+                        out.push_str(&format!("        zz_arena_reset(&{name});\n"));
+                    }
                 }
                 out.push_str("    }\n");
-                if let Some(ref name) = loop_arena {
-                    out.push_str(&format!("    zz_arena_destroy(&{name});\n"));
+                if arena_used {
+                    if let Some((name, _)) = &loop_arena {
+                        out.push_str(&format!("    zz_arena_destroy(&{name});\n"));
+                    }
                 }
                 "zz_unit()".to_string()
             }
@@ -1391,6 +1406,47 @@ impl Lowerer {
                         return format!("{ctor}({raw})");
                     }
                 }
+                // Nested flat rows: `rows[i][j]` where `rows` is the
+                // `zz_flat_row *` inferred layout. The outer read loads the
+                // row handle (bounds-checked and trapped exactly like a
+                // scalar flat array), then the element is a direct load from
+                // the row buffer. `bool` stays raw so `if a[i][j]` skips
+                // `zz_truthy`, mirroring the flat scalar bool path.
+                if let Expr::Index {
+                    obj: root,
+                    index: i_expr,
+                    ..
+                } = obj.as_ref()
+                {
+                    if let Some((rows_name, inner)) = self.flat_rows_receiver(root, names) {
+                        if let (Some(buf_cid), Some(len_cid)) = (
+                            names.lookup(&rows_name).map(str::to_string),
+                            names
+                                .lookup(&format!("{rows_name}_len"))
+                                .map(str::to_string),
+                        ) {
+                            let func = names.current_scope.clone();
+                            let i_chk =
+                                self.flat_index_checked(i_expr, &len_cid, &func, names, out);
+                            let rtmp = names.fresh("_frow");
+                            out.push_str(&format!(
+                                "    zz_flat_row {rtmp} = ({buf_cid})[{i_chk}];\n"
+                            ));
+                            let j_chk = self.flat_index_checked(
+                                index,
+                                &format!("({rtmp}).len"),
+                                &func,
+                                names,
+                                out,
+                            );
+                            let raw = format!("(({inner} *)({rtmp}).data)[{j_chk}]");
+                            if inner == "bool" {
+                                return raw;
+                            }
+                            return auto_box(&raw, Some(inner.as_str()));
+                        }
+                    }
+                }
                 // Flat scalar array index: `arr[k]` where `arr` is `[int]`/`[float]`/`[bool]`
                 // → direct `({cid})[{i}]` read, no `zz_index_get` bounds-check/clone.
                 // Handles both `arr[k]` (Ident) and `ns.arr[k]` (Path for namespaced globals).
@@ -1458,7 +1514,10 @@ impl Lowerer {
                             // Direct access: no bounds check needed.
                             format!("({arr_cid})[{idx_raw}]")
                         } else {
-                            format!("({arr_cid})[zz_flat_index({idx_raw}, {len_cid}, \"{func}\")]")
+                            format!(
+                                "({arr_cid})[{}]",
+                                self.flat_index_wrap(index, &idx_raw, &len_cid, &func, names)
+                            )
                         };
                         // For flat bool arrays, return the raw C bool instead of
                         // boxing it via zz_bool(). The caller (if/while condition)
@@ -3701,6 +3760,11 @@ impl Lowerer {
                             let len_cid = names.lookup_or_name(&format!("{}_len", name));
                             return format!("zz_int({len_cid})");
                         }
+                        // Flat row array: length tracked in `name_len`.
+                        if names.lookup_type(name) == Some("zz_flat_row *") {
+                            let len_cid = names.lookup_or_name(&format!("{}_len", name));
+                            return format!("zz_int({len_cid})");
+                        }
                     }
                     // `len(ns.arr)` for namespaced globals: same folds as
                     // the Ident arm above, using the joined name.
@@ -3718,6 +3782,10 @@ impl Lowerer {
                         if let Some(_elem_ctype) =
                             self.scalar_array_from_ptr(names.lookup_type(&joined).unwrap_or(""))
                         {
+                            let len_cid = names.lookup_or_name(&format!("{}_len", joined));
+                            return format!("zz_int({len_cid})");
+                        }
+                        if names.lookup_type(&joined) == Some("zz_flat_row *") {
                             let len_cid = names.lookup_or_name(&format!("{}_len", joined));
                             return format!("zz_int({len_cid})");
                         }

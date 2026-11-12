@@ -108,6 +108,13 @@ pub struct NameCtx {
     pub(crate) flat_locals: HashSet<String>,
     /// Inferred flat scalar array element types for `ty: None` declarations.
     pub(crate) flat_scalar_types: HashMap<String, String>,
+    /// Inferred flat *row* arrays: `a := []` whose every push appends a flat
+    /// scalar array. These lower to `zz_flat_row *` (see
+    /// `param_escape::untyped_flat_rows_uses_ok`).
+    pub(crate) flat_rows: HashSet<String>,
+    /// Outer flat-row name -> inner row element C type (`int64_t`, `double`,
+    /// `bool`). Read by the nested index lowering.
+    pub(crate) flat_row_inner: HashMap<String, String>,
     /// Stack of counter snapshots for scope tracking. `push_scope` records
     /// the current counter; `pop_scope` removes all entries whose C id was
     /// created at or after that counter value.
@@ -132,6 +139,16 @@ pub struct NameCtx {
     /// each scope introduced, so `pop_scope` removes exactly those (outer
     /// loop bounds survive nested-loop scopes). See `set_loop_bound`.
     pub(crate) loop_bounds_scopes: Vec<Vec<String>>,
+    /// C identifiers whose current value is statically known to be
+    /// non-negative: loop counters from `for i in <non-negative start>`, plus
+    /// locals whose last assignment was a literal or a sum/product of
+    /// non-negative values. Flat index lowering emits `zz_flat_index_nn`
+    /// (single unsigned range check) for these instead of the general
+    /// `zz_flat_index` (which must also fold negative indices). Sound because
+    /// every plain reassignment re-evaluates the flag and any other form
+    /// clears it; keyed by C id, the set is per function body and dies with
+    /// the binding's scope.
+    pub(crate) nonneg: HashSet<String>,
     /// zz var name → pure-scalar array literal elements it was most
     /// recently bound to (straight-line code only). Used to forward
     /// `arr[lit]` reads to the element's raw C expression, eliminating
@@ -186,12 +203,15 @@ impl NameCtx {
             capture_set: HashSet::new(),
             flat_locals: HashSet::new(),
             flat_scalar_types: HashMap::new(),
+            flat_rows: HashSet::new(),
+            flat_row_inner: HashMap::new(),
             scope_markers: Vec::new(),
             array_lens: HashMap::new(),
             dict_lens: HashMap::new(),
             array_len_exprs: HashMap::new(),
             loop_bounds: HashMap::new(),
             loop_bounds_scopes: Vec::new(),
+            nonneg: HashSet::new(),
             stack_array_elems: HashMap::new(),
             last_promoted_array: None,
             checker_types: HashMap::new(),
@@ -437,6 +457,20 @@ impl NameCtx {
         self.loop_bounds_scopes.push(Vec::new());
     }
 
+    /// Mark (or unmark) the variable currently bound to `name` as
+    /// non-negative. Keyed by C identifier so the fact dies with its binding:
+    /// a shadowing declaration gets a fresh id and never inherits it.
+    pub(crate) fn set_nonneg_name(&mut self, name: &str, nonneg: bool) {
+        let Some(cid) = self.lookup(name).map(str::to_string) else {
+            return;
+        };
+        if nonneg {
+            self.nonneg.insert(cid);
+        } else {
+            self.nonneg.remove(&cid);
+        }
+    }
+
     /// Record a loop-variable upper bound for bounds-check elimination,
     /// attributing it to the current scope so `pop_scope` retires it with
     /// the loop's body scope (outer loop bounds survive nested loops).
@@ -477,6 +511,9 @@ impl NameCtx {
                 vec.retain(|(ctr, _, _)| *ctr < marker);
             }
             self.cell_ptrs.retain(|_, v| !v.is_empty());
+            // Non-negative facts belong to the binding that established them;
+            // drop the ones introduced by the scope being closed.
+            self.nonneg.retain(|cid| cid_counter(cid) < marker);
         }
     }
 
@@ -903,10 +940,23 @@ impl Lowerer {
         let Expr::Index { obj, .. } = e else {
             return None;
         };
-        let Expr::Ident { name, .. } = obj.as_ref() else {
-            return None;
+        let elem = match obj.as_ref() {
+            Expr::Ident { name, .. } => names.lookup_type(name)?.strip_suffix(" *")?,
+            // Nested flat rows: `rows[i][j]` lowers to a row-handle load plus a
+            // raw element read, then boxes it the same way a scalar flat read
+            // is boxed. Recover that raw text so arithmetic on matrix elements
+            // stays raw C instead of boxing through `zz_binop`.
+            Expr::Index { obj: root, .. } => {
+                let Expr::Ident { name, .. } = root.as_ref() else {
+                    return None;
+                };
+                if names.lookup_type(name)? != "zz_flat_row *" {
+                    return None;
+                }
+                names.flat_row_inner.get(name)?
+            }
+            _ => return None,
         };
-        let elem = names.lookup_type(name)?.strip_suffix(" *")?;
         let t: &'static str = match elem {
             "int64_t" => "int64_t",
             "double" => "double",
@@ -1507,12 +1557,15 @@ impl Lowerer {
             Expr::Int { .. } => Some("int64_t".to_string()),
             Expr::Float { .. } => Some("double".to_string()),
             Expr::Bool { .. } => Some("bool".to_string()),
-            Expr::Ident { name, .. } => names.lookup_type(name).and_then(|t| match t {
-                "int64_t" => Some("int64_t".to_string()),
-                "double" => Some("double".to_string()),
-                "bool" => Some("bool".to_string()),
-                _ => None,
-            }),
+            Expr::Ident { name, .. } => names
+                .lookup_type(name)
+                .and_then(|t| match t {
+                    "int64_t" => Some("int64_t".to_string()),
+                    "double" => Some("double".to_string()),
+                    "bool" => Some("bool".to_string()),
+                    _ => None,
+                })
+                .or_else(|| self.checked_scalar_ctype(arg, names)),
             Expr::Binary {
                 op: _, left, right, ..
             } => {
@@ -1524,7 +1577,7 @@ impl Lowerer {
                     | (Some("int64_t"), Some("double"))
                     | (Some("double"), Some("int64_t")) => Some("double".to_string()),
                     (Some("bool"), Some("bool")) => Some("bool".to_string()),
-                    _ => None,
+                    _ => self.checked_scalar_ctype(arg, names),
                 }
             }
             Expr::StructInit { name, .. } => {
@@ -1533,6 +1586,28 @@ impl Lowerer {
                 } else {
                     None
                 }
+            }
+            _ => self.checked_scalar_ctype(arg, names),
+        }
+    }
+
+    /// Element C type implied by the checker's inferred type of `e`, when it
+    /// is a scalar or an unboxed struct.
+    ///
+    /// The syntactic arms above only see literals and locally-typed
+    /// identifiers, which misses the common `arr = vec.push(arr, <expr>)`
+    /// shapes where `<expr>` is a loop variable, an arithmetic chain, or an
+    /// index read. Those still have a *proven* scalar type in the checker, so
+    /// the flat layout can store them unboxed (`push_elem` unboxes boxed
+    /// operands on the way in). Anything else — arrays, strings, boxed
+    /// structs, unknown inference — yields `None` and keeps the array boxed.
+    fn checked_scalar_ctype(&self, e: &zz_frontend::ast::Expr, names: &NameCtx) -> Option<String> {
+        match self.ty_at(names, e.span())? {
+            zz_checker::Type::Int => Some("int64_t".to_string()),
+            zz_checker::Type::Float => Some("double".to_string()),
+            zz_checker::Type::Bool => Some("bool".to_string()),
+            zz_checker::Type::Struct(name, _) if self.is_unboxed_struct(name) => {
+                Some(format!("zz_struct_{}", mangle(name)))
             }
             _ => None,
         }
@@ -1591,7 +1666,7 @@ impl Lowerer {
     /// True when `ctype` is a flat-array pointer produced by
     /// [`Self::flat_array_c_type`] (scalar or unboxed-struct buffer).
     pub(crate) fn is_flat_array_ctype(ctype: &str) -> bool {
-        matches!(ctype, "int64_t *" | "double *" | "bool *")
+        matches!(ctype, "int64_t *" | "double *" | "bool *" | "zz_flat_row *")
             || (ctype.starts_with("zz_struct_") && ctype.ends_with(" *"))
     }
 
@@ -1668,24 +1743,88 @@ impl Lowerer {
 
         self.scan_pushes(block, &mut candidates, &mut bad, names);
 
-        // The inferred layout has no boxed fallback: every mention must be an
-        // operation the flat path implements (`arr[i] = v` stores and the
-        // self-append assignment included). Scan once for all candidates;
-        // any unsupported mention keeps that name boxed.
         let cand_map: std::collections::HashMap<String, bool> = candidates
             .iter()
             .filter(|(_, elem_type)| !elem_type.is_empty())
             .map(|(name, elem_type)| (name.clone(), !elem_type.starts_with("zz_struct_")))
             .collect();
-        let bad_uses = crate::param_escape::untyped_flat_uses_ok(block, &cand_map);
 
-        for (name, elem_type) in &candidates {
-            if !bad.contains(name) && !bad_uses.contains(name) && !elem_type.is_empty() {
-                flat_names.insert(name.clone());
-                names
-                    .flat_scalar_types
-                    .insert(name.clone(), elem_type.clone());
+        // Type-eligible row elements: candidates whose pushes revealed a
+        // scalar element type. Struct rows are not handled by the nested
+        // lowering, so they never qualify here.
+        let scalar_elem: std::collections::HashMap<String, String> = candidates
+            .iter()
+            .filter(|(name, elem_type)| {
+                !bad.contains(*name)
+                    && !elem_type.is_empty()
+                    && !elem_type.starts_with("zz_struct_")
+            })
+            .map(|(name, elem_type)| (name.clone(), elem_type.clone()))
+            .collect();
+
+        // Flat *row* arrays: `a := []` whose every push appends an in-scope
+        // candidate row local. Candidates that phase 1 rejected are scanned
+        // here too: an unknown push argument is exactly the row shape.
+        let row_cands: std::collections::HashSet<String> = candidates
+            .keys()
+            .filter(|n| !scalar_elem.contains_key(*n))
+            .cloned()
+            .collect();
+        let (mut rows, row_elems) = if row_cands.is_empty() || scalar_elem.is_empty() {
+            (
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+            )
+        } else {
+            crate::param_escape::untyped_flat_rows_uses_ok(block, &scalar_elem, &row_cands)
+        };
+
+        // Fixpoint: a row array is only representable while every element it
+        // pushes stays flat, and a scalar array may be pushed into a row
+        // array only once that row array is final (otherwise the push would
+        // feed a raw `T *` into a boxed `zz_value` slot). Dropping a row can
+        // disqualify its element arrays, which can drop more rows, so iterate
+        // until stable — each pass removes at least one name.
+        let mut scalars: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        loop {
+            let row_set: std::collections::HashSet<String> = rows.keys().cloned().collect();
+            let bad_uses = if row_set.is_empty() {
+                crate::param_escape::untyped_flat_uses_ok(block, &cand_map)
+            } else {
+                crate::param_escape::untyped_flat_uses_ok_with_rows(block, &cand_map, &row_set)
+            };
+            scalars.clear();
+            for (name, elem_type) in &candidates {
+                if !bad.contains(name) && !bad_uses.contains(name) && !elem_type.is_empty() {
+                    scalars.insert(name.clone(), elem_type.clone());
+                }
             }
+            let dropped: Vec<String> = rows
+                .keys()
+                .filter(|outer| {
+                    row_elems
+                        .get(*outer)
+                        .is_some_and(|elems| elems.iter().any(|e| !scalars.contains_key(e)))
+                })
+                .cloned()
+                .collect();
+            if dropped.is_empty() {
+                break;
+            }
+            for outer in dropped {
+                rows.remove(&outer);
+            }
+        }
+
+        for (name, elem_type) in scalars {
+            flat_names.insert(name.clone());
+            names.flat_scalar_types.insert(name, elem_type);
+        }
+        for (name, inner) in rows {
+            flat_names.insert(name.clone());
+            names.flat_rows.insert(name.clone());
+            names.flat_row_inner.insert(name, inner);
         }
     }
 
@@ -2091,6 +2230,34 @@ impl Lowerer {
         Some((name, elem_ctype.to_string()))
     }
 
+    /// If `obj` is a flat *row* array (`a := []` of flat scalar rows, lowered
+    /// to `zz_flat_row *`), return its C id and the inner row element C type.
+    /// The C type check runs first, so a stale `flat_row_inner` entry from
+    /// another body can never resolve a name that is not a row array here.
+    pub(crate) fn flat_rows_receiver(
+        &self,
+        obj: &zz_frontend::ast::Expr,
+        names: &NameCtx,
+    ) -> Option<(String, String)> {
+        let (name, ctype) = match obj {
+            zz_frontend::ast::Expr::Ident { name, .. } => {
+                let ctype = names.lookup_type(name.as_str()).unwrap_or("");
+                (name.clone(), ctype.to_string())
+            }
+            zz_frontend::ast::Expr::Path { parts, .. } if parts.len() == 2 => {
+                let joined = parts.join(".");
+                let ctype = names.lookup_type(&joined).unwrap_or("");
+                (joined, ctype.to_string())
+            }
+            _ => return None,
+        };
+        if ctype != "zz_flat_row *" {
+            return None;
+        }
+        let inner = names.flat_row_inner.get(&name)?.clone();
+        Some((name, inner))
+    }
+
     /// Emit a raw `int64_t` index expression for flat-array indexing.
     /// Boxed-int loop variables (e.g. the `k` in `for k in 0..n`) lower to
     /// `zz_value` locals, so extract `.i`; plain int64_t locals and literals
@@ -2123,6 +2290,87 @@ impl Lowerer {
             return format!("({emitted}).i");
         }
         emitted
+    }
+
+    /// True when `e` is statically non-negative: a non-negative literal, a
+    /// name tracked in [`NameCtx::nonneg`], or a sum/product/rem of
+    /// non-negative operands (C's `%` keeps the left operand's sign).
+    pub(crate) fn is_nonneg_expr(&self, e: &zz_frontend::ast::Expr, names: &NameCtx) -> bool {
+        use zz_frontend::ast::{BinOp, Expr};
+        match e {
+            Expr::Int { value, .. } => *value >= 0,
+            // Keyed by the C identifier, not the source name: a shadowed
+            // binding gets a fresh id, so a fact can never transfer to the
+            // other variable that happens to share the name.
+            Expr::Ident { name, .. } => names
+                .lookup(name)
+                .is_some_and(|cid| names.nonneg.contains(cid)),
+            Expr::Path { parts, .. } => names
+                .lookup(&parts.join("."))
+                .is_some_and(|cid| names.nonneg.contains(cid)),
+            Expr::Binary {
+                op, left, right, ..
+            } => {
+                matches!(op, BinOp::Add | BinOp::Mul | BinOp::Rem)
+                    && self.is_nonneg_expr(left, names)
+                    && self.is_nonneg_expr(right, names)
+            }
+            _ => false,
+        }
+    }
+
+    /// Record the non-negative flow fact for a plain assignment (or a `:=`
+    /// declaration) of `value` to `name`. Any value that is not provably
+    /// non-negative clears the fact, so a later flat index never skips the
+    /// negative-index normalization for a value that could be negative.
+    /// Globals and captured locals are never tracked: a call in between can
+    /// mutate them without a visible assignment at this level.
+    pub(crate) fn track_nonneg_assign(
+        &self,
+        name: &str,
+        value: &zz_frontend::ast::Expr,
+        names: &mut NameCtx,
+    ) {
+        let trackable = !names.resolves_to_global(name) && !names.capture_set.contains(name);
+        // Evaluate the RHS fact before mutating the set: `x = x + 1` reads
+        // the old fact.
+        let nonneg = trackable && self.is_nonneg_expr(value, names);
+        names.set_nonneg_name(name, nonneg);
+    }
+
+    /// Wrap a flat index in the bounds check that matches what is statically
+    /// known about it: `zz_flat_index_nn` (one unsigned compare) when the
+    /// index cannot be negative, otherwise the general form that also folds
+    /// negative indices.
+    pub(crate) fn flat_index_checked(
+        &self,
+        index: &zz_frontend::ast::Expr,
+        len: &str,
+        func: &str,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        let raw = self.flat_index_expr(index, names, out);
+        self.flat_index_wrap(index, &raw, len, func, names)
+    }
+
+    /// Wrap an already-emitted raw index text in the matching flat bounds
+    /// check. Use this when the index expression has side effects that must
+    /// not be evaluated twice.
+    pub(crate) fn flat_index_wrap(
+        &self,
+        index: &zz_frontend::ast::Expr,
+        raw: &str,
+        len: &str,
+        func: &str,
+        names: &NameCtx,
+    ) -> String {
+        let f = if self.is_nonneg_expr(index, names) {
+            "zz_flat_index_nn"
+        } else {
+            "zz_flat_index"
+        };
+        format!("{f}({raw}, {len}, \"{func}\")")
     }
 
     /// Check if a type string is a struct type.
