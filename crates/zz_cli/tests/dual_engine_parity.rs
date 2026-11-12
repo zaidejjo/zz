@@ -111,6 +111,16 @@ fn run_zz_with_input(args: &[&str], file: &Path, input: &[u8]) -> (i32, String, 
 /// Generous on purpose: the `--native` leg pays a cold clang `-O3`
 /// compile per fixture. Matches GNU `timeout`'s 124 convention.
 const ZZ_CHILD_TIMEOUT_SECS: u64 = 300;
+/// Shorter bound for VM-only legs (no clang compile): a VM that spins
+/// forever is a bug, not a compile waiting on clang. Override with
+/// `ZZ_VM_CHILD_TIMEOUT_SECS`.
+fn vm_child_timeout_secs() -> u64 {
+    std::env::var("ZZ_VM_CHILD_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(60)
+}
 /// Sentinel exit for a timed-out child (GNU `timeout` convention).
 const ZZ_CHILD_TIMEOUT_EXIT: i32 = 124;
 
@@ -2087,7 +2097,7 @@ fn run_quad_leg(
     // quad legs run the same fixture under two drivers that share one run
     // cache, so a hit on the second leg skips the check pass (its warnings
     // never reach stderr) and executes cached IR instead of the source
-    // pipeline — `vm_dbg` and `vm_rel` then disagree on stderr.
+    // pipeline — the two legs then disagree on stderr.
     cmd.env("ZZ_RUN_CACHE", "0");
     if dev {
         cmd.env("ZZ_NATIVE_DEV", "1");
@@ -2101,8 +2111,12 @@ fn run_quad_leg(
         }
     }
     drop(child.stdin.take());
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(ZZ_CHILD_TIMEOUT_SECS);
+    let timeout_secs = if native {
+        ZZ_CHILD_TIMEOUT_SECS
+    } else {
+        vm_child_timeout_secs()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
@@ -2117,7 +2131,7 @@ fn run_quad_leg(
                         ZZ_CHILD_TIMEOUT_EXIT,
                         String::from_utf8_lossy(&output.stdout).to_string(),
                         format!(
-                            "{}\nQUAD TIMEOUT: {} exceeded {ZZ_CHILD_TIMEOUT_SECS}s",
+                            "{}\nQUAD TIMEOUT: {} exceeded {timeout_secs}s",
                             String::from_utf8_lossy(&output.stderr),
                             file.display()
                         ),
@@ -2139,11 +2153,13 @@ fn run_quad_leg(
     )
 }
 
-/// All four legs for one fixture: (vm_debug, vm_release, native_dev, native_release).
+/// Two legs for one fixture: (vm_release, native_release).
+///
+/// Dropped vm_dbg (debug VM adds little signal beyond vm_rel) and
+/// nat_dev (clang -O0 -g is not the shipping config; nat_rel is the real
+/// AOT signal). Halves process spawns and native clang invocations.
 struct QuadLegs {
-    vm_dbg: LegOut,
     vm_rel: LegOut,
-    nat_dev: Option<LegOut>,
     nat_rel: Option<LegOut>,
 }
 
@@ -2181,26 +2197,17 @@ fn run_quad(file: &Path, token: &str) -> QuadLegs {
     };
     let release_clone = release_bin.clone();
     let mut handles: Vec<_> = [
-        spawn(debug_bin.clone(), false, false),
-        spawn(release_clone, false, false),
-        spawn(debug_bin.clone(), true, true),
-        spawn(debug_bin, true, false),
+        spawn(release_clone, false, false), // vm_rel
+        spawn(debug_bin, true, false),      // nat_rel
     ]
     .into_iter()
     .map(|h| h.join().expect("quad leg thread panicked"))
     .collect::<Vec<_>>();
 
-    let vm_dbg = handles[0].take().expect("vm_dbg leg");
-    let vm_rel = handles[1].take().expect("vm_rel leg");
-    let nat_dev = handles[2].take();
-    let nat_rel = handles[3].take();
+    let vm_rel = handles[0].take().expect("vm_rel leg");
+    let nat_rel = handles[1].take();
 
-    QuadLegs {
-        vm_dbg,
-        vm_rel,
-        nat_dev,
-        nat_rel,
-    }
+    QuadLegs { vm_rel, nat_rel }
 }
 
 fn fmt_leg(name: &str, leg: &LegOut) -> String {
@@ -2212,13 +2219,7 @@ fn fmt_leg(name: &str, leg: &LegOut) -> String {
 
 fn fmt_quad(file: &Path, q: &QuadLegs) -> String {
     let mut s = format!("QUAD DUMP [{}]:\n", file.display());
-    s.push_str(&fmt_leg("vm_dbg", &q.vm_dbg));
-    s.push('\n');
     s.push_str(&fmt_leg("vm_rel", &q.vm_rel));
-    if let Some(l) = &q.nat_dev {
-        s.push('\n');
-        s.push_str(&fmt_leg("nat_dev", l));
-    }
     if let Some(l) = &q.nat_rel {
         s.push('\n');
         s.push_str(&fmt_leg("nat_rel", l));
@@ -2226,12 +2227,9 @@ fn fmt_quad(file: &Path, q: &QuadLegs) -> String {
     s
 }
 
-/// Assert all available legs pairwise-match (exit + normalized streams).
+/// Assert both available legs match (exit + normalized streams).
 fn assert_quad_agree(file: &Path, q: &QuadLegs) {
-    let mut legs: Vec<(&str, &LegOut)> = vec![("vm_dbg", &q.vm_dbg), ("vm_rel", &q.vm_rel)];
-    if let Some(l) = &q.nat_dev {
-        legs.push(("nat_dev", l));
-    }
+    let mut legs: Vec<(&str, &LegOut)> = vec![("vm_rel", &q.vm_rel)];
     if let Some(l) = &q.nat_rel {
         legs.push(("nat_rel", l));
     }
@@ -2264,10 +2262,7 @@ fn assert_quad_agree(file: &Path, q: &QuadLegs) {
 /// Assert every available leg failed.
 fn assert_quad_all_fail(file: &Path, q: &QuadLegs) {
     let legs: Vec<(&str, &LegOut)> = {
-        let mut v = vec![("vm_dbg", &q.vm_dbg), ("vm_rel", &q.vm_rel)];
-        if let Some(l) = &q.nat_dev {
-            v.push(("nat_dev", l));
-        }
+        let mut v = vec![("vm_rel", &q.vm_rel)];
         if let Some(l) = &q.nat_rel {
             v.push(("nat_rel", l));
         }

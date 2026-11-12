@@ -330,8 +330,8 @@ impl<'a> Parser<'a> {
     fn line_col(&self) -> (usize, usize) {
         let mut line = 1;
         let mut col = 1;
-        for i in 0..self.pos.min(self.bytes.len()) {
-            if self.bytes[i] == b'\n' {
+        for &b in self.bytes[..self.pos.min(self.bytes.len())].iter() {
+            if b == b'\n' {
                 line += 1;
                 col = 1;
             } else {
