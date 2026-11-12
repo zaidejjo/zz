@@ -3,9 +3,20 @@
 // Verifies that mysql.connect does not hit zz_unimplemented_native under
 // AOT. Connects to a non-existent host and expects a connection error
 // (not an unimplemented-native abort).
+//
+// Skipped unless ZZ_HAS_MYSQL is set (CI or local env with a MySQL server
+// on 127.0.0.1:3306). Developers without MySQL installed are not blocked.
+import std.env
 import std.sqlz
 
 func main() -> () {
+    match std.env.get("ZZ_HAS_MYSQL") {
+        .none => {
+            println("mysql_test_skip: ZZ_HAS_MYSQL not set")
+            return
+        }
+        .some(_) => {}
+    }
     // Connect to localhost:3306 (nothing listening) - should get a connection
     // refused error, not an unimplemented native abort.
     match sqlz.mysql.connect("host=127.0.0.1 port=3306 user=root password=secret dbname=test") {
