@@ -1,0 +1,15 @@
+// features: arrays, comparison, imports, print, std-bytes, string-literal
+// E2E: std.bytes pure-ZZ gap helpers (builder/push_byte/extend/len_of/from_ints + bytes.* aliases).
+import std.bytes
+
+func main() {
+    b := bytes.builder()
+    b = bytes.push_byte(b, 65)
+    b = bytes.push_byte(b, 66)
+    b = bytes.push_byte(b, 67)
+    println("bytes.len_of: {bytes.len_of(b)}")
+    println("bytes.from_ints([68,69,70]): {bytes.from_ints([68, 69, 70])}")
+    b2 := bytes.extend(b, [70, 71])
+    println("bytes.len_of(extend): {bytes.len_of(b2)}")
+    println("bytes_gaps_ok")
+}

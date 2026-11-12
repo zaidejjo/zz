@@ -1641,6 +1641,14 @@ parity_strict!(parity_stdlib_json_gaps, "stdlib", "json_gaps_test.zz");
 parity_strict!(parity_stdlib_path_gaps, "stdlib", "path_gaps_test.zz");
 parity_strict!(parity_stdlib_time_gaps, "stdlib", "time_gaps_test.zz");
 parity_strict!(parity_stdlib_regexp_gaps, "stdlib", "regexp_gaps_test.zz");
+parity_strict!(parity_stdlib_bytes_gaps, "stdlib", "bytes_gaps_test.zz");
+parity_strict!(parity_stdlib_csv_gaps, "stdlib", "csv_gaps_test.zz");
+parity_strict!(
+    parity_stdlib_property_gaps,
+    "stdlib",
+    "property_gaps_test.zz"
+);
+parity_strict!(parity_stdlib_dec_gaps, "stdlib", "dec_gaps_test.zz");
 parity_strict!(
     parity_stdlib_matrix_mul_test,
     "stdlib",

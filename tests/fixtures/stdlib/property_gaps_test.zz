@@ -1,0 +1,29 @@
+// features: arrays, bool-logic, comparison, imports, print, std-property, string-literal
+// E2E: std.property pure-ZZ gap helpers (seed/norm_state/step/stream/int_in/pick/boolean/alpha_char/alpha_str/shrink_int/shrink_str/shrink_value/check/for_all_int + property.* aliases).
+import std.property
+
+func main() {
+    s := property.seed(42)
+    println("property.seed(42): {s}")
+    ns := property.norm_state(100)
+    println("property.norm_state(100): {ns}")
+    st := property.step(s)
+    println("property.step(seed): {st}")
+    strm := property.stream(s, 0)
+    println("property.stream(seed, 0): {strm}")
+    ii := property.int_in(s, 0, 1, 100)
+    println("property.int_in(seed, 0, 1, 100): {ii}")
+    pk := property.pick(s, 0, 10)
+    println("property.pick(seed, 0, 10): {pk}")
+    bl := property.boolean(s, 0)
+    println("property.boolean(seed, 0): {bl}")
+    ac := property.alpha_char(s, 0)
+    println("property.alpha_char(seed, 0): {ac}")
+    astr := property.alpha_str(s, 0, 5)
+    println("property.alpha_str(seed, 0, 5): {astr}")
+    si := property.shrink_int(10)
+    println("property.shrink_int(10): {si}")
+    ss := property.shrink_str("hello")
+    println("property.shrink_str(hello): {ss}")
+    println("property_gaps_ok")
+}
