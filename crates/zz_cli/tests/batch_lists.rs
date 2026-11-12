@@ -159,6 +159,26 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "interp_expr_test.zz", false),
     ("stdlib", "nested_assign_test.zz", false),
     ("stdlib", "nested_struct_field_test.zz", false),
+    // Concurrency (chan/task/spawn): ported to the C11 <threads.h> shim in
+    // the AOT runtime, so they are batch-eligible on every platform.
+    ("stdlib", "concurrency_spawn_test.zz", false),
+    ("stdlib", "channel_test.zz", false),
+    ("stdlib", "concurrency_batch_test.zz", false),
+    ("stdlib", "concurrency_tasks_test.zz", false),
+    ("stdlib", "concurrency_stress_test.zz", false),
+    ("stdlib", "concurrency_timeslice_loop_test.zz", false),
+    ("stdlib", "concurrency_try_join_test.zz", false),
+    ("stdlib", "concurrency_shared_fn_test.zz", false),
+    ("stdlib", "concurrency_capture_test.zz", false),
+    ("stdlib", "concurrency_recall_test.zz", false),
+    ("stdlib", "concurrency_verdict_chain_test.zz", false),
+    ("stdlib", "concurrency_join_chain_test.zz", false),
+    ("stdlib", "concurrency_mpmc_test.zz", false),
+    ("stdlib", "concurrency_relay_test.zz", false),
+    ("stdlib", "concurrency_matchbind_test.zz", false),
+    ("stdlib", "concurrency_vartrip_test.zz", false),
+    ("stdlib", "concurrency_panic_test.zz", false),
+    ("stdlib", "concurrent_http_test.zz", false),
 ];
 
 /// (category/file, reason). Everything strict outside regression/errors
@@ -170,34 +190,6 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     ("stdlib/envmod.zz", "reads env/argv (shared in batch)"),
     ("stdlib/env_test.zz", "reads env/argv (shared in batch)"),
     ("stdlib/env_full.zz", "reads env/argv (shared in batch)"),
-    ("stdlib/concurrency_spawn_test.zz", "spawn/timing-sensitive"),
-    ("stdlib/channel_test.zz", "spawn/timing-sensitive"),
-    ("stdlib/concurrency_batch_test.zz", "spawn/timing-sensitive"),
-    ("stdlib/concurrency_tasks_test.zz", "spawn/timing-sensitive"),
-    (
-        "stdlib/concurrency_stress_test.zz",
-        "spawn/timing-sensitive",
-    ),
-    (
-        "stdlib/concurrency_timeslice_loop_test.zz",
-        "spawn/timing-sensitive",
-    ),
-    (
-        "stdlib/concurrency_try_join_test.zz",
-        "spawn/timing-sensitive",
-    ),
-    (
-        "stdlib/concurrency_shared_fn_test.zz",
-        "spawn/timing-sensitive",
-    ),
-    (
-        "stdlib/concurrency_capture_test.zz",
-        "spawn/timing-sensitive",
-    ),
-    (
-        "stdlib/concurrency_recall_test.zz",
-        "spawn/timing-sensitive",
-    ),
     ("stdlib/fs_comprehensive.zz", "spawn/timing-sensitive"),
     ("stdlib/net_tcp_test.zz", "binds ports (collide in batch)"),
     ("stdlib/net_dns_test.zz", "binds ports (collide in batch)"),

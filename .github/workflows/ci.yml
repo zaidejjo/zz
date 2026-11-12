@@ -170,14 +170,16 @@ jobs:
       legs: ${{ needs.plan.outputs.macos }}
 
   # --- windows: x86_64 + arm64 -------------------------------------------
-  # `native: false`: the AOT backend cannot build on Windows yet (the C
-  # runtime includes <pthread.h> and its socket layer is POSIX
-  # `fcntl`/`poll`), so these legs set `ZZ_SKIP_NATIVE=1` and run every VM,
-  # CLI, PM and LSP suite. `support::native_unsupported()` in the CLI
-  # integration tests makes the AOT cases report "skip" instead of failing
-  # on a limitation the platform cannot fix, and the leg's final
-  # `native capability` step says so in the log. Tracked as the Windows
-  # runtime port; flip the flag with that work, not before.
+  # `native: false`: the AOT backend cannot build on Windows yet. The C11
+  # <threads.h> shim now covers the pthread primitives (mutex/cond/once/
+  # create, clock/sleep) so concurrency (chan/task/spawn) compiles, but the
+  # socket layer is still POSIX `fcntl`/`poll`/`unistd`/`socket` and is not
+  # yet Windows-ported, so core.c does not compile on Windows. These legs
+  # keep `ZZ_SKIP_NATIVE=1` and run every VM, CLI, PM and LSP suite.
+  # `support::native_unsupported()` makes AOT cases report "skip"; the leg's
+  # final `native capability` step says so. Flip `native: true` once the
+  # socket layer is ported; concurrency fixtures are already batch-eligible
+  # and parity-registered so they run natively then.
   windows:
     name: windows
     needs: plan

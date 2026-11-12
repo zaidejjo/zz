@@ -42,7 +42,7 @@ static zz_intern_entry zz_intern_table[ZZ_INTERN_BUCKETS];
 // Spawned threads evaluate string literals too, so interning must be
 // thread-safe: one mutex around lookup-or-create (first touch per literal
 // is rare; steady-state hits are a single locked probe chain).
-static pthread_mutex_t zz_intern_lock = PTHREAD_MUTEX_INITIALIZER;
+static zz_mtx_t zz_intern_lock = ZZ_MTX_INIT;
 
 static uint32_t fnv1a(const char *s, size_t len) {
     uint32_t h = 2166136261u;
@@ -54,7 +54,7 @@ static uint32_t fnv1a(const char *s, size_t len) {
 }
 
 static zz_str *intern_lookup_or_create(const char *src, size_t len) {
-    pthread_mutex_lock(&zz_intern_lock);
+    zz_mtx_lock(&zz_intern_lock);
     uint32_t h = fnv1a(src, len);
     uint32_t idx = h % ZZ_INTERN_BUCKETS;
     zz_str *found = NULL;
@@ -104,7 +104,7 @@ static zz_str *intern_lookup_or_create(const char *src, size_t len) {
             found = s;
         }
     }
-    pthread_mutex_unlock(&zz_intern_lock);
+    zz_mtx_unlock(&zz_intern_lock);
     return found;
 }
 

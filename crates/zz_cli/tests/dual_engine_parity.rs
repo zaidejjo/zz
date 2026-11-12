@@ -1522,6 +1522,46 @@ parity_strict!(
     "stdlib",
     "concurrency_recall_test.zz"
 );
+parity_strict!(
+    parity_stdlib_concurrency_verdict_chain_test,
+    "stdlib",
+    "concurrency_verdict_chain_test.zz"
+);
+parity_strict!(
+    parity_stdlib_concurrency_join_chain_test,
+    "stdlib",
+    "concurrency_join_chain_test.zz"
+);
+parity_strict!(
+    parity_stdlib_concurrency_mpmc_test,
+    "stdlib",
+    "concurrency_mpmc_test.zz"
+);
+parity_strict!(
+    parity_stdlib_concurrency_relay_test,
+    "stdlib",
+    "concurrency_relay_test.zz"
+);
+parity_strict!(
+    parity_stdlib_concurrency_matchbind_test,
+    "stdlib",
+    "concurrency_matchbind_test.zz"
+);
+parity_strict!(
+    parity_stdlib_concurrency_vartrip_test,
+    "stdlib",
+    "concurrency_vartrip_test.zz"
+);
+parity_strict!(
+    parity_stdlib_concurrency_panic_test,
+    "stdlib",
+    "concurrency_panic_test.zz"
+);
+parity_strict!(
+    parity_stdlib_concurrent_http_test,
+    "stdlib",
+    "concurrent_http_test.zz"
+);
 parity_strict_error!(parity_err_type_mismatch, "type_mismatch.zz");
 parity_strict_error!(parity_err_alias_cycle, "alias_cycle.zz");
 parity_strict_error!(parity_err_alias_dup, "alias_dup.zz");

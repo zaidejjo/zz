@@ -24,7 +24,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+// Threading types come from platform.h's shim (pthread on POSIX, C11
+// <threads.h> on Windows). platform.h is concatenated before this header
+// in AOT builds and is included by runtime.h standalone.
+#ifndef ZZ_OS_WINDOWS
 #include <pthread.h>
+#endif
 #include <math.h>
 #include <time.h>
 #include <sys/stat.h>
@@ -400,8 +405,8 @@ struct zz_chan {
     size_t ring_tail __attribute__((aligned(64)));
     // Slow path: mutex spillover queue + signaling condvar. Unbounded
     // bursts land here; drained before the ring whenever non-empty.
-    pthread_mutex_t lock;
-    pthread_cond_t  cond;
+    zz_mtx_t lock;
+    zz_cnd_t cond;
     zz_value       *queue;   // spill ring buffer of zz_value
     size_t          len;     // current spill items
     size_t          cap;     // spill buffer capacity
@@ -494,12 +499,12 @@ zz_value zz_task_join_recv_green(zz_value join, zz_task_frame *fr, int resume_id
 
 // Task join handle for spawned threads.
 struct zz_task_join {
-    pthread_t       thread;
+    zz_thrd_t       thread;
     zz_value        result;
     int             completed;
     int             consumed;   // set once `task.try_join` takes the result
-    pthread_mutex_t lock;
-    pthread_cond_t  cond;
+    zz_mtx_t lock;
+    zz_cnd_t cond;
     // Green waiters (B3): tasks/threads suspended in `task.join` that
     // must be resumed by direct handoff on completion (no condvar
     // round-trip for task waiters). Served FIFO before the condvar.
