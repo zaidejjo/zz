@@ -5,7 +5,7 @@
 //! asserts the echoed bytes are identical. This failed before the
 //! `handle_connection_thread` loop-read fix (body truncated at ~8 KiB).
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -66,35 +66,23 @@ fn start_echo_server() -> Server {
             .spawn()
             .expect("spawn zz run echo server");
 
-        // `http.listen` prints SERVER_READY to stderr once bound.
-        let stderr = child.stderr.take().expect("piped stderr");
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut reader = BufReader::new(stderr);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line) {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        if line.contains("SERVER_READY") {
-                            let _ = tx.send(true);
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
+        // Wait for the server to accept connections: poll the port until
+        // TCP connect succeeds. SERVER_READY is no longer printed to stderr.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut connected = false;
+        while std::time::Instant::now() < deadline {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                connected = true;
+                break;
             }
-        });
-        match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(true) => return Server { child, port, dir },
-            Ok(false) => unreachable!(),
-            Err(_) => {
-                last_err = "SERVER_READY timeout".to_string();
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+            std::thread::sleep(Duration::from_millis(50));
         }
+        if connected {
+            return Server { child, port, dir };
+        }
+        last_err = "server did not accept connections in time".to_string();
+        let _ = child.kill();
+        let _ = child.wait();
     }
     panic!("could not start echo server: {last_err}");
 }

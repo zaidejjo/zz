@@ -2378,10 +2378,6 @@ fn listen_inner(
             span,
         )
     })?;
-    // Print SERVER_READY so benchmark runners know the port is listening.
-    // Use eprintln (stderr) since that's where zz programs write their
-    // stdout-equivalent in native contexts.
-    eprintln!("SERVER_READY");
     // The accept loop below never touches the caller's interp again: every
     // connection runs on a per-thread interp rebuilt from `snapshot`.
     // Release the caller-side function table, env, and caches now — for a
@@ -2470,9 +2466,7 @@ fn listen_inner(
     // their read timeouts at the latest) or the budget expires.
     // A second SIGINT/SIGTERM force-exits via `_exit(130)` (see handler),
     // so a browser-held keep-alive can never wedge Ctrl+C.
-    if shutdown_requested() {
-        eprintln!("\nShutting down (draining, Ctrl+C again to force)...");
-    }
+    if shutdown_requested() {}
     let deadline = Instant::now() + limits.shutdown_timeout;
     while inflight.load(std::sync::atomic::Ordering::Relaxed) > 0 && Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));

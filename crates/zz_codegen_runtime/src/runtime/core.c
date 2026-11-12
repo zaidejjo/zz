@@ -8133,11 +8133,6 @@ static zz_value http_listen_impl(zz_value port, int *err) {
     // Set listen_fd non-blocking
     set_nonblock(listen_fd);
 
-    // Print SERVER_READY to stderr so benchmark runners know the port
-    // is open (matches the VM, and keeps program stdout clean).
-    fprintf(stderr, "SERVER_READY\n");
-    fflush(stderr);
-
     g_http_server_running = 1;
 
 #if defined(__linux__) && defined(__GLIBC__)

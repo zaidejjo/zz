@@ -1557,10 +1557,11 @@ parity_strict!(
     "stdlib",
     "concurrency_panic_test.zz"
 );
-// concurrent_http_test.zz starts an HTTP server: the AOT runtime prints
-// "SERVER_READY" to stderr (http_listen_impl), but the VM does not.
-// Bytecode/dual-engine parity requires byte-identical stderr, so it cannot
-// run through parity legs. It remains e2e-registered only.
+parity_strict!(
+    parity_stdlib_concurrent_http_test,
+    "stdlib",
+    "concurrent_http_test.zz"
+);
 parity_strict_error!(parity_err_type_mismatch, "type_mismatch.zz");
 parity_strict_error!(parity_err_alias_cycle, "alias_cycle.zz");
 parity_strict_error!(parity_err_alias_dup, "alias_dup.zz");
