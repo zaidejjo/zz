@@ -1,0 +1,50 @@
+// features: arrays, comparison, imports, json, option-result, print, std-json, string-literal
+// E2E: std.json pure-ZZ gap helpers (validate/parse_or/parse_or_null/path_exists/path_get_or/is_*/is_empty + json.* aliases).
+import std.json
+
+func main() {
+    // ── Validation ──
+    good_s := `{"a": 1}`
+    bad_s := "not json"
+    println("validate good: {json.validate(good_s)}")
+    println("validate bad: {json.validate(bad_s)}")
+    _ = json.parse(good_s) ?? json.null()
+    _ = json.parse(bad_s) ?? json.null()
+    // ── Safe parsing ──
+    j1 := json.parse_or(`{"x": 5}`, json.null())
+    xk := "x"
+    println("parse_or ok: {json.get(j1, xk)}")
+    j2 := json.parse_or("not json", json.null())
+    println("parse_or bad type: {json.type(j2)}")
+    j3 := json.parse_or_null(`{"y": 7}`)
+    yk := "y"
+    println("parse_or_null: {json.get(j3, yk)}")
+    j4 := json.parse_or_null("bad")
+    println("parse_or_null bad type: {json.type(j4)}")
+    // ── Path operations ──
+    obj := json.parse(`{"a": {"b": 1}}`) ?? json.null()
+    ab := "a.b"
+    ac := "a.c"
+    println("path_exists(a.b): {json.path_exists(obj, ab)}")
+    println("path_exists(a.c): {json.path_exists(obj, ac)}")
+    println("path_get_or(a.b, 0): {json.path_get_or(obj, ab, json.null())}")
+    println("path_get_or(a.c, 42): {json.path_get_or(obj, ac, json.null())}")
+    // ── Type predicates ──
+    jn := json.null()
+    jb := json.parse("true") ?? json.null()
+    jn2 := json.parse("42") ?? json.null()
+    js := json.parse("\"hi\"") ?? json.null()
+    ja := json.parse("[1, 2]") ?? json.null()
+    jo := json.parse(`{"a": 1}`) ?? json.null()
+    println("is_null: {json.is_null(jn)}")
+    println("is_bool: {json.is_bool(jb)}")
+    println("is_number: {json.is_number(jn2)}")
+    println("is_string: {json.is_string(js)}")
+    println("is_array: {json.is_array(ja)}")
+    println("is_object: {json.is_object(jo)}")
+    // ── Aggregate ──
+    empty_obj := json.parse("{}") ?? json.null()
+    println("is_empty({}): {json.is_empty(empty_obj)}")
+    println("is_object(jo): {json.is_object(jo)}")
+    println("json_gaps_ok")
+}

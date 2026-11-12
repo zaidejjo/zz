@@ -1637,6 +1637,7 @@ parity_strict!(parity_stdlib_math_ops, "stdlib", "math_ops.zz");
 parity_strict!(parity_stdlib_math_gaps, "stdlib", "math_gaps_test.zz");
 parity_strict!(parity_stdlib_str_gaps, "stdlib", "str_gaps_test.zz");
 parity_strict!(parity_stdlib_vec_gaps, "stdlib", "vec_gaps_test.zz");
+parity_strict!(parity_stdlib_json_gaps, "stdlib", "json_gaps_test.zz");
 parity_strict!(
     parity_stdlib_matrix_mul_test,
     "stdlib",

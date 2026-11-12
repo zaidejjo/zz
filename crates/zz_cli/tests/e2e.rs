@@ -876,6 +876,7 @@ e2e_success_test!(e2e_stdlib_math_ops, "stdlib", "math_ops.zz");
 e2e_success_test!(e2e_stdlib_math_gaps, "stdlib", "math_gaps_test.zz");
 e2e_success_test!(e2e_stdlib_str_gaps, "stdlib", "str_gaps_test.zz");
 e2e_success_test!(e2e_stdlib_vec_gaps, "stdlib", "vec_gaps_test.zz");
+e2e_success_test!(e2e_stdlib_json_gaps, "stdlib", "json_gaps_test.zz");
 e2e_success_test!(e2e_stdlib_matrix_mul_test, "stdlib", "matrix_mul_test.zz");
 e2e_success_test!(e2e_stdlib_math_consts, "stdlib", "math_consts.zz");
 e2e_success_test!(e2e_stdlib_const_index_test, "stdlib", "const_index_test.zz");

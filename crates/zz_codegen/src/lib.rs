@@ -50,32 +50,6 @@ pub use zz_codegen_types::{CodegenSink, NoopSink};
 pub(crate) const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // Non-reachable from parity fixtures (no fixture uses them):
     // Pure-ZZ stdlib functions — run in VM only, no C codegen
-    // Pure-ZZ JSON helpers — compiled from zz/json/mod.zz, run in VM only
-    ("std.json.validate", "pure ZZ; no C codegen"),
-    ("std.json.parse_or", "pure ZZ; no C codegen"),
-    ("std.json.parse_or_null", "pure ZZ; no C codegen"),
-    ("std.json.path_exists", "pure ZZ; no C codegen"),
-    ("std.json.path_get_or", "pure ZZ; no C codegen"),
-    ("std.json.is_null", "pure ZZ; no C codegen"),
-    ("std.json.is_bool", "pure ZZ; no C codegen"),
-    ("std.json.is_number", "pure ZZ; no C codegen"),
-    ("std.json.is_string", "pure ZZ; no C codegen"),
-    ("std.json.is_array", "pure ZZ; no C codegen"),
-    ("std.json.is_object", "pure ZZ; no C codegen"),
-    ("std.json.is_empty", "pure ZZ; no C codegen"),
-    // Method-dispatch aliases for pure-ZZ JSON helpers
-    ("json.validate", "pure ZZ alias"),
-    ("json.parse_or", "pure ZZ alias"),
-    ("json.parse_or_null", "pure ZZ alias"),
-    ("json.path_exists", "pure ZZ alias"),
-    ("json.path_get_or", "pure ZZ alias"),
-    ("json.is_null", "pure ZZ alias"),
-    ("json.is_bool", "pure ZZ alias"),
-    ("json.is_number", "pure ZZ alias"),
-    ("json.is_string", "pure ZZ alias"),
-    ("json.is_array", "pure ZZ alias"),
-    ("json.is_object", "pure ZZ alias"),
-    ("json.is_empty", "pure ZZ alias"),
     // Pure-ZZ regexp helpers — compiled from zz/regexp/mod.zz and merged
     // into AOT builds as ZZ functions (no C/FFI native needed).
     ("Regexp.new", "pure ZZ; lowered as ZZ fn"),
