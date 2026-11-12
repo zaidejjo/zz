@@ -892,6 +892,7 @@ e2e_success_test!(
     "str_builder_gaps_test.zz"
 );
 e2e_success_test!(e2e_stdlib_colors_gaps, "stdlib", "colors_gaps_test.zz");
+e2e_success_test!(e2e_stdlib_http_gaps, "stdlib", "http_gaps_test.zz");
 e2e_success_test!(e2e_stdlib_matrix_mul_test, "stdlib", "matrix_mul_test.zz");
 e2e_success_test!(e2e_stdlib_math_consts, "stdlib", "math_consts.zz");
 e2e_success_test!(e2e_stdlib_const_index_test, "stdlib", "const_index_test.zz");

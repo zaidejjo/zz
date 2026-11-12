@@ -1657,6 +1657,7 @@ parity_strict!(
     "str_builder_gaps_test.zz"
 );
 parity_strict!(parity_stdlib_colors_gaps, "stdlib", "colors_gaps_test.zz");
+parity_strict!(parity_stdlib_http_gaps, "stdlib", "http_gaps_test.zz");
 parity_strict!(
     parity_stdlib_matrix_mul_test,
     "stdlib",

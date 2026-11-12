@@ -53,27 +53,6 @@ pub(crate) const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // Pure-ZZ regexp helpers — compiled from zz/regexp/mod.zz and merged
     // into AOT builds as ZZ functions (no C/FFI native needed).
     ("ArgsParser.new", "pure ZZ; lowered as ZZ fn"),
-    // HTTP helpers (pure-ZZ, compiled from zz/http/mod.zz)
-    ("std.http.ok", "pure ZZ; no C codegen"),
-    ("http.ok", "pure ZZ alias"),
-    ("std.http.created", "pure ZZ; no C codegen"),
-    ("http.created", "pure ZZ alias"),
-    ("std.http.not_found", "pure ZZ; no C codegen"),
-    ("http.not_found", "pure ZZ alias"),
-    ("std.http.redirect", "pure ZZ; no C codegen"),
-    ("http.redirect", "pure ZZ alias"),
-    ("std.http.cors", "pure ZZ; no C codegen"),
-    ("http.cors", "pure ZZ alias"),
-    ("std.http.secure_headers", "pure ZZ; no C codegen"),
-    ("http.secure_headers", "pure ZZ alias"),
-    ("std.http.secure_header_dict", "pure ZZ; no C codegen"),
-    ("http.secure_header_dict", "pure ZZ alias"),
-    ("std.http.csrf_token", "pure ZZ; no C codegen"),
-    ("http.csrf_token", "pure ZZ alias"),
-    ("std.http.csrf_check", "pure ZZ; no C codegen"),
-    ("http.csrf_check", "pure ZZ alias"),
-    ("std.http.request_id", "pure ZZ; no C codegen"),
-    ("http.request_id", "pure ZZ alias"),
     // Phase 2/3 HTTP natives — deliberate AOT exclusions (VM-only). Each is
     // excluded because porting it to the C HTTP runtime needs infrastructure
     // that does not exist in AOT (rustls TLS, WebSocket handshake + TCP

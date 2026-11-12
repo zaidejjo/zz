@@ -1,0 +1,28 @@
+// features: arrays, bool-logic, comparison, crypto, imports, print, std-http, std-json, std-uuid, string-literal
+// E2E: std.http pure-ZZ gap helpers (ok/created/not_found/redirect/cors/secure_headers/secure_header_dict/csrf_token/csrf_check/request_id + http.* aliases).
+import std.http
+
+func main() {
+    // ── Response constructors ──
+    r_ok := http.ok("ok body")
+    println("http.ok status: {r_ok.status()}")
+    println("http.ok text: {r_ok.text()}")
+    r_created := http.created("created body")
+    println("http.created status: {r_created.status()}")
+    r_nf := http.not_found()
+    println("http.not_found status: {r_nf.status()}")
+    println("http.not_found text: {r_nf.text()}")
+    r_redirect := http.redirect("/login")
+    println("http.redirect status: {r_redirect.status()}")
+    // ── secure_header_dict ──
+    d := http.secure_header_dict()
+    println("secure_header_dict CSP: {d["Content-Security-Policy"]}")
+    println("secure_header_dict XFO: {d["X-Frame-Options"]}")
+    // ── CSRF ──
+    t1 := http.csrf_token()
+    t2 := http.csrf_token()
+    println("csrf_token len: {len(t1)}")
+    println("csrf_check same: {http.csrf_check(t1, t1)}")
+    println("csrf_check diff: {http.csrf_check(t1, t2)}")
+    println("http_gaps_ok")
+}
