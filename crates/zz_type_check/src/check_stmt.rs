@@ -111,6 +111,17 @@ fn check_stmt_decl(
         }
     }
     let rt = checker.unifier.resolve_deep(&vt);
+    // Variant types (Option/Result/Enum) may carry unconstrained payload vars
+    // that get resolved by later usage (e.g. `.unwrap_or(7)` on `.none`).
+    // Defer those to span type resolution; other unconstrained vars still
+    // error here (e.g. closure param types in `f := |x| x`).
+    if matches!(rt, Type::Option(_) | Type::Result(_, _) | Type::Enum(_, _)) {
+        checker.define_var_at(&name.name, rt.clone(), name.span, is_const);
+        if checker.env.len() == 1 {
+            checker.new_bindings.insert(name.name.clone(), rt.clone());
+        }
+        return rt;
+    }
     if contains_var(&rt) {
         let mut d = rt.clone();
         default_variant_vars(&mut d);

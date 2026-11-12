@@ -912,6 +912,11 @@ parity_strict!(
     "syntax",
     "closure_capture_struct_array.zz"
 );
+parity_strict!(
+    parity_syntax_struct_array_index_field,
+    "syntax",
+    "struct_array_index_field.zz"
+);
 parity_strict!(parity_stdlib_shadow_test, "stdlib", "shadow_test.zz");
 parity_strict!(parity_syntax_destructuring, "syntax", "destructuring.zz");
 parity_strict!(
@@ -1081,6 +1086,18 @@ parity_strict!(
     parity_regression_block_local_no_clobber,
     "regression",
     "block_local_no_clobber.zz"
+);
+// GH#796: string concatenation must guard len_a + len_b against overflow.
+parity_strict!(
+    parity_regression_str_concat_overflow,
+    "regression",
+    "str_concat_overflow_test.zz"
+);
+// GH#794/795: array push growth null-checks and cap*2 overflow guard.
+parity_strict!(
+    parity_regression_array_push_growth,
+    "regression",
+    "array_push_growth_test.zz"
 );
 // M0 edge corpus: strict-parity probes (both engines agree).
 parity_strict!(
@@ -1440,6 +1457,21 @@ parity_strict!(parity_stdlib_console, "stdlib", "console.zz");
 parity_strict!(parity_stdlib_envmod, "stdlib", "envmod.zz");
 parity_strict!(parity_stdlib_env_test, "stdlib", "env_test.zz");
 parity_strict!(
+    parity_stdlib_nested_assign_test,
+    "stdlib",
+    "nested_assign_test.zz"
+);
+parity_strict!(
+    parity_stdlib_nested_struct_field_test,
+    "stdlib",
+    "nested_struct_field_test.zz"
+);
+parity_strict!(
+    parity_stdlib_interp_expr_test,
+    "stdlib",
+    "interp_expr_test.zz"
+);
+parity_strict!(
     parity_stdlib_str_extended_test,
     "stdlib",
     "str_extended_test.zz"
@@ -1596,11 +1628,36 @@ parity_strict!(
 );
 parity_strict!(parity_syntax_string_build, "syntax", "string_build.zz");
 parity_strict!(parity_syntax_flat_arrays, "syntax", "flat_arrays.zz");
+parity_strict!(parity_syntax_flat_matrix, "syntax", "flat_matrix.zz");
 parity_strict!(parity_syntax_defer, "syntax", "defer.zz");
 parity_strict!(parity_syntax_dict_iteration, "syntax", "dict_iteration.zz");
 parity_strict!(parity_stdlib_vectors, "stdlib", "vectors.zz");
 parity_strict!(parity_stdlib_vec_sort, "stdlib", "vec_sort.zz");
 parity_strict!(parity_stdlib_math_ops, "stdlib", "math_ops.zz");
+parity_strict!(parity_stdlib_math_gaps, "stdlib", "math_gaps_test.zz");
+parity_strict!(parity_stdlib_str_gaps, "stdlib", "str_gaps_test.zz");
+parity_strict!(parity_stdlib_vec_gaps, "stdlib", "vec_gaps_test.zz");
+parity_strict!(parity_stdlib_json_gaps, "stdlib", "json_gaps_test.zz");
+parity_strict!(parity_stdlib_path_gaps, "stdlib", "path_gaps_test.zz");
+parity_strict!(parity_stdlib_time_gaps, "stdlib", "time_gaps_test.zz");
+parity_strict!(parity_stdlib_regexp_gaps, "stdlib", "regexp_gaps_test.zz");
+parity_strict!(parity_stdlib_bytes_gaps, "stdlib", "bytes_gaps_test.zz");
+parity_strict!(parity_stdlib_csv_gaps, "stdlib", "csv_gaps_test.zz");
+parity_strict!(
+    parity_stdlib_property_gaps,
+    "stdlib",
+    "property_gaps_test.zz"
+);
+parity_strict!(parity_stdlib_dec_gaps, "stdlib", "dec_gaps_test.zz");
+parity_strict!(parity_stdlib_map_gaps, "stdlib", "map_gaps_test.zz");
+parity_strict!(parity_stdlib_set_gaps, "stdlib", "set_gaps_test.zz");
+parity_strict!(
+    parity_stdlib_str_builder_gaps,
+    "stdlib",
+    "str_builder_gaps_test.zz"
+);
+parity_strict!(parity_stdlib_colors_gaps, "stdlib", "colors_gaps_test.zz");
+parity_strict!(parity_stdlib_http_gaps, "stdlib", "http_gaps_test.zz");
 parity_strict!(
     parity_stdlib_matrix_mul_test,
     "stdlib",

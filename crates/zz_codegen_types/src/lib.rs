@@ -317,6 +317,11 @@ pub enum BuildError {
     /// an intentional VM-only gap. The build fails before clang with the
     /// offending names listed (#715).
     UnimplementedNative { names: Vec<String> },
+    /// AddressSanitizer/UBSan are incompatible with this build mode:
+    /// static linking, full LTO, or `zig cc` each produce unresolved ASan
+    /// runtime symbols at link time. Use `--dynamic` (thin LTO is fine) or
+    /// `--cc clang`.
+    SanitizerUnsupported { reason: String },
 }
 
 impl std::fmt::Display for BuildError {
@@ -365,6 +370,14 @@ impl std::fmt::Display for BuildError {
                      runtime (native_impl + ffi_impl) before `-p` / `zz build`.\n\
                      Tracked VM-only gaps: std.http.listen_tls, std.http.fetch_insecure, \
                      std.http.hijack, std.sqlz.mysql.*, and pure-ZZ stdlib functions."
+                )
+            }
+            BuildError::SanitizerUnsupported { reason } => {
+                write!(
+                    f,
+                    "sanitizers (ZZ_SANITIZE) are incompatible with this build: {reason}\n\
+                     hint: use `--dynamic` (thin LTO + sanitizers is supported) or \
+                     `--cc clang`; see `zz build --help`"
                 )
             }
         }

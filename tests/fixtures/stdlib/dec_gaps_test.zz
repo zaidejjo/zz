@@ -1,0 +1,22 @@
+// features: arrays, comparison, imports, print, std-dec, string-literal
+// E2E: std.dec pure-ZZ gap helpers (add/sub/mul/cmp/eq/lt/gt/format/is_valid/scale_of/pow10/to_scaled/from_scaled/trim_zeros + dec.* aliases).
+import std.dec
+
+func main() {
+    println("dec.add(0.1, 0.2): {dec.add("0.1", "0.2")}")
+    println("dec.sub(1.0, 0.3): {dec.sub("1.0", "0.3")}")
+    println("dec.mul(2.5, 4.0): {dec.mul("2.5", "4.0")}")
+    println("dec.cmp(1.5, 2.5): {dec.cmp("1.5", "2.5")}")
+    println("dec.eq(1.00, 1.0): {dec.eq("1.00", "1.0")}")
+    println("dec.lt(0.5, 0.6): {dec.lt("0.5", "0.6")}")
+    println("dec.gt(0.7, 0.6): {dec.gt("0.7", "0.6")}")
+    println("dec.format(1.2345, 2): {dec.format("1.2345", 2)}")
+    println("dec.is_valid(12.34): {dec.is_valid("12.34")}")
+    println("dec.is_valid(abc): {dec.is_valid("abc")}")
+    println("dec.scale_of(1.234): {dec.scale_of("1.234")}")
+    println("dec.pow10(3): {dec.pow10(3)}")
+    println("dec.to_scaled(1.5, 2): {dec.to_scaled("1.5", 2)}")
+    println("dec.from_scaled(150, 2): {dec.from_scaled(150, 2)}")
+    println("dec.trim_zeros(1.500): {dec.trim_zeros("1.500")}")
+    println("dec_gaps_ok")
+}

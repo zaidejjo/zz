@@ -1763,7 +1763,7 @@ pub fn build_release(
 
     // Early validation: exact CLI-contract errors for PGO-cross and
     // static-macOS, before any cache or toolchain work.
-    if let Err(e) = zz_codegen::validate(&opts, target) {
+    if let Err(e) = zz_codegen::validate(&opts, target, rel.provider) {
         return Err(e.to_string());
     }
 

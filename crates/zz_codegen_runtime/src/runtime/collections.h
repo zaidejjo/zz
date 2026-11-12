@@ -326,6 +326,27 @@ static inline int64_t zz_flat_index(int64_t i, int64_t n, const char *func) {
     return idx;
 }
 
+// Fast path for indices the lowerer proved non-negative (non-negative
+// literals, loop counters from `for i in 0..x`, and sums/products of those):
+// the negative-index normalization cannot apply, so the whole check is one
+// unsigned compare.
+static inline int64_t zz_flat_index_nn(int64_t i, int64_t n, const char *func) {
+    if ((uint64_t)i >= (uint64_t)n)
+        zz_index_trap_flat((long long)i, (long long)n, func);
+    return i;
+}
+
+// ---- flat rows (unboxed nested arrays) ---------------------------------
+// `a := []` whose elements are themselves flat scalar arrays lowers to
+// `zz_flat_row *`: each element is a *snapshot* of a row buffer, taken from
+// the function arena when the row is pushed. Copy-on-push gives the same
+// value semantics as the boxed layout (which detaches on write), so mutating
+// the source row afterwards can never be observed through the outer array.
+typedef struct {
+    void *data;
+    int64_t len;
+} zz_flat_row;
+
 // Slice expression (`obj[a:b]`): arrays (items) and strings (bytes).
 zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err);
 
@@ -357,36 +378,12 @@ static inline void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
 
 // Index expression support (lowered from `obj[idx]`). Dispatch on the
 // object tag at runtime: arrays and dicts. Arena buffers write in place.
-static inline void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err) {
-    if (!obj) { if (err) *err = 1; return; }
-    if (obj->tag == ZZ_ARRAY && obj->arr && obj->arr->refs != 1
-        && !zz_array_is_arena(obj->arr)) {
-        zz_value fresh = zz_array_dup(obj->arr);
-        if (!fresh.arr) { if (err) *err = 1; zz_release(&item); return; }
-        zz_release_array(obj->arr);
-        obj->arr = fresh.arr;
-    } else if (obj->tag == ZZ_DICT && obj->dict && obj->dict->refs != 1
-        && !zz_dict_is_arena(obj->dict)) {
-        zz_value fresh = zz_dict_dup_value(obj->dict);
-        if (!fresh.dict) { if (err) *err = 1; zz_release(&item); return; }
-        zz_release_dict(obj->dict);
-        obj->dict = fresh.dict;
-    }
-    switch (obj->tag) {
-    case ZZ_ARRAY:
-        zz_array_set(obj->arr, idx, item, err);
-        if (err && *err) { zz_release(&item); return; }
-        if (item.tag != ZZ_STR && item.tag != ZZ_MUTABLE_STR) zz_release(&item);
-        return;
-    case ZZ_DICT:
-        zz_dict_set(obj->dict, idx, item);
-        if (item.tag != ZZ_STR && item.tag != ZZ_MUTABLE_STR) zz_release(&item);
-        if (err) *err = 0;
-        return;
-    default:
-        if (err) *err = 1;
-    }
-}
+//
+// Defined out-of-line in collections.c (not `static inline`) because it is
+// called through the C-ABI from Rust (`zz_native_rt::pg::dict_insert`) and
+// therefore needs an external symbol to link against — `static inline` gives
+// it internal linkage only.
+void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err);
 
 size_t zz_dict_len(const zz_dict *d);
 
@@ -433,12 +430,10 @@ static inline zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
             zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
             for (size_t i = 0; i < a->len; i++)
                 new_items[i] = a->items[i];
-            // Free the previous heap-backed items buffer, if any. Arena
-            // buffers are reclaimed by the arena reset; NULL is a no-op.
-            // Only heap buffers (from a prior migration) must be freed, else
-            // every grow leaks the old buffer (alloc_churn: ~6 leaked bufs
-            // per iteration × 100k iterations ≈ 195 MB RSS).
-            if (a->items != NULL) free(a->items);
+            // Stack/lit/arena items live on the stack or an arena — they must
+            // NOT be freed (free() on stack/arena memory corrupts the heap).
+            // They're reclaimed when the frame/arena resets. On later grows
+            // `a->refs` is 0/1 so we take the realloc branch above.
             a->items = new_items;
             // Mark migration to heap so `zz_release_array` frees the items
             // buffer when this array is released (refs==0 path). Applies to

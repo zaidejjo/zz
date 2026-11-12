@@ -40,6 +40,41 @@ int zz_dict_is_arena(const zz_dict *d) {
     return d->refs == 0 || d->refs == ZZ_DICT_ARENA_MAGIC;
 }
 
+// Out-of-line external definition (declared in collections.h) so the symbol
+// is linkable from the C-ABI Rust FFI (`zz_native_rt::pg::dict_insert`).
+// `static inline` would give it internal linkage only.
+void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err) {
+    if (!obj) { if (err) *err = 1; return; }
+    if (obj->tag == ZZ_ARRAY && obj->arr && obj->arr->refs != 1) {
+        zz_value fresh = zz_array_dup(obj->arr);
+        if (!fresh.arr) { if (err) *err = 1; zz_release(&item); return; }
+        zz_release_array(obj->arr);
+        obj->arr = fresh.arr;
+    } else if (obj->tag == ZZ_DICT && obj->dict && obj->dict->refs != 1) {
+        // Arena dicts (`refs == ZZ_DICT_ARENA_MAGIC`, e.g. `d := {}`) are
+        // fixed-capacity and cannot grow in place. On first write dup them
+        // to a growable heap dict so `d[k] = v` persists (matches the VM).
+        zz_value fresh = zz_dict_dup_value(obj->dict);
+        if (!fresh.dict) { if (err) *err = 1; zz_release(&item); return; }
+        zz_release_dict(obj->dict);
+        obj->dict = fresh.dict;
+    }
+    switch (obj->tag) {
+    case ZZ_ARRAY:
+        zz_array_set(obj->arr, idx, item, err);
+        if (err && *err) { zz_release(&item); return; }
+        if (item.tag != ZZ_STR && item.tag != ZZ_MUTABLE_STR) zz_release(&item);
+        return;
+    case ZZ_DICT:
+        zz_dict_set(obj->dict, idx, item);
+        if (item.tag != ZZ_STR && item.tag != ZZ_MUTABLE_STR) zz_release(&item);
+        if (err) *err = 0;
+        return;
+    default:
+        if (err) *err = 1;
+    }
+}
+
 // True when storing `v` must copy instead of share: top-level arena
 // ownership, a boxed struct transitively containing one, or a
 // variant/tuple wrapper around a value that does.
@@ -312,7 +347,15 @@ void zz_array_reserve(zz_value arr, size_t additional, int *err) {
 
 void zz_array_push(zz_array *a, zz_value item) {
     if (a->len == a->cap) {
-        size_t nc = a->cap == 0 ? 4 : a->cap * 2;
+        size_t nc;
+        if (a->cap == 0) {
+            nc = 4;
+        } else if (a->cap > SIZE_MAX / 2) {
+            fprintf(stderr, "zz error: array capacity overflow\n");
+            exit(1);
+        } else {
+            nc = a->cap * 2;
+        }
         // Stack/lit/arena arrays need migration to malloc before realloc
         // (realloc on arena/stack memory corrupts the heap — SIGSEGV
         // class; ARENA_MAGIC was missing here while zz_vec_append
@@ -321,9 +364,10 @@ void zz_array_push(zz_array *a, zz_value item) {
             || a->refs == ZZ_ARRAY_ARENA_MAGIC || a->items == NULL) {
             zz_value *new_items = (zz_value *)malloc(nc * sizeof(zz_value));
             for (size_t i = 0; i < a->len; i++) new_items[i] = a->items[i];
-            // Free the previous heap-backed items buffer, if any, to avoid
-            // leaking on every grow of a migrated arena/stack/lit array.
-            if (a->items != NULL) free(a->items);
+            // Stack/lit/arena items live on the stack or an arena — they must
+            // NOT be freed (free() on stack/arena memory corrupts the heap).
+            // They're reclaimed when the frame/arena resets. On later grows
+            // `a->refs` is 0/1 so we take the realloc branch above.
             a->items = new_items;
             // Preserve an accurate `refs == 1` (fresh heap array claiming
             // its first buffer): it proves single ownership, which the
@@ -331,6 +375,10 @@ void zz_array_push(zz_array *a, zz_value item) {
             if (a->refs != 1) a->refs = 0;
         } else {
             a->items = (zz_value *)realloc(a->items, nc * sizeof(zz_value));
+            if (!a->items) {
+                fprintf(stderr, "zz: out of memory\n");
+                exit(1);
+            }
         }
         a->cap = nc;
     }
@@ -1212,15 +1260,26 @@ zz_value zz_vec_push(zz_value arr, zz_value item, int *err) {
     zz_value out = zz_array_dup(arr.arr);
     zz_array *a = out.arr;
     if (a->len >= a->cap) {
-        size_t new_cap = a->cap ? a->cap * 2 : 8;
+        size_t new_cap;
+        if (a->cap == 0) {
+            new_cap = 8;
+        } else if (a->cap > SIZE_MAX / 2) {
+            if (err) *err = 1;
+            return zz_unit();
+        } else {
+            new_cap = a->cap * 2;
+        }
         if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_STACK_MAGIC
             || a->refs == ZZ_ARRAY_ARENA_MAGIC || a->items == NULL) {
             zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
+            if (!new_items) { if (err) *err = 1; return zz_unit(); }
             for (size_t i = 0; i < a->len; i++) {
                 new_items[i] = a->items[i];
             }
-            // Free the previous heap-backed items buffer, if any.
-            if (a->items != NULL) free(a->items);
+            // Stack/lit/arena items live on the stack or an arena — they must
+            // NOT be freed (free() on stack/arena memory corrupts the heap).
+            // They're reclaimed when the frame/arena resets. On later grows
+            // `a->refs` is 0/1 so we take the realloc branch above.
             a->items = new_items;
             // Preserve `refs == 1` (see `zz_array_push`): dup results stay
             // provably single-owner, so a later move-aware push can go
@@ -1228,6 +1287,7 @@ zz_value zz_vec_push(zz_value arr, zz_value item, int *err) {
             if (a->refs != 1) a->refs = 0;
         } else {
             a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));
+            if (!a->items) { if (err) *err = 1; return zz_unit(); }
         }
         a->cap = new_cap;
     }
@@ -1361,16 +1421,26 @@ zz_value zz_vec_insert(zz_value arr, zz_value idx, zz_value item, int *err) {
     zz_value out = zz_array_dup(arr.arr);
     zz_array *o = out.arr;
     if (o->len >= o->cap) {
-        size_t new_cap = o->cap ? o->cap * 2 : 8;
+        size_t new_cap;
+        if (o->cap == 0) {
+            new_cap = 8;
+        } else if (o->cap > SIZE_MAX / 2) {
+            if (err) *err = 1;
+            return zz_unit();
+        } else {
+            new_cap = o->cap * 2;
+        }
         if (o->refs == ZZ_ARRAY_STACK_MAGIC || o->refs == ZZ_ARRAY_LIT_MAGIC
             || o->refs == ZZ_ARRAY_ARENA_MAGIC || o->items == NULL) {
             zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
+            if (!new_items) { if (err) *err = 1; return zz_unit(); }
             for (size_t j = 0; j < o->len; j++) new_items[j] = o->items[j];
             o->items = new_items;
             // Preserve `refs == 1` (see `zz_array_push`).
             if (o->refs != 1) o->refs = 0;
         } else {
             o->items = (zz_value *)realloc(o->items, new_cap * sizeof(zz_value));
+            if (!o->items) { if (err) *err = 1; return zz_unit(); }
         }
         o->cap = new_cap;
     }

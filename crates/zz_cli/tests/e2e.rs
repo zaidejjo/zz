@@ -426,6 +426,7 @@ e2e_success_test!(e2e_syntax_struct_access, "syntax", "struct_access.zz");
 e2e_success_test!(e2e_syntax_struct_debug_fwd, "syntax", "struct_debug_fwd.zz");
 e2e_success_test!(e2e_syntax_string_build, "syntax", "string_build.zz");
 e2e_success_test!(e2e_syntax_flat_arrays, "syntax", "flat_arrays.zz");
+e2e_success_test!(e2e_syntax_flat_matrix, "syntax", "flat_matrix.zz");
 e2e_success_test!(e2e_syntax_dicts, "syntax", "dicts.zz");
 e2e_success_test!(e2e_syntax_dict_eq_order, "syntax", "dict_eq_order.zz");
 e2e_success_test!(e2e_syntax_dicts_nonstr, "syntax", "dicts_nonstr.zz");
@@ -791,6 +792,18 @@ e2e_success_test!(
     "regression",
     "struct_method_self_mutation.zz"
 );
+// GH#796: string concatenation must guard len_a + len_b against overflow.
+e2e_success_test!(
+    e2e_regression_str_concat_overflow,
+    "regression",
+    "str_concat_overflow_test.zz"
+);
+// GH#794/795: array push growth null-checks and cap*2 overflow guard.
+e2e_success_test!(
+    e2e_regression_array_push_growth,
+    "regression",
+    "array_push_growth_test.zz"
+);
 e2e_success_test!(
     e2e_syntax_method_shadow_free,
     "syntax",
@@ -860,6 +873,26 @@ e2e_success_test!(
     "vec_nested_str_parity.zz"
 );
 e2e_success_test!(e2e_stdlib_math_ops, "stdlib", "math_ops.zz");
+e2e_success_test!(e2e_stdlib_math_gaps, "stdlib", "math_gaps_test.zz");
+e2e_success_test!(e2e_stdlib_str_gaps, "stdlib", "str_gaps_test.zz");
+e2e_success_test!(e2e_stdlib_vec_gaps, "stdlib", "vec_gaps_test.zz");
+e2e_success_test!(e2e_stdlib_json_gaps, "stdlib", "json_gaps_test.zz");
+e2e_success_test!(e2e_stdlib_path_gaps, "stdlib", "path_gaps_test.zz");
+e2e_success_test!(e2e_stdlib_time_gaps, "stdlib", "time_gaps_test.zz");
+e2e_success_test!(e2e_stdlib_regexp_gaps, "stdlib", "regexp_gaps_test.zz");
+e2e_success_test!(e2e_stdlib_bytes_gaps, "stdlib", "bytes_gaps_test.zz");
+e2e_success_test!(e2e_stdlib_csv_gaps, "stdlib", "csv_gaps_test.zz");
+e2e_success_test!(e2e_stdlib_property_gaps, "stdlib", "property_gaps_test.zz");
+e2e_success_test!(e2e_stdlib_dec_gaps, "stdlib", "dec_gaps_test.zz");
+e2e_success_test!(e2e_stdlib_map_gaps, "stdlib", "map_gaps_test.zz");
+e2e_success_test!(e2e_stdlib_set_gaps, "stdlib", "set_gaps_test.zz");
+e2e_success_test!(
+    e2e_stdlib_str_builder_gaps,
+    "stdlib",
+    "str_builder_gaps_test.zz"
+);
+e2e_success_test!(e2e_stdlib_colors_gaps, "stdlib", "colors_gaps_test.zz");
+e2e_success_test!(e2e_stdlib_http_gaps, "stdlib", "http_gaps_test.zz");
 e2e_success_test!(e2e_stdlib_matrix_mul_test, "stdlib", "matrix_mul_test.zz");
 e2e_success_test!(e2e_stdlib_math_consts, "stdlib", "math_consts.zz");
 e2e_success_test!(e2e_stdlib_const_index_test, "stdlib", "const_index_test.zz");
@@ -1165,6 +1198,17 @@ e2e_success_test!(e2e_stdlib_link_gates_test, "stdlib", "link_gates_test.zz");
 e2e_success_test!(e2e_stdlib_sqlz_transaction, "stdlib", "sqlz_transaction.zz");
 e2e_success_test!(e2e_stdlib_colors_demo, "stdlib", "colors_demo.zz");
 e2e_success_test!(e2e_stdlib_colors_styles, "stdlib", "colors_styles.zz");
+e2e_success_test!(
+    e2e_stdlib_nested_assign_test,
+    "stdlib",
+    "nested_assign_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_nested_struct_field_test,
+    "stdlib",
+    "nested_struct_field_test.zz"
+);
+e2e_success_test!(e2e_stdlib_interp_expr_test, "stdlib", "interp_expr_test.zz");
 e2e_success_test!(
     e2e_stdlib_option_interpolation,
     "stdlib",

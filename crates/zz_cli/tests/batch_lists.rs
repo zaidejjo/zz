@@ -80,6 +80,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("syntax", "struct_access.zz", true),
     ("syntax", "string_build.zz", true),
     ("syntax", "flat_arrays.zz", true),
+    ("syntax", "flat_matrix.zz", true),
     ("syntax", "defer.zz", false),
     ("syntax", "dict_iteration.zz", true),
     ("stdlib", "vectors.zz", false),
@@ -126,6 +127,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("syntax", "closure_in_loop.zz", false),
     ("syntax", "closure_nested.zz", false),
     ("syntax", "closure_capture_struct_array.zz", false),
+    ("syntax", "struct_array_index_field.zz", true),
     ("stdlib", "bytes_finish_test.zz", true),
     ("stdlib", "http_delete_put.zz", true),
     ("stdlib", "http_fetch_insecure_test.zz", true),
@@ -152,6 +154,11 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "crypto_jwt_test.zz", false),
     ("regression", "edge_float_format.zz", false),
     ("regression", "edge_float_nan_display.zz", false),
+    ("regression", "str_concat_overflow_test.zz", true),
+    ("regression", "array_push_growth_test.zz", true),
+    ("stdlib", "interp_expr_test.zz", false),
+    ("stdlib", "nested_assign_test.zz", false),
+    ("stdlib", "nested_struct_field_test.zz", false),
 ];
 
 /// (category/file, reason). Everything strict outside regression/errors

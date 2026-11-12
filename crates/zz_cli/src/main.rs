@@ -862,9 +862,11 @@ fn extract_color_flag(args: &[String]) -> Result<(ColorMode, Vec<String>), Strin
                 "auto" => ColorMode::Auto,
                 "always" => ColorMode::Always,
                 "never" => ColorMode::Never,
-                other => return Err(format!(
+                other => {
+                    return Err(format!(
                     "zz: unknown `--color` value `{other}` (expected `auto`, `always`, or `never`)"
-                )),
+                ))
+                }
             };
             i += 2;
             continue;
@@ -873,9 +875,11 @@ fn extract_color_flag(args: &[String]) -> Result<(ColorMode, Vec<String>), Strin
                 "auto" => ColorMode::Auto,
                 "always" => ColorMode::Always,
                 "never" => ColorMode::Never,
-                other => return Err(format!(
+                other => {
+                    return Err(format!(
                     "zz: unknown `--color` value `{other}` (expected `auto`, `always`, or `never`)"
-                )),
+                ))
+                }
             };
             i += 1;
             continue;
@@ -1423,37 +1427,38 @@ pub(crate) fn prewarm_run_cache(
 }
 pub(crate) fn render_eval_error(e: &zz_runtime::EvalError, name: &str, source: &str) -> String {
     if source.is_empty() {
-        eprintln!(
+        // Build a simple diagnostic string for bytecode-span-only errors.
+        // The caller prints it once; do not eprintln! here (would duplicate).
+        let mut s = format!(
             "error: {} (bytecode span {}..{})",
             e.message, e.span.start, e.span.end
         );
         for (fname, _) in &e.backtrace {
             if !fname.is_empty() {
-                eprintln!("  at {fname}");
+                s.push_str(&format!("\n  at {fname}"));
             }
         }
         for note in &e.notes {
-            eprintln!("  note: {note}");
+            s.push_str(&format!("\n  note: {note}"));
         }
-        return format!("runtime error: {}", e.message);
-    }
-    let mut files = Files::new();
-    let id = files.add(name.to_string(), source.to_string());
-    let mut diag = error_at(e.message.clone(), e.span);
-    for (fname, _span) in &e.backtrace {
-        if !fname.is_empty() {
-            diag = diag.with_note(format!("  at {fname}"));
+        s
+    } else {
+        let mut files = Files::new();
+        let id = files.add(name.to_string(), source.to_string());
+        let mut diag = error_at(e.message.clone(), e.span);
+        for (fname, _span) in &e.backtrace {
+            if !fname.is_empty() {
+                diag = diag.with_note(format!("  at {fname}"));
+            }
         }
+        for note in &e.notes {
+            diag = diag.with_note(note.clone());
+        }
+        let diags = vec![diag];
+        // Return the full formatted diagnostic; the caller prints it once.
+        // Do not eprint! here (would duplicate the caller's eprintln!).
+        render_to_string(&files, id, &diags, ColorMode::Auto)
     }
-    for note in &e.notes {
-        diag = diag.with_note(note.clone());
-    }
-    let diags = vec![diag];
-    eprint!("{}", render_to_string(&files, id, &diags, ColorMode::Auto));
-    // The trailing `zz: ...` line is what survives when stderr is captured
-    // and only the tail is read, so make it name the failure instead of the
-    // opaque "program failed".
-    format!("runtime error: {}", e.message)
 }
 
 /// Print a non-unit program result, then auto-call `main()` when the

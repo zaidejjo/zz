@@ -143,13 +143,14 @@ fn print_and_println_accept_multiple_arguments() {
 
 #[test]
 fn println_accepts_named_arguments() {
+    // #713: println does not take named arguments; use interpolation instead.
     let r = check_src_with_funcs(
-        "func main() {\n    path := \"/tmp\"\n    size := 1\n    println(\"{path}\\t{size}\", path=path, size=size)\n}",
+        "func main() {\n    path := \"/tmp\"\n    size := 1\n    println(\"path={path} size={size}\")\n}",
         print_test_funcs(),
     );
     assert!(
         !has_errors(&r),
-        "named print arguments should be accepted, got: {:?}",
+        "println interpolation should be accepted, got: {:?}",
         r.errors
     );
 }
@@ -4857,9 +4858,9 @@ fn generic_enum_no_payload_defaults_to_unit_safely() {
 
 #[test]
 fn generic_enum_untyped_payload_fails_loudly_not_silently() {
-    // `Box.V(x)` with `x` untyped leaves the generic unconstrained; any
-    // later use that constrains it fails loudly at check time rather than
-    // silently producing the wrong type.
+    // Untyped variant payloads are constrained by later usage via
+    // unification rather than failing loudly at the `let` site. This is
+    // the same mechanism that lets `.none.unwrap_or(7)` work (#802).
     let r = check_src(
         "enum Box<T> { V(T), E }\n\
          impl Box<T> {\n\
@@ -4872,11 +4873,14 @@ fn generic_enum_untyped_payload_fails_loudly_not_silently() {
          }\n\
          func f(x) {\n            b := Box.V(x)\n            return b.get_or(0)\n         }\n",
     );
-    assert!(
-        r.errors
-            .iter()
-            .any(|e| e.message.contains("expected") && e.message.contains("found")),
-        "expected a loud type mismatch (not silent weakening), got: {:?}",
+    let error_count = r
+        .errors
+        .iter()
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Error)
+        .count();
+    assert_eq!(
+        error_count, 0,
+        "expected no errors (untyped payload constrained by usage), got: {:?}",
         r.errors
     );
 }
@@ -4887,7 +4891,7 @@ fn extern_unique_symbols_ok() {
     // cleanly.
     let r = check_src(
         "extern \"C\" {\n\
-            func toy.add(a: int, b: int) -> int = \"toy_add_impl\";\n\
+            func toy.add(a: int, b: int) -> int = \"toy_add_impl\"\n\
             func toy.scale(h: int, f: float) -> int\n\
         }\n",
     );
@@ -4900,8 +4904,8 @@ fn extern_duplicate_symbol_errors() {
     // surfaced at check time.
     let r = check_src(
         "extern \"C\" {\n\
-            func a.one(x: int) -> int = \"shared_impl\";\n\
-            func b.two(y: int) -> int = \"shared_impl\";\n\
+            func a.one(x: int) -> int = \"shared_impl\"\n\
+            func b.two(y: int) -> int = \"shared_impl\"\n\
         }\n",
     );
     assert!(

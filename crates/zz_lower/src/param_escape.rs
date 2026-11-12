@@ -33,6 +33,7 @@ use std::collections::{HashMap, HashSet};
 
 use zz_checker::Type;
 use zz_frontend::ast::{Block, Expr, FmtPart, MatchArm, Pattern, Program, Stmt};
+use zz_frontend::move_elide::count_refs;
 
 /// Outcome of evaluating an expression: whether tainted storage escapes
 /// through it (calls into unknown code, captures, deferred runs), and
@@ -1165,11 +1166,208 @@ pub(crate) fn flat_array_locals(
             cand: &candidates,
             bad: &mut bad,
             escaping: false,
+            inferred_layout: false,
+            row_cand: None,
+            rows: None,
+            declared_rows: vec![HashSet::new()],
+            row_ok: None,
+            row_elems: None,
+            transfer_into: None,
         };
         scan.block(block);
     }
     candidates.retain(|n, _| !bad.contains(n));
     candidates.into_keys().collect()
+}
+
+/// Use scan for arrays inferred from usage (untyped `name := []` declarations
+/// whose pushes reveal a flat element type).
+///
+/// This layout has no boxed fallback at any mention, so the scan is stricter
+/// than the typed contract in one direction (any plain mention disqualifies)
+/// and more permissive in another: the inferred layout implements
+/// `arr[i] = v` stores and the self-append assignment
+/// (`arr = vec.push(arr, x)` / `arr = arr.push(x)`), so those shapes are
+/// allowed here. `cand` maps each candidate to whether its element is a
+/// scalar (struct elements cannot be index-stored).
+///
+/// Returns the candidates with an unsupported mention; callers keep those
+/// boxed.
+pub(crate) fn untyped_flat_uses_ok(block: &Block, cand: &HashMap<String, bool>) -> HashSet<String> {
+    untyped_flat_uses_ok_with_rows(block, cand, &HashSet::new())
+}
+
+/// Like [`untyped_flat_uses_ok`], but a bare candidate passed as the element
+/// of a push into one of `rows` (flat-row arrays) is a pure buffer read: the
+/// nested push lowering snapshots it. Callers pass the row set *after* it is
+/// final, so a scalar candidate is never transferred into a boxed array.
+pub(crate) fn untyped_flat_uses_ok_with_rows(
+    block: &Block,
+    cand: &HashMap<String, bool>,
+    rows: &HashSet<String>,
+) -> HashSet<String> {
+    let mut bad: HashSet<String> = HashSet::new();
+    {
+        let mut scan = FlatUseScan {
+            cand,
+            bad: &mut bad,
+            escaping: false,
+            inferred_layout: true,
+            row_cand: None,
+            rows: None,
+            declared_rows: vec![HashSet::new()],
+            row_ok: None,
+            row_elems: None,
+            transfer_into: Some(rows),
+        };
+        scan.block(block);
+    }
+    bad
+}
+
+/// Use scan for arrays inferred to hold *flat scalar rows* — the unboxed
+/// nested-array layout (`a := []` whose every push appends a flat scalar
+/// array, lowered to `zz_flat_row *`).
+///
+/// `rows` maps this body's phase-1 flat scalar locals to their element C
+/// type; `cand` is the set of still-unclassified `name := []` candidates.
+/// Only shapes the nested lowering implements are allowed:
+///
+/// - the candidate's own `a := []`,
+/// - `a = vec.push(a, row)` / `a = a.push(row)` / the statement forms, where
+///   `row` is a flat scalar local declared before the push,
+/// - `a[i][j]` reads and `a[i][j] = v` stores,
+/// - `len(a)`.
+///
+/// Every other mention disqualifies the candidate, because the row layout has
+/// no boxed fallback. Returns the supported candidates mapped to the inner
+/// row element C type.
+pub(crate) fn untyped_flat_rows_uses_ok(
+    block: &Block,
+    rows: &HashMap<String, String>,
+    cand: &HashSet<String>,
+) -> (HashMap<String, String>, HashMap<String, HashSet<String>>) {
+    let scalar_cand: HashMap<String, bool> = HashMap::new();
+    let mut bad: HashSet<String> = HashSet::new();
+    let mut row_ok: HashMap<String, String> = HashMap::new();
+    let mut row_elems: HashMap<String, HashSet<String>> = HashMap::new();
+    {
+        let mut scan = FlatUseScan {
+            cand: &scalar_cand,
+            bad: &mut bad,
+            escaping: false,
+            inferred_layout: true,
+            row_cand: Some(cand),
+            rows: Some(rows),
+            declared_rows: vec![HashSet::new()],
+            row_ok: Some(&mut row_ok),
+            row_elems: Some(&mut row_elems),
+            transfer_into: None,
+        };
+        scan.block(block);
+    }
+    row_ok.retain(|n, _| !bad.contains(n));
+    row_elems.retain(|n, _| row_ok.contains_key(n));
+    (row_ok, row_elems)
+}
+
+/// Element expression of a self-append assignment
+/// `var = vec.push(var, e)` / `var = std.vec.push(var, e)` /
+/// `var = var.push(e)`.
+///
+/// Mirrors `zz_frontend::move_elide::classify_self_assign` so the scan never
+/// allows a shape the lowering cannot emit: no named arguments and exactly one
+/// reference to `var` (the receiver), which keeps the element from observing
+/// the moved-from slot.
+fn self_push_elem<'e>(var: &str, rhs: &'e Expr) -> Option<&'e Expr> {
+    let Expr::Call {
+        callee,
+        args,
+        named,
+        ..
+    } = rhs
+    else {
+        return None;
+    };
+    if !named.is_empty() {
+        return None;
+    }
+    // Exactly one reference to the array (the receiver): the lowering's
+    // take-before-store window is only sound when the element cannot
+    // observe the moved-from slot.
+    if count_refs(rhs, var) != 1 {
+        return None;
+    }
+    let fn_push = match callee.as_ref() {
+        Expr::Ident { name, .. } => name == "vec.push" || name == "std.vec.push",
+        Expr::Path { parts, .. } => {
+            matches!(parts.as_slice(), [m, p] if m == "vec" && p == "push")
+                || matches!(parts.as_slice(), [s, m, p] if s == "std" && m == "vec" && p == "push")
+        }
+        _ => false,
+    };
+    if fn_push && args.len() == 2 {
+        return match &args[0] {
+            Expr::Ident { name, .. } if name == var => Some(&args[1]),
+            _ => None,
+        };
+    }
+    let method_push = match callee.as_ref() {
+        Expr::Path { parts, .. } => parts.len() == 2 && parts[0] == var && parts[1] == "push",
+        Expr::Field { obj, name, .. } => {
+            name == "push" && matches!(obj.as_ref(), Expr::Ident { name: n, .. } if n == var)
+        }
+        _ => false,
+    };
+    if method_push && args.len() == 1 {
+        return Some(&args[0]);
+    }
+    None
+}
+
+/// Receiver name and element argument of any push spelling: the function
+/// forms `vec.push(recv, x)` / `std.vec.push(recv, x)` / `ns.push(recv, x)`,
+/// and the method forms `recv.push(x)` / `recv.push` as a field call. Used by
+/// the row scan to validate statement-form appends, where the element must be
+/// a specific row local (unlike the scalar scan, which only looks at types).
+fn push_recv_arg(rhs: &Expr) -> Option<(&str, &Expr)> {
+    let Expr::Call {
+        callee,
+        args,
+        named,
+        ..
+    } = rhs
+    else {
+        return None;
+    };
+    if !named.is_empty() {
+        return None;
+    }
+    let fn_push = match callee.as_ref() {
+        Expr::Ident { name, .. } => name == "vec.push" || name == "std.vec.push",
+        Expr::Path { parts, .. } => {
+            matches!(parts.as_slice(), [m, p] if m == "vec" && p == "push")
+                || matches!(parts.as_slice(), [s, m, p] if s == "std" && m == "vec" && p == "push")
+        }
+        _ => false,
+    };
+    if fn_push && args.len() == 2 {
+        return match &args[0] {
+            Expr::Ident { name, .. } => Some((name.as_str(), &args[1])),
+            _ => None,
+        };
+    }
+    let method_recv = match callee.as_ref() {
+        Expr::Path { parts, .. } if parts.len() == 2 && parts[1] == "push" && args.len() == 1 => {
+            Some(parts[0].as_str())
+        }
+        Expr::Field { obj, name, .. } if name == "push" && args.len() == 1 => match obj.as_ref() {
+            Expr::Ident { name, .. } => Some(name.as_str()),
+            _ => None,
+        },
+        _ => None,
+    };
+    method_recv.map(|r| (r, &args[0]))
 }
 
 /// Program-wide version of [`flat_array_locals`] for module-level arrays:
@@ -1235,6 +1433,13 @@ pub(crate) fn flat_global_arrays(
             cand: &candidates,
             bad: &mut bad,
             escaping: false,
+            inferred_layout: false,
+            row_cand: None,
+            rows: None,
+            declared_rows: vec![HashSet::new()],
+            row_ok: None,
+            row_elems: None,
+            transfer_into: None,
         };
         for stmt in &program.stmts {
             match stmt {
@@ -1261,6 +1466,31 @@ struct FlatUseScan<'a> {
     cand: &'a HashMap<String, bool>,
     bad: &'a mut HashSet<String>,
     escaping: bool,
+    /// Enable the shapes only the inferred layout implements: `arr[i] = v`
+    /// stores (scalar elements only) and the self-append assignment. The
+    /// typed [`flat_array_locals`] contract keeps this off; see
+    /// [`untyped_flat_uses_ok`].
+    inferred_layout: bool,
+    /// Flat-row candidates (`zz_flat_row *`). Populated only by
+    /// [`untyped_flat_rows_uses_ok`]; `cand` is empty in that scan so none of
+    /// the scalar shapes can match a row name by accident.
+    row_cand: Option<&'a HashSet<String>>,
+    /// Flat scalar locals of the body. Row pushes are only sound when the
+    /// pushed element is one of these (a flat row buffer with a known length).
+    rows: Option<&'a HashMap<String, String>>,
+    /// Names declared so far in the enclosing blocks. A row (or row-array)
+    /// push before the declaration would lower against an identifier that is
+    /// not in C scope, so order is part of the contract.
+    declared_rows: Vec<HashSet<String>>,
+    /// Accepted row candidates: name -> inner row element C type.
+    row_ok: Option<&'a mut HashMap<String, String>>,
+    /// Element (row local) names used by every accepted row candidate. The
+    /// caller keeps a row only when all of them stay flat.
+    row_elems: Option<&'a mut HashMap<String, HashSet<String>>>,
+    /// Scalar scan only: row arrays whose element argument may be a bare flat
+    /// candidate. Appending a flat row element snapshots the buffer, so the
+    /// element mention is a pure read instead of an escape.
+    transfer_into: Option<&'a HashSet<String>>,
 }
 
 impl<'a> FlatUseScan<'a> {
@@ -1274,8 +1504,60 @@ impl<'a> FlatUseScan<'a> {
         self.cand.get(name).copied().unwrap_or(false)
     }
 
+    /// True when `name` is a flat-row candidate of the current scan.
+    fn is_row_cand(&self, name: &str) -> bool {
+        self.row_cand.is_some_and(|c| c.contains(name))
+    }
+
+    /// True when `name` was already declared in an enclosing block.
+    fn declared_in_scope(&self, name: &str) -> bool {
+        self.declared_rows.iter().any(|s| s.contains(name))
+    }
+
+    /// Validate one `a = vec.push(a, row)` / `a = a.push(row)` append on a
+    /// flat-row candidate: the element must be a flat scalar local declared
+    /// before the push (so the lowering can read its buffer and length), and
+    /// every append must agree on the inner row element type.
+    fn record_row_push(&mut self, outer: &str, arg: &Expr) {
+        if !self.declared_in_scope(outer) {
+            self.mention(outer);
+            return;
+        }
+        let Expr::Ident { name: row, .. } = arg else {
+            self.mention(outer);
+            return;
+        };
+        // The pushed row must be a flat scalar local of this body *declared
+        // before* the push: the lowering reads `row` + `row_len` here.
+        let Some(inner) = self.rows.and_then(|r| r.get(row)).cloned() else {
+            self.mention(outer);
+            return;
+        };
+        if !self.declared_in_scope(row) {
+            self.mention(outer);
+            return;
+        }
+        match self.row_ok.as_ref().and_then(|m| m.get(outer)).cloned() {
+            Some(prev) if prev != inner => self.mention(outer),
+            Some(_) => {}
+            None => {
+                if let Some(map) = self.row_ok.as_mut() {
+                    map.insert(outer.to_string(), inner);
+                } else {
+                    self.mention(outer);
+                }
+            }
+        }
+        if let Some(elems) = self.row_elems.as_mut() {
+            elems
+                .entry(outer.to_string())
+                .or_default()
+                .insert(row.to_string());
+        }
+    }
+
     fn mention(&mut self, name: &str) {
-        if self.is_cand(name) {
+        if self.is_cand(name) || self.is_row_cand(name) {
             self.bad.insert(name.to_string());
         }
     }
@@ -1322,9 +1604,11 @@ impl<'a> FlatUseScan<'a> {
     }
 
     fn block(&mut self, b: &Block) {
+        self.declared_rows.push(HashSet::new());
         for stmt in &b.stmts {
             self.stmt(stmt);
         }
+        self.declared_rows.pop();
     }
 
     fn stmt(&mut self, stmt: &Stmt) {
@@ -1333,12 +1617,25 @@ impl<'a> FlatUseScan<'a> {
                 // A redeclaration shadows the candidate: its later uses are
                 // not the array, so keep the array boxed (conservative). The
                 // candidate's own `arr: [T] = []` declaration is exempt.
-                let own_flat_decl = self.is_cand(&name.name)
+                let own_flat_decl = (self.is_cand(&name.name) || self.is_row_cand(&name.name))
                     && matches!(value, Expr::Array { elems, .. } if elems.is_empty());
                 if !own_flat_decl {
                     self.mention(&name.name);
                 }
                 self.expr(value);
+                // Row buffers must be declared before they are pushed (the
+                // lowering reads `row` + `row_len` at the push site).
+                if self.rows.is_some_and(|r| r.contains_key(&name.name)) {
+                    if let Some(top) = self.declared_rows.last_mut() {
+                        top.insert(name.name.clone());
+                    }
+                }
+                // Row-array candidates: `a := []` is what later pushes bind to.
+                if own_flat_decl && self.is_row_cand(&name.name) {
+                    if let Some(top) = self.declared_rows.last_mut() {
+                        top.insert(name.name.clone());
+                    }
+                }
             }
             Stmt::For {
                 vars, iter, body, ..
@@ -1358,9 +1655,72 @@ impl<'a> FlatUseScan<'a> {
                     self.poison_expr(v);
                 }
             }
-            Stmt::Assign { target, value, .. } | Stmt::CompoundAssign { target, value, .. } => {
-                // Stores (including `arr[i] = v`) are not implemented on
-                // the flat layout: the target is a poison position.
+            Stmt::Assign { target, value, .. } => {
+                // Self-append (`arr = vec.push(arr, x)` / `arr = arr.push(x)`):
+                // implemented only by the inferred layout, where the whole
+                // assignment lowers inline — scan just the element (it must
+                // not mention the array; the take precedes the store).
+                if self.inferred_layout && !self.escaping {
+                    if let Expr::Ident { name, .. } = target {
+                        if self.is_row_cand(name) {
+                            if let Some(elem) = self_push_elem(name, value) {
+                                self.record_row_push(name, elem);
+                                return;
+                            }
+                        }
+                        if self.is_cand(name) {
+                            if let Some(elem) = self_push_elem(name, value) {
+                                self.expr(elem);
+                                return;
+                            }
+                        }
+                    }
+                }
+                // `rows[i][j] = v` on a flat-row outer: the row buffer is
+                // reached directly, so scan the outer index, the inner index
+                // and the value; the receiver is consumed.
+                if !self.escaping {
+                    if let Expr::Index { obj, index, .. } = target {
+                        if let Expr::Index {
+                            obj: root,
+                            index: i,
+                            ..
+                        } = obj.as_ref()
+                        {
+                            if let Expr::Ident { name, .. } = root.as_ref() {
+                                if self.is_row_cand(name) {
+                                    self.expr(i);
+                                    self.expr(index);
+                                    self.expr(value);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                // `arr[i] = v` (scalar flat elements): implemented as a direct
+                // buffer store, so the base is consumed and only the index and
+                // the value need scanning. Struct elements have no flat store
+                // yet, hence the scalar check.
+                if self.inferred_layout && !self.escaping {
+                    if let Expr::Index { obj, index, .. } = target {
+                        if let Expr::Ident { name, .. } = obj.as_ref() {
+                            if self.is_scalar_cand(name) {
+                                self.expr(index);
+                                self.expr(value);
+                                return;
+                            }
+                        }
+                    }
+                }
+                // Any other store (`b = arr`, `arr = other`, `arr += x`, …) is
+                // not implemented on the flat layout: the target is a poison
+                // position.
+                self.poison_expr(target);
+                self.expr(value);
+            }
+            Stmt::CompoundAssign { target, value, .. } => {
+                // Compounds are not implemented on the flat layout.
                 self.poison_expr(target);
                 self.expr(value);
             }
@@ -1374,7 +1734,23 @@ impl<'a> FlatUseScan<'a> {
                 self.expr(expr);
                 self.escaping = saved;
             }
-            Stmt::Expr(e) => self.expr(e),
+            Stmt::Expr(e) => {
+                // Statement-form row append (`a.push(row)`,
+                // `vec.push(a, row)`, …): an in-place mutation, so the
+                // receiver is consumed. Validate the element; a value-position
+                // push (e.g. `if a.push(row)`) falls through to `expr` and
+                // disqualifies the candidate, because that path boxes a
+                // `zz_value` result the row layout cannot produce.
+                if !self.escaping {
+                    if let Some((recv, arg)) = push_recv_arg(e) {
+                        if self.is_row_cand(recv) {
+                            self.record_row_push(recv, arg);
+                            return;
+                        }
+                    }
+                }
+                self.expr(e)
+            }
             Stmt::Func { body, .. } => self.poison_block(body),
             Stmt::Impl { methods, .. } => {
                 for m in methods {
@@ -1403,6 +1779,25 @@ impl<'a> FlatUseScan<'a> {
                 named,
                 ..
             } => {
+                // Row transfer: a bare flat candidate passed as the element
+                // of a push into a flat-row array is snapshotted by the nested
+                // push lowering, so the mention is a pure read. Every other
+                // argument is still scanned (the receiver is consumed here).
+                if self.inferred_layout && !self.escaping {
+                    if let Some((recv, elem)) = push_recv_arg(e) {
+                        if self.transfer_into.is_some_and(|set| set.contains(recv)) {
+                            for a in args {
+                                if !std::ptr::eq(a, elem) {
+                                    self.expr(a);
+                                }
+                            }
+                            for (_, v) in named {
+                                self.expr(v);
+                            }
+                            return;
+                        }
+                    }
+                }
                 // `len(arr)` consumes its argument as a length read, so the
                 // generic argument scan below must skip it.
                 let mut args_consumed = false;
@@ -1427,7 +1822,9 @@ impl<'a> FlatUseScan<'a> {
                     Expr::Ident {
                         name: callee_name, ..
                     } if callee_name == "len" && args.len() == 1 => match &args[0] {
-                        Expr::Ident { name, .. } if self.is_cand(name) => {
+                        Expr::Ident { name, .. }
+                            if self.is_cand(name) || self.is_row_cand(name) =>
+                        {
                             args_consumed = true;
                         }
                         other => self.expr(other),
@@ -1448,6 +1845,25 @@ impl<'a> FlatUseScan<'a> {
             // element arrays may be indexed directly (struct arrays are
             // read through `arr[i].field`, handled above).
             Expr::Index { obj, index, .. } => {
+                // `rows[i][j]` on a flat-row outer: the row handle is reached
+                // directly and both indices are scanned; the receiver is
+                // consumed (no boxed `rows[i]` value is ever materialized).
+                if !self.escaping {
+                    if let Expr::Index {
+                        obj: root,
+                        index: i,
+                        ..
+                    } = obj.as_ref()
+                    {
+                        if let Expr::Ident { name, .. } = root.as_ref() {
+                            if self.is_row_cand(name) {
+                                self.expr(i);
+                                self.expr(index);
+                                return;
+                            }
+                        }
+                    }
+                }
                 match obj.as_ref() {
                     Expr::Ident { name, .. } if self.is_scalar_cand(name) && !self.escaping => {}
                     _ => self.expr(obj),
@@ -1731,6 +2147,31 @@ mod tests {
         flat_names_with(src, &|_| false)
     }
 
+    /// `untyped_flat_uses_ok` over the parsed `main` body of `src`, with
+    /// `cand` naming the inferred candidates (name, is-scalar-element).
+    fn untyped_bad(src: &str, cand: &[(&str, bool)]) -> HashSet<String> {
+        let parsed = zz_frontend::parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let body = parsed
+            .program
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                Stmt::Func { name, body, .. } if name.join(".") == "main" => Some(body),
+                _ => None,
+            })
+            .expect("main body");
+        let map: HashMap<String, bool> = cand
+            .iter()
+            .map(|(name, scalar)| (name.to_string(), *scalar))
+            .collect();
+        untyped_flat_uses_ok(body, &map)
+    }
+
     /// `flat_global_arrays` over a parsed program (bare globals only).
     fn flat_global_names(src: &str) -> HashSet<String> {
         let parsed = zz_frontend::parse(src);
@@ -1866,6 +2307,232 @@ mod tests {
             "func main() { arr: [int] = []\narr.push(1)\nif true { arr := [1, 2]\nprintln(len(arr)) } }",
         );
         assert!(names.is_empty(), "expected boxed, got {names:?}");
+    }
+
+    #[test]
+    fn untyped_self_push_and_index_store_are_eligible() {
+        let bad = untyped_bad(
+            "func main() {
+                flags := []
+                for i in 0..3 { flags = vec.push(flags, true) }
+                flags[0] = false
+                for x in flags { println(x) }
+                println(len(flags))
+                println(flags[1])
+            }",
+            &[("flags", true)],
+        );
+        assert!(bad.is_empty(), "expected flat, got {bad:?}");
+    }
+
+    #[test]
+    fn untyped_method_self_push_is_eligible() {
+        let bad = untyped_bad(
+            "func main() {
+                arr := []
+                for i in 0..3 { arr = arr.push(i) }
+                println(len(arr))
+            }",
+            &[("arr", true)],
+        );
+        assert!(bad.is_empty(), "expected flat, got {bad:?}");
+    }
+
+    #[test]
+    fn untyped_struct_index_store_disqualifies() {
+        // Struct elements have no flat index store yet.
+        let bad = untyped_bad(
+            "func main() {
+                pts := []
+                for i in 0..3 { pts = vec.push(pts, Pt{ x: 1, y: 2 }) }
+                pts[0] = Pt{ x: 3, y: 4 }
+            }",
+            &[("pts", false)],
+        );
+        assert!(bad.contains("pts"), "expected boxed, got {bad:?}");
+    }
+
+    #[test]
+    fn untyped_standalone_push_call_disqualifies() {
+        // Only the self-append *assignment* lowers; a bare push statement
+        // would reach the boxed native.
+        let bad = untyped_bad(
+            "func main() {
+                arr := []
+                vec.push(arr, 1)
+            }",
+            &[("arr", true)],
+        );
+        assert!(bad.contains("arr"), "expected boxed, got {bad:?}");
+    }
+
+    #[test]
+    fn untyped_whole_assignment_disqualifies() {
+        let bad = untyped_bad(
+            "func main() {
+                arr := []
+                other := []
+                arr = other
+            }",
+            &[("arr", true)],
+        );
+        assert!(bad.contains("arr"), "expected boxed, got {bad:?}");
+    }
+
+    #[test]
+    fn untyped_element_mentioning_array_disqualifies() {
+        // `arr = vec.push(arr, len(arr))` would read a moved-from slot; the
+        // single-reference check in `self_push_elem` catches it.
+        let bad = untyped_bad(
+            "func main() {
+                arr := []
+                arr = vec.push(arr, len(arr))
+            }",
+            &[("arr", true)],
+        );
+        assert!(bad.contains("arr"), "expected boxed, got {bad:?}");
+    }
+
+    #[test]
+    fn untyped_compound_index_store_disqualifies() {
+        let bad = untyped_bad(
+            "func main() {
+                arr := []
+                arr[0] += 1
+            }",
+            &[("arr", true)],
+        );
+        assert!(bad.contains("arr"), "expected boxed, got {bad:?}");
+    }
+
+    #[test]
+    fn untyped_plain_mention_disqualifies() {
+        let bad = untyped_bad(
+            "func main() {
+                arr := []
+                println(arr)
+            }",
+            &[("arr", true)],
+        );
+        assert!(bad.contains("arr"), "expected boxed, got {bad:?}");
+    }
+
+    /// `untyped_flat_rows_uses_ok` over the parsed `main` body of `src`.
+    /// `rows` names flat scalar locals (inner element `int64_t`); `cand`
+    /// names the outer row-array candidates.
+    fn flat_rows_ok(src: &str, rows: &[&str], cand: &[&str]) -> HashMap<String, String> {
+        let parsed = zz_frontend::parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let body = parsed
+            .program
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                Stmt::Func { name, body, .. } if name.join(".") == "main" => Some(body),
+                _ => None,
+            })
+            .expect("main body");
+        let rows: HashMap<String, String> = rows
+            .iter()
+            .map(|n| (n.to_string(), "int64_t".to_string()))
+            .collect();
+        let cand: HashSet<String> = cand.iter().map(|n| n.to_string()).collect();
+        untyped_flat_rows_uses_ok(body, &rows, &cand).0
+    }
+
+    #[test]
+    fn flat_rows_matrix_shape_is_supported() {
+        let ok = flat_rows_ok(
+            "func main() {
+                n := 4
+                a := []
+                for i in 0..n {
+                    row := []
+                    for j in 0..n { row = vec.push(row, j) }
+                    a = vec.push(a, row)
+                }
+                total := 0
+                for i in 0..n {
+                    for j in 0..n { total = total + a[i][j] }
+                }
+                a[0][0] = 1
+                println(total)
+                println(len(a))
+            }",
+            &["row"],
+            &["a"],
+        );
+        assert_eq!(ok.get("a").map(String::as_str), Some("int64_t"));
+    }
+
+    #[test]
+    fn flat_rows_bare_row_value_disqualifies() {
+        // `a[0]` alone has no flat representation (the element is a row
+        // snapshot, not a `zz_value` array).
+        let ok = flat_rows_ok(
+            "func main() {
+                a := []
+                row := []
+                row = vec.push(row, 1)
+                a = vec.push(a, row)
+                first := a[0]
+                println(len(first))
+            }",
+            &["row"],
+            &["a"],
+        );
+        assert!(ok.is_empty(), "expected boxed, got {ok:?}");
+    }
+
+    #[test]
+    fn flat_rows_push_before_row_decl_disqualifies() {
+        // The lowering reads `row` + `row_len` at the push site; a push
+        // before the declaration would reference names outside C scope.
+        let ok = flat_rows_ok(
+            "func main() {
+                a := []
+                a = vec.push(a, row)
+                row := []
+                row = vec.push(row, 1)
+            }",
+            &["row"],
+            &["a"],
+        );
+        assert!(ok.is_empty(), "expected boxed, got {ok:?}");
+    }
+
+    #[test]
+    fn flat_rows_push_of_unknown_local_disqualifies() {
+        let ok = flat_rows_ok(
+            "func main() {
+                a := []
+                x := 1
+                a = vec.push(a, x)
+            }",
+            &["row"],
+            &["a"],
+        );
+        assert!(ok.is_empty(), "expected boxed, got {ok:?}");
+    }
+
+    #[test]
+    fn flat_rows_for_in_disqualifies() {
+        let ok = flat_rows_ok(
+            "func main() {
+                a := []
+                row := []
+                row = vec.push(row, 1)
+                a = vec.push(a, row)
+                for r in a { println(len(r)) }
+            }",
+            &["row"],
+            &["a"],
+        );
+        assert!(ok.is_empty(), "expected boxed, got {ok:?}");
     }
 
     #[test]

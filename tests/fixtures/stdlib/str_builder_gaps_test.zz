@@ -1,0 +1,15 @@
+// features: arrays, comparison, imports, print, std-bytes, std-str, string-literal
+// E2E: std.str.builder pure-ZZ gap helpers (builder/push_part/finish/builder_len/join_parts + str.* aliases).
+import std.str
+
+func main() {
+    b := str.builder()
+    b = str.push_part(b, "hello")
+    b = str.push_part(b, " ")
+    b = str.push_part(b, "world")
+    println("str.finish(b): {str.finish(b)}")
+    println("str.builder_len(b): {str.builder_len(b)}")
+    println("str.join_parts([a, b, c], -): {str.join_parts(["a", "b", "c"], "-")}")
+    println("str.join_parts([], -): {str.join_parts([], "-")}")
+    println("str_builder_gaps_ok")
+}

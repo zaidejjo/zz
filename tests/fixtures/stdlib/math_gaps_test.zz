@@ -1,0 +1,52 @@
+// features: arrays, comparison, float-arith, imports, math, option-result, print, std-math, string-literal
+// E2E: std.math pure-ZZ gap functions (sum/product/count/is_even/is_odd/min_arr/max_arr/sum_f/product_f/mean_f/median_f/min/max + constants).
+import std.math
+
+func main() {
+    // ── Int aggregation ──
+    println("sum([1,2,3,4]): {math.sum([1, 2, 3, 4])}")
+    println("product([1,2,3,4]): {math.product([1, 2, 3, 4])}")
+    println("count([1,2,3,2,1], 2): {math.count([1, 2, 3, 2, 1], 2)}")
+    // ── Scalar predicates ──
+    println("is_even(4): {math.is_even(4)}")
+    println("is_even(5): {math.is_even(5)}")
+    println("is_odd(4): {math.is_odd(4)}")
+    println("is_odd(5): {math.is_odd(5)}")
+    // ── Generic min/max ──
+    println("min(5, 3): {math.min(5, 3)}")
+    println("max(5, 3): {math.max(5, 3)}")
+    println("min(3.5, 7.2): {math.min(3.5, 7.2)}")
+    println("max(3.5, 7.2): {math.max(3.5, 7.2)}")
+    // ── Generic array min/max (Option) ──
+    match math.min_arr([3, 1, 2]) {
+        .some(v) => println("min_arr([3,1,2]): {v}")
+        .none => println("min_arr([3,1,2]): none")
+    }
+    match math.max_arr([3, 1, 2]) {
+        .some(v) => println("max_arr([3,1,2]): {v}")
+        .none => println("max_arr([3,1,2]): none")
+    }
+    // ── Float aggregation ──
+    println("sum_f([1.5, 2.5, 3.0]): {math.sum_f([1.5, 2.5, 3.0])}")
+    println("product_f([1.5, 2.0]): {math.product_f([1.5, 2.0])}")
+    match math.mean_f([1.0, 2.0, 3.0, 4.0, 5.0]) {
+        .ok(v) => println("mean_f([1..5]): {v}")
+        .err(e) => println("mean_f err: {e}")
+    }
+    match math.median_f([1.0, 3.0, 5.0]) {
+        .ok(v) => println("median_f([1,3,5]): {v}")
+        .err(e) => println("median_f err: {e}")
+    }
+    match math.median_f([1.0, 2.0, 3.0, 4.0]) {
+        .ok(v) => println("median_f([1,2,3,4]): {v}")
+        .err(e) => println("median_f err: {e}")
+    }
+    // ── Numeric constants (lowered to float literals) ──
+    println("SQRT_2: {math.SQRT_2}")
+    println("SQRT_1_2: {math.SQRT_1_2}")
+    println("LN_2: {math.LN_2}")
+    println("LN_10: {math.LN_10}")
+    println("LOG10_E: {math.LOG10_E}")
+    println("LOG2_E: {math.LOG2_E}")
+    println("math_gaps_ok")
+}

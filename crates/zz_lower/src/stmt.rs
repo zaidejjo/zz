@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use zz_frontend::ast::{Block, Expr, FmtPart, Pattern, Stmt, Ty, TyKind};
+use zz_frontend::visitor::{AstVisitor, VisitControl};
 
 use super::*;
 
@@ -124,14 +125,16 @@ impl Lowerer {
             Expr::Index {
                 obj, index, span, ..
             } => {
-                // Nested index home: store the temp into an owned copy
-                // of the base, then write that base back (recursion
-                // bottoms at a direct home or a drop). The base copy is
-                // an owned clone, so the inner set detaches exactly when
-                // truly shared and the outer assign+release balances.
+                // Nested index home: clone `obj` (e.g. `m[0]` → `[1,2]`),
+                // set `clone[index] = tmp` (the fully-modified inner value,
+                // e.g. `99`), then write the base back through `obj`. Recursion
+                // bottoms at a direct Ident/Path home, so `m[0][1] = 99`
+                // becomes: clone `m[0]` → `[1,2]`; `clone[1] = 99` → `[1,99]`;
+                // write `[1,99]` back through `m[0]` into `m`. `tmp` already
+                // holds the complete modified inner value.
                 let base = self.emit_expr(obj, names, out);
-                let idx = self.emit_expr(index, names, out);
-                let idx_boxed = self.box_index_arg(index, idx, names);
+                let idx_raw = self.emit_expr(index, names, out);
+                let idx_boxed = self.box_index_arg(index, idx_raw, names);
                 let base_tmp = names.fresh("_wbb");
                 let e = names.fresh("_wbe");
                 let itrap = names.fresh("_wbi");
@@ -278,6 +281,26 @@ impl Lowerer {
                     // Empty literal → NULL buffer; len/cap start at 0, grow via
                     // the inline flat-array push in Expr::Call.
                     out.push_str(&format!("    {ptr_ty} {cid} = NULL;\n"));
+                    out.push_str(&format!("    int64_t {len_cid} = 0;\n"));
+                    out.push_str(&format!("    int64_t {cap_cid} = 0;\n"));
+                    return;
+                }
+
+                // ---- Flat row arrays (unboxed nested arrays) -----------------
+                // `a := []` whose every push appends a flat scalar row lowers
+                // to `zz_flat_row *`: each element carries a row buffer and
+                // its length, so `a[i][j]` reads/stores reach the row data
+                // directly. Rows are snapshotted on push (see the push
+                // lowering), which keeps the boxed layout's value semantics.
+                if !self.green_active()
+                    && ty.is_none()
+                    && names.flat_rows.contains(&name.name)
+                    && matches!(value, Expr::Array { elems, .. } if elems.is_empty())
+                {
+                    let cid = names.enter_with_type(&name.name, "zz_flat_row *");
+                    let len_cid = names.enter_with_type(&format!("{}_len", name.name), "int64_t");
+                    let cap_cid = names.enter_with_type(&format!("{}_cap", name.name), "int64_t");
+                    out.push_str(&format!("    zz_flat_row * {cid} = NULL;\n"));
                     out.push_str(&format!("    int64_t {len_cid} = 0;\n"));
                     out.push_str(&format!("    int64_t {cap_cid} = 0;\n"));
                     return;
@@ -574,7 +597,9 @@ impl Lowerer {
                         && names.lookup_type(&name.name) == Some(ctype.as_str())
                         && names.is_in_current_scope(&name.name);
                     if is_redecl {
-                        let cid = names.lookup(&name.name).unwrap();
+                        // `is_redecl` (above) guarantees `lookup` is Some;
+                        // `unwrap_or` avoids a panic on the unreachable path.
+                        let cid = names.lookup(&name.name).unwrap_or("");
                         out.push_str(&format!("    {cid} = {final_val};\n"));
                     } else {
                         let cid = if matches!(ctype.as_str(), "int64_t" | "double" | "bool") {
@@ -659,6 +684,12 @@ impl Lowerer {
                         }
                     }
                 }
+                // Non-negative flow fact for the binding just entered (see
+                // `NameCtx::nonneg`). Recorded here, after the C id exists, so
+                // the fact attaches to this binding and never to a shadowed
+                // one; the early-returning layouts above (flat arrays/rows,
+                // structs, comprehensions) do not hold index values.
+                self.track_nonneg_assign(&name.name, value, names);
             }
             Stmt::Assign { target, value, .. } => {
                 // `_ = expr` — evaluate `expr` for effect, drop the value.
@@ -683,6 +714,13 @@ impl Lowerer {
                         }
                         return;
                     }
+                }
+
+                // Flow fact for the flat-index fast path: a plain `=` sets it
+                // from the RHS (`x = x + 1` keeps `x` non-negative), every
+                // other write form clears it (see `track_nonneg_assign`).
+                if let Expr::Ident { name, .. } = target {
+                    self.track_nonneg_assign(name, value, names);
                 }
 
                 // Fast-path: `s = s + <rhs>` where `s` is a string
@@ -1039,16 +1077,22 @@ impl Lowerer {
                                                 let mut tmps = vec![base_cid];
                                                 for f in &chain[..chain.len() - 1] {
                                                     let tmp = names.fresh("_sobj");
-                                                    let parent = tmps.last().cloned().unwrap();
+                                                    // `tmps` is seeded with `base_cid`, so `last()` is
+                                                    // always Some; `unwrap_or_default` avoids a panic.
+                                                    let parent =
+                                                        tmps.last().cloned().unwrap_or_default();
                                                     out.push_str(&format!(
                                                         "    zz_value {tmp} = zz_object_get_field(&{parent}, \"{f}\");\n"
                                                     ));
                                                     tmps.push(tmp);
                                                 }
-                                                let leaf_parent = tmps.last().cloned().unwrap();
+                                                // `tmps` is non-empty here; `unwrap_or_default` avoids a panic.
+                                                let leaf_parent =
+                                                    tmps.last().cloned().unwrap_or_default();
+                                                let leaf_field =
+                                                    chain.last().map(String::as_str).unwrap_or("");
                                                 out.push_str(&format!(
-                                                    "    zz_object_set_field(&{leaf_parent}, \"{}\", {boxed});\n",
-                                                    chain.last().unwrap()
+                                                    "    zz_object_set_field(&{leaf_parent}, \"{leaf_field}\", {boxed});\n",
                                                 ));
                                                 for (i, f) in chain[..chain.len() - 1]
                                                     .iter()
@@ -1102,8 +1146,57 @@ impl Lowerer {
                         if let Some(root) = Self::store_root_ident(obj) {
                             let root = root.to_string();
                             names.invalidate_stack_array_elems(&root);
+                            // `d[k] = v` mutates the dict, so a previously
+                            // cached `len(d)` (constant-folded from the
+                            // literal size) must not stay valid.
+                            names.invalidate_dict_len(&root);
                         }
-                        let boxed_val = self.box_index_store_value(value, val.clone(), names);
+                        let (boxed_val, boxed_needs_release) =
+                            self.box_index_store_value(value, val.clone(), names, out);
+
+                        // Nested flat rows: `rows[i][j] = v`. The row handle is
+                        // loaded through the outer element with the same
+                        // bounds trap as scalar flats, then the write is a
+                        // direct store into the row buffer — no boxed
+                        // read-modify-write chain and no copy-on-write.
+                        if !self.green_active() {
+                            if let Expr::Index {
+                                obj: root,
+                                index: i_expr,
+                                ..
+                            } = obj.as_ref()
+                            {
+                                if let Some((rows_name, inner)) =
+                                    self.flat_rows_receiver(root, names)
+                                {
+                                    if let (Some(buf_cid), Some(len_cid)) = (
+                                        names.lookup(&rows_name).map(str::to_string),
+                                        names
+                                            .lookup(&format!("{rows_name}_len"))
+                                            .map(str::to_string),
+                                    ) {
+                                        let func = names.current_scope.clone();
+                                        let i_chk = self.flat_index_checked(
+                                            i_expr, &len_cid, &func, names, out,
+                                        );
+                                        let rtmp = names.fresh("_frow");
+                                        let j_chk = self.flat_index_checked(
+                                            index,
+                                            &format!("({rtmp}).len"),
+                                            &func,
+                                            names,
+                                            out,
+                                        );
+                                        let raw = self
+                                            .flat_store_raw_value(value, &val, &boxed_val, &inner);
+                                        out.push_str(&format!(
+                                            "    {{ zz_flat_row {rtmp} = ({buf_cid})[{i_chk}];\n      (({inner} *)({rtmp}).data)[{j_chk}] = {raw}; }}\n"
+                                        ));
+                                        return;
+                                    }
+                                }
+                            }
+                        }
 
                         // Bounds-check elimination for array writes:
                         // `for k in 0..n { ... flags[k] = ... }` where flags.len == n
@@ -1231,6 +1324,14 @@ impl Lowerer {
                                         out.push_str(&format!(
                                             "    {{ int _e = 0; zz_array_set_raw(&{home}, {i_raw}, {boxed_val}, &_e);\n"
                                         ));
+                                        // `zz_array_set_raw` clones `v` but does not
+                                        // release the caller's share; a boxed struct
+                                        // RHS owns a share the caller must drop.
+                                        if boxed_needs_release {
+                                            out.push_str(&format!(
+                                                "      zz_release(&{boxed_val});\n"
+                                            ));
+                                        }
                                         out.push_str(&format!(
                                             "      if (_e) {{ zz_index_trap({home}, zz_int({i_raw}), \"{func}\"); }} }}\n"
                                         ));
@@ -1246,6 +1347,12 @@ impl Lowerer {
                                     out.push_str(&format!(
                                         "      zz_array_set_raw(&{wb}, {i_raw}, {boxed_val}, &_e);\n"
                                     ));
+                                    // `zz_array_set_raw` clones `v` but does not
+                                    // release the caller's share; a boxed struct
+                                    // RHS owns a share the caller must drop.
+                                    if boxed_needs_release {
+                                        out.push_str(&format!("      zz_release(&{boxed_val});\n"));
+                                    }
                                     out.push_str(&format!(
                                         "      if (_e) {{ zz_index_trap({wb}, zz_int({i_raw}), \"{func}\"); }}\n"
                                     ));
@@ -1302,8 +1409,10 @@ impl Lowerer {
                                     .unwrap_or("int64_t");
                                 let raw_val =
                                     self.flat_store_raw_value(value, &val, &boxed_val, elem);
+                                let i_chk =
+                                    self.flat_index_wrap(index, &i_raw, &len_cid, &func, names);
                                 out.push_str(&format!(
-                                    "    {{ int _e = 0; {home}[zz_flat_index({i_raw}, {len_cid}, \"{func}\")] = {raw_val}; }}\n"
+                                    "    {{ int _e = 0; {home}[{i_chk}] = {raw_val}; }}\n"
                                 ));
                                 return;
                             }
@@ -1354,12 +1463,19 @@ impl Lowerer {
                             names.invalidate_stack_array_elems(&root);
                         }
                         let o = self.emit_expr(obj, names, out);
-                        let boxed_val = self.box_index_store_value(value, val.clone(), names);
+                        let (boxed_val, boxed_needs_release) =
+                            self.box_index_store_value(value, val.clone(), names, out);
                         let tmp = names.fresh("_wbf");
                         out.push_str(&format!("    {{ zz_value {tmp} = zz_clone({o});\n"));
                         out.push_str(&format!(
                             "      zz_object_set_field(&{tmp}, \"{name}\", {boxed_val});\n"
                         ));
+                        // `zz_object_set_field` clones `val` but does not
+                        // release it; a boxed struct RHS owns a share the
+                        // caller must drop.
+                        if boxed_needs_release {
+                            out.push_str(&format!("      zz_release(&{boxed_val});\n"));
+                        }
                         self.emit_store_writeback(obj, &tmp, names, out);
                         out.push_str("    }\n");
                     }
@@ -1405,7 +1521,8 @@ impl Lowerer {
                             names.invalidate_stack_array_elems(&root);
                         }
                         let rhs = self.emit_expr(value, names, out);
-                        let rhs_boxed = self.box_index_store_value(value, rhs, names);
+                        let (rhs_boxed, rhs_needs_release) =
+                            self.box_index_store_value(value, rhs, names, out);
                         let cop = binop_runtime_op(op);
                         if let Some(home) = self.index_store_home(obj, names) {
                             let i = self.emit_expr(index, names, out);
@@ -1424,6 +1541,11 @@ impl Lowerer {
                             out.push_str(&format!(
                                 "      zz_value _cr = zz_binop({cop}, _cc, {rhs_boxed});\n"
                             ));
+                            // `zz_binop` does not release its inputs; a boxed
+                            // struct RHS owns a share the caller must drop.
+                            if rhs_needs_release {
+                                out.push_str(&format!("      zz_release(&{rhs_boxed});\n"));
+                            }
                             out.push_str(&format!("      zz_index_set(&{home}, _ci, _cr, &_e);\n"));
                             out.push_str(&format!(
                                 "      if (_e) {{ zz_index_trap({home}, _ci, \"{func}\"); }} }}\n"
@@ -1443,6 +1565,11 @@ impl Lowerer {
                             out.push_str(&format!(
                                 "      zz_value _cr = zz_binop({cop}, _cc, {rhs_boxed});\n"
                             ));
+                            // `zz_binop` does not release its inputs; a boxed
+                            // struct RHS owns a share the caller must drop.
+                            if rhs_needs_release {
+                                out.push_str(&format!("      zz_release(&{rhs_boxed});\n"));
+                            }
                             out.push_str("      zz_index_set(&_co, _ci, _cr, &_e);\n");
                             out.push_str(&format!(
                                 "      if (_e) {{ zz_index_trap(_co, _ci, \"{func}\"); }}\n"
@@ -2097,13 +2224,68 @@ impl Lowerer {
         };
 
         if let Some((start_expr, end_expr)) = bounds {
+            // Constant-fill fast path: `for _ in 0..N { arr = vec.push(arr, C) }`
+            // on a flat scalar array appends N copies of a constant, which is
+            // exactly a `memset` over the new tail. Rust's `vec![c; n]` lowers
+            // to this natively, so without it a pure fill pays a compare, a
+            // capacity branch, and a store per element (2M iterations for a
+            // bool sieve table).
+            if !self.green_active()
+                && vars.len() == 1
+                && body.stmts.len() == 1
+                && matches!(&start_expr, Expr::Int { value: 0, .. })
+            {
+                if let Some((arr_name, arr_ctype, value)) =
+                    flat_fill_target(&body.stmts[0], names, self)
+                {
+                    if let Some(byte) = fill_byte(value, &arr_ctype) {
+                        if let (Some(cid), Some(len_cid), Some(cap_cid)) = (
+                            names.lookup(&arr_name).map(str::to_string),
+                            names.lookup(&format!("{arr_name}_len")).map(str::to_string),
+                            names.lookup(&format!("{arr_name}_cap")).map(str::to_string),
+                        ) {
+                            let elem = arr_ctype.strip_suffix(" *").unwrap_or(&arr_ctype);
+                            let n_raw = self.flat_index_expr(&end_expr, names, out);
+                            let grow = if names.resolves_to_global(&arr_name) {
+                                format!(
+                                    "{cap_cid} = __new; {cid} = ({arr_ctype})realloc({cid}, (size_t)__new * sizeof({elem}));"
+                                )
+                            } else {
+                                format!(
+                                    "{cap_cid} = __new; {arr_ctype} __fill = ({arr_ctype})zz_arena_alloc(&_func_arena, (size_t)__new * sizeof({elem}), 8);\n        if (__old > 0) {{ memcpy(__fill, {cid}, (size_t)__old * sizeof({elem})); }}\n        {cid} = __fill;"
+                                )
+                            };
+                            out.push_str(&format!(
+                                "    {{ int64_t __n = {n}; if (__n > 0) {{ int64_t __old = {len}; int64_t __new = __old + __n;\n      if (__new > {cap}) {{ if ((uint64_t)__new > SIZE_MAX / sizeof({elem})) {{ fprintf(stderr, \"zz error: array capacity overflow\\n\"); exit(1); }} {grow} }}\n      memset({cid} + __old, {byte}, (size_t)__n * sizeof({elem}));\n      {len} = __new; }} }}\n",
+                                n = n_raw,
+                                len = len_cid,
+                                cap = cap_cid,
+                                cid = cid,
+                                elem = elem,
+                                grow = grow,
+                                byte = byte,
+                            ));
+                            // The fill never reads the loop variable, so the
+                            // loop (and its sub-arena) is not emitted at all.
+                            return;
+                        }
+                    }
+                }
+            }
             // Loop-scoped sub-arena: loops whose body contains non-escaping
             // allocations get their own arena so the per-iteration reset can
             // reuse the buffer without touching objects an enclosing scope or
             // an outer loop iteration may have placed on the function arena.
             // Skipped in green closures: stack arenas cannot survive a
             // suspend (heap-only there).
-            let loop_arena: Option<String> =
+            // The declaration/init is emitted lazily below: the body is
+            // emitted first and the arena scaffolding only kept when the body
+            // actually allocates into it. Tight loops whose allocations were
+            // optimized away (flat pushes, raw stores) would otherwise pay a
+            // per-iteration `zz_arena_reset` over the class table for nothing
+            // — 2M of those dominate a fill loop.
+            let arena_decl_at = out.len();
+            let loop_arena: Option<(String, usize)> =
                 if !self.green_active() && self.escape.loop_spans.contains(&span) {
                     let ac = names.bump_counter();
                     let name = format!("_loop_arena{ac}");
@@ -2111,9 +2293,7 @@ impl Lowerer {
                     // Count allocating expressions in the body × 128 bytes each.
                     let alloc_count = count_allocating_exprs(body);
                     let arena_size = (alloc_count * 128).max(65536);
-                    out.push_str(&format!("    zz_arena {name};\n"));
-                    out.push_str(&format!("    zz_arena_init(&{name}, {arena_size});\n"));
-                    Some(name)
+                    Some((name, arena_size))
                 } else {
                     None
                 };
@@ -2158,10 +2338,10 @@ impl Lowerer {
                                         || ctype == "int64_t *"
                                         || ctype == "double *"
                                     {
-                                        let arr_cid = names.lookup(arr_name).unwrap().to_string();
+                                        let arr_cid = names.lookup(arr_name).map(str::to_string);
                                         let elem_ctype =
                                             ctype.strip_suffix(" *").unwrap_or(ctype).to_string();
-                                        Some((arr_cid, elem_ctype))
+                                        arr_cid.map(|c| (c, elem_ctype))
                                     } else {
                                         None
                                     }
@@ -2200,6 +2380,18 @@ impl Lowerer {
                 }
                 cid
             };
+            // Non-negative flow fact for the flat-index fast path: an
+            // ascending loop starting at a non-negative value can never make
+            // its counter negative (checked before the body is emitted, so
+            // the body's index expressions see it).
+            let start_nonneg = self.is_nonneg_expr(&start_expr, names);
+            names.set_nonneg_name(v, start_nonneg);
+
+            // The VM re-binds the loop variable on every iteration, so a body
+            // assignment writes a per-iteration copy, not the iteration state.
+            // A captured loop variable already gets a per-iteration cell
+            // below; otherwise a direct write must not drive the C counter.
+            let loop_var_written = !names.capture_set.contains(v) && block_assigns_ident(body, v);
 
             // Captured upper bound of a scalar-terminated loop, recorded into
             // the body scope for bounds-check elimination (see
@@ -2253,7 +2445,7 @@ impl Lowerer {
                     // Some other expression, unbox it
                     format!("({ev}).i")
                 };
-                if !green {
+                if !green && !loop_var_written {
                     for_loop_bound = Some(ev_unboxed.clone());
                 }
 
@@ -2295,6 +2487,22 @@ impl Lowerer {
                     // For other expressions, assume they need unboxing
                     format!("({sv}).i")
                 };
+
+                // Hidden induction variable used when the body assigns the
+                // loop variable: the counter stays private to the loop and the
+                // binding is re-created per iteration (VM semantics). Green
+                // loops drive a frame cell, so the counter is a fresh cell.
+                let counter: Option<String> = if loop_var_written {
+                    Some(if green {
+                        let (_, deref, _) = self.green_cell(names, "int64_t", true, out, None);
+                        deref
+                    } else {
+                        names.fresh("_lf")
+                    })
+                } else {
+                    None
+                };
+                let ind: &str = counter.as_deref().unwrap_or(&cid);
 
                 let s = if green {
                     // Resume-safety: the end bound is re-read every
@@ -2353,15 +2561,15 @@ impl Lowerer {
                     // Green loops never use the flat-array `ptr` walk
                     // (`ptr_store` is `None` for green, see line 2097), so
                     // the increment never touches `ptr`.
-                    format!("for ({cid} = {sv_unboxed}; {cid} < {end_ref}; {cid}++) {{\n")
+                    format!("for ({ind} = {sv_unboxed}; {ind} < {end_ref}; {ind}++) {{\n")
                 } else {
                     if let Some((ref _arr_cid, ref _elem_ctype)) = ptr_store {
                         format!(
-                            "for (int64_t {cid} = {sv_unboxed}; {cid} < {ev_unboxed}; {cid}++, ptr += 1) {{\n"
+                            "for (int64_t {ind} = {sv_unboxed}; {ind} < {ev_unboxed}; {ind}++, ptr += 1) {{\n"
                         )
                     } else {
                         format!(
-                            "for (int64_t {cid} = {sv_unboxed}; {cid} < {ev_unboxed}; {cid}++) {{\n"
+                            "for (int64_t {ind} = {sv_unboxed}; {ind} < {ev_unboxed}; {ind}++) {{\n"
                         )
                     }
                 };
@@ -2374,6 +2582,16 @@ impl Lowerer {
                     out.push_str(&format!("    {elem_ctype} *ptr = {arr_cid};\n"));
                 }
                 out.push_str(&s);
+                // Per-iteration copy of the induction variable: the body sees
+                // a fresh binding, so its writes cannot rewind or stall the
+                // loop (matches the VM, and the boxed path below).
+                if let Some(ind) = &counter {
+                    if green {
+                        out.push_str(&format!("    {cid} = {ind};\n"));
+                    } else {
+                        out.push_str(&format!("    int64_t {cid} = {ind};\n"));
+                    }
+                }
                 // Loop-top safepoint (mirrors the VM's `Op::Safepoint`),
                 // elided for concurrency-free programs (see
                 // `needs_safepoint`): the call barrier blocks clang from
@@ -2601,7 +2819,7 @@ impl Lowerer {
             } else {
                 None
             };
-            if let Some(ref name) = loop_arena {
+            if let Some((name, _)) = &loop_arena {
                 self.loop_arenas.borrow_mut().push(name.clone());
                 *self.current_loop_arena.borrow_mut() = Some(name.clone());
             }
@@ -2661,13 +2879,28 @@ impl Lowerer {
             }
             self.loop_scope_end(names, out, body_scope);
             names.clear_array_lens();
-            if let Some(ref name) = loop_arena {
+            // Keep the arena scaffolding only when the body actually
+            // allocated into it (see the note at `arena_decl_at`).
+            let arena_used = match &loop_arena {
+                Some((name, _)) => out[arena_decl_at..].contains(name.as_str()),
+                None => false,
+            };
+            if let Some((name, arena_size)) = &loop_arena {
                 self.loop_arenas.borrow_mut().pop();
                 *self.current_loop_arena.borrow_mut() = self.loop_arenas.borrow().last().cloned();
-                // Per-iteration reset: every arena allocation made inside this
-                // iteration is reclaimed in O(1), so the sub-arena's buffer is
-                // reused indefinitely without growing the heap footprint.
-                out.push_str(&format!("    zz_arena_reset(&{name});\n"));
+                if arena_used {
+                    out.insert_str(
+                        arena_decl_at,
+                        &format!(
+                            "    zz_arena {name};\n    zz_arena_init(&{name}, {arena_size});\n"
+                        ),
+                    );
+                    // Per-iteration reset: every arena allocation made inside
+                    // this iteration is reclaimed in O(1), so the sub-arena's
+                    // buffer is reused indefinitely without growing the heap
+                    // footprint.
+                    out.push_str(&format!("    zz_arena_reset(&{name});\n"));
+                }
             }
             out.push_str("    }\n");
             if !end_is_scalar {
@@ -2677,8 +2910,10 @@ impl Lowerer {
             // loop regain the grow guard.
             self.skip_flat_push_grow.set(false);
             // Free the sub-arena's buffer once the loop completes.
-            if let Some(ref name) = loop_arena {
-                out.push_str(&format!("    zz_arena_destroy(&{name});\n"));
+            if let Some((name, _)) = &loop_arena {
+                if arena_used {
+                    out.push_str(&format!("    zz_arena_destroy(&{name});\n"));
+                }
             }
             if let Some(cell_name) = loop_cell {
                 // Pop the per-iteration cell shadow, then the raw loop var.
@@ -2750,7 +2985,12 @@ impl Lowerer {
                 // Any boxed use site auto-boxes the raw value through the
                 // normal `auto_box` paths.
                 let elem_ctype_for_body = if raw_elem {
-                    format!("zz_struct_{}", elem_ctype)
+                    // `elem_ctype` is the demangled/dotted ZZ name (e.g.
+                    // `flat_arrays.Pt`) from `flat_array_from_ptr`; mangle it
+                    // to the real C typedef (`zz_struct_flat__arrays_Pt`) for
+                    // emission. Keep `elem_ctype` dotted: `box_raw_struct`
+                    // looks it up in `tp.structs` by un-mangled key below.
+                    format!("zz_struct_{}", mangle(&elem_ctype))
                 } else {
                     elem_ctype.to_string()
                 };
@@ -3101,6 +3341,15 @@ impl Lowerer {
         // compute it before emitting any statement of this body. Nested
         // block/closure bodies recompute their own set; restore ours after.
         let outer_flat = std::mem::take(&mut names.flat_locals);
+        // Element types are per-body too: a stale entry from another function
+        // that happens to declare the same name must not pick the flat layout
+        // with the wrong element type.
+        let outer_flat_scalar = std::mem::take(&mut names.flat_scalar_types);
+        let outer_flat_rows = std::mem::take(&mut names.flat_rows);
+        let outer_flat_row_inner = std::mem::take(&mut names.flat_row_inner);
+        // Flow facts are per body too: a non-negative loop counter from
+        // another function must never reach an index check here.
+        let outer_nonneg = std::mem::take(&mut names.nonneg);
         names.flat_locals = self.body_flat_locals(block, names);
         // Dead-variable release: after a variable's last top-level use,
         // emit `zz_release` to free refcounted containers (arrays, dicts,
@@ -3118,6 +3367,10 @@ impl Lowerer {
             self.emit_dead_releases(i, &last_top_level, &max_nested, names, out);
         }
         names.flat_locals = outer_flat;
+        names.flat_scalar_types = outer_flat_scalar;
+        names.flat_rows = outer_flat_rows;
+        names.flat_row_inner = outer_flat_row_inner;
+        names.nonneg = outer_nonneg;
     }
 
     // ── Dead-variable release analysis ──────────────────────────────
@@ -3234,6 +3487,27 @@ impl Lowerer {
                         .entry(name.clone())
                         .and_modify(|v| *v = (*v).max(index))
                         .or_insert(index);
+                }
+            }
+            // A dotted path (`a.len()`, `std.str.length`) reads its first
+            // segment when that segment names a local variable (e.g. a method
+            // call on a local). Record it as a use so the dead-variable
+            // release analysis doesn't free the variable too early.
+            // Non-variable segments (module namespaces, type names) are
+            // filtered out by `emit_dead_releases` via `names.lookup`.
+            Expr::Path { parts, .. } => {
+                for part in parts {
+                    if in_nested {
+                        max_nested
+                            .entry(part.clone())
+                            .and_modify(|v| *v = (*v).max(index))
+                            .or_insert(index);
+                    } else {
+                        last_top_level
+                            .entry(part.clone())
+                            .and_modify(|v| *v = (*v).max(index))
+                            .or_insert(index);
+                    }
                 }
             }
             Expr::Block(block) => {
@@ -3355,6 +3629,14 @@ impl Lowerer {
             // releasing. Scalars (int64_t/double/bool) and raw structs
             // (zz_struct_*) are Copy and must not be released.
             if ty != "zz_value" {
+                continue;
+            }
+            // Function-scope zz_value locals already carry a
+            // `cleanup(zz_release)` attribute that releases them at end of
+            // scope. Releasing here too would double-free. Loop-body locals
+            // (depth > 0) have no cleanup attribute and rely on dead-release
+            // plus `loop_scope_end`, so they are still released here.
+            if self.loop_scope_depth.get() == 0 {
                 continue;
             }
             out.push_str(&format!("    zz_release(&{});\n", cid));
@@ -3609,6 +3891,124 @@ fn flat_push_receiver(
     let is_flat = lowerer.scalar_array_from_ptr(&recv_ctype).is_some()
         || lowerer.flat_array_from_ptr(&recv_ctype).is_some();
     is_flat.then_some((recv_name, recv_ctype))
+}
+
+/// Match a single flat push statement in all three surface forms —
+/// `arr.push(c)`, `vec.push(arr, c)`, `arr = vec.push(arr, c)` — returning the
+/// receiver name, its pointer C type, and the pushed expression. Only scalar
+/// flat arrays qualify (struct rows have no byte fill).
+fn flat_fill_target<'a>(
+    stmt: &'a Stmt,
+    names: &NameCtx,
+    lowerer: &Lowerer,
+) -> Option<(String, String, &'a Expr)> {
+    // `vec.push(arr, c)` — receiver is the first argument, not the callee.
+    fn function_push<'a>(callee: &Expr, args: &'a [Expr]) -> Option<(&'a str, &'a Expr)> {
+        let Expr::Path { parts, .. } = callee else {
+            return None;
+        };
+        if parts.len() != 2 || parts[0] != "vec" || parts[1] != "push" || args.len() != 2 {
+            return None;
+        }
+        let Expr::Ident { name, .. } = &args[0] else {
+            return None;
+        };
+        Some((name.as_str(), &args[1]))
+    }
+    // Method form `arr.push(c)`: one argument, receiver from the callee path.
+    fn method_push<'a>(
+        callee: &Expr,
+        args: &'a [Expr],
+        names: &NameCtx,
+        lowerer: &Lowerer,
+    ) -> Option<(String, &'a Expr)> {
+        let (recv, _ctype) = flat_push_receiver(callee, args, "", names, lowerer)?;
+        Some((recv, args.first()?))
+    }
+    let (recv, value) = match stmt {
+        Stmt::Expr(Expr::Call { callee, args, .. }) => {
+            if let Some((name, value)) = function_push(callee, args) {
+                (name.to_string(), value)
+            } else {
+                let (name, value) = method_push(callee, args, names, lowerer)?;
+                (name, value)
+            }
+        }
+        Stmt::Assign {
+            target: Expr::Ident { name, .. },
+            value: Expr::Call { callee, args, .. },
+            ..
+        } => {
+            if let Some((recv, value)) = function_push(callee, args) {
+                if recv != name {
+                    return None;
+                }
+                (name.clone(), value)
+            } else {
+                let (recv, value) = method_push(callee, args, names, lowerer)?;
+                if &recv != name {
+                    return None;
+                }
+                (name.clone(), value)
+            }
+        }
+        _ => return None,
+    };
+    let ctype = names.lookup_type(&recv)?.to_string();
+    lowerer.scalar_array_from_ptr(&ctype)?;
+    Some((recv, ctype, value))
+}
+
+/// True when `block` assigns the binding `name` itself
+/// (`for k in 0..n { k = … }`, including inside nested blocks and closures).
+///
+/// The VM re-binds the loop variable every iteration, so a body assignment is
+/// a write to a per-iteration copy. A C `for (int64_t v = …; …; v++)` instead
+/// shares one variable with the body: `k = -1` would reset the counter (an
+/// infinite loop at runtime) and `k = 0` would rewind it.
+fn block_assigns_ident(block: &Block, name: &str) -> bool {
+    struct AssignScan<'a> {
+        name: &'a str,
+        found: bool,
+    }
+    impl AstVisitor for AssignScan<'_> {
+        fn visit_stmt(&mut self, stmt: &Stmt) -> VisitControl {
+            if !self.found {
+                let target = match stmt {
+                    Stmt::Assign { target, .. } | Stmt::CompoundAssign { target, .. } => {
+                        Some(target)
+                    }
+                    _ => None,
+                };
+                if let Some(Expr::Ident { name, .. }) = target {
+                    self.found = name == self.name;
+                }
+            }
+            if self.found {
+                VisitControl::Skip
+            } else {
+                VisitControl::Recurse
+            }
+        }
+    }
+    let mut scan = AssignScan { name, found: false };
+    scan.walk_block(block);
+    scan.found
+}
+
+/// Byte value for a `memset` fill of `elem` with the constant `value`, or
+/// `None` when the constant has no byte-uniform representation (any non-zero
+/// int or float, string, struct…).
+fn fill_byte(value: &Expr, ctype: &str) -> Option<u8> {
+    let elem = ctype.strip_suffix(" *")?;
+    match (elem, value) {
+        ("bool", Expr::Bool { value, .. }) => Some(u8::from(*value)),
+        ("int64_t", Expr::Int { value: 0, .. }) => Some(0),
+        // `+0.0` only: `-0.0` compares equal but has a non-zero sign bit, so a
+        // zero-byte fill would change the value (observable via `1.0 / x`).
+        ("double", Expr::Float { value, .. }) if value.to_bits() == 0 => Some(0),
+        _ => None,
+    }
 }
 
 /// Find the integer value of a `const name = <literal>` or `let name = <literal>`

@@ -918,6 +918,335 @@ mod tests {
         })
     }
 
+    /// A `name := []` declaration whose pushes reveal a scalar element type
+    /// through the self-append assignment (`name = vec.push(name, x)`) gets
+    /// the inferred flat layout: contiguous `bool *` buffer, inline push, and
+    /// a raw index store — no boxed `zz_vec_push_take` / `zz_index_set`.
+    #[test]
+    fn untyped_inferred_flat_bool_array_lowers_inline() {
+        let units = lower_merged(
+            "func main() {
+                n := 100
+                flags := []
+                for i in 0..n {
+                    flags = vec.push(flags, true)
+                }
+                flags[0] = false
+                count := 0
+                for i in 0..n {
+                    if flags[i] { count = count + 1 }
+                }
+                println(count)
+            }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        // Inferred flat declarations get a fresh C id, so assert on the shape
+        // of the emitted code rather than the source-level name.
+        assert!(
+            code.contains("bool * ") && code.contains(" = NULL;"),
+            "expected flat bool buffer:\n{code}"
+        );
+        assert!(
+            code.contains("memset(") && code.contains("sizeof(bool)"),
+            "constant fill must lower to a single memset:\n{code}"
+        );
+        assert!(
+            code.matches("for (int64_t ").count() == 1,
+            "the fill loop must be replaced by the memset:\n{code}"
+        );
+        assert!(
+            !code.contains("zz_vec_push_take"),
+            "push must not go through the boxed move path:\n{code}"
+        );
+        assert!(
+            !code.contains("zz_index_set"),
+            "index store must use the flat buffer:\n{code}"
+        );
+        assert!(
+            code.contains("zz_flat_index(") || code.contains("zz_flat_index_nn("),
+            "index reads/stores must use the flat buffer:\n{code}"
+        );
+    }
+
+    /// The same inference for `name = vec.push(name, StructInit{...})` with an
+    /// all-scalar struct: flat `zz_struct_Pt *` buffer and direct element
+    /// field reads.
+    #[test]
+    fn untyped_inferred_flat_struct_array_lowers_inline() {
+        let units = lower_merged(
+            "struct Pt { x: int, y: int }
+             func main() {
+                 n := 100
+                 pts := []
+                 for i in 0..n {
+                     pts = vec.push(pts, Pt{ x: i, y: i * 2 })
+                 }
+                 total := 0
+                 for i in 0..n {
+                     total = total + pts[i].x
+                 }
+                 println(total)
+             }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        assert!(
+            code.contains("zz_struct_Pt * ") && code.contains(" = NULL;"),
+            "expected flat struct buffer:\n{code}"
+        );
+        assert!(
+            !code.contains("zz_vec_push_take"),
+            "push must not go through the boxed move path:\n{code}"
+        );
+        assert!(
+            !code.contains("zz_object_get_field"),
+            "field read must not go through the boxed object path:\n{code}"
+        );
+        assert!(
+            code.contains("].x"),
+            "field read must index the flat buffer:\n{code}"
+        );
+    }
+
+    /// Control: a push argument with no flat representation (a string) keeps
+    /// the array boxed. Loop variables and arithmetic expressions no longer
+    /// disqualify a candidate: the checker's inferred type makes them scalars.
+    #[test]
+    fn untyped_inferred_array_with_string_element_stays_boxed() {
+        let units = lower_merged(
+            "func main() {
+                n := 100
+                arr := []
+                for i in 0..n {
+                    arr = vec.push(arr, \"x\")
+                }
+                println(len(arr))
+            }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        assert!(
+            code.contains("zz_vec_push_take"),
+            "boxed self-push must keep the take path:\n{code}"
+        );
+        assert!(
+            !code.contains("__flat_grow") && !code.contains("zz_flat_index("),
+            "expected the boxed layout:\n{code}"
+        );
+    }
+
+    /// A loop-variable element now resolves through the checker type, so the
+    /// inferred flat layout applies to `arr = vec.push(arr, i)`.
+    #[test]
+    fn untyped_inferred_array_with_loop_element_is_flat() {
+        let units = lower_merged(
+            "func main() {
+                n := 100
+                arr := []
+                for i in 0..n {
+                    arr = vec.push(arr, i)
+                }
+                total := 0
+                for i in 0..n { total = total + arr[i] }
+                println(total)
+            }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        assert!(
+            code.contains("int64_t * ") && code.contains(" = NULL;"),
+            "expected a flat int buffer:\n{code}"
+        );
+        assert!(
+            !code.contains("zz_vec_push_take"),
+            "push must stay inline:\n{code}"
+        );
+    }
+
+    /// A body assignment to the loop variable writes a per-iteration copy in
+    /// the VM, so lowering must not let it drive the C induction variable
+    /// (`k = -1` would otherwise reset the counter and hang).
+    #[test]
+    fn for_loop_var_write_uses_hidden_counter() {
+        let units = lower_merged(
+            "func main() {
+                total := 0
+                for k in 0..3 {
+                    k = 0 - 1
+                    total = total + k
+                }
+                println(total)
+            }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        assert!(
+            code.contains("for (int64_t _lf"),
+            "the counter must be a hidden induction variable:\n{code}"
+        );
+        assert!(
+            code.lines()
+                .any(|l| l.trim_start().starts_with("int64_t v") && l.contains("= _lf")),
+            "the loop binding must be re-created inside the body:\n{code}"
+        );
+    }
+
+    /// The hidden counter is only for bodies that assign the binding: an
+    /// ordinary counted loop keeps the direct (unboxed) counter.
+    #[test]
+    fn for_loop_without_var_write_keeps_direct_counter() {
+        let units = lower_merged(
+            "func main() {
+                total := 0
+                for k in 0..3 { total = total + k }
+                println(total)
+            }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        assert!(
+            !code.contains("_lf"),
+            "a read-only loop variable must drive the counter directly:\n{code}"
+        );
+        assert!(
+            code.contains("for (int64_t v"),
+            "expected the direct counter header:\n{code}"
+        );
+    }
+
+    /// Nested inferred arrays: `a := []` whose elements are flat scalar rows
+    /// lowers to `zz_flat_row *`, and `a[i][j]` reads/stores index the row
+    /// buffer directly instead of the boxed read-modify-write chain.
+    #[test]
+    fn untyped_inferred_flat_row_matrix_lowers_inline() {
+        let units = lower_merged(
+            "func main() {
+                n := 8
+                a := []
+                for i in 0..n {
+                    row := []
+                    for j in 0..n {
+                        row = vec.push(row, (i * n + j) % 1000)
+                    }
+                    a = vec.push(a, row)
+                }
+                total := 0
+                for i in 0..n {
+                    for j in 0..n {
+                        total = total + a[i][j]
+                    }
+                }
+                a[0][0] = 1
+                println(total)
+            }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        assert!(
+            code.contains("zz_flat_row * ") && code.contains(" = NULL;"),
+            "expected a flat row buffer:\n{code}"
+        );
+        assert!(
+            code.contains("zz_flat_row "),
+            "row snapshot temp missing:\n{code}"
+        );
+        assert!(
+            !code.contains("zz_vec_push_take"),
+            "pushes must not take the boxed path:\n{code}"
+        );
+        assert!(
+            !code.contains("zz_index_get") && !code.contains("zz_index_set"),
+            "nested reads/stores must stay raw:\n{code}"
+        );
+        assert!(
+            code.matches("zz_flat_index").count() >= 4,
+            "both bounds checks missing:\n{code}"
+        );
+    }
+
+    /// The non-negative index fact is bound to the C id of the binding: an
+    /// inner shadow must not mark the outer variable, which still needs the
+    /// sign-folding check (a negative index counts from the end, it is not an
+    /// out-of-bounds trap).
+    #[test]
+    fn flat_index_fast_path_survives_shadowing() {
+        let units = lower_merged(
+            "func main() {
+                arr := []
+                for i in 0..3 { arr = vec.push(arr, i) }
+                j := -1
+                {
+                    j := 5
+                    println(j)
+                }
+                println(arr[j])
+            }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        assert!(
+            !code.contains("zz_flat_index_nn("),
+            "a shadowed binding must not inherit the non-negative fact:\n{code}"
+        );
+        assert!(
+            code.contains("zz_flat_index("),
+            "negative index needs the sign-folding check:\n{code}"
+        );
+    }
+
+    /// A constant fill lowers to one `memset`; a constant without a
+    /// byte-uniform representation (`5` in an int array) keeps the loop.
+    #[test]
+    fn flat_constant_fill_uses_memset_only_for_byte_values() {
+        let units = lower_merged(
+            "func main() {
+                zeros := []
+                for i in 0..100 { zeros = vec.push(zeros, 0) }
+                fives := []
+                for i in 0..100 { fives = vec.push(fives, 5) }
+                println(zeros[0])
+                println(fives[0])
+            }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        assert!(
+            code.contains("memset("),
+            "zero fill must lower to a memset:\n{code}"
+        );
+        assert!(
+            code.matches("for (int64_t ").count() == 1,
+            "only the non-byte fill may keep its loop:\n{code}"
+        );
+    }
+
+    /// The non-negative index fast path is a flow fact, not a property of the
+    /// name: a negative local keeps the general check (which folds from the
+    /// end), while a literal uses the single-compare variant.
+    #[test]
+    fn flat_index_fast_path_tracks_sign() {
+        let units = lower_merged(
+            "func main() {
+                arr := []
+                for i in 0..4 { arr = vec.push(arr, i) }
+                j := -1
+                println(arr[j])
+                println(arr[1])
+            }",
+        );
+        let prelude = unit(&units, PRELUDE_NS);
+        let code = &prelude.code;
+        assert!(
+            code.contains("zz_flat_index("),
+            "negative local needs the general check:\n{code}"
+        );
+        assert!(
+            code.contains("zz_flat_index_nn(1"),
+            "literal index should use the unsigned fast path:\n{code}"
+        );
+    }
+
     /// A module-level `arr: [int] = []` used only through the flat-array
     /// operations lowers to a contiguous pointer plus length/capacity
     /// counters (not a boxed `zz_value`).

@@ -1,0 +1,26 @@
+// features: arrays, bool-logic, comparison, imports, print, std-set, string-literal
+// E2E: std.set pure-ZZ gap helpers (has/has_int/insert/insert_int/remove/remove_int/union/union_int/intersect/intersect_int/diff/len/is_empty + set.* aliases).
+import std.set
+
+func main() {
+    s1 := ["a", "b", "c"]
+    s2 := ["b", "c", "d"]
+    println("set.has(s1, b): {set.has(s1, "b")}")
+    println("set.has(s1, z): {set.has(s1, "z")}")
+    println("set.insert(s1, d): {set.insert(s1, "d")}")
+    println("set.insert(s1, a): {set.insert(s1, "a")}")
+    println("set.remove(s1, b): {set.remove(s1, "b")}")
+    println("set.union(s1, s2): {set.union(s1, s2)}")
+    println("set.intersect(s1, s2): {set.intersect(s1, s2)}")
+    println("set.diff(s1, s2): {set.diff(s1, s2)}")
+    println("set.len(s1): {set.len(s1)}")
+    println("set.is_empty(s1): {set.is_empty(s1)}")
+    println("set.is_empty([]): {set.is_empty([])}")
+    i1 := [1, 2, 3]
+    i2 := [2, 3, 4]
+    println("set.has_int(i1, 2): {set.has_int(i1, 2)}")
+    println("set.insert_int(i1, 4): {set.insert_int(i1, 4)}")
+    println("set.union_int(i1, i2): {set.union_int(i1, i2)}")
+    println("set.intersect_int(i1, i2): {set.intersect_int(i1, i2)}")
+    println("set_gaps_ok")
+}

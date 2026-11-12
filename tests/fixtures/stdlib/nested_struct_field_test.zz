@@ -1,0 +1,13 @@
+// features: arrays, field-store, fstrings, indexing, locals, print, struct-literal, structs
+struct Inner {
+    v: int,
+}
+
+struct Outer {
+    inner: Inner,
+}
+o := Outer{inner: Inner{v: 42}}
+arr := [o]
+arr[0].inner.v = 99
+println("nested={arr[0].inner.v}") // expect 99
+println("direct={o.inner.v}") // expect 99 (write propagated through array)

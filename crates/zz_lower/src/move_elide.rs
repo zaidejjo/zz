@@ -28,7 +28,7 @@
 use zz_frontend::ast::Expr;
 use zz_frontend::move_elide::{classify_self_assign, unqualify_expr, MoveKind};
 
-use super::{box_scalar_operand, Lowerer, NameCtx};
+use super::{box_scalar_operand, mangle, Lowerer, NameCtx};
 
 /// Marker C type for a moved-from-temporary binding: [`Lowerer::emit_expr`]
 /// emits the bare C identifier (no `zz_clone` bump) for it. The entry is
@@ -176,12 +176,23 @@ impl Lowerer {
         names: &mut NameCtx,
         out: &mut String,
     ) -> bool {
-        let (cid, _local) = match self.takeable_slot(names, var) {
-            Some(slot) => slot,
-            None => return false,
-        };
         let elem = match self.push_elem(var, original, names) {
             Some(e) => e,
+            None => return false,
+        };
+        // Flat (unboxed) array: append in place with a raw element store.
+        // The layout has no `zz_value` handle to take, so this bypasses the
+        // move/refcount path entirely.
+        if let Some((cid, ctype)) = self.flat_slot(names, var) {
+            if self.emit_flat_push(&cid, var, &ctype, elem, names, out) {
+                names.invalidate_array_len(var);
+                names.invalidate_dict_len(var);
+                names.invalidate_stack_array_elems(var);
+                return true;
+            }
+        }
+        let (cid, _local) = match self.takeable_slot(names, var) {
+            Some(slot) => slot,
             None => return false,
         };
         // Element first, take second: the element observes the slot while
@@ -203,6 +214,132 @@ impl Lowerer {
         names.invalidate_array_len(var);
         names.invalidate_dict_len(var);
         names.invalidate_stack_array_elems(var);
+        true
+    }
+
+    /// Resolve `var` to `(C id, C type)` when it currently names a flat
+    /// (unboxed) array buffer. Captures are excluded; a stack local shadows
+    /// a global of the same name.
+    fn flat_slot(&self, names: &NameCtx, var: &str) -> Option<(String, String)> {
+        if names.cap_deref.contains_key(var) {
+            return None;
+        }
+        let (cid, ctype) = match names.stack.get(var).and_then(|v| v.last()) {
+            Some((cid, ctype)) => (cid.clone(), ctype.clone()),
+            None => {
+                let (cid, ctype) = names.globals.get(var)?;
+                (cid.clone(), ctype.clone())
+            }
+        };
+        Self::is_flat_array_ctype(&ctype).then_some((cid, ctype))
+    }
+
+    /// Append `arg` to the flat array buffer `cid` (C type `recv_ctype`),
+    /// growing it when full. Shared by `arr.push(x)` (expression lowering) and
+    /// `arr = vec.push(arr, x)` (move-aware lowering). Returns false when the
+    /// C type is not a flat buffer.
+    pub(crate) fn emit_flat_push(
+        &self,
+        cid: &str,
+        recv_name: &str,
+        recv_ctype: &str,
+        arg: &Expr,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> bool {
+        // Struct elements store the raw C struct; scalar elements unbox the
+        // emitted value to the buffer's element type.
+        let (elem_ctype, arg_raw) = if let Some(elem) = self.scalar_array_from_ptr(recv_ctype) {
+            let elem = elem.to_string();
+            let arg_val = self.emit_expr(arg, names, out);
+            let static_ty: &'static str = match elem.as_str() {
+                "double" => "double",
+                "bool" => "bool",
+                _ => "int64_t",
+            };
+            let raw = self.unbox_for_return(arg, arg_val, names, static_ty);
+            (elem, raw)
+        } else if let Some(sname) = self.flat_array_from_ptr(recv_ctype) {
+            let elem = format!("zz_struct_{}", mangle(&sname));
+            let arg_val = self.emit_expr(arg, names, out);
+            (elem, arg_val)
+        } else if recv_ctype == "zz_flat_row *" {
+            // Flat row array: the pushed element must be a flat scalar row in
+            // scope (the scan guarantees the shape). Store a *snapshot* of the
+            // row in the function arena — never the row's own buffer, which
+            // may live in a loop arena that resets and may be mutated later.
+            // Copy-on-push reproduces the boxed layout's detach-on-write, so
+            // the outer array can never observe later row mutation.
+            let Expr::Ident { name: row_name, .. } = arg else {
+                return false;
+            };
+            let Some(row_cid) = names.lookup(row_name).map(str::to_string) else {
+                return false;
+            };
+            let Some(inner) = names
+                .lookup_type(row_name)
+                .and_then(|ct| self.scalar_array_from_ptr(ct))
+                .map(str::to_string)
+            else {
+                return false;
+            };
+            let Some(row_len) = names.lookup(&format!("{row_name}_len")).map(str::to_string) else {
+                return false;
+            };
+            let flen = names.fresh("_frow_len");
+            let fval = names.fresh("_frow_val");
+            out.push_str(&format!(
+                "    int64_t {flen} = {row_len};\n    zz_flat_row {fval} = {{ NULL, {flen} }};\n    if ({flen} > 0) {{\n      {fval}.data = zz_arena_alloc(&_func_arena, (size_t){flen} * sizeof({inner}), 8);\n      memcpy({fval}.data, {row_cid}, (size_t){flen} * sizeof({inner}));\n    }}\n"
+            ));
+            ("zz_flat_row".to_string(), fval)
+        } else {
+            return false;
+        };
+        let len_cid = names.lookup_or_name(&format!("{recv_name}_len"));
+        let cap_cid = names.lookup_or_name(&format!("{recv_name}_cap"));
+        // Local flat buffers live in the function arena; module globals
+        // outlive the frame, so growth must survive a return →
+        // malloc-family realloc.
+        let is_global = names.resolves_to_global(recv_name);
+        let grow = if is_global {
+            format!(
+                "      {cid} = ({elem_ctype}*)realloc({cid}, (size_t){cap} * sizeof({elem_ctype}));\n",
+                cid = cid,
+                cap = cap_cid,
+                elem_ctype = elem_ctype,
+            )
+        } else {
+            format!(
+                "      {elem_ctype} *__flat_grow = ({elem_ctype}*)zz_arena_alloc(&_func_arena, (size_t){cap} * sizeof({elem_ctype}), 8);\n      if ({len} > 0) {{ memcpy(__flat_grow, {cid}, (size_t){len} * sizeof({elem_ctype})); }}\n      {cid} = __flat_grow;\n",
+                len = len_cid,
+                cap = cap_cid,
+                cid = cid,
+                elem_ctype = elem_ctype,
+            )
+        };
+        // When emit_for pre-reserved capacity for a counted loop, skip the
+        // per-iteration grow guard.
+        if self.skip_flat_push_grow.get() {
+            out.push_str(&format!(
+                "    {cid}[{len}] = {arg_raw};\n    {len}++;\n",
+                cid = cid,
+                len = len_cid,
+                arg_raw = arg_raw
+            ));
+        } else {
+            out.push_str(&format!(
+                "    if ({len} >= {cap}) {{\n      if ({cap} != 0 && {cap} > SIZE_MAX / 2) {{ fprintf(stderr, \"zz error: array capacity overflow\\n\"); exit(1); }}\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n{grow}    }}\n",
+                len = len_cid,
+                cap = cap_cid,
+                grow = grow,
+            ));
+            out.push_str(&format!(
+                "    {cid}[{len}] = {arg_raw};\n    {len}++;\n",
+                cid = cid,
+                len = len_cid,
+                arg_raw = arg_raw
+            ));
+        }
         true
     }
 

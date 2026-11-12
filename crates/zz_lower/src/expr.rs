@@ -869,7 +869,14 @@ impl Lowerer {
                                     || self.is_string_expr(right, names))
                                 && self.loop_arenas.borrow().last().is_some()
                             {
-                                let arena = self.loop_arenas.borrow().last().unwrap().clone();
+                                // `is_some()` is checked above; `unwrap_or_default`
+                                // avoids a panic on the unreachable None path.
+                                let arena = self
+                                    .loop_arenas
+                                    .borrow()
+                                    .last()
+                                    .cloned()
+                                    .unwrap_or_default();
                                 if let zz_frontend::ast::Expr::Binary {
                                     op: inner_op,
                                     left: ll,
@@ -1111,19 +1118,21 @@ impl Lowerer {
                 // allocations are reused instead of growing the heap.
                 // Skipped in green closures (stack arenas cannot survive
                 // a suspend; heap-only there).
-                let loop_arena: Option<String> =
+                // The declaration/init is emitted lazily (see the `for`
+                // lowering): a body whose allocations were optimized away
+                // (e.g. flat pushes) must not pay a per-iteration reset.
+                let arena_decl_at = out.len();
+                let loop_arena: Option<(String, usize)> =
                     if !self.green_active() && self.escape.loop_spans.contains(span) {
                         let ac = names.bump_counter();
                         let name = format!("_loop_arena{ac}");
                         let alloc_count = count_allocating_exprs(body);
                         let arena_size = (alloc_count * 128).max(65536);
-                        out.push_str(&format!("    zz_arena {name};\n"));
-                        out.push_str(&format!("    zz_arena_init(&{name}, {arena_size});\n"));
-                        Some(name)
+                        Some((name, arena_size))
                     } else {
                         None
                     };
-                if let Some(ref name) = loop_arena {
+                if let Some((name, _)) = &loop_arena {
                     self.loop_arenas.borrow_mut().push(name.clone());
                     *self.current_loop_arena.borrow_mut() = Some(name.clone());
                 }
@@ -1249,15 +1258,28 @@ impl Lowerer {
                 // cleared above), and zero-trip loops skip the body
                 // entirely, so post-loop reads re-evaluate at runtime.
                 names.clear_array_lens();
-                if let Some(ref name) = loop_arena {
+                let arena_used = loop_arena
+                    .as_ref()
+                    .is_some_and(|(name, _)| out[arena_decl_at..].contains(name.as_str()));
+                if let Some((name, arena_size)) = &loop_arena {
                     self.loop_arenas.borrow_mut().pop();
                     *self.current_loop_arena.borrow_mut() =
                         self.loop_arenas.borrow().last().cloned();
-                    out.push_str(&format!("        zz_arena_reset(&{name});\n"));
+                    if arena_used {
+                        out.insert_str(
+                            arena_decl_at,
+                            &format!(
+                                "    zz_arena {name};\n    zz_arena_init(&{name}, {arena_size});\n"
+                            ),
+                        );
+                        out.push_str(&format!("        zz_arena_reset(&{name});\n"));
+                    }
                 }
                 out.push_str("    }\n");
-                if let Some(ref name) = loop_arena {
-                    out.push_str(&format!("    zz_arena_destroy(&{name});\n"));
+                if arena_used {
+                    if let Some((name, _)) = &loop_arena {
+                        out.push_str(&format!("    zz_arena_destroy(&{name});\n"));
+                    }
                 }
                 "zz_unit()".to_string()
             }
@@ -1384,6 +1406,47 @@ impl Lowerer {
                         return format!("{ctor}({raw})");
                     }
                 }
+                // Nested flat rows: `rows[i][j]` where `rows` is the
+                // `zz_flat_row *` inferred layout. The outer read loads the
+                // row handle (bounds-checked and trapped exactly like a
+                // scalar flat array), then the element is a direct load from
+                // the row buffer. `bool` stays raw so `if a[i][j]` skips
+                // `zz_truthy`, mirroring the flat scalar bool path.
+                if let Expr::Index {
+                    obj: root,
+                    index: i_expr,
+                    ..
+                } = obj.as_ref()
+                {
+                    if let Some((rows_name, inner)) = self.flat_rows_receiver(root, names) {
+                        if let (Some(buf_cid), Some(len_cid)) = (
+                            names.lookup(&rows_name).map(str::to_string),
+                            names
+                                .lookup(&format!("{rows_name}_len"))
+                                .map(str::to_string),
+                        ) {
+                            let func = names.current_scope.clone();
+                            let i_chk =
+                                self.flat_index_checked(i_expr, &len_cid, &func, names, out);
+                            let rtmp = names.fresh("_frow");
+                            out.push_str(&format!(
+                                "    zz_flat_row {rtmp} = ({buf_cid})[{i_chk}];\n"
+                            ));
+                            let j_chk = self.flat_index_checked(
+                                index,
+                                &format!("({rtmp}).len"),
+                                &func,
+                                names,
+                                out,
+                            );
+                            let raw = format!("(({inner} *)({rtmp}).data)[{j_chk}]");
+                            if inner == "bool" {
+                                return raw;
+                            }
+                            return auto_box(&raw, Some(inner.as_str()));
+                        }
+                    }
+                }
                 // Flat scalar array index: `arr[k]` where `arr` is `[int]`/`[float]`/`[bool]`
                 // → direct `({cid})[{i}]` read, no `zz_index_get` bounds-check/clone.
                 // Handles both `arr[k]` (Ident) and `ns.arr[k]` (Path for namespaced globals).
@@ -1393,62 +1456,77 @@ impl Lowerer {
                 // the array's length equals `limit` (from `[x for _ in 0..limit]`),
                 // then `arr[i]` is provably in bounds and we elide `zz_flat_index`.
                 if let Some((arr_name, elem_ctype)) = self.flat_index_receiver(obj, names) {
-                    let arr_cid = names.lookup(arr_name.as_str()).unwrap().to_string();
-                    let idx_raw = self.flat_index_expr(index, names, out);
-                    let func = names.current_scope.clone();
-
-                    // Resolve array length: flat locals track the live length in
-                    // `{name}_len` (a `push` can grow the buffer, so the static
-                    // comprehension bound in `array_len_exprs` is only valid for
-                    // bounds-check elimination). Other flat buffers prefer the
-                    // raw bound expression from the list comprehension, then the
-                    // `{name}_len` counter.
-                    let len_cid = if names.flat_locals.contains(arr_name.as_str()) {
-                        names.lookup_or_name(&format!("{}_len", arr_name))
+                    // Guard the C-id lookup: if the array has no registered C
+                    // id (unusual but possible for flat_backing buffers), fall
+                    // through to the boxed `zz_index_get` path instead of
+                    // panicking.
+                    let arr_cid = names.lookup(arr_name.as_str()).unwrap_or("").to_string();
+                    if arr_cid.is_empty() {
+                        // No registered C id for this flat array: fall through
+                        // to the boxed `zz_index_get` path below.
                     } else {
-                        names
-                            .array_len_exprs
-                            .get(arr_name.as_str())
-                            .cloned()
-                            .unwrap_or_else(|| names.lookup_or_name(&format!("{}_len", arr_name)))
-                    };
+                        let idx_raw = self.flat_index_expr(index, names, out);
+                        let func = names.current_scope.clone();
 
-                    // Check bounds-check elimination: index var bounded by array length.
-                    let bounds_eliminated = match index.as_ref() {
-                        zz_frontend::ast::Expr::Ident { name, .. } => {
-                            if let Some(bound) = names.loop_bounds.get(name) {
-                                if let Some(len_expr) = names.array_len_exprs.get(arr_name.as_str())
-                                {
-                                    bound == len_expr
+                        // Resolve array length: flat locals track the live length in
+                        // `{name}_len` (a `push` can grow the buffer, so the static
+                        // comprehension bound in `array_len_exprs` is only valid for
+                        // bounds-check elimination). Other flat buffers prefer the
+                        // raw bound expression from the list comprehension, then the
+                        // `{name}_len` counter.
+                        let len_cid = if names.flat_locals.contains(arr_name.as_str()) {
+                            names.lookup_or_name(&format!("{}_len", arr_name))
+                        } else {
+                            names
+                                .array_len_exprs
+                                .get(arr_name.as_str())
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    names.lookup_or_name(&format!("{}_len", arr_name))
+                                })
+                        };
+
+                        // Check bounds-check elimination: index var bounded by array length.
+                        let bounds_eliminated = match index.as_ref() {
+                            zz_frontend::ast::Expr::Ident { name, .. } => {
+                                if let Some(bound) = names.loop_bounds.get(name) {
+                                    if let Some(len_expr) =
+                                        names.array_len_exprs.get(arr_name.as_str())
+                                    {
+                                        bound == len_expr
+                                    } else {
+                                        false
+                                    }
                                 } else {
                                     false
                                 }
-                            } else {
-                                false
                             }
-                        }
-                        // `a[i * n + k]` on an `n * n` buffer with `i < n`
-                        // and `k < n` is provably in bounds.
-                        _ => crate::context::flat_arith_index_in_bounds(
-                            index.as_ref(),
-                            arr_name.as_str(),
-                            names,
-                        ),
-                    };
+                            // `a[i * n + k]` on an `n * n` buffer with `i < n`
+                            // and `k < n` is provably in bounds.
+                            _ => crate::context::flat_arith_index_in_bounds(
+                                index.as_ref(),
+                                arr_name.as_str(),
+                                names,
+                            ),
+                        };
 
-                    let raw = if bounds_eliminated {
-                        // Direct access: no bounds check needed.
-                        format!("({arr_cid})[{idx_raw}]")
-                    } else {
-                        format!("({arr_cid})[zz_flat_index({idx_raw}, {len_cid}, \"{func}\")]")
-                    };
-                    // For flat bool arrays, return the raw C bool instead of
-                    // boxing it via zz_bool(). The caller (if/while condition)
-                    // can use the raw bool directly without zz_truthy().
-                    if elem_ctype == "bool" {
-                        return raw;
+                        let raw = if bounds_eliminated {
+                            // Direct access: no bounds check needed.
+                            format!("({arr_cid})[{idx_raw}]")
+                        } else {
+                            format!(
+                                "({arr_cid})[{}]",
+                                self.flat_index_wrap(index, &idx_raw, &len_cid, &func, names)
+                            )
+                        };
+                        // For flat bool arrays, return the raw C bool instead of
+                        // boxing it via zz_bool(). The caller (if/while condition)
+                        // can use the raw bool directly without zz_truthy().
+                        if elem_ctype == "bool" {
+                            return raw;
+                        }
+                        return auto_box(&raw, Some(elem_ctype.as_str()));
                     }
-                    return auto_box(&raw, Some(elem_ctype.as_str()));
                 }
                 // Two fast-paths over the naive
                 // `zz_call_native2(zz_index_get, zz_clone(o), boxed_i)`:
@@ -1634,14 +1712,22 @@ impl Lowerer {
                         _ => (String::new(), None),
                     };
                     if sname.is_some() {
-                        let arr_cid = names.lookup(&arr_name).unwrap().to_string();
-                        let idx_raw = self.flat_index_expr(index, names, out);
-                        let field_ctype = self.field_type_from_struct(
-                            &format!("zz_struct_{}", sname.as_deref().unwrap_or("")),
-                            name,
-                        );
-                        let raw = format!("({arr_cid})[{idx_raw}].{name}");
-                        return auto_box(&raw, field_ctype);
+                        // Guard the C-id lookup: if the array has no registered
+                        // C id, fall through to the boxed field-access path
+                        // below instead of panicking.
+                        if let Some(arr_cid) = names.lookup(&arr_name).map(str::to_string) {
+                            let idx_raw = self.flat_index_expr(index, names, out);
+                            // `sname` is the demangled/dotted ZZ name (e.g.
+                            // `struct_array.Row`); `field_type_from_struct` needs
+                            // the mangled C identifier (`struct_array_Row`) to
+                            // match `tp.structs` keys.
+                            let field_ctype = self.field_type_from_struct(
+                                &format!("zz_struct_{}", mangle(sname.as_deref().unwrap_or(""))),
+                                name,
+                            );
+                            let raw = format!("({arr_cid})[{idx_raw}].{name}");
+                            return auto_box(&raw, field_ctype);
+                        }
                     }
                 }
                 // Determine if the object is boxed (zz_value) or unboxed (C struct).
@@ -2936,10 +3022,17 @@ impl Lowerer {
         Some(out_cid.to_string())
     }
 
-    /// Cast inlining: `float(int|float)` → `(double)(x)`, `int(int|float)` →
-    /// `(int64_t)(x)`. Only fires when the argument is provably scalar
-    /// (int64_t or double). `int()` used without `??` still needs the boxed
-    /// Option path; `int(X) ?? default` is handled in the Elvis arm.
+    /// Cast inlining: `float(int|float)` → `(double)(x)`.
+    ///
+    /// Only fires when the argument is provably scalar (int64_t or double).
+    /// `float()` returns `Float` (an unboxed `double`), so the raw cast matches
+    /// its C type. `int()` returns `Option<Int>` (a boxed `zz_value`), so it
+    /// must NOT be inlined to a raw `int64_t` here — doing so mis-types a
+    /// standalone `x := int(...)` global (declared `zz_value`) as a raw int
+    /// store. `int()` used without `??` still needs the boxed Option path via
+    /// `zz_call_native1(zz_int_cast, ...)`; `int(X) ?? default` is handled in
+    /// the Elvis arm; `int()` as a binary-op operand is folded separately in
+    /// `scalar_operand_c`.
     fn try_emit_cast_raw(effective_name: &str, args: &[Expr], names: &NameCtx) -> Option<String> {
         if args.len() != 1 {
             return None;
@@ -2959,16 +3052,9 @@ impl Lowerer {
                 };
                 Some(format!("(double)({c})"))
             }
-            "zz_int_cast" => {
-                // int(X) where X is int64_t → just X (identity).
-                // int(X) where X is double → saturating truncation (matches
-                // `zz_int_cast`/the VM for NaN, ±∞ and out-of-range values).
-                if t == "int64_t" {
-                    Some(c)
-                } else {
-                    Some(format!("(int64_t)(zz_i64_sat({c}))"))
-                }
-            }
+            // `zz_int_cast` returns `Option<Int>` (boxed `zz_value`), never a
+            // raw `int64_t` — leave it to the boxed native-call path.
+            "zz_int_cast" => None,
             _ => None,
         }
     }
@@ -3139,8 +3225,10 @@ impl Lowerer {
                             // Try type-based dispatch: check NameCtx's checker_types
                             // (populated at Decl) for the receiver variable's resolved
                             // type, then map to the matching namespace.
-                            let recv_type_ns =
-                                names.checker_types.get(obj_name).and_then(|ty| match ty {
+                            let recv_type_ns = names
+                                .checker_types
+                                .get(obj_name.rsplit('.').next().unwrap_or(obj_name))
+                                .and_then(|ty| match ty {
                                     zz_checker::Type::Str => Some("str"),
                                     zz_checker::Type::Array(_) => Some("vec"),
                                     zz_checker::Type::Dict(_, _) => Some("dict"),
@@ -3227,7 +3315,39 @@ impl Lowerer {
                                                 || self.reachable_natives.contains(&std_candidate))
                                     })
                                     .collect();
-                                if let Some(ns) = crate::pick_arity(reachable_ns, method, nvalues) {
+                                let typed_ns = if reachable_ns.contains(&"option")
+                                    && reachable_ns.contains(&"result")
+                                {
+                                    let bare = obj_name.rsplit('.').next().unwrap_or(obj_name);
+                                    self.tp
+                                        .bindings
+                                        .get(bare)
+                                        .and_then(|ty| match ty {
+                                            zz_checker::Type::Result(_, _) => Some("result"),
+                                            zz_checker::Type::Option(_) => Some("option"),
+                                            _ => None,
+                                        })
+                                        .or_else(|| {
+                                            // Result bindings often missing (e.g. `.ok(x)` error type
+                                            // unresolved at binding time). For unwrap methods,
+                                            // `.ok(x)`/`.err(x)` create Results — default to "result".
+                                            if method == "unwrap"
+                                                || method == "unwrap_or"
+                                                || method == "expect"
+                                            {
+                                                Some("result")
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                } else {
+                                    None
+                                };
+                                if let Some(ns) = typed_ns {
+                                    found_ns = ns;
+                                } else if let Some(ns) =
+                                    crate::pick_arity(reachable_ns, method, nvalues)
+                                {
                                     found_ns = ns;
                                 }
                             }
@@ -3674,6 +3794,11 @@ impl Lowerer {
                             let len_cid = names.lookup_or_name(&format!("{}_len", name));
                             return format!("zz_int({len_cid})");
                         }
+                        // Flat row array: length tracked in `name_len`.
+                        if names.lookup_type(name) == Some("zz_flat_row *") {
+                            let len_cid = names.lookup_or_name(&format!("{}_len", name));
+                            return format!("zz_int({len_cid})");
+                        }
                     }
                     // `len(ns.arr)` for namespaced globals: same folds as
                     // the Ident arm above, using the joined name.
@@ -3691,6 +3816,10 @@ impl Lowerer {
                         if let Some(_elem_ctype) =
                             self.scalar_array_from_ptr(names.lookup_type(&joined).unwrap_or(""))
                         {
+                            let len_cid = names.lookup_or_name(&format!("{}_len", joined));
+                            return format!("zz_int({len_cid})");
+                        }
+                        if names.lookup_type(&joined) == Some("zz_flat_row *") {
                             let len_cid = names.lookup_or_name(&format!("{}_len", joined));
                             return format!("zz_int({len_cid})");
                         }
@@ -3998,123 +4127,15 @@ impl Lowerer {
                     }
                     _ => (String::new(), String::new()),
                 };
-                if !recv_name.is_empty() {
-                    // Struct element push
-                    if let Some(sname) = self.flat_array_from_ptr(&recv_type) {
-                        let Some(arg) = args.first() else {
-                            return "zz_unit()".to_string();
-                        };
-                        let arg_val = self.emit_expr(arg, names, out);
-                        let elem = format!("zz_struct_{}", sname);
-                        let cid = names
-                            .lookup(&recv_name)
-                            .map(str::to_string)
-                            .unwrap_or_else(|| recv_name.clone());
-                        let len_cid = names.lookup_or_name(&format!("{}_len", recv_name));
-                        let cap_cid = names.lookup_or_name(&format!("{}_cap", recv_name));
-                        // Local flat buffers live in the function arena;
-                        // module globals outlive the frame, so growth must
-                        // survive a return → malloc-family realloc.
-                        let is_global = names.resolves_to_global(&recv_name);
-                        let grow = if is_global {
-                            format!(
-                                "      {cid} = ({elem}*)realloc({cid}, (size_t){cap} * sizeof({elem}));\n",
-                                cid = cid,
-                                cap = cap_cid,
-                                elem = elem,
-                            )
-                        } else {
-                            format!(
-                                "      {elem} *__flat_grow = ({elem}*)zz_arena_alloc(&_func_arena, (size_t){cap} * sizeof({elem}), 8);\n      if ({len} > 0) {{ memcpy(__flat_grow, {cid}, (size_t){len} * sizeof({elem})); }}\n      {cid} = __flat_grow;\n",
-                                len = len_cid,
-                                cap = cap_cid,
-                                cid = cid,
-                                elem = elem,
-                            )
-                        };
-                        // When emit_for pre-reserved capacity for a counted
-                        // loop, skip the per-iteration grow guard.
-                        if self.skip_flat_push_grow.get() {
-                            out.push_str(&format!(
-                                "    {cid}[{len}] = {arg_val};\n    {len}++;\n",
-                                cid = cid,
-                                len = len_cid,
-                                arg_val = arg_val
-                            ));
-                        } else {
-                            out.push_str(&format!(
-                                "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n{grow}    }}\n",
-                                len = len_cid,
-                                cap = cap_cid,
-                                grow = grow,
-                            ));
-                            out.push_str(&format!(
-                                "    {cid}[{len}] = {arg_val};\n    {len}++;\n",
-                                cid = cid,
-                                len = len_cid,
-                                arg_val = arg_val
-                            ));
-                        }
+                if !recv_name.is_empty() && Self::is_flat_array_ctype(&recv_type) {
+                    let Some(arg) = args.first() else {
                         return "zz_unit()".to_string();
-                    }
-                    // Scalar element push
-                    if let Some(elem_ctype) = self.scalar_array_from_ptr(&recv_type) {
-                        let Some(arg) = args.first() else {
-                            return "zz_unit()".to_string();
-                        };
-                        let arg_val = self.emit_expr(arg, names, out);
-                        let elem_static: &'static str = match elem_ctype {
-                            "double" => "double",
-                            "bool" => "bool",
-                            _ => "int64_t",
-                        };
-                        let arg_raw = self.unbox_for_return(arg, arg_val, names, elem_static);
-                        let cid = names
-                            .lookup(&recv_name)
-                            .map(str::to_string)
-                            .unwrap_or_else(|| recv_name.clone());
-                        let len_cid = names.lookup_or_name(&format!("{}_len", recv_name));
-                        let cap_cid = names.lookup_or_name(&format!("{}_cap", recv_name));
-                        let is_global = names.resolves_to_global(&recv_name);
-                        let grow = if is_global {
-                            format!(
-                                "      {cid} = ({elem_ctype}*)realloc({cid}, (size_t){cap} * sizeof({elem_ctype}));\n",
-                                cid = cid,
-                                cap = cap_cid,
-                                elem_ctype = elem_ctype,
-                            )
-                        } else {
-                            format!(
-                                "      {elem_ctype} *__flat_grow = ({elem_ctype}*)zz_arena_alloc(&_func_arena, (size_t){cap} * sizeof({elem_ctype}), 8);\n      if ({len} > 0) {{ memcpy(__flat_grow, {cid}, (size_t){len} * sizeof({elem_ctype})); }}\n      {cid} = __flat_grow;\n",
-                                len = len_cid,
-                                cap = cap_cid,
-                                cid = cid,
-                                elem_ctype = elem_ctype,
-                            )
-                        };
-                        // When emit_for pre-reserved capacity for a counted
-                        // loop, skip the per-iteration grow guard.
-                        if self.skip_flat_push_grow.get() {
-                            out.push_str(&format!(
-                                "    {cid}[{len}] = {arg_raw};\n    {len}++;\n",
-                                cid = cid,
-                                len = len_cid,
-                                arg_raw = arg_raw
-                            ));
-                        } else {
-                            out.push_str(&format!(
-                                "    if ({len} >= {cap}) {{\n      {cap} = {cap} == 0 ? 16 : {cap} * 2;\n{grow}    }}\n",
-                                len = len_cid,
-                                cap = cap_cid,
-                                grow = grow,
-                            ));
-                            out.push_str(&format!(
-                                "    {cid}[{len}] = {arg_raw};\n    {len}++;\n",
-                                cid = cid,
-                                len = len_cid,
-                                arg_raw = arg_raw
-                            ));
-                        }
+                    };
+                    let cid = names
+                        .lookup(&recv_name)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| recv_name.clone());
+                    if self.emit_flat_push(&cid, &recv_name, &recv_type, arg, names, out) {
                         return "zz_unit()".to_string();
                     }
                 }
@@ -4740,7 +4761,9 @@ impl Lowerer {
             hits.dedup();
             if hits.len() == 1 {
                 owned_fallback = Some(hits[0].clone());
-                owned_fallback.as_deref().unwrap()
+                owned_fallback
+                    .as_deref()
+                    .unwrap_or(cname_for_native.as_str())
             } else {
                 owned_fallback = None;
                 cname_for_native.as_str()
@@ -5514,7 +5537,9 @@ impl Lowerer {
             zz_checker::Type::Struct(s, _) => s.clone(),
             _ => return false,
         };
-        let method = parts.last().unwrap();
+        let Some(method) = parts.last() else {
+            return false;
+        };
         let bare = sname.rsplit('.').next().unwrap_or(&sname).to_string();
         self.tp
             .structs
@@ -6013,7 +6038,7 @@ impl Lowerer {
         if parts.len() < 2 {
             return None;
         }
-        let method = parts.last().unwrap().clone();
+        let method = parts.last().cloned()?;
 
         // Strategy 1: longest-prefix local match.
         // parts = ["mod", "rect", "area"] → try "mod.rect" (no), then
@@ -6027,7 +6052,9 @@ impl Lowerer {
         for split in (1..parts.len()).rev() {
             let recv_parts = &parts[..split];
             let recv_joined = recv_parts.join(".");
-            let recv_tail = recv_parts.last().unwrap().clone();
+            let Some(recv_tail) = recv_parts.last().cloned() else {
+                continue;
+            };
             let (matched_key, matched_tail) = if names.lookup(&recv_joined).is_some() {
                 (recv_joined, recv_tail)
             } else if names.lookup(&recv_tail).is_some() {
@@ -6292,12 +6319,21 @@ impl Lowerer {
     /// Box a raw-scalar index-store RHS to a `zz_value` before storing.
     /// Extracted from the `obj[idx] = v` lowering so compound assignment
     /// (`obj[idx] OP= v`) boxes identically.
+    ///
+    /// Returns `(expression, needs_release)`. `needs_release` is `true` when
+    /// the expression is a named variable owning a `zz_value` share that the
+    /// caller must release after the store consumes it (only struct RHS, via
+    /// `box_raw_struct`). Scalar/immediate results (`zz_int(…)` etc.) return
+    /// `false` — they are either immediates or already-owned `zz_value`s that
+    /// the consuming runtime function (`zz_index_set`, `zz_object_set_field`)
+    /// takes ownership of.
     pub(crate) fn box_index_store_value(
         &self,
         value: &Expr,
         val: String,
-        names: &NameCtx,
-    ) -> String {
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> (String, bool) {
         let ast_says_scalar = super::expr_emits_raw_scalar(value);
         let ident = match value {
             Expr::Ident { name, .. } => Some(name.as_str()),
@@ -6309,26 +6345,34 @@ impl Lowerer {
         if value_is_scalar {
             if let Expr::Ident { name, .. } = value {
                 let name_str = name.clone();
-                auto_box(&val, names.lookup_type(&name_str))
+                (auto_box(&val, names.lookup_type(&name_str)), false)
             } else if let Expr::Path { parts, .. } = value {
                 let joined = parts.join(".");
-                auto_box(&val, names.lookup_type(&joined))
+                (auto_box(&val, names.lookup_type(&joined)), false)
             } else if val.starts_with("(double)(") {
-                format!("zz_float({val})")
+                (format!("zz_float({val})"), false)
             } else if val.starts_with("(bool)(") {
-                format!("zz_bool({val})")
+                (format!("zz_bool({val})"), false)
             } else if val_is_actually_scalar {
                 // Genuinely raw scalar (int ident/arithmetic):
                 // box it. (String concats over string idents
                 // trip the AST-only check above but lower to
                 // a zz_value — wrapping one in zz_int is a C
                 // type error.)
-                format!("zz_int({val})")
+                (format!("zz_int({val})"), false)
             } else {
-                val
+                (val, false)
             }
+        } else if let Some(sname) = self.struct_box_name(value, names) {
+            // Struct RHS must be boxed to a zz_value before zz_index_set /
+            // zz_object_set_field consume it as `item: zz_value`. Emits the
+            // field-copy statements to `out` and returns the boxed object.
+            // `box_raw_struct` creates a named `__eqobjN` variable owning a
+            // share; the caller must release it unless the consumer
+            // (`zz_index_set`) does so.
+            (self.box_raw_struct(&sname, &val, names, out), true)
         } else {
-            val
+            (val, false)
         }
     }
 
