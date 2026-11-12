@@ -50,17 +50,6 @@ pub use zz_codegen_types::{CodegenSink, NoopSink};
 pub(crate) const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     // Non-reachable from parity fixtures (no fixture uses them):
     // Pure-ZZ stdlib functions — run in VM only, no C codegen
-    ("std.vec.fold", "pure ZZ; no C codegen"),
-    ("std.vec.sum", "pure ZZ; no C codegen"),
-    ("std.vec.product", "pure ZZ; no C codegen"),
-    ("std.vec.min_val", "pure ZZ; no C codegen"),
-    ("std.vec.max_val", "pure ZZ; no C codegen"),
-    ("std.vec.sum_f", "pure ZZ; no C codegen"),
-    ("std.vec.product_f", "pure ZZ; no C codegen"),
-    ("std.vec.concat", "pure ZZ; no C codegen"),
-    ("std.vec.flatten", "pure ZZ; no C codegen"),
-    ("std.vec.index_of", "pure ZZ; no C codegen"),
-    ("std.vec.last_index_of", "pure ZZ; no C codegen"),
     // Pure-ZZ JSON helpers — compiled from zz/json/mod.zz, run in VM only
     ("std.json.validate", "pure ZZ; no C codegen"),
     ("std.json.parse_or", "pure ZZ; no C codegen"),
@@ -74,18 +63,6 @@ pub(crate) const KNOWN_CODEGEN_GAPS: &[(&str, &str)] = &[
     ("std.json.is_array", "pure ZZ; no C codegen"),
     ("std.json.is_object", "pure ZZ; no C codegen"),
     ("std.json.is_empty", "pure ZZ; no C codegen"),
-    // Method-dispatch aliases for pure-ZZ functions
-    ("vec.fold", "pure ZZ alias"),
-    ("vec.sum", "pure ZZ alias"),
-    ("vec.product", "pure ZZ alias"),
-    ("vec.min_val", "pure ZZ alias"),
-    ("vec.max_val", "pure ZZ alias"),
-    ("vec.sum_f", "pure ZZ alias"),
-    ("vec.product_f", "pure ZZ alias"),
-    ("vec.concat", "pure ZZ alias"),
-    ("vec.flatten", "pure ZZ alias"),
-    ("vec.index_of", "pure ZZ alias"),
-    ("vec.last_index_of", "pure ZZ alias"),
     // Method-dispatch aliases for pure-ZZ JSON helpers
     ("json.validate", "pure ZZ alias"),
     ("json.parse_or", "pure ZZ alias"),

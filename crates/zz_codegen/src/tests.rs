@@ -304,12 +304,14 @@ fn reject_unimplemented_natives_allows_gap() {
             "known gap {gap} must be allowed by the preflight"
         );
     }
-    // Multiple names: only non-gap ones are reported. `std.vec.fold` is
+    // Multiple names: only non-gap ones are reported. `std.json.validate` is
     // still a VM-only gap (pure ZZ, no C impl) so it must be allowed;
     // `std.fake.native` is neither a gap nor implemented, so it is reported.
-    let err =
-        reject_unimplemented_natives(&["std.vec.fold".to_string(), "std.fake.native".to_string()])
-            .unwrap_err();
+    let err = reject_unimplemented_natives(&[
+        "std.json.validate".to_string(),
+        "std.fake.native".to_string(),
+    ])
+    .unwrap_err();
     let BuildError::UnimplementedNative { names } = err else {
         panic!("expected UnimplementedNative, got: {err}");
     };
