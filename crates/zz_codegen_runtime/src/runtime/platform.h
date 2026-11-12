@@ -121,11 +121,14 @@ ZZ_INLINE void zz_once(zz_once_t *o, void (*f)(void)) {
 }
 // Monotonic milliseconds (arbitrary epoch, matching clock_gettime semantics).
 ZZ_INLINE int64_t zz_mono_now(void) {
-    static int64_t freq = 0;
+    static volatile int64_t freq = 0;
     if (freq == 0) {
         LARGE_INTEGER f;
-        QueryPerformanceFrequency(&f);
-        freq = f.QuadPart; // ticks per second
+        if (QueryPerformanceFrequency(&f)) {
+            // Publish atomically: first writer wins; the value is identical
+            // either way, so a lost race is harmless.
+            (void)_InterlockedCompareExchange64(&freq, f.QuadPart, 0);
+        }
     }
     LARGE_INTEGER cnt;
     QueryPerformanceCounter(&cnt);
