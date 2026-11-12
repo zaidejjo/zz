@@ -171,15 +171,18 @@ jobs:
 
   # --- windows: x86_64 + arm64 -------------------------------------------
   # `native: false`: the AOT backend cannot build on Windows yet. The C11
-  # <threads.h> shim now covers the pthread primitives (mutex/cond/once/
-  # create, clock/sleep) so concurrency (chan/task/spawn) compiles, but the
-  # socket layer is still POSIX `fcntl`/`poll`/`unistd`/`socket` and is not
-  # yet Windows-ported, so core.c does not compile on Windows. These legs
-  # keep `ZZ_SKIP_NATIVE=1` and run every VM, CLI, PM and LSP suite.
+  # <threads.h> shim (mutex/cond/once/clock/sleep) and the Winsock socket
+  # shim (socket/bind/listen/accept/connect/recv/send/close/fcntl/poll) are
+  # now ported, so concurrency (chan/task/spawn) and the HTTP/net socket
+  # layer compile on Windows. However, the filesystem layer (`stat`/`lstat`,
+  # `opendir`/`readdir`, `unlink`/`rename`/`remove`/`mkdir`, `errno`,
+  # `S_ISDIR`/`S_ISREG`) used by `fs.*` natives and HTTP static-file serving
+  # is still POSIX-only, so core.c does not compile on Windows yet. These
+  # legs keep `ZZ_SKIP_NATIVE=1` and run every VM, CLI, PM and LSP suite.
   # `support::native_unsupported()` makes AOT cases report "skip"; the leg's
   # final `native capability` step says so. Flip `native: true` once the
-  # socket layer is ported; concurrency fixtures are already batch-eligible
-  # and parity-registered so they run natively then.
+  # filesystem layer is ported; concurrency fixtures are already
+  # batch-eligible and parity-registered so they run natively then.
   windows:
     name: windows
     needs: plan

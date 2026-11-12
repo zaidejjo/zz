@@ -23,6 +23,7 @@ fn main() {
         "src/runtime/memory.h",
         "src/runtime/runtime.h",
         "src/runtime/platform.h",
+        "src/runtime/socket.h",
     ];
     for f in files {
         println!("cargo:rerun-if-changed={f}");
