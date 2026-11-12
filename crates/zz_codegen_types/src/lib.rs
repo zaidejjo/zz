@@ -527,10 +527,7 @@ fn is_reserved_symbol(symbol: &str) -> bool {
     // C reserves identifiers beginning with `_` followed by an uppercase
     // letter or another underscore, and identifiers beginning with `__`.
     let bytes = symbol.as_bytes();
-    if bytes.len() >= 2 && bytes[0] == b'_' && (bytes[1] == b'_' || bytes[1].is_ascii_uppercase()) {
-        return true;
-    }
-    false
+    bytes.len() >= 2 && bytes[0] == b'_' && (bytes[1] == b'_' || bytes[1].is_ascii_uppercase())
 }
 
 /// Append `_` to `symbol` until it no longer collides with a reserved
