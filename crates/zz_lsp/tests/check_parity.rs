@@ -82,14 +82,9 @@ fn workspace_root() -> PathBuf {
 }
 
 fn zz_bin() -> PathBuf {
-    // target/debug/deps/check_parity-<hash> -> target/debug/zz(.exe).
-    let exe = std::env::current_exe().expect("current exe");
-    let name = if cfg!(windows) { "zz.exe" } else { "zz" };
-    exe.parent()
-        .expect("deps dir")
-        .parent()
-        .expect("debug dir")
-        .join(name)
+    // `CARGO_BIN_EXE_zz` is the built `zz` binary for this test run and
+    // carries the platform executable suffix (`zz.exe` on Windows).
+    PathBuf::from(env!("CARGO_BIN_EXE_zz"))
 }
 
 fn fixture_files() -> Vec<PathBuf> {
