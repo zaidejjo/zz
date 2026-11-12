@@ -224,11 +224,20 @@ jobs:
           echo "$out" | grep -qx 'smoke-ok'
 
       # --- PR signal: fast suite (VM) + batched native + sanitizers -----
+      # Prebuild the release VM driver once so release_vm_bin() (quad matrix)
+      # doesn't trigger a cold, lock-serialized `cargo build --release` while
+      # every quad worker idles. Reuses the per-leg rust-cache.
+      - name: prebuild release zz driver (quad matrix)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: cargo build --release -p zz_cli
+
       - name: 'test (PR: fast suite, native allowed)'
         if: github.event_name == 'pull_request' && matrix.native
         shell: bash
         env:
           ZZ_CI_SKIP_LINT: "1"
+          ZZ_QUAD_JOBS: "16"
         run: ./scripts/test-fast.sh
 
       - name: 'test (PR: fast suite, native skipped)'
@@ -237,6 +246,7 @@ jobs:
         env:
           ZZ_CI_SKIP_LINT: "1"
           ZZ_SKIP_NATIVE: "1"
+          ZZ_QUAD_JOBS: "16"
         run: ./scripts/test-fast.sh
 
       - name: 'test (PR: zz_cli unit tests inside the binary)'
@@ -262,6 +272,13 @@ jobs:
         run: cargo test -p zz_cli --test sanitizer_aot -- --nocapture
 
       # --- merge/push: full suite --------------------------------------
+      # Prebuild the release VM driver once so release_vm_bin() (quad matrix)
+      # doesn't trigger a cold, lock-serialized `cargo build --release`.
+      - name: prebuild release zz driver (quad matrix)
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: cargo build --release -p zz_cli
+
       - name: 'test (merge: full suite, native allowed)'
         if: github.event_name != 'pull_request' && matrix.native
         shell: bash
