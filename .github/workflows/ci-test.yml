@@ -284,14 +284,14 @@ jobs:
       - name: 'test (merge: unit tests, native allowed)'
         if: github.event_name != 'pull_request' && matrix.native && inputs.test_scope == 'unit'
         shell: bash
-        run: cargo test --workspace --lib
+        run: cargo test --workspace --exclude zz_cli --lib
 
       - name: 'test (merge: unit tests, native skipped)'
         if: github.event_name != 'pull_request' && !matrix.native && inputs.test_scope == 'unit'
         shell: bash
         env:
           ZZ_SKIP_NATIVE: "1"
-        run: cargo test --workspace --lib
+        run: cargo test --workspace --exclude zz_cli --lib
 
       - name: 'test (merge: zz_cli lib + bins)'
         if: github.event_name != 'pull_request' && inputs.test_scope == 'cli'
@@ -335,7 +335,7 @@ jobs:
         run: cargo test -p zz_cli --test sanitizer_aot -- --nocapture
 
       - name: 'lsp parity (LSP ↔ checker diagnostics)'
-        if: inputs.test_scope == 'full' || inputs.test_scope == 'fast' || inputs.test_scope == 'lsp' || inputs.test_scope == 'misc'
+        if: inputs.test_scope == 'full' || inputs.test_scope == 'fast' || inputs.test_scope == 'lsp'
         shell: bash
         run: |
           cargo build -p zz_cli
