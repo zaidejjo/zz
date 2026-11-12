@@ -1,4 +1,4 @@
-// features: arrays, comparison, imports, json, option-result, print, std-json, string-literal
+// features: arrays, comparison, imports, option-result, print, std-json, string-literal
 // E2E: std.json pure-ZZ gap helpers (validate/parse_or/parse_or_null/path_exists/path_get_or/is_*/is_empty + json.* aliases).
 import std.json
 

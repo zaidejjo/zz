@@ -1,4 +1,4 @@
-// features: arrays, comparison, imports, json, print, std-csv, std-json, string-literal
+// features: arrays, comparison, imports, print, std-csv, std-json, string-literal
 // E2E: std.csv pure-ZZ gap helpers (parse/parse_delim/stringify/stringify_delim/header/records/len/get_cell/validate/to_json + csv.* aliases).
 import std.csv
 import std.json

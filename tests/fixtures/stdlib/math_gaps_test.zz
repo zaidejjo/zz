@@ -1,4 +1,4 @@
-// features: arrays, comparison, float-arith, imports, math, option-result, print, std-math, string-literal
+// features: arrays, comparison, float-arith, imports, option-result, print, std-math, string-literal
 // E2E: std.math pure-ZZ gap functions (sum/product/count/is_even/is_odd/min_arr/max_arr/sum_f/product_f/mean_f/median_f/min/max + constants).
 import std.math
 

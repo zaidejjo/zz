@@ -1,4 +1,4 @@
-// features: arrays, bool-logic, comparison, crypto, imports, print, std-http, std-json, std-uuid, string-literal
+// features: arrays, bool-logic, comparison, imports, print, std-crypto, std-http, std-json, std-uuid, string-literal
 // E2E: std.http pure-ZZ gap helpers (ok/created/not_found/redirect/cors/secure_headers/secure_header_dict/csrf_token/csrf_check/request_id + http.* aliases).
 import std.http
 
