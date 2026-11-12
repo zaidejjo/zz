@@ -1743,17 +1743,17 @@ impl<'a> Parser<'a> {
                 let arg = if self.eat(TokenKind::LParen) {
                     let first = self.parse_pattern();
                     let first_span = first.span();
-                    // Multi-field pattern `.Op(k, p)`: parse remaining
-                    // comma-separated patterns into a tuple.
-                    let p = if self.eat(TokenKind::Comma) {
+                    let comma_result = self.eat(TokenKind::Comma);
+                    let p = if comma_result {
                         let mut pats = vec![first];
+                        pats.push(self.parse_pattern());
                         while self.eat(TokenKind::Comma) {
                             if self.at(TokenKind::RParen) {
                                 break;
                             }
                             pats.push(self.parse_pattern());
                         }
-                        let end = if self.eat_close(TokenKind::RParen) {
+                        let end = if self.eat(TokenKind::RParen) {
                             self.previous().span
                         } else {
                             self.error_missing_close(")", "expected `)` to close pattern");
@@ -1764,7 +1764,7 @@ impl<'a> Parser<'a> {
                             span: first_span.join(end),
                         }
                     } else {
-                        let end = if self.eat_close(TokenKind::RParen) {
+                        let end = if self.eat(TokenKind::RParen) {
                             self.previous().span
                         } else {
                             self.error_missing_close(")", "expected `)` to close pattern");
