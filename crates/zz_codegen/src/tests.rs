@@ -13,7 +13,7 @@ use crate::{
 };
 
 /// Seed the real stdlib signatures for typed building.
-use zz_stdlib::stdlib_funcs;
+use zz_stdlib::{stdlib_funcs, zz_stdlib_programs};
 
 fn build_reachable(src: &str) -> (TypedProgram, ReachableSet) {
     // Type-check with real stdlib func sigs.
@@ -86,21 +86,40 @@ fn vm_run(src: &str) -> (i32, String) {
 
 #[test]
 fn all_stdlib_funcs_have_c_impls() {
-    // Drift census: the checker's stdlib registry must have a C runtime
-    // implementation for every key. The AOT backend lowers funcs through
-    // `native_impl`; a missing entry means a valid `std.*` call silently
-    // lowers to an unimplemented native.
+    // Drift census: every `stdlib_funcs()` key must either (a) have a C
+    // runtime implementation (`native_supported`), (b) be an intentional
+    // VM-only gap in `KNOWN_CODEGEN_GAPS`, or (c) be defined in a
+    // pure-ZZ stdlib program — those lower as ZZ functions in AOT and
+    // need no C twin.
     let funcs = zz_stdlib::stdlib_funcs();
     let supported = |k: &String| native_supported(k);
+    // Collect every pure-ZZ function name (short form `math.sum` and
+    // canonical `std.math.sum`) from the embedded compiled programs.
+    let purezz_names: std::collections::HashSet<String> = zz_stdlib_programs()
+        .iter()
+        .filter_map(|r| r.as_ref().ok())
+        .flat_map(|tp| tp.funcs.keys().cloned())
+        .map(|k| {
+            let canon = if k.starts_with("std.") {
+                k.clone()
+            } else {
+                format!("std.{k}")
+            };
+            (k, canon)
+        })
+        .flat_map(|(k, canon)| [k, canon])
+        .collect();
+    let is_purezz = |k: &String| purezz_names.contains(k);
     let mut unlisted_gap: Vec<&String> = funcs
         .keys()
         .filter(|k| !supported(k))
         .filter(|k| !KNOWN_CODEGEN_GAPS.iter().any(|(g, _)| g == k))
+        .filter(|k| !is_purezz(k))
         .collect();
     unlisted_gap.sort();
     assert!(
         unlisted_gap.is_empty(),
-        "stdlib_funcs keys without a C impl and without a KNOWN_CODEGEN_GAPS entry: {unlisted_gap:?}"
+        "stdlib_funcs keys without a C impl, without a KNOWN_CODEGEN_GAPS entry, and not pure-ZZ: {unlisted_gap:?}"
     );
 
     // Stale gaps: an allowlisted key that now HAS a C impl must be removed
