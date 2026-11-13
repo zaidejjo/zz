@@ -1465,11 +1465,23 @@ zz_value zz_vec_insert(zz_value arr, zz_value idx, zz_value item, int *err) {
 zz_value zz_vec_contains(zz_value arr, zz_value item, int *err) {
     (void)err;
     if (arr.tag != ZZ_ARRAY || !arr.arr) return (zz_value){ZZ_BOOL, {.b = false}};
+    // Clone the needle once, not per element. Tags that differ can never be
+    // equal (zz_values_equal requires identical tags), so skip zz_binop
+    // entirely for those. Interned strings compare by pointer in O(1).
+    zz_value item_clone = zz_clone(item);
     for (size_t i = 0; i < arr.arr->len; i++) {
-        if (zz_truthy(zz_binop(ZZOP_EQ, zz_clone(arr.arr->items[i]), zz_clone(item))))
-            return (zz_value){ZZ_BOOL, {.b = true}};
+        zz_value el = arr.arr->items[i];
+        if (el.tag != item_clone.tag) continue;
+        if (el.tag == ZZ_STR && el.s && item_clone.s && el.s == item_clone.s)
+            goto found;
+        if (zz_truthy(zz_binop(ZZOP_EQ, zz_clone(el), zz_clone(item_clone))))
+            goto found;
     }
+    zz_release(&item_clone);
     return (zz_value){ZZ_BOOL, {.b = false}};
+found:
+    zz_release(&item_clone);
+    return (zz_value){ZZ_BOOL, {.b = true}};
 }
 
 // ---- vec.sort -------------------------------------------------------------

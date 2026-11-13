@@ -530,7 +530,7 @@ size_t zz_float_format_raw(double x, char *buf, size_t cap) ZZ_WEAK_IMPORT_FLOAT
 // Render `x` canonically: `*out_len` bytes at the returned pointer
 // (`stack`, or malloc'd `*heap` when the core reports more than fits).
 // Callers `free(*heap)` (`free(NULL)` is a no-op).
-static const char *zz_canonical_double(double x, char *stack, char **heap, size_t *out_len) {
+const char *zz_canonical_double(double x, char *stack, char **heap, size_t *out_len) {
 #if !ZZ_LINK_FLOAT
     (void)x;
     (void)stack;

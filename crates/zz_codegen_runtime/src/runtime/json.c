@@ -303,13 +303,15 @@ void json_serialize(SB *sb, zz_value v) {
     case ZZ_INT:
         { char buf[32]; int n = snprintf(buf, sizeof buf, "%lld", (long long)v.i); sb_str(sb, buf, (size_t)n); }
         break;
-    case ZZ_FLOAT:
-        if (v.f == (double)(int64_t)v.f) {
-            char buf[32]; int n = snprintf(buf, sizeof buf, "%.0f", v.f); sb_str(sb, buf, (size_t)n);
-        } else {
-            char buf[64]; int n = snprintf(buf, sizeof buf, "%.15g", v.f); sb_str(sb, buf, (size_t)n);
-        }
+    case ZZ_FLOAT: {
+        char stack[ZZ_FLOAT_STACK];
+        char *heap = NULL;
+        size_t n = 0;
+        const char *s = zz_canonical_double(v.f, stack, &heap, &n);
+        sb_str(sb, s, n);
+        free(heap);
         break;
+    }
     case ZZ_STR: {
         sb_str(sb, "\"", 1);
         json_append_str_sb(sb, zz_str_cptr(v.s), v.s->len);
@@ -634,17 +636,15 @@ static void json_pretty_print(SB *sb, zz_value v, int indent) {
         sb_str(sb, buf, (size_t)n);
         break;
     }
-    case ZZ_FLOAT:
-        if (v.f == (double)(int64_t)v.f) {
-            char buf[32];
-            int n = snprintf(buf, sizeof buf, "%.0f", v.f);
-            sb_str(sb, buf, (size_t)n);
-        } else {
-            char buf[64];
-            int n = snprintf(buf, sizeof buf, "%.15g", v.f);
-            sb_str(sb, buf, (size_t)n);
-        }
+    case ZZ_FLOAT: {
+        char stack[ZZ_FLOAT_STACK];
+        char *heap = NULL;
+        size_t n = 0;
+        const char *s = zz_canonical_double(v.f, stack, &heap, &n);
+        sb_str(sb, s, n);
+        free(heap);
         break;
+    }
     case ZZ_STR:
         sb_str(sb, "\"", 1);
         json_append_str_sb(sb, zz_str_cptr(v.s), v.s->len);
