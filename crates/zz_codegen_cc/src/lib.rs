@@ -1314,28 +1314,47 @@ pub fn compile_units_with_sink(
                     sink.file_done(completed.fetch_add(1, Ordering::Relaxed) + 1);
                     return Ok(obj.clone());
                 }
-                let mut cmd = Command::new(&clang.path);
-                if clang.zig {
-                    cmd.arg("cc");
-                    if let Some(t) = target {
-                        cmd.arg("-target").arg(t);
+                // Compile the TU, retrying once on a transient failure.
+                // clang's atomic object publish (temp → rename) can race
+                // under heavy parallel load (e.g. full `cargo test` with
+                // many clang jobs at once) and abort with "unable to rename
+                // temporary ... : No such file or directory". A retry with
+                // a fresh temp file resolves it without failing the build.
+                let mut last_err: Option<String> = None;
+                for _ in 0..2 {
+                    let mut cmd = Command::new(&clang.path);
+                    if clang.zig {
+                        cmd.arg("cc");
+                        if let Some(t) = target {
+                            cmd.arg("-target").arg(t);
+                        }
                     }
-                }
-                for flag in &cflags {
-                    if flag == "-s" || flag.starts_with("-Wl,") || flag == "-static" {
-                        continue;
+                    for flag in &cflags {
+                        if flag == "-s" || flag.starts_with("-Wl,") || flag == "-static" {
+                            continue;
+                        }
+                        cmd.arg(flag);
                     }
-                    cmd.arg(flag);
+                    cmd.arg("-c")
+                        .arg(src_path)
+                        .arg("-o")
+                        .arg(obj)
+                        .arg(format!("-DZZ_HAS_CURL={}", u8::from(opts.curl_link)))
+                        .arg(format!("-DZZ_HAS_SQLITE3={}", u8::from(opts.sqlite_link)));
+                    let out = match cmd.output() {
+                        Ok(o) => o,
+                        Err(e) => {
+                            last_err = Some(e.to_string());
+                            continue;
+                        }
+                    };
+                    if out.status.success() {
+                        last_err = None;
+                        break;
+                    }
+                    last_err = Some(String::from_utf8_lossy(&out.stderr).into_owned());
                 }
-                cmd.arg("-c")
-                    .arg(src_path)
-                    .arg("-o")
-                    .arg(obj)
-                    .arg(format!("-DZZ_HAS_CURL={}", u8::from(opts.curl_link)))
-                    .arg(format!("-DZZ_HAS_SQLITE3={}", u8::from(opts.sqlite_link)));
-                let out = cmd.output().map_err(BuildError::Io)?;
-                if !out.status.success() {
-                    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+                if let Some(stderr) = last_err {
                     return Err(BuildError::CompileFailed { stderr });
                 }
                 // Publish the fresh object for future builds (same key =
