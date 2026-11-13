@@ -98,6 +98,10 @@ pub fn load_c_plugin(
 
     let path_str = path.display().to_string();
 
+    // SAFETY: Loading a dynamic library by path is safe as long as the
+    // library file exists and is a valid native library. The path comes
+    // from user configuration, so a missing or invalid file results in a
+    // Dlopen error rather than undefined behavior.
     let lib = unsafe { libloading::Library::new(path) }.map_err(|e| LoadError::Dlopen {
         path: path_str.clone(),
         source: e,
@@ -130,6 +134,11 @@ pub fn load_c_plugin(
         let mut sym_nul = sym.into_bytes();
         sym_nul.push(0);
         let ptr: *mut c_void = unsafe {
+            // SAFETY: Getting a symbol pointer from a loaded library is
+            // safe as long as the library is loaded. The symbol name comes
+            // from the program's native function table, so it should exist
+            // in the library. A missing symbol results in a MissingSymbol
+            // error rather than undefined behavior.
             *lib.get::<*mut c_void>(&sym_nul)
                 .map_err(|_| LoadError::MissingSymbol {
                     path: path_str.clone(),
@@ -241,6 +250,10 @@ pub fn load_plugin(
 ) -> Result<PluginLib, LoadError> {
     let path_str = path.display().to_string();
 
+    // SAFETY: Loading a dynamic library by path is safe as long as the
+    // library file exists and is a valid native library. The path comes
+    // from user configuration, so a missing or invalid file results in a
+    // Dlopen error rather than undefined behavior.
     let lib = unsafe { libloading::Library::new(path) }.map_err(|e| LoadError::Dlopen {
         path: path_str.clone(),
         source: e,
@@ -248,6 +261,9 @@ pub fn load_plugin(
 
     // Validate ABI version stamp.
     unsafe {
+        // SAFETY: Getting a symbol pointer from a loaded library is safe
+        // as long as the library is loaded. The symbol name is a
+        // well-known constant, so it should exist in the library.
         let version_bytes: &[u8] = VERSION_SYMBOL;
         let version_sym =
             lib.get::<*const u32>(version_bytes)
@@ -267,6 +283,9 @@ pub fn load_plugin(
 
     // Get the registration function.
     let register_fn: libloading::Symbol<unsafe extern "C" fn(RegisterCallback)> = unsafe {
+        // SAFETY: Getting a symbol pointer from a loaded library is safe
+        // as long as the library is loaded. The symbol name is a
+        // well-known constant, so it should exist in the library.
         lib.get(REGISTER_SYMBOL)
             .map_err(|_| LoadError::MissingSymbol {
                 path: path_str.clone(),
