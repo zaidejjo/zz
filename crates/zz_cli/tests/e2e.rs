@@ -933,6 +933,9 @@ e2e_success_test!(e2e_stdlib_property_gaps, "stdlib", "property_gaps_test.zz");
 e2e_success_test!(e2e_stdlib_dec_gaps, "stdlib", "dec_gaps_test.zz");
 e2e_success_test!(e2e_stdlib_map_gaps, "stdlib", "map_gaps_test.zz");
 e2e_success_test!(e2e_stdlib_set_gaps, "stdlib", "set_gaps_test.zz");
+e2e_success_test!(e2e_stdlib_pty_open, "stdlib", "pty_open_test.zz");
+e2e_success_test!(e2e_stdlib_spawn_pty, "stdlib", "spawn_pty_test.zz");
+e2e_success_test!(e2e_stdlib_signal, "stdlib", "signal_test.zz");
 e2e_success_test!(
     e2e_stdlib_str_builder_gaps,
     "stdlib",

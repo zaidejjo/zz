@@ -1,0 +1,23 @@
+// E2E: std.signal yield-point delivery. Install a handler, raise the
+// signal, then run_pending to invoke it at a yield point.
+// VM-only: EXCLUDED from native parity batch.
+import std.signal
+
+func main() {
+    match signal.install(10, || {
+        ()
+    }) {
+        .ok(_) => println("signal.install ok")
+        .err(e) => println("signal.install err: {e}")
+    }
+    match signal.raise(10) {
+        .ok(_) => println("signal.raise ok")
+        .err(e) => println("signal.raise err: {e}")
+    }
+    match signal.run_pending() {
+        .ok(_) => println("signal.run_pending ok")
+        .err(e) => println("signal.run_pending err: {e}")
+    }
+    println("signal.pending(10): {signal.pending(10)}")
+    println("signal_test_ok")
+}

@@ -75,6 +75,67 @@ pub fn spawn(cmd: &str, argv: &[String]) -> Result<Handle, String> {
     }
 }
 
+/// Spawn `cmd` inside the pseudo-terminal whose slave fd is `slave_fd`.
+///
+/// The child: `setsid()`, acquires the slave as its controlling terminal
+/// (`TIOCSCTTY`), dup2s the slave onto stdio (0/1/2), closes the master fd
+/// and the original slave fd, then `execvp`s `cmd` with `argv`. The parent
+/// keeps the master fd and gets back the child pid; `wait(pid)` reaps it.
+pub fn spawn_pty(cmd: &str, argv: &[String], slave_fd: i32) -> Result<i32, String> {
+    unsafe {
+        match libc::fork() {
+            0 => {
+                // Child: become a session leader and acquire a controlling tty.
+                if libc::setsid() == -1 {
+                    let e = std::io::Error::last_os_error();
+                    eprintln!("spawn_pty: setsid failed: {e}");
+                    libc::_exit(127);
+                }
+                // SAFETY: `slave_fd` is an open fd; `TIOCSCTTY` acquires it as
+                // the controlling terminal for this new session.
+                if libc::ioctl(slave_fd, libc::TIOCSCTTY, 0) == -1 {
+                    let e = std::io::Error::last_os_error();
+                    eprintln!("spawn_pty: TIOCSCTTY failed: {e}");
+                    libc::_exit(127);
+                }
+                // dup2 the slave onto stdin/stdout/stderr.
+                for fd in 0..3 {
+                    let _ = libc::dup2(slave_fd, fd);
+                }
+                // Close fds >= 3 that we inherited (master + original slave).
+                let max_fd = 64;
+                for fd in 3..max_fd {
+                    if fd != slave_fd {
+                        let _ = libc::close(fd);
+                    }
+                }
+                // execvp: search PATH for `cmd`.
+                let c_cmd = std::ffi::CString::new(cmd)
+                    .map_err(|e| format!("spawn_pty: cmd contains nul byte: {e}"))?;
+                let c_argv: Vec<std::ffi::CString> = argv
+                    .iter()
+                    .map(|s| std::ffi::CString::new(s.as_str()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| format!("spawn_pty: argv contains nul byte: {e}"))?;
+                let mut c_ptrs: Vec<*const libc::c_char> =
+                    c_argv.iter().map(|s| s.as_ptr()).collect();
+                c_ptrs.push(std::ptr::null());
+                // SAFETY: `execvp` only reads the argv/env arrays; `cmd` and
+                // each argv entry are valid C strings. On success never
+                // returns; on failure we _exit.
+                libc::execvp(c_cmd.as_ptr(), c_ptrs.as_ptr());
+                let e = std::io::Error::last_os_error();
+                eprintln!("spawn_pty: execvp {cmd} failed: {e}");
+                libc::_exit(127);
+            }
+            pid if pid > 0 => Ok(pid),
+            _ => Err(format!(
+                "process.spawn_pty: fork failed: {}",
+                std::io::Error::last_os_error()
+            )),
+        }
+    }
+}
 /// Why `wait` could not produce output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WaitError {

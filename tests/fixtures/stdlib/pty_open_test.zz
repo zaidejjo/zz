@@ -1,0 +1,42 @@
+// E2E: std.pty pseudo-terminal primitives. Allocates a master/slave fd pair,
+// writes on the slave, reads on the master, and checks terminal properties.
+// VM-only (needs /dev/pts): EXCLUDED from native parity batch.
+import std.pty
+
+func main() {
+    match pty.open() {
+        .ok(pair) => {
+            master:int = pair[0]
+            slave:int = pair[1]
+            println("pty.open: master={master} slave={slave}")
+            println("pty.isatty(slave): {pty.isatty(slave)}")
+            // Write on slave -> readable on master.
+            match pty.write(slave, "hello") {
+                .ok(n) => println("pty.wrote: {n}")
+                .err(e) => println("pty.write err: {e}")
+            }
+            match pty.read(master, 64) {
+                .ok(data) => println("pty.read: {data}")
+                .err(e) => println("pty.read err: {e}")
+            }
+            match pty.set_winsz(master, 80, 24) {
+                .ok(_) => println("pty.set_winsz ok")
+                .err(e) => println("pty.set_winsz err: {e}")
+            }
+            match pty.grantpt(slave) {
+                .ok(_) => println("pty.grantpt ok")
+                .err(e) => println("pty.grantpt err: {e}")
+            }
+            match pty.unlockpt(slave) {
+                .ok(_) => println("pty.unlockpt ok")
+                .err(e) => println("pty.unlockpt err: {e}")
+            }
+            match pty.ptsname(master) {
+                .ok(path) => println("pty.ptsname: {path}")
+                .err(e) => println("pty.ptsname err: {e}")
+            }
+        }
+        .err(e) => println("pty.open err: {e}")
+    }
+    println("pty_open_test_ok")
+}

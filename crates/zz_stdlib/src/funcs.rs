@@ -492,6 +492,17 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
         sig(vec![("code", Type::Int)], Type::Unit),
     );
     m.insert("std.process.pid".into(), sig(vec![], Type::Int));
+    m.insert(
+        "std.process.spawn_pty".into(),
+        sig(
+            vec![
+                ("cmd", Type::Str),
+                ("argv", str_arr2()),
+                ("slave_fd", Type::Int),
+            ],
+            Type::Result(Box::new(Type::Int), Box::new(Type::Str)),
+        ),
+    );
 
     // std.uuid — v4/v7 generation, parse (normalizing), validation.
     // Both spellings (like json).
@@ -591,6 +602,79 @@ fn build_stdlib_funcs() -> HashMap<String, FuncSig> {
     m.insert("std.term.get_size".into(), sig(vec![], res_size()));
     m.insert("std.term.is_tty".into(), sig(vec![], Type::Bool));
     m.insert("std.term.flush".into(), sig(vec![], Type::Unit));
+
+    // std.pty — pseudo-terminals: master/slave pair, size, byte stream.
+    // `pty.read`/`pty.write` cross lossy UTF-8 (same contract as
+    // `std.process.run`); binary PTY output keeps its shape minus invalid
+    // sequences. No `Type::Bytes` exists in the checker, so `str` is the
+    // byte-stream carrier here.
+    let res_fd_pair = || {
+        Type::Result(
+            Box::new(Type::Array(Box::new(Type::Int))),
+            Box::new(Type::Str),
+        )
+    };
+    m.insert("std.pty.open".into(), sig(vec![], res_fd_pair()));
+    m.insert(
+        "std.pty.read".into(),
+        sig(
+            vec![("fd", Type::Int), ("n", Type::Int)],
+            Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.pty.write".into(),
+        sig(vec![("fd", Type::Int), ("data", Type::Str)], res_int()),
+    );
+    m.insert(
+        "std.pty.ptsname".into(),
+        sig(
+            vec![("fd", Type::Int)],
+            Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+        ),
+    );
+    m.insert(
+        "std.pty.grantpt".into(),
+        sig(vec![("fd", Type::Int)], res_unit2()),
+    );
+    m.insert(
+        "std.pty.unlockpt".into(),
+        sig(vec![("fd", Type::Int)], res_unit2()),
+    );
+    m.insert(
+        "std.pty.set_winsz".into(),
+        sig(
+            vec![("fd", Type::Int), ("cols", Type::Int), ("rows", Type::Int)],
+            res_unit2(),
+        ),
+    );
+    m.insert(
+        "std.pty.isatty".into(),
+        sig(vec![("fd", Type::Int)], Type::Bool),
+    );
+
+    // std.signal — yield-point signal delivery.
+    // `signal.install(signum, handler)`: `sigaction` sets a flag + self-pipe;
+    // `handler` (a no-arg closure) runs on the ZZ executor at the next yield
+    // point, never as a true async preemption. This avoids async-signal
+    // safety issues with ZZ state.
+    let handler_t = Type::Func(vec![], Box::new(Type::Unit));
+    m.insert(
+        "std.signal.install".into(),
+        sig(
+            vec![("signum", Type::Int), ("handler", handler_t)],
+            res_unit2(),
+        ),
+    );
+    m.insert(
+        "std.signal.pending".into(),
+        sig(vec![("signum", Type::Int)], Type::Bool),
+    );
+    m.insert(
+        "std.signal.raise".into(),
+        sig(vec![("signum", Type::Int)], res_unit2()),
+    );
+    m.insert("std.signal.run_pending".into(), sig(vec![], res_unit2()));
 
     // std.args — raw argv + flag parser. Parser handles are Opaque("args"),
     // dispatching `args.*` methods by tag. Both spellings (like json).
@@ -4091,6 +4175,29 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
+        // std.pty — pseudo-terminals.
+        for name in [
+            "std.pty.open",
+            "std.pty.read",
+            "std.pty.write",
+            "std.pty.ptsname",
+            "std.pty.grantpt",
+            "std.pty.unlockpt",
+            "std.pty.set_winsz",
+            "std.pty.isatty",
+        ] {
+            assert!(funcs.contains_key(name), "missing {name}");
+        }
+        // std.signal — yield-point signal delivery.
+        assert!(
+            funcs.contains_key("std.signal.install"),
+            "missing std.signal.install"
+        );
+        // std.process.spawn_pty.
+        assert!(
+            funcs.contains_key("std.process.spawn_pty"),
+            "missing std.process.spawn_pty"
+        );
         // New pure-ZZ modules (map, set, dec, bytes, csv, time dates).
         for name in [
             "std.map.has",
@@ -4190,7 +4297,7 @@ mod tests {
         ] {
             assert!(funcs.contains_key(name), "missing {name}");
         }
-        assert_eq!(funcs.len(), 687);
+        assert_eq!(funcs.len(), 700);
     }
 
     #[test]

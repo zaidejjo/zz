@@ -378,6 +378,9 @@ fn native_skip_reason(file: &Path) -> Option<&'static str> {
         "log_test" => {
             Some("log output embeds unix timestamps and span durations — non-deterministic")
         }
+        "pty_open_test" | "spawn_pty_test" | "signal_test" => {
+            Some("needs /dev/pts + fork (VM-only pty/signal primitives)")
+        }
         _ => None,
     }
 }

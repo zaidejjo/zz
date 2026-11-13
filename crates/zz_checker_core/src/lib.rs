@@ -942,6 +942,8 @@ pub const STD_MODULES: &[&str] = &[
     "sys",
     "args",
     "process",
+    "pty",
+    "signal",
     "uuid",
     "sqlz",
     "sqlz.postgres",

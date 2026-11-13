@@ -1,0 +1,27 @@
+// E2E: std.process.spawn_pty runs a child inside a pseudo-terminal; the
+// parent reads the child's output from the master fd.
+// VM-only (needs /dev/pts + fork): EXCLUDED from native parity batch.
+import std.process
+import std.pty
+
+func main() {
+    match pty.open() {
+        .ok(pair) => {
+            master:int = pair[0]
+            slave:int = pair[1]
+            match process.spawn_pty("echo", ["pty-spawn-hello"], slave) {
+                .ok(pid) => {
+                    println("spawn_pty: pid={pid}")
+                    // Read child output from master.
+                    match pty.read(master, 64) {
+                        .ok(data) => println("spawn_pty.output: {data}")
+                        .err(e) => println("spawn_pty.read err: {e}")
+                    }
+                }
+                .err(e) => println("spawn_pty err: {e}")
+            }
+        }
+        .err(e) => println("spawn_pty.open err: {e}")
+    }
+    println("spawn_pty_test_ok")
+}

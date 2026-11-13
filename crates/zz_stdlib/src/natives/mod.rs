@@ -31,8 +31,10 @@ pub(crate) mod math;
 pub(crate) mod net;
 pub(crate) mod option_mod;
 pub(crate) mod process;
+pub(crate) mod pty;
 pub(crate) mod regexp;
 pub(crate) mod result_mod;
+pub(crate) mod signal;
 pub(crate) mod str_mod;
 pub(crate) mod sys;
 pub(crate) mod term;
@@ -1863,6 +1865,38 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         m.insert(name.into(), NativeEntry { arity, f: func });
     }
 
+    // std.pty — pseudo-terminals: master/slave pair, size, byte stream.
+    for (name, arity, func) in [
+        (
+            "std.pty.open",
+            0_usize,
+            pty::pty_open as zz_runtime::NativeFn,
+        ),
+        ("std.pty.read", 2, pty::pty_read),
+        ("std.pty.write", 2, pty::pty_write),
+        ("std.pty.ptsname", 1, pty::pty_ptsname),
+        ("std.pty.grantpt", 1, pty::pty_grantpt),
+        ("std.pty.unlockpt", 1, pty::pty_unlockpt),
+        ("std.pty.set_winsz", 3, pty::pty_set_winsz),
+        ("std.pty.isatty", 1, pty::pty_isatty),
+    ] {
+        m.insert(name.into(), NativeEntry { arity, f: func });
+    }
+
+    // std.signal — yield-point signal delivery.
+    for (name, arity, func) in [
+        (
+            "std.signal.install",
+            2,
+            signal::signal_install as zz_runtime::NativeFn,
+        ),
+        ("std.signal.pending", 1, signal::signal_pending),
+        ("std.signal.raise", 1, signal::signal_raise),
+        ("std.signal.run_pending", 0, signal::signal_run_pending),
+    ] {
+        m.insert(name.into(), NativeEntry { arity, f: func });
+    }
+
     // std.args — raw argv + flag parser (both spellings each).
     m.insert(
         "std.args.get_raw".into(),
@@ -2004,6 +2038,13 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         NativeEntry {
             arity: 0,
             f: process::process_pid,
+        },
+    );
+    m.insert(
+        "std.process.spawn_pty".into(),
+        NativeEntry {
+            arity: 3,
+            f: process::process_spawn_pty,
         },
     );
 
@@ -2611,7 +2652,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // table without the other will fail CI here rather than at runtime.
     assert_eq!(
         m.len(),
-        465,
+        478,
         "natives registry count drifted; update this assertion"
     );
 

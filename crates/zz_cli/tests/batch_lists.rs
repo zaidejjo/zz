@@ -256,4 +256,16 @@ pub const EXCLUDED: &[(&str, &str)] = &[
         "types/enum_import.zz",
         "alias `shapes` collides with alias_import's support module",
     ),
+    (
+        "stdlib/pty_open_test.zz",
+        "needs /dev/pts (VM-only pty primitive)",
+    ),
+    (
+        "stdlib/spawn_pty_test.zz",
+        "needs /dev/pts + fork (VM-only pty primitive)",
+    ),
+    (
+        "stdlib/signal_test.zz",
+        "needs /dev/pts + signals (VM-only signal primitive)",
+    ),
 ];
