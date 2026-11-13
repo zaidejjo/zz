@@ -26,6 +26,7 @@ use zz_runtime::{EvalError, Interp, Span, Value};
 
 use crate::natives::expect_int;
 use executor::Executor;
+use zz_runtime::env::EnvLink;
 use zz_runtime::value::snapshot_env_cow;
 use zz_runtime::value::{ChanInner, ChanState};
 
@@ -462,7 +463,12 @@ pub(crate) fn spawn(
                 )
             })?,
             f.params.len(),
-            f.env.clone(),
+            // Freeze the captured env before crossing the thread boundary.
+            // `FuncValue.env` may be `Owned` (mutable, same-thread) or
+            // `Frozen` (immutable, cross-thread). Spawning always sends the
+            // closure to a worker thread, so we must freeze first to make
+            // the `unsafe impl Send for Value` sound.
+            EnvLink::Frozen(f.env.freeze_arc()),
         ),
         Some(other) => {
             return Err(EvalError::new(
@@ -493,7 +499,7 @@ pub(crate) fn spawn_hook(
     _chunk_defaults: &[Option<Arc<zz_runtime::Chunk>>],
     span: Span,
 ) -> Result<Value, EvalError> {
-    let env = interp.env.clone();
+    let env = EnvLink::Frozen(interp.env.freeze_arc());
     spawn_from_parts(interp, Arc::clone(chunk), params.len(), env, span)
 }
 

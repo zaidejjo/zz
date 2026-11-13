@@ -1,11 +1,30 @@
 //! Expression lowering: literals, binary ops, function calls, field access,
 //! collections, variants, closures, and match expressions.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use zz_codegen_ffi::ffi_impl;
 use zz_frontend::ast::{Block, Decorator, Expr, FmtPart, Ident, MatchArm, Param, Pattern};
 
 use super::green::GreenCtx;
 use super::*;
+
+// Intern table for method-namespace strings. Replaces Box::leak so that
+// each distinct tag leaks at most once per process.
+static INTERNED_NAMES: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
+
+/// Intern a string, leaking it at most once per process. Returns a
+/// `&'static str` that lives for the process lifetime.
+pub(crate) fn intern_tag(tag: &str) -> &'static str {
+    let map = INTERNED_NAMES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = map.lock().unwrap();
+    if let Some(s) = map.get(tag) {
+        return *s;
+    }
+    let leaked: &'static str = Box::leak(tag.to_string().into_boxed_str());
+    map.insert(leaked.to_string(), leaked);
+    leaked
+}
 
 // ── Route-handler request-use analysis ───────────────────────────────────
 // True when a 1-param closure never references its parameter, letting the
@@ -3263,9 +3282,7 @@ impl Lowerer {
                                     // Opaque handles dispatch on their module tag.
                                     // Tags are dynamic, so leak once per tag —
                                     // same pattern as struct namespaces in the VM.
-                                    zz_checker::Type::Opaque(tag) => {
-                                        Some(Box::leak(tag.clone().into_boxed_str()) as &str)
-                                    }
+                                    zz_checker::Type::Opaque(tag) => Some(intern_tag(tag)),
                                     _ => None,
                                 });
                             // Also check the type checker's span_types map
@@ -3287,9 +3304,7 @@ impl Lowerer {
                                         zz_checker::Type::Json => Some("json"),
                                         zz_checker::Type::Bytes => Some("bytes"),
                                         zz_checker::Type::Chan => Some("chan"),
-                                        zz_checker::Type::Opaque(tag) => {
-                                            Some(Box::leak(tag.clone().into_boxed_str()) as &str)
-                                        }
+                                        zz_checker::Type::Opaque(tag) => Some(intern_tag(tag)),
                                         _ => None,
                                     }
                                 } else {
@@ -3415,7 +3430,7 @@ impl Lowerer {
                                     {
                                         // Same once-per-process leak pattern
                                         // as opaque-tag namespaces above.
-                                        found_ns = Box::leak(ns.into_boxed_str());
+                                        found_ns = intern_tag(&ns);
                                     }
                                 }
                                 if found_ns.is_empty() {
@@ -3730,9 +3745,7 @@ impl Lowerer {
                                 zz_checker::Type::Json => "json",
                                 zz_checker::Type::Bytes => "bytes",
                                 zz_checker::Type::Chan => "chan",
-                                zz_checker::Type::Opaque(tag) => {
-                                    Box::leak(tag.clone().into_boxed_str()) as &str
-                                }
+                                zz_checker::Type::Opaque(tag) => intern_tag(tag),
                                 _ => "",
                             };
                             if !ns.is_empty() {

@@ -35,8 +35,8 @@ pub struct Env {
 /// `Send for Value` discipline).
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrozenScope {
-    vars: HashMap<String, Value>,
-    parent: Option<Arc<FrozenScope>>,
+    pub(crate) vars: HashMap<String, Value>,
+    pub(crate) parent: Option<Arc<FrozenScope>>,
 }
 
 impl FrozenScope {
@@ -44,8 +44,38 @@ impl FrozenScope {
     /// `deep_clone_value` so snapshotted closures carry `Frozen` (Arc-backed,
     /// Send + Sync) envs instead of `Owned` (Rc-backed, not Send) envs when
     /// crossing thread boundaries.
+    #[allow(dead_code)]
     pub(crate) fn new(vars: HashMap<String, Value>, parent: Option<Arc<FrozenScope>>) -> Self {
         Self { vars, parent }
+    }
+
+    /// Stable identity for cache keys: the allocation address. Frozen
+    /// `Arc`s stay alive while pinned by caches/workers, so reuse-after-
+    /// free false hits are impossible (same discipline as the old `Rc`
+    /// keys).
+    #[allow(dead_code)]
+    pub(crate) fn id(env: &Arc<FrozenScope>) -> usize {
+        Arc::as_ptr(env) as *const () as usize
+    }
+
+    /// Flatten the scope chain root→leaf into a `HashMap`. Leaf values
+    /// shadow root values, matching normal scope semantics.
+    #[allow(dead_code)]
+    pub(crate) fn flatten(&self) -> HashMap<String, Value> {
+        let mut chain: Vec<HashMap<String, Value>> = Vec::new();
+        chain.push(self.vars.clone());
+        let mut cur = self.parent.clone();
+        while let Some(parent) = cur {
+            chain.push(parent.vars.clone());
+            cur = parent.parent.clone();
+        }
+        let mut flat = HashMap::with_capacity(chain.iter().map(|l| l.len()).sum());
+        for mut layer in chain.into_iter().rev() {
+            for (k, v) in layer.drain() {
+                flat.insert(k, v);
+            }
+        }
+        flat
     }
 
     /// Read a binding, leaf-first (plain map reads, no borrow flags).
@@ -64,6 +94,12 @@ impl FrozenScope {
         }
         self.parent.as_ref().and_then(|p| p.bound(name))
     }
+}
+
+/// Pointer equality between two frozen scopes.
+#[allow(dead_code)]
+pub(crate) fn frozen_ptr_eq(a: &Arc<FrozenScope>, b: &Arc<FrozenScope>) -> bool {
+    Arc::ptr_eq(a, b)
 }
 
 /// Process-wide environment generation.
@@ -150,6 +186,16 @@ impl Env {
         EnvLink::Owned(Rc::new(RefCell::new(Env {
             vars: HashMap::new(),
             parent: Some(parent.clone()),
+            version: std::cell::Cell::new(0),
+        })))
+    }
+
+    /// Create a child scope whose parent is a frozen scope. Used when
+    /// entering a compiled closure whose captured env is `Arc<FrozenScope>`.
+    pub fn with_frozen_parent(parent: &Arc<FrozenScope>) -> EnvLink {
+        EnvLink::Owned(Rc::new(RefCell::new(Env {
+            vars: HashMap::new(),
+            parent: Some(EnvLink::Frozen(parent.clone())),
             version: std::cell::Cell::new(0),
         })))
     }
@@ -342,6 +388,21 @@ impl EnvLink {
     /// Fresh owned root scope.
     pub fn new() -> Self {
         EnvLink::Owned(Rc::new(RefCell::new(Env::new())))
+    }
+
+    /// Convert to an `Arc<FrozenScope>` for cross-thread sending.
+    /// Owned scopes are cloned and frozen; frozen scopes are cloned as-is.
+    pub fn freeze_arc(&self) -> Arc<FrozenScope> {
+        match self {
+            EnvLink::Owned(rc) => {
+                let env = rc.borrow().clone();
+                match env.freeze() {
+                    EnvLink::Frozen(f) => f,
+                    _ => unreachable!(),
+                }
+            }
+            EnvLink::Frozen(f) => f.clone(),
+        }
     }
 
     /// Stable identity for cache keys: the allocation address. Frozen

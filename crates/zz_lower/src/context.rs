@@ -6,6 +6,7 @@
 //! classification helpers shared by the expression and statement
 //! lowerers.
 
+use super::expr::intern_tag;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
@@ -2432,7 +2433,7 @@ impl Lowerer {
                 // Route through `mangle()` so a namespaced struct (e.g. `mod.Rect`)
                 // produces a single valid C identifier.
                 let s = format!("zz_struct_{}", mangle(name));
-                Some(Box::leak(s.into_boxed_str()) as &str)
+                Some(intern_tag(&s))
             }
             _ => None, // non-scalar boxed type: caller handles
         }
