@@ -107,6 +107,40 @@ pub(crate) fn process_spawn(
     }
 }
 
+/// `std.process.spawn_pty(cmd, argv, slave_fd) -> Result<int, str>`.
+///
+/// Spawns `cmd` inside the pseudo-terminal whose slave fd is `slave_fd`:
+/// the child calls `setsid`, acquires the slave as its controlling terminal
+/// (`TIOCSCTTY`), dup2s the slave onto stdio, closes the master, then
+/// `execvp`s. The parent keeps the master fd and gets back the child pid;
+/// `std.process.wait(pid)` reaps it.
+pub(crate) fn process_spawn_pty(
+    _interp: &mut Interp,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let cmd = expect_str(args, 0, "std.process.spawn_pty")?;
+    let argv = expect_argv(args, 1, "std.process.spawn_pty", span)?;
+    let slave_fd = match args.get(2) {
+        Some(Value::Int(n)) => *n as i32,
+        other => {
+            return Err(EvalError::new(
+                format!(
+                    "std.process.spawn_pty: expects `int` slave_fd at arg 2, found `{}`",
+                    other
+                        .map(|v| v.type_name())
+                        .unwrap_or_else(|| "nothing".to_string())
+                ),
+                span,
+            ))
+        }
+    };
+    match zz_native_rt::process::spawn_pty(&cmd, &argv, slave_fd) {
+        Ok(pid) => Ok(ok_wrap(Value::Int(pid as i64))),
+        Err(e) => Ok(err_wrap(e)),
+    }
+}
+
 pub(crate) fn process_wait(
     _interp: &mut Interp,
     args: &mut Vec<Value>,

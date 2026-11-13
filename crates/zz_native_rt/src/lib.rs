@@ -54,8 +54,12 @@ pub mod pg_wire;
 pub mod placeholders;
 /// `std.process` subprocess control (run, spawn/wait, exit, pid).
 pub mod process;
+/// `std.pty` pseudo-terminal control (open, read/write, size, slave setup).
+pub mod pty;
 /// `std.regexp` implementation (safe pool API + `extern "C"` FFI).
 pub mod regexp;
+/// `std.signal` yield-point signal delivery (sigaction + pending flag).
+pub mod signal;
 /// `std.sys` system information (os, arch, cpu, hostname, memory).
 pub mod sys;
 /// `std.term` terminal control (raw mode, single-key reads, size).

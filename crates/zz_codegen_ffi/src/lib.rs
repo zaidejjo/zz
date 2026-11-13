@@ -137,6 +137,19 @@ pub fn ffi_impl(name: &str) -> Option<&'static str> {
         "process.wait" | "std.process.wait" => Some("zz_process_wait"),
         "process.exit" | "std.process.exit" => Some("zz_process_exit"),
         "process.pid" | "std.process.pid" => Some("zz_process_pid"),
+        "process.spawn_pty" | "std.process.spawn_pty" => Some("zz_process_spawn_pty"),
+        "pty.open" | "std.pty.open" => Some("zz_pty_open"),
+        "pty.read" | "std.pty.read" => Some("zz_pty_read"),
+        "pty.write" | "std.pty.write" => Some("zz_pty_write"),
+        "pty.ptsname" | "std.pty.ptsname" => Some("zz_pty_ptsname"),
+        "pty.grantpt" | "std.pty.grantpt" => Some("zz_pty_grantpt"),
+        "pty.unlockpt" | "std.pty.unlockpt" => Some("zz_pty_unlockpt"),
+        "pty.set_winsz" | "std.pty.set_winsz" => Some("zz_pty_set_winsz"),
+        "pty.isatty" | "std.pty.isatty" => Some("zz_pty_isatty"),
+        "signal.install" | "std.signal.install" => Some("zz_signal_install"),
+        "signal.pending" | "std.signal.pending" => Some("zz_signal_pending"),
+        "signal.raise" | "std.signal.raise" => Some("zz_signal_raise"),
+        "signal.run_pending" | "std.signal.run_pending" => Some("zz_signal_run_pending"),
         "uuid.v4" | "std.uuid.v4" => Some("zz_uuid_v4"),
         "uuid.v7" | "std.uuid.v7" => Some("zz_uuid_v7"),
         "uuid.parse" | "std.uuid.parse" => Some("zz_uuid_parse"),
@@ -493,6 +506,23 @@ pub fn ffi_decl(symbol: &str) -> Option<&'static str> {
         "zz_process_wait" => Some("zz_value zz_process_wait(zz_value id, int *err);"),
         "zz_process_exit" => Some("zz_value zz_process_exit(zz_value code, int *err);"),
         "zz_process_pid" => Some("zz_value zz_process_pid(zz_value unit, int *err);"),
+        "zz_process_spawn_pty" => {
+            Some("zz_value zz_process_spawn_pty(zz_value cmd, zz_value argv, zz_value slave_fd, int *err);")
+        }
+        "zz_pty_open" => Some("zz_value zz_pty_open(zz_value unit, int *err);"),
+        "zz_pty_read" => Some("zz_value zz_pty_read(zz_value fd, zz_value n, int *err);"),
+        "zz_pty_write" => Some("zz_value zz_pty_write(zz_value fd, zz_value data, int *err);"),
+        "zz_pty_ptsname" => Some("zz_value zz_pty_ptsname(zz_value fd, int *err);"),
+        "zz_pty_grantpt" => Some("zz_value zz_pty_grantpt(zz_value fd, int *err);"),
+        "zz_pty_unlockpt" => Some("zz_value zz_pty_unlockpt(zz_value fd, int *err);"),
+        "zz_pty_set_winsz" => {
+            Some("zz_value zz_pty_set_winsz(zz_value fd, zz_value cols, zz_value rows, int *err);")
+        }
+        "zz_pty_isatty" => Some("zz_value zz_pty_isatty(zz_value fd, int *err);"),
+        "zz_signal_install" => Some("zz_value zz_signal_install(zz_value signum, int *err);"),
+        "zz_signal_pending" => Some("zz_value zz_signal_pending(zz_value signum, int *err);"),
+        "zz_signal_raise" => Some("zz_value zz_signal_raise(zz_value signum, int *err);"),
+        "zz_signal_run_pending" => Some("zz_value zz_signal_run_pending(zz_value unit, int *err);"),
         "zz_uuid_v4" => Some("zz_value zz_uuid_v4(zz_value unit, int *err);"),
         "zz_uuid_v7" => Some("zz_value zz_uuid_v7(zz_value unit, int *err);"),
         "zz_uuid_parse" => Some("zz_value zz_uuid_parse(zz_value s, int *err);"),
