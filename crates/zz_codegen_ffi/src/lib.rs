@@ -1499,6 +1499,41 @@ fn find_std_rlib(libdir: &std::path::Path) -> Result<String, FfiError> {
     })
 }
 
+/// All of rustc's standard-library rlibs in `libdir` (std, alloc, core,
+/// panic_unwind, unicode_*, hashbrown, cfg_if, compiler_builtins, ...).
+///
+/// rustc links all of these for a program that uses std; linking only
+/// `libstd-*.rlib` leaves its undefined symbols (`__rust_alloc`,
+/// `core::panicking`, `alloc::*`, ...) unresolved on Windows, where the
+/// `zz_native_rt.lib` staticlib does not bake them in.
+///
+/// Excluded: `librustc_std_workspace_std` (dupes libstd), `libtest` (defines
+/// `main`), `libpanic_abort` (dupes libpanic_unwind), `libproc_macro` and
+/// `libprofiler_builtins` (not needed by a std program).
+fn rust_std_rlibs(rustc_dir: &Path) -> Result<Vec<String>, FfiError> {
+    let excluded = [
+        "rustc_std_workspace_std",
+        "libtest",
+        "libpanic_abort",
+        "libproc_macro",
+        "libprofiler_builtins",
+    ];
+    let entries = std::fs::read_dir(rustc_dir)
+        .map_err(|e| FfiError(format!("cannot read {rustc_dir:?}: {e}")))?;
+    let mut rlibs: Vec<_> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "rlib"))
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            !excluded.iter().any(|x| name.contains(x))
+        })
+        .map(|p| p.display().to_string())
+        .collect();
+    rlibs.sort();
+    Ok(rlibs)
+}
+
 /// Exact `libstd` shared-object file name in `libdir` (`-l:` needs the full
 /// name because rustc hashes it: `libstd-<hash>.so`).
 /// Fallback for pre-#303 toolchains that shipped only the shared object.
@@ -1558,16 +1593,20 @@ pub fn link_args_for_target(
     // `foo.lib` makes the driver treat them as input files
     // (`error: no such file`), so the archive goes in by absolute path.
     if os == TargetOs::Windows {
-        // `zz_native_rt.lib` (the `staticlib` crate-type) is self-contained:
-        // rustc bakes std/alloc/core into it, so it alone provides every
-        // Rust-runtime symbol the generated program needs, including
-        // `zz_float_format_raw`. Linking `libstd-*.rlib` on top would only
-        // re-introduce its undefined symbols (`__rust_alloc`,
-        // `core::panicking`, `alloc::*`, ...) that nothing else defines.
-        // The MSVC import libs below cover the CRT/Win32 API the std objects
+        // `zz_native_rt.lib` (the `staticlib` crate-type) provides
+        // `zz_float_format_raw`; rustc's std/alloc/core rlibs in the same
+        // libdir provide everything else the std objects reference
+        // (`__rust_alloc`, `alloc::*`, `core::panicking`, ...). Linking only
+        // `libstd-*.rlib` leaves those undefined on Windows, so link the full
+        // rustc rlib set, plus the CRT/Win32 import libs the std objects
         // reference externally (memset, HeapAlloc, __security_cookie, ...).
         let mut base = vec![libdir.join(lib_file_name_for(os)).display().to_string()];
         base.extend(sys_link_libs_windows().iter().map(|s| s.to_string()));
+        if let Ok(rustc_dir) = rustc_libdir_for_target(target) {
+            if let Ok(rlibs) = rust_std_rlibs(&rustc_dir) {
+                base.extend(rlibs);
+            }
+        }
         return Ok((base, lib));
     }
 
