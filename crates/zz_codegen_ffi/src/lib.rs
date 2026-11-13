@@ -1424,12 +1424,31 @@ fn sys_link_libs(os: TargetOs) -> &'static [&'static str] {
 /// 'kernel32.lib'". clang maps `-l` to the right import library for both
 /// the MSVC and the GNU driver.
 fn sys_link_libs_windows() -> &'static [&'static str] {
+    // Import libraries Rust's std needs on Windows MSVC. The C runtime
+    // archive itself only uses a handful of Win32 APIs, but linking
+    // `std.rlib` (required for float formatting and any `zz_native_rt`
+    // native) pulls in std objects that reference the rest.
+    // kernel32/user32/advapi32/ws2_32/crypt32 are the pre-existing set;
+    // the rest are the standard Rust-std Windows link deps.
     &[
         "-lkernel32",
         "-luser32",
         "-ladvapi32",
         "-lws2_32",
         "-lcrypt32",
+        "-lbcrypt",
+        "-lntdll",
+        "-luserenv",
+        "-lshell32",
+        "-lole32",
+        "-lversion",
+        "-lshlwapi",
+        "-lwsock32",
+        "-lnetapi32",
+        "-lpsapi",
+        "-ldbghelp",
+        "-limagehlp",
+        "-liphlpapi",
     ]
 }
 
