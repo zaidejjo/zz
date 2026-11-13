@@ -696,7 +696,6 @@ fn opaque_handle_tag(name: &str) -> Option<&'static str> {
 pub fn contains_var(t: &Type) -> bool {
     match t {
         Type::Var(_) => true,
-        Type::Void => false,
         Type::Tuple(ts) => ts.iter().any(contains_var),
         Type::Option(x) => contains_var(x),
         Type::Result(a, b) => contains_var(a) || contains_var(b),
@@ -708,7 +707,31 @@ pub fn contains_var(t: &Type) -> bool {
         Type::Union(ts) => ts.iter().any(contains_var),
         Type::Range(x) => contains_var(x),
         Type::Ptr { inner, .. } => contains_var(inner),
-        _ => false,
+        // Leaf variants carry no nested `Type`, so none can contain an
+        // inference variable. Listed exhaustively (no catch-all) so that
+        // adding a new `Type` variant forces an update here — otherwise a
+        // nested-Type variant would silently slip through and cause a
+        // cross-module var-id collision (G1).
+        Type::Int
+        | Type::Float
+        | Type::Bool
+        | Type::Str
+        | Type::Unit
+        | Type::Void
+        | Type::Bytes
+        | Type::Json
+        | Type::Db
+        | Type::HttpServer
+        | Type::TcpStream
+        | Type::TcpListener
+        | Type::Response
+        | Type::HttpRequest
+        | Type::Opaque(_)
+        | Type::Chan
+        | Type::TaskJoin
+        | Type::Named(_)
+        | Type::Error
+        | Type::Never => false,
     }
 }
 
@@ -910,7 +933,6 @@ fn hash_type_into(ty: &Type, h: &mut impl std::hash::Hasher) {
 pub fn max_var_id(t: &Type) -> Option<u32> {
     match t {
         Type::Var(id) => Some(*id),
-        Type::Void => None,
         Type::Tuple(ts) => ts.iter().filter_map(max_var_id).max(),
         Type::Option(x) => max_var_id(x),
         Type::Result(a, b) => max_var_id(a).into_iter().chain(max_var_id(b)).max(),
@@ -922,7 +944,31 @@ pub fn max_var_id(t: &Type) -> Option<u32> {
         Type::Union(ts) => ts.iter().filter_map(max_var_id).max(),
         Type::Range(x) => max_var_id(x),
         Type::Ptr { inner, .. } => max_var_id(inner),
-        _ => None,
+        // Leaf variants carry no nested `Type`, so none hold a var id.
+        // Listed exhaustively (no catch-all) so that adding a new `Type`
+        // variant forces an update here — otherwise a nested-Type variant
+        // would silently return None and cause a cross-module var-id
+        // collision (G1).
+        Type::Int
+        | Type::Float
+        | Type::Bool
+        | Type::Str
+        | Type::Unit
+        | Type::Void
+        | Type::Bytes
+        | Type::Json
+        | Type::Db
+        | Type::HttpServer
+        | Type::TcpStream
+        | Type::TcpListener
+        | Type::Response
+        | Type::HttpRequest
+        | Type::Opaque(_)
+        | Type::Chan
+        | Type::TaskJoin
+        | Type::Named(_)
+        | Type::Error
+        | Type::Never => None,
     }
 }
 
