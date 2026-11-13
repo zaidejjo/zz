@@ -1427,9 +1427,11 @@ fn sys_link_libs_windows() -> &'static [&'static str] {
     // Import libraries Rust's std needs on Windows MSVC. The C runtime
     // archive itself only uses a handful of Win32 APIs, but linking
     // `std.rlib` (required for float formatting and any `zz_native_rt`
-    // native) pulls in std objects that reference the rest.
-    // kernel32/user32/advapi32/ws2_32/crypt32 are the pre-existing set;
-    // the rest are the standard Rust-std Windows link deps.
+    // native) pulls in std objects that reference the rest of the Windows
+    // API surface (heap, unwind, console, locale, environment, networking,
+    // security, crypto). kernel32/user32/advapi32/ws2_32/crypt32 are the
+    // pre-existing set; the rest are the standard Rust-std Windows link
+    // deps. Order does not matter for lld-link.
     &[
         "-lkernel32",
         "-luser32",
@@ -1449,6 +1451,26 @@ fn sys_link_libs_windows() -> &'static [&'static str] {
         "-ldbghelp",
         "-limagehlp",
         "-liphlpapi",
+        "-lgdi32",
+        "-lcomdlg32",
+        "-lwinmm",
+        "-limm32",
+        "-lmsimg32",
+        "-lusp10",
+        "-loleaut32",
+        "-lrpcrt4",
+        "-lsecur32",
+        "-lsspicli",
+        "-lmpr",
+        "-lmswsock",
+        "-ldnsapi",
+        "-lcryptui",
+        "-lwintrust",
+        // MSVC CRT static archives that Rust std object files reference
+        // (memset, memcmp, ...) when linked with clang rather than link.exe.
+        "-llibcmt",
+        "-llibvcruntime",
+        "-loldnames",
     ]
 }
 
