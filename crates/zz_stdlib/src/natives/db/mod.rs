@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use zz_runtime::value::{DbHandle, DbHandleInner, ObjectValue};
+use zz_runtime::value::{DbHandle, DbHandleInner, DbHandleInnerState, ObjectValue};
 use zz_runtime::{EvalError, Interp, Span, Value};
 
 use crate::natives::{arg, expect_str};
@@ -88,7 +88,7 @@ fn lock_handle<'a>(
     handle: &'a Arc<DbHandleInner>,
     name: &str,
     span: Span,
-) -> Result<std::sync::MutexGuard<'a, Box<dyn std::any::Any + Send + Sync>>, EvalError> {
+) -> Result<std::sync::MutexGuard<'a, DbHandleInnerState>, EvalError> {
     handle
         .mutex
         .lock()
@@ -102,7 +102,11 @@ fn with_pg<T>(
     f: impl FnOnce(&mut PgConn) -> Result<T, String>,
 ) -> Result<T, EvalError> {
     let guard = lock_handle(handle, name, span)?;
+    if guard.closed {
+        return Err(EvalError::new(format!("`{name}`: handle is closed"), span));
+    }
     let db = guard
+        .conn
         .downcast_ref::<DbConn>()
         .ok_or_else(|| EvalError::new(format!("`{name}`: invalid db handle"), span))?;
     match db {
@@ -130,7 +134,11 @@ fn with_my<T>(
     f: impl FnOnce(&mut MyConn) -> Result<T, String>,
 ) -> Result<T, EvalError> {
     let guard = lock_handle(handle, name, span)?;
+    if guard.closed {
+        return Err(EvalError::new(format!("`{name}`: handle is closed"), span));
+    }
     let db = guard
+        .conn
         .downcast_ref::<DbConn>()
         .ok_or_else(|| EvalError::new(format!("`{name}`: invalid db handle"), span))?;
     match db {
@@ -167,7 +175,10 @@ pub(crate) fn db_open(
         let conn = MyConn::connect(&info)
             .map_err(|e| EvalError::new(format!("sqlz.open failed: {e}"), span))?;
         return Ok(Value::Db(DbHandle(Arc::new(DbHandleInner {
-            mutex: Mutex::new(Box::new(DbConn::My(Mutex::new(conn)))),
+            mutex: Mutex::new(DbHandleInnerState {
+                conn: Box::new(DbConn::My(Mutex::new(conn))),
+                closed: false,
+            }),
         }))));
     }
     if path.starts_with("postgres://") || path.starts_with("postgresql://") {
@@ -176,7 +187,10 @@ pub(crate) fn db_open(
         let conn = PgConn::connect(&info)
             .map_err(|e| EvalError::new(format!("sqlz.open failed: {e}"), span))?;
         return Ok(Value::Db(DbHandle(Arc::new(DbHandleInner {
-            mutex: Mutex::new(Box::new(DbConn::Pg(Mutex::new(conn)))),
+            mutex: Mutex::new(DbHandleInnerState {
+                conn: Box::new(DbConn::Pg(Mutex::new(conn))),
+                closed: false,
+            }),
         }))));
     }
     let conn = if path == ":memory:" {
@@ -192,7 +206,10 @@ pub(crate) fn db_open(
     }
     .map_err(|e| EvalError::new(format!("sqlz.open failed: {e}"), span))?;
     let inner = DbHandleInner {
-        mutex: Mutex::new(Box::new(DbConn::Sqlite(Mutex::new(conn)))),
+        mutex: Mutex::new(DbHandleInnerState {
+            conn: Box::new(DbConn::Sqlite(Mutex::new(conn))),
+            closed: false,
+        }),
     };
     Ok(Value::Db(DbHandle(Arc::new(inner))))
 }
@@ -249,6 +266,7 @@ pub(crate) fn db_exec(
     let (template, params) = split_query_args(&args[1..]);
     let guard = lock_handle(&handle, "std.sqlz.exec", span)?;
     let db = guard
+        .conn
         .downcast_ref::<DbConn>()
         .ok_or_else(|| EvalError::new("`std.sqlz.exec`: invalid db handle".to_string(), span))?;
     match db {
@@ -312,6 +330,7 @@ pub(crate) fn db_query(
 
     let guard = lock_handle(&handle, "std.sqlz.query", span)?;
     let db = guard
+        .conn
         .downcast_ref::<DbConn>()
         .ok_or_else(|| EvalError::new("`std.sqlz.query`: invalid db handle".to_string(), span))?;
     let rows: Vec<Vec<Value>> = match db {
@@ -573,12 +592,18 @@ fn sqlite_bool_decl(decltype: Option<&str>) -> bool {
 
 /// `sqlz.close(db) -> unit` — explicit close (also dropped automatically).
 /// Works for both backends (the postgres socket closes on drop).
+/// Idempotent: calling close multiple times is safe.
 pub(crate) fn db_close(
     _interp: &mut Interp,
     args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, EvalError> {
-    let _ = expect_db(args, 0, "std.sqlz.close", span)?;
+    let handle = expect_db(args, 0, "std.sqlz.close", span)?;
+    let mut guard = handle
+        .mutex
+        .lock()
+        .map_err(|e| EvalError::new(format!("db.close: lock poisoned: {e}"), span))?;
+    guard.closed = true;
     Ok(Value::Unit)
 }
 
@@ -599,7 +624,10 @@ pub(crate) fn pg_connect(
     let conn = PgConn::connect(&info)
         .map_err(|e| EvalError::new(format!("pg.connect failed: {e}"), span))?;
     let inner = DbHandleInner {
-        mutex: Mutex::new(Box::new(DbConn::Pg(Mutex::new(conn)))),
+        mutex: Mutex::new(DbHandleInnerState {
+            conn: Box::new(DbConn::Pg(Mutex::new(conn))),
+            closed: false,
+        }),
     };
     Ok(Value::Db(DbHandle(Arc::new(inner))))
 }
@@ -770,7 +798,10 @@ pub(crate) fn my_connect(
     let conn = MyConn::connect(&info)
         .map_err(|e| EvalError::new(format!("my.connect failed: {e}"), span))?;
     let inner = DbHandleInner {
-        mutex: Mutex::new(Box::new(DbConn::My(Mutex::new(conn)))),
+        mutex: Mutex::new(DbHandleInnerState {
+            conn: Box::new(DbConn::My(Mutex::new(conn))),
+            closed: false,
+        }),
     };
     Ok(Value::Db(DbHandle(Arc::new(inner))))
 }
@@ -877,6 +908,7 @@ fn tx_stmt(
 ) -> Result<(), EvalError> {
     let guard = lock_handle(handle, name, span)?;
     let db = guard
+        .conn
         .downcast_ref::<DbConn>()
         .ok_or_else(|| EvalError::new(format!("`{name}`: invalid db handle"), span))?;
     match db {

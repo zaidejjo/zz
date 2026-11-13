@@ -266,7 +266,18 @@ pub struct DbHandle(pub Arc<DbHandleInner>);
 /// Inner payload for [`DbHandle`]: a mutex-guarded type-erased connection.
 #[derive(Debug)]
 pub struct DbHandleInner {
-    pub mutex: Mutex<Box<dyn std::any::Any + Send + Sync>>,
+    pub mutex: Mutex<DbHandleInnerState>,
+}
+
+/// Inner state of a [`DbHandleInner`]: the type-erased connection and the
+/// closed flag, guarded by a single mutex to avoid lock ordering issues.
+#[derive(Debug)]
+pub struct DbHandleInnerState {
+    pub conn: Box<dyn std::any::Any + Send + Sync>,
+    /// Set to true when `sqlz.close()` has been called. Further operations
+    /// on the handle return an error. The underlying connection is closed
+    /// when the last `Arc<DbHandleInner>` reference is dropped.
+    pub closed: bool,
 }
 
 impl PartialEq for DbHandle {
