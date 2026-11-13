@@ -1263,47 +1263,26 @@ zz_value zz_vec_len(zz_value v, int *err) {
 // array and the original is left untouched.
 zz_value zz_vec_push(zz_value arr, zz_value item, int *err) {
     if (arr.tag != ZZ_ARRAY) return zz_unit();
-    // Value semantics: `vec.push(a, x)` returns a *new* array and leaves
-    // `a` untouched (the VM behaves this way, and a binding may keep
-    // using `a`). The in-place fast path is `zz_vec_push_take`, used only
-    // when the caller transfers its share (`x = vec.push(x, e)`).
-    zz_value out = zz_array_dup(arr.arr);
-    zz_array *a = out.arr;
-    if (a->len >= a->cap) {
-        size_t new_cap;
-        if (a->cap == 0) {
-            new_cap = 8;
-        } else if (a->cap > SIZE_MAX / 2) {
-            if (err) *err = 1;
-            return zz_unit();
-        } else {
-            new_cap = a->cap * 2;
-        }
-        if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_STACK_MAGIC
-            || a->refs == ZZ_ARRAY_ARENA_MAGIC || a->items == NULL) {
-            zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
-            if (!new_items) { if (err) *err = 1; return zz_unit(); }
-            for (size_t i = 0; i < a->len; i++) {
-                new_items[i] = a->items[i];
-            }
-            // Stack/lit/arena items live on the stack or an arena — they must
-            // NOT be freed (free() on stack/arena memory corrupts the heap).
-            // They're reclaimed when the frame/arena resets. On later grows
-            // `a->refs` is 0/1 so we take the realloc branch above.
-            a->items = new_items;
-            // Preserve `refs == 1` (see `zz_array_push`): dup results stay
-            // provably single-owner, so a later move-aware push can go
-            // in place instead of copying again.
-            if (a->refs != 1) a->refs = 0;
-        } else {
-            a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));
-            if (!a->items) { if (err) *err = 1; return zz_unit(); }
-        }
-        a->cap = new_cap;
+    zz_array *a = arr.arr;
+    // In-place fast path when uniquely owned: no alias exists to observe
+    // the mutation, so returning the same handle preserves value semantics
+    // while turning `vec.push(a, x)` in a loop from O(n²) into O(n).
+    // Stack/lit/arena/0 sentinels are uniquely owned by construction.
+    int uniquely_owned = (a->refs == 1
+        || a->refs == ZZ_ARRAY_STACK_MAGIC
+        || a->refs == ZZ_ARRAY_LIT_MAGIC
+        || a->refs == ZZ_ARRAY_ARENA_MAGIC
+        || a->refs == 0);
+    if (uniquely_owned) {
+        // `zz_array_push` migrates stack/lit/arena items to malloc on grow
+        // and takes element ownership (move convention).
+        zz_array_push(a, item);
+        return arr;
     }
-    // Share convention (was zz_clone): heal arena-owned values to heap so the
-    // element survives the loop-arena reset.
-    a->items[a->len++] = zz_clone_for_store(item);
+    // Shared (refs != 1): copy-on-write so the caller's array is untouched.
+    zz_value out = zz_array_dup(a);
+    if (!out.arr) { if (err) *err = 1; return zz_unit(); }
+    zz_array_push(out.arr, item);
     return out;
 }
 
