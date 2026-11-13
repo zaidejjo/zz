@@ -3514,6 +3514,10 @@ static int tcp_resolve(const char *hostport, struct sockaddr_in *out) {
 
 static zz_tcp *tcp_alloc(int fd) {
     zz_tcp *t = (zz_tcp *)malloc(sizeof(zz_tcp));
+    if (!t) {
+        fprintf(stderr, "zz: out of memory (tcp)\n");
+        exit(1);
+    }
     t->fd = fd;
     t->closed = 0;
     return t;

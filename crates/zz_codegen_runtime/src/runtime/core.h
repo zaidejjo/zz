@@ -920,6 +920,9 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
     int healed = 0;
     if (src.tag == ZZ_STR && src.s && !src.s->interned && src.s->refs == 0) {
         src = zz_str_heal_arena(src);
+        // Healed strings arrive fresh-owned (refs==1, solely ours); retaining
+        // would leak one share since `dst` is the only owner.
+        healed = 1;
     } else if (src.tag == ZZ_ARRAY && src.arr && zz_array_is_arena(src.arr)) {
         src = zz_heal_for_move(src);
         healed = 1;
@@ -928,12 +931,16 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
         healed = 1;
     }
     *dst = src;
-    // Retain the new value for refcounted types.
+    // Retain the new value for refcounted types. ZZ_STR is included here:
+    // without it, `zz_assign(&dst, tmp); zz_release(&tmp);` frees the only
+    // share of a heap string while `dst` still aliases it (use-after-free).
+    // Interned singletons (immortal) and arena strings (healed above, or
+    // refs==0 skipped by zz_retain) are no-ops under zz_retain.
     if (!healed && (src.tag == ZZ_ARRAY || src.tag == ZZ_BYTES || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
         src.tag == ZZ_OBJECT || src.tag == ZZ_RANGE || src.tag == ZZ_DB ||
         src.tag == ZZ_OPTION_SOME || src.tag == ZZ_RESULT_OK ||
         src.tag == ZZ_RESULT_ERR || src.tag == ZZ_JSON ||
-        src.tag == ZZ_WEAK)) {
+        src.tag == ZZ_WEAK || src.tag == ZZ_STR)) {
         zz_retain(dst);
     }
 }

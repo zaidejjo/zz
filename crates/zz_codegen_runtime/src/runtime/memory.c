@@ -260,7 +260,10 @@ void zz_retain_func(zz_func *f) {
 
 void zz_release_func(zz_func *f) {
     if (f && __atomic_sub_fetch(&f->refs, 1, __ATOMIC_ACQ_REL) == 0) {
-        // Release captured env values.
+        // Release the wrapped function value (often a ZZ_NATIVE closure rep),
+        // then the captured env values, then the func shell itself. Without
+        // the first release every `zz_func` leaked its `fn` on last drop.
+        zz_release(&f->fn);
         for (size_t i = 0; i < f->env_len; i++) {
             zz_release(&f->env[i]);
         }

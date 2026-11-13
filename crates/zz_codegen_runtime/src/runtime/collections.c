@@ -63,11 +63,16 @@ void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err) {
     case ZZ_ARRAY:
         zz_array_set(obj->arr, idx, item, err);
         if (err && *err) { zz_release(&item); return; }
-        if (item.tag != ZZ_STR && item.tag != ZZ_MUTABLE_STR) zz_release(&item);
+        // `zz_array_set` -> `zz_assign` already retained `item` for the
+        // slot (including ZZ_STR since core.h's zz_assign retain list now
+        // covers it). Drop the caller's share here so the slot holds
+        // exactly one share of every type, strings included.
+        zz_release(&item);
         return;
     case ZZ_DICT:
         zz_dict_set(obj->dict, idx, item);
-        if (item.tag != ZZ_STR && item.tag != ZZ_MUTABLE_STR) zz_release(&item);
+        // Same contract as the array arm: consume `item` for every type.
+        zz_release(&item);
         if (err) *err = 0;
         return;
     default:
@@ -1013,11 +1018,13 @@ static int zz_object_get_depth(const zz_value *obj, const char *name, int depth,
     // `name` and `o->type_name` are both pointer-stable C strings, so
     // pointer comparison is valid. Hot paths like `rows[i].val` hit the
     // cache on every access after the first, turning O(fields)·strcmp
-    // into O(1).
-    static const char *cached_type = NULL;
-    static const char *cached_name = NULL;
-    static size_t cached_index = 0;
-    static int cached_found = 0;
+    // into O(1). Thread-local: the cached entries are per-thread so
+    // concurrent field access across spawned tasks never races on shared
+    // statics.
+    static __thread const char *cached_type = NULL;
+    static __thread const char *cached_name = NULL;
+    static __thread size_t cached_index = 0;
+    static __thread int cached_found = 0;
     if (o->type_name == cached_type && name == cached_name) {
         if (cached_found) {
             *out = zz_clone(o->fields[cached_index * 2 + 1]);
