@@ -19,7 +19,7 @@ pub(crate) fn intern_tag(tag: &str) -> &'static str {
     let map = INTERNED_NAMES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut map = map.lock().unwrap();
     if let Some(s) = map.get(tag) {
-        return *s;
+        return s;
     }
     let leaked: &'static str = Box::leak(tag.to_string().into_boxed_str());
     map.insert(leaked.to_string(), leaked);
