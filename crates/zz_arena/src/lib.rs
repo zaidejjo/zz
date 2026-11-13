@@ -224,6 +224,10 @@ impl Bump {
     pub fn try_alloc<T>(&mut self, val: T) -> Result<&mut T, ArenaError> {
         if std::mem::size_of::<T>() == 0 {
             self.stats.bytes_used += 0;
+            // SAFETY: `NonNull::dangling()` returns a valid but
+            // dereferenceable-null pointer. It is never dereferenced,
+            // only used as a sentinel "empty" pointer that is never
+            // read or written.
             return Ok(unsafe { &mut *ptr::NonNull::<T>::dangling().as_ptr() });
         }
         // SAFETY: `alloc_raw` returns `size` readable/writable bytes at the
