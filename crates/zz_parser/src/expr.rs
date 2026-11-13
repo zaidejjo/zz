@@ -719,7 +719,7 @@ impl<'a> Parser<'a> {
         parts: &[FmtPart],
         string_span: Span,
     ) {
-        use zz_lexer::is_interp_start;
+        use zz_lexer::{is_interp_operand_start, is_interp_start};
         if !parts.iter().any(|p| matches!(p, FmtPart::Expr(..))) {
             return; // No interpolation: presumably intentional literals.
         }
@@ -745,12 +745,37 @@ impl<'a> Parser<'a> {
                         continue;
                     }
                     // Expands, or is a deliberate literal (`{}`, `{"key"`).
-                    Some((_, next))
-                        if is_interp_start(Some(next)) || next == '"' || next == '}' =>
-                    {
-                        continue;
-                    }
-                    _ => {
+                    // A unary prefix operator needs an operand: `{!}`, `{-}`,
+                    // `{+}` (even with trailing spaces) stay literal and warn.
+                    Some((_, next)) => {
+                        let is_interp = is_interp_start(Some(next)) || next == '"' || next == '}';
+                        if is_interp {
+                            if matches!(next, '!' | '-' | '+') {
+                                let mut lookahead = rest.clone();
+                                let operand = loop {
+                                    match lookahead.next() {
+                                        Some((_, c)) if c == ' ' || c == '\t' => continue,
+                                        other => break other.map(|(_, c)| c),
+                                    }
+                                };
+                                if !is_interp_operand_start(operand) {
+                                    let snippet: String = text[idx..].chars().take(14).collect();
+                                    self.push_error(
+                                        warning_at(
+                                            format!(
+                                                "this string also contains `{snippet}`, which will NOT interpolate"
+                                            ),
+                                            string_span,
+                                        )
+                                        .with_note(
+                                            "single-line strings expand `{name}`, `{1 + 2}`, `{(x)}` (spaces after `{` are fine) — `{{`, `{}`, and `{\"key\"` stay literal; use `{{` for a literal `{`",
+                                        ),
+                                    );
+                                    return; // One warning per string.
+                                }
+                            }
+                            continue;
+                        }
                         let snippet: String = text[idx..].chars().take(14).collect();
                         self.push_error(
                             warning_at(
