@@ -1631,7 +1631,8 @@ void zz_str_append_str(zz_value *a, zz_value b) {
     zz_str *fresh = str_alloc(need);
     memcpy(zz_str_ptr(fresh), zz_str_ptr(a->s), la);
     memcpy(zz_str_ptr(fresh) + la, zz_str_ptr(b.s), lb);
-    if (!a->s->interned && a->s->refs != 0 && --a->s->refs == 0) {
+    if (!a->s->interned && a->s->refs != 0
+        && __atomic_sub_fetch(&a->s->refs, 1, __ATOMIC_ACQ_REL) == 0) {
         if (a->s->cap > 0) free(a->s->heap);
         zz_str_header_free(a->s);
     }
@@ -1659,7 +1660,8 @@ void zz_str_append_lit(zz_value *a, const char *lit, size_t lit_len) {
     memcpy(zz_str_ptr(fresh), zz_str_ptr(a->s), la);
     memcpy(zz_str_ptr(fresh) + la, lit, lit_len);
     // Arena-owned source (refs==0 sentinel): abandon, never release.
-    if (!a->s->interned && a->s->refs != 0 && --a->s->refs == 0) {
+    if (!a->s->interned && a->s->refs != 0
+        && __atomic_sub_fetch(&a->s->refs, 1, __ATOMIC_ACQ_REL) == 0) {
         if (a->s->cap > 0) free(a->s->heap);
         zz_str_header_free(a->s);
     }
@@ -2140,17 +2142,11 @@ zz_value zz_str_replace(zz_value s, zz_value old_s, zz_value new_s, int *err) {
 }
 
 // memchr-skip search core: jump to the next first-needle-byte, then
-// verify with memcmp. Portable C89 + memchr, near-memmem speed for
-// short needles (the common case).
+// the caller verifies with memcmp. Portable C89 + memchr, near-memmem speed
+// for short needles (the common case).
 static const char *scan_skip(const char *h, const char *hend, char first) {
-    const char *p = h;
-    while (p < hend) {
-        const char *hit = (const char *)memchr(p, first, (size_t)(hend - p));
-        if (!hit) return hend;
-        p = hit;
-        return p;
-    }
-    return hend;
+    const char *hit = (const char *)memchr(h, first, (size_t)(hend - h));
+    return hit ? hit : hend;
 }
 
 // str.count(s, sub) — non-overlapping occurrences, no allocation.

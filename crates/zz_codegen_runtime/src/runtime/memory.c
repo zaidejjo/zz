@@ -32,7 +32,12 @@ void *zz_arena_alloc(zz_arena *a, size_t size, size_t align) {
         // any live pointers into it remain valid (the old code returned
         // a->buf itself while leaving a->buf pointing at it, so the next
         // small alloc bumped into the same block and corrupted the object).
-        size_t chunk_cap = (size > a->cap) ? size * 2 : a->cap;
+        size_t chunk_cap;
+        if (size > SIZE_MAX / 2) {
+            chunk_cap = size; // doubling would overflow; use size as-is
+        } else {
+            chunk_cap = (size > a->cap) ? size * 2 : a->cap;
+        }
         char *blk = (char *)malloc(chunk_cap);
         if (!blk) {
             fprintf(stderr, "zz: arena chunk out of memory\n");
