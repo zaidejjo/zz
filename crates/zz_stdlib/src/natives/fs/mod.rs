@@ -176,6 +176,7 @@ fn fresh_chan() -> Arc<zz_runtime::value::ChanState> {
     Arc::new(zz_runtime::value::ChanState {
         ring: zz_runtime::lf_chan::LfRing::new(),
         spill: AtomicUsize::new(0),
+        spill_cap: AtomicUsize::new(super::concurrency::CHAN_SPILL_CAP),
         green_parked: AtomicBool::new(false),
         cvar_waiters: AtomicUsize::new(0),
         inner: Mutex::new(zz_runtime::value::ChanInner {
@@ -189,6 +190,12 @@ fn fresh_chan() -> Arc<zz_runtime::value::ChanState> {
 fn chan_send_from_io(state: &Arc<zz_runtime::value::ChanState>, v: Value) {
     use std::sync::atomic::Ordering;
     if let Err(back) = state.ring.try_enqueue(v) {
+        if state.spill.load(Ordering::Acquire) >= state.spill_cap.load(Ordering::Acquire) {
+            // Spill queue full: drop the value rather than grow RSS.
+            // (One-shot I/O channel — dropping is acceptable; the task
+            // side will time out or fail its recv.)
+            return;
+        }
         let guard = state.inner.lock().unwrap();
         // `ChanInner.queue` is a VecDeque in this workspace version.
         let mut guard = guard;

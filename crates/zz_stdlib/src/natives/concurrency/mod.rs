@@ -30,6 +30,11 @@ use zz_runtime::value::snapshot_env_cow;
 use zz_runtime::value::{ChanInner, ChanState};
 
 /// `chan()` — create a new unbounded channel.
+/// Hard cap on channel spill queue depth. Prevents a fast producer +
+/// slow/no consumer from causing unbounded memory growth (OOM).
+/// Each spill entry is one `Value` (16 bytes), so 100_000 ≈ 1.6 MiB.
+pub(crate) const CHAN_SPILL_CAP: usize = 100_000;
+
 pub(crate) fn chan_new(
     _interp: &mut Interp,
     _args: &mut Vec<Value>,
@@ -41,6 +46,7 @@ pub(crate) fn chan_new(
     let state = Arc::new(ChanState {
         ring: LfRing::new(),
         spill: AtomicUsize::new(0),
+        spill_cap: AtomicUsize::new(CHAN_SPILL_CAP),
         green_parked: AtomicBool::new(false),
         cvar_waiters: AtomicUsize::new(0),
         inner: Mutex::new(ChanInner {
@@ -96,8 +102,21 @@ pub(crate) fn chan_send(
                     Ok(Value::Unit)
                 }
                 Err(back) => {
-                    // Ring full — spill under the mutex (channels stay
-                    // unbounded no matter how deep the burst).
+                    // Ring full — spill under the mutex. The spill queue is
+                    // bounded by `spill_cap`; once it fills, return an error
+                    // instead of growing RSS without bound (OOM on fast
+                    // producer / slow-or-no consumer).
+                    if state.spill.load(Ordering::Acquire)
+                        >= state.spill_cap.load(Ordering::Acquire)
+                    {
+                        return Err(EvalError::new(
+                            format!(
+                                "chan.send: channel spill queue full (cap {})",
+                                state.spill_cap.load(Ordering::Acquire)
+                            ),
+                            span,
+                        ));
+                    }
                     let mut guard = state.inner.lock().map_err(|e| {
                         EvalError::new(format!("chan.send: lock poisoned: {e}"), span)
                     })?;
@@ -160,6 +179,19 @@ pub(crate) fn chan_send_batch(
                 return Ok(Value::Unit);
             }
             // Mutex path: spill the overflow + serve any waiters.
+            // The spill queue is bounded by `spill_cap`; reject when full
+            // to prevent unbounded memory growth.
+            let cap = state.spill_cap.load(Ordering::Acquire);
+            let current = state.spill.load(Ordering::Acquire);
+            if spilled.len() > cap.saturating_sub(current) {
+                return Err(EvalError::new(
+                    format!(
+                        "chan.send_batch: channel spill queue full (cap {}, {} already used)",
+                        cap, current
+                    ),
+                    span,
+                ));
+            }
             let mut guard = state.inner.lock().map_err(|e| {
                 EvalError::new(format!("chan.send_batch: lock poisoned: {e}"), span)
             })?;

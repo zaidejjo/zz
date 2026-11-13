@@ -88,6 +88,11 @@ pub struct ChanInner {
 
 /// Channel pair: lock-free ring + spill counter + waiter flags (all
 /// lock-free) plus the mutex-protected spill queue and signaling condvar.
+///
+/// The spill queue is bounded by `spill_cap`: once it fills, `chan.send`
+/// returns an error instead of growing RSS without bound. This prevents a
+/// fast producer + slow/no consumer from causing unbounded memory growth
+/// (OOM).
 #[derive(Debug)]
 pub struct ChanState {
     /// Fast path: zero-lock enqueue/dequeue while depth fits.
@@ -95,6 +100,11 @@ pub struct ChanState {
     /// Number of values sitting in the spill queue. Written only while
     /// holding `inner`; read lock-free by fast paths (Release/Acquire).
     pub spill: AtomicUsize,
+    /// Hard cap on spill queue depth. When `spill >= spill_cap`, sends
+    /// return an error instead of enqueuing to the unbounded spill queue.
+    /// Set at channel creation; 0 means no cap (unbounded — legacy
+    /// behavior, not recommended for long-running producers).
+    pub spill_cap: AtomicUsize,
     /// Set while `green_waiters` may be non-empty (under `inner` both
     /// ways); fast pops require it clear so no waiter is robbed.
     pub green_parked: AtomicBool,
