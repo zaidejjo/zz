@@ -314,6 +314,12 @@ pub enum Value {
     /// `.ok(v)` / `.err(e)`.
     Result(Box<Result<Value, Value>>),
     /// A closure or named function, with its captured environment.
+    ///
+    /// Closures can capture variables from their enclosing scope. If a
+    /// closure captures itself (directly or through a cycle of closures or
+    /// objects), the reference count never reaches zero and the values are
+    /// leaked. Use `weak()` to break such cycles:
+    /// `f := |x| weak(f)(x)` or `a.b = weak(a)`.
     Func(std::rc::Rc<FuncValue>),
     /// `[v1, v2, ...]`.
     ///
