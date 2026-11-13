@@ -59,6 +59,13 @@ void zz_index_set(zz_value *obj, zz_value idx, zz_value item, int *err) {
         zz_release_dict(obj->dict);
         obj->dict = fresh.dict;
     }
+    // A container tag with a NULL backing object cannot be indexed — bail
+    // before dereferencing (defensive; constructors always set it).
+    if ((obj->tag == ZZ_ARRAY && !obj->arr) || (obj->tag == ZZ_DICT && !obj->dict)) {
+        if (err) *err = 1;
+        zz_release(&item);
+        return;
+    }
     switch (obj->tag) {
     case ZZ_ARRAY:
         zz_array_set(obj->arr, idx, item, err);

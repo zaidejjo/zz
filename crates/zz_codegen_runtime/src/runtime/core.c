@@ -158,8 +158,13 @@ int zz_values_equal(zz_value a, zz_value b) {
                 }
                 if (!found) { free(idx); return 0; }
             }
-            free(idx);
-            if (ok) return 1;
+            if (ok) {
+                free(idx);
+                return 1;
+            }
+            // A `da` key turned out non-hashable mid-scan: fall through to the
+            // linear lane. `idx` is freed once below — freeing here too would
+            // double-free.
         }
         free(idx);
     dict_linear:
@@ -1731,7 +1736,11 @@ static zz_value zz_value_dup_inner(zz_value v, int *err, zz_dup_memo *m) {
         f->fn = zz_value_dup_inner(v.fn->fn, err, m);
         f->env_len = v.fn->env_len;
         f->env = f->env_len ? (zz_value *)malloc(f->env_len * sizeof(zz_value)) : NULL;
-        if (f->env_len && !f->env) { if (err) *err = 1; return v; }
+        if (f->env_len && !f->env) {
+            free(f);
+            if (err) *err = 1;
+            return v;
+        }
         zz_value out;
         out.tag = ZZ_FUNC;
         out.fn = f;
@@ -3256,6 +3265,7 @@ zz_value zz_spawn(zz_value fn, int *err) {
     if (task.fn.tag == ZZ_NATIVE && !task.fn.payload) {
         // Dup OOM: null-payload closure. Drop the task (reporting via
         // err) rather than enqueueing a no-op that still costs a join.
+        free(join);
         *err = 1;
         return zz_unit();
     }
