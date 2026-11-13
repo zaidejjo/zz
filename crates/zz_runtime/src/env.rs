@@ -40,6 +40,14 @@ pub struct FrozenScope {
 }
 
 impl FrozenScope {
+    /// Create a frozen scope from owned data. Used by `snapshot_funcs` and
+    /// `deep_clone_value` so snapshotted closures carry `Frozen` (Arc-backed,
+    /// Send + Sync) envs instead of `Owned` (Rc-backed, not Send) envs when
+    /// crossing thread boundaries.
+    pub(crate) fn new(vars: HashMap<String, Value>, parent: Option<Arc<FrozenScope>>) -> Self {
+        Self { vars, parent }
+    }
+
     /// Read a binding, leaf-first (plain map reads, no borrow flags).
     fn get(&self, name: &str) -> Option<Value> {
         if let Some(v) = self.vars.get(name) {
@@ -119,6 +127,21 @@ pub enum EnvLink {
 impl Env {
     pub fn new() -> Self {
         Env::default()
+    }
+
+    /// Freeze this scope into an immutable, `Send + Sync` `EnvLink::Frozen`.
+    /// Used by `snapshot_funcs` and `deep_clone_value` so snapshotted
+    /// closures carry thread-safe envs when crossing thread boundaries.
+    pub(crate) fn freeze(mut self) -> EnvLink {
+        let vars = std::mem::take(&mut self.vars);
+        let parent = self.parent.take().map(|link| match link {
+            EnvLink::Owned(rc) => {
+                let env = rc.borrow();
+                Arc::new(FrozenScope::new(env.vars.clone(), None))
+            }
+            EnvLink::Frozen(f) => Arc::clone(&f),
+        });
+        EnvLink::Frozen(Arc::new(FrozenScope::new(vars, parent)))
     }
 
     /// Create a child scope sharing `parent` by reference. Assignments in
