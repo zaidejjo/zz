@@ -3300,7 +3300,12 @@ impl<'a> Emitter<'a> {
     /// (releases, `_ldepth--`, `sp` already at the exit position, `goto
     /// exit`). Body var/slot loads substitute their C locals directly (no
     /// guard, no box): proven-int by entry guard or construction.
-    fn emit_peeled(module: &Module, code: &[Op], peel: &Peel, out: &mut String) {
+    fn emit_peeled(
+        module: &Module,
+        code: &[Op],
+        peel: &Peel,
+        out: &mut String,
+    ) -> Result<(), ChunkError> {
         let v = peel.var;
         out.push_str("    {\n");
         // Pop the placeholders `ForSetup` pushed (iterable, index, var):
@@ -3355,7 +3360,7 @@ impl<'a> Emitter<'a> {
                     peel.body_tail,
                     &subs,
                     out,
-                );
+                )?;
                 subs.remove(&v);
                 out.push_str("      }\n");
             }
@@ -3384,7 +3389,7 @@ impl<'a> Emitter<'a> {
                     peel.body_tail,
                     &subs,
                     out,
-                );
+                )?;
                 subs.remove(&v);
                 out.push_str("      }\n");
             }
@@ -3400,6 +3405,7 @@ impl<'a> Emitter<'a> {
         out.push_str("      _ldepth--;\n");
         out.push_str(&format!("      goto L{};\n", peel.exit));
         out.push_str("    }\n");
+        Ok(())
     }
 
     /// Render one fused unboxed-int window at `pc` (see [`FusedTail`]):
@@ -3423,7 +3429,7 @@ impl<'a> Emitter<'a> {
         tail: FusedTail,
         subs: &HashMap<u16, String>,
         out: &mut String,
-    ) {
+    ) -> Result<(), ChunkError> {
         let taillen = match tail {
             FusedTail::Store(_) => 1,
             FusedTail::Take(_) => 6,
@@ -3452,14 +3458,18 @@ impl<'a> Emitter<'a> {
                     let k = match module.consts.get(c.0 as usize) {
                         Some(Const::Int(k)) => *k,
                         // Unreachable: the matcher only admits int consts.
-                        _ => return,
+                        _ => return Err(ChunkError::op("non-int const in fused window")),
                     };
                     out.push_str(&format!("      int64_t {t} = {};\n", c_int(k)));
                     tstack.push((t, Some(k)));
                 }
                 Op::IntAdd | Op::BinOp(zz_ir::op::BinOp::Add) => {
-                    let (b, bv) = tstack.pop().unwrap_or_default();
-                    let (a, av) = tstack.pop().unwrap_or_default();
+                    let (b, bv) = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("fused int window stack underflow"))?;
+                    let (a, av) = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("fused int window stack underflow"))?;
                     match (av, bv) {
                         (Some(x), Some(y)) => {
                             let r = x.wrapping_add(y);
@@ -3473,8 +3483,12 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 Op::IntSub | Op::BinOp(zz_ir::op::BinOp::Sub) => {
-                    let (b, bv) = tstack.pop().unwrap_or_default();
-                    let (a, av) = tstack.pop().unwrap_or_default();
+                    let (b, bv) = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("fused int window stack underflow"))?;
+                    let (a, av) = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("fused int window stack underflow"))?;
                     match (av, bv) {
                         (Some(x), Some(y)) => {
                             let r = x.wrapping_sub(y);
@@ -3488,8 +3502,12 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 Op::IntMul | Op::BinOp(zz_ir::op::BinOp::Mul) => {
-                    let (b, bv) = tstack.pop().unwrap_or_default();
-                    let (a, av) = tstack.pop().unwrap_or_default();
+                    let (b, bv) = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("fused int window stack underflow"))?;
+                    let (a, av) = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("fused int window stack underflow"))?;
                     match (av, bv) {
                         (Some(x), Some(y)) => {
                             let r = x.wrapping_mul(y);
@@ -3503,8 +3521,12 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 Op::IntDiv => {
-                    let (b, bv) = tstack.pop().unwrap_or_default();
-                    let (a, _) = tstack.pop().unwrap_or_default();
+                    let (b, bv) = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("fused int window stack underflow"))?;
+                    let (a, _) = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("fused int window stack underflow"))?;
                     // Elide provably-dead traps: a nonzero const divisor
                     // can never be zero; anything but -1 can never be
                     // `MIN / -1`. (Dead-code traps keep their runtime
@@ -3538,8 +3560,12 @@ impl<'a> Emitter<'a> {
                     tstack.push((t, None));
                 }
                 Op::IntRem => {
-                    let (b, bv) = tstack.pop().unwrap_or_default();
-                    let (a, _) = tstack.pop().unwrap_or_default();
+                    let (b, bv) = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("fused int window stack underflow"))?;
+                    let (a, _) = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("fused int window stack underflow"))?;
                     match bv {
                         Some(0) => {
                             out.push_str(&format!(
@@ -3566,7 +3592,9 @@ impl<'a> Emitter<'a> {
                     tstack.push((t, None));
                 }
                 Op::IntNeg => {
-                    let (a, av) = tstack.pop().unwrap_or_default();
+                    let (a, av) = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("fused int window stack underflow"))?;
                     match av {
                         Some(x) => {
                             let r = x.wrapping_neg();
@@ -3580,12 +3608,14 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 // Unreachable: the matcher only admits the above.
-                _ => return,
+                _ => return Err(ChunkError::op("non-int op in fused window")),
             }
         }
         match tail {
             FusedTail::Store(d) => {
-                let (v, _) = tstack.pop().unwrap_or_default();
+                let (v, _) = tstack
+                    .pop()
+                    .ok_or_else(|| ChunkError::op("fused int window stack underflow"))?;
                 if let Some(local) = subs.get(&d) {
                     // Promoted slot: assign the C local (write-back at
                     // loop exit keeps the slot authoritative).
@@ -3621,6 +3651,7 @@ impl<'a> Emitter<'a> {
             }
         }
         out.push_str("    }\n");
+        Ok(())
     }
 
     /// Render one fused unboxed-float window at `pc` (see [`float_fuse`]):
@@ -3637,10 +3668,12 @@ impl<'a> Emitter<'a> {
         len: usize,
         tail: FusedTail,
         out: &mut String,
-    ) {
+    ) -> Result<(), ChunkError> {
         // `Store` is the only tail float_fuse produces.
         let _ = len;
-        let FusedTail::Store(d) = tail else { return };
+        let FusedTail::Store(d) = tail else {
+            return Err(ChunkError::op("fused float window unexpected tail"));
+        };
         out.push_str("    {\n");
         // Expression prefix: straight-line float ops into window temps.
         let mut tstack: Vec<String> = Vec::new();
@@ -3658,44 +3691,61 @@ impl<'a> Emitter<'a> {
                     let k = match module.consts.get(c.0 as usize) {
                         Some(Const::Float(k)) => *k,
                         // Unreachable: the matcher only admits float consts.
-                        _ => return,
+                        _ => return Err(ChunkError::op("non-float const in fused window")),
                     };
                     out.push_str(&format!("      double {t} = {k};\n"));
                     tstack.push(t);
                 }
                 Op::BinOp(zz_ir::op::BinOp::Add) => {
-                    let b = tstack.pop().unwrap_or_default();
-                    let a = tstack.pop().unwrap_or_default();
+                    let b = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("fused float window stack underflow"))?;
+                    let a = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("fused float window stack underflow"))?;
                     out.push_str(&format!("      double {t} = {a} + {b};\n"));
                     tstack.push(t);
                 }
                 Op::BinOp(zz_ir::op::BinOp::Sub) => {
-                    let b = tstack.pop().unwrap_or_default();
-                    let a = tstack.pop().unwrap_or_default();
+                    let b = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("fused float window stack underflow"))?;
+                    let a = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("fused float window stack underflow"))?;
                     out.push_str(&format!("      double {t} = {a} - {b};\n"));
                     tstack.push(t);
                 }
                 Op::BinOp(zz_ir::op::BinOp::Mul) => {
-                    let b = tstack.pop().unwrap_or_default();
-                    let a = tstack.pop().unwrap_or_default();
+                    let b = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("fused float window stack underflow"))?;
+                    let a = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("fused float window stack underflow"))?;
                     out.push_str(&format!("      double {t} = {a} * {b};\n"));
                     tstack.push(t);
                 }
                 Op::UnOp(zz_ir::op::UnOp::Neg) => {
-                    let a = tstack.pop().unwrap_or_default();
+                    let a = tstack
+                        .pop()
+                        .ok_or_else(|| ChunkError::op("fused float window stack underflow"))?;
                     out.push_str(&format!("      double {t} = -{a};\n"));
                     tstack.push(t);
                 }
                 // Unreachable: the matcher only admits the above.
-                _ => return,
+                _ => return Err(ChunkError::op("non-float op in fused window")),
             }
         }
-        let v = tstack.pop().unwrap_or_default();
+        let v = tstack
+            .pop()
+            .ok_or_else(|| ChunkError::op("fused float window stack underflow"))?;
         // Release-then-move: the old slot value is owned (release it); the
         // fresh `zz_float(...)` carries no refs (no clone/source release).
         out.push_str(&format!("      zz_release(&st[{d}]);\n"));
         out.push_str(&format!("      st[{d}] = zz_float({v});\n"));
         out.push_str("    }\n");
+        Ok(())
     }
 
     /// Record a referenced native impl for link-flag computation.
@@ -3887,7 +3937,7 @@ impl<'a> Emitter<'a> {
                 .funcs
                 .get(id.0 as usize)
                 .ok_or_else(|| ChunkError::op("func id"))?;
-            Self::emit_peeled(self.module, &f.code, peel, out);
+            Self::emit_peeled(self.module, &f.code, peel, out)?;
             return Ok(());
         }
         // Fused unboxed-int window (see `int_fuse`): single statement,
@@ -3898,7 +3948,7 @@ impl<'a> Emitter<'a> {
                 .funcs
                 .get(id.0 as usize)
                 .ok_or_else(|| ChunkError::op("func id"))?;
-            Self::emit_fused_window(self.module, &f.code, pc, len, tail, &HashMap::new(), out);
+            Self::emit_fused_window(self.module, &f.code, pc, len, tail, &HashMap::new(), out)?;
             return Ok(());
         }
         // Fused unboxed-float window (see `float_fuse`): single statement,
@@ -3909,7 +3959,7 @@ impl<'a> Emitter<'a> {
                 .funcs
                 .get(id.0 as usize)
                 .ok_or_else(|| ChunkError::op("func id"))?;
-            Self::emit_fused_float_window(self.module, &f.code, pc, len, tail, out);
+            Self::emit_fused_float_window(self.module, &f.code, pc, len, tail, out)?;
             return Ok(());
         }
         // Fused string append (see `strapp_scan`): in-place literal
