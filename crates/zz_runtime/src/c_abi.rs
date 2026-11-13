@@ -121,6 +121,12 @@ macro_rules! adapters_i {
             fname: &str,
         ) -> Result<Value, EvalError> {
             let f: extern "C" fn($( adapters_i!(@ctype $t) ),*) -> i64 =
+                // SAFETY: Transmuting a data pointer to a function pointer is
+                // technically UB in Rust, but it is well-defined on all
+                // supported targets (x86_64, aarch64) where data and
+                // function pointers are the same size and calling convention.
+                // The pointer comes from dlsym or a similar mechanism and
+                // points to a valid C function with the expected signature.
                 unsafe { std::mem::transmute(ptr) };
             let mut _held: Vec<CString> = Vec::new();
             let out = f($( adapters_i!(@extract args span fname $idx $t _held) ),*);
@@ -219,6 +225,12 @@ macro_rules! adapters_v {
             fname: &str,
         ) -> Result<Value, EvalError> {
             let f: extern "C" fn($( adapters_v!(@ctype $t) ),*) =
+                // SAFETY: Transmuting a data pointer to a function pointer is
+                // technically UB in Rust, but it is well-defined on all
+                // supported targets (x86_64, aarch64) where data and
+                // function pointers are the same size and calling convention.
+                // The pointer comes from dlsym or a similar mechanism and
+                // points to a valid C function with the expected signature.
                 unsafe { std::mem::transmute(ptr) };
             let mut _held: Vec<CString> = Vec::new();
             f($( adapters_v!(@extract args span fname $idx $t _held) ),*);
@@ -338,6 +350,12 @@ macro_rules! adapters_f {
             fname: &str,
         ) -> Result<Value, EvalError> {
             let f: extern "C" fn($( adapters_f!(@ctype $t) ),*) -> f64 =
+                // SAFETY: Transmuting a data pointer to a function pointer is
+                // technically UB in Rust, but it is well-defined on all
+                // supported targets (x86_64, aarch64) where data and
+                // function pointers are the same size and calling convention.
+                // The pointer comes from dlsym or a similar mechanism and
+                // points to a valid C function with the expected signature.
                 unsafe { std::mem::transmute(ptr) };
             let mut _held: Vec<CString> = Vec::new();
             let out = f($( adapters_f!(@extract args span fname $idx $t _held) ),*);
