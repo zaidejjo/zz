@@ -394,6 +394,34 @@ fn module_skip_reason(file: &Path) -> Option<&'static str> {
     }
 }
 
+/// True when `parity_discover_all_fixtures` (the sweep) actually exercises
+/// `file` on this host: it lists the file and does not skip it.
+///
+/// Quad's fixture set (`regression/` + `errors/edge_*`) is a subset of the
+/// sweep's (`syntax/types/stdlib/regression/modules/errors`), and the
+/// sweep's checks are equal-or-stricter (it additionally requires exit 0 on
+/// passing fixtures). Any quad fixture the sweep exercises is therefore
+/// covered with equal-or-stricter checks and can be skipped by quad to
+/// avoid redundant execution. Only fixtures the sweep does *not* exercise
+/// on this host (e.g. Unix-only fixtures on Windows) remain for quad.
+fn is_sweep_exercised(file: &Path) -> bool {
+    if !support::fixture_supported_here(file) {
+        return false;
+    }
+    let is_error = file
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        == Some("errors");
+    if is_error {
+        // Sweep checks errors_bucket: VM fails + native fails (ErrorStrict)
+        // or known failure — quad's `assert_quad_all_fail` is identical.
+        return true;
+    }
+    // Regression fixture: sweep applies native_skip_reason + module_skip_reason.
+    native_skip_reason(file).is_none() && module_skip_reason(file).is_none()
+}
+
 // ---------------------------------------------------------------------------
 // Known native failures — tracked parity bugs
 //
@@ -2331,7 +2359,15 @@ fn quad_regression_and_edge_matrix() {
             files.push(f);
         }
     }
+    // Dedup against the parity sweep: sweep covers `regression/` + `errors/`
+    // with equal-or-stricter checks, so run quad only for fixtures the sweep
+    // does not exercise on this host (e.g. Unix-only fixtures on Windows).
+    files.retain(|f| !is_sweep_exercised(f));
     files.sort();
+    if files.is_empty() {
+        eprintln!("[quad] all fixtures covered by parity sweep; nothing to run");
+        return;
+    }
     assert!(!files.is_empty(), "quad found no fixtures");
 
     // Parallel workers: this was one sequential loop (63 fixtures × up
