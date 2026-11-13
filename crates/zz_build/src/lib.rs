@@ -1670,6 +1670,10 @@ pub fn build_release(
     mode: BuildMode,
     rel: &ReleaseOptions,
 ) -> Result<PathBuf, String> {
+    eprintln!(
+        "ZZ_DEBUG_BUILD_RELEASE: called path={:?} mode={:?}",
+        path, mode
+    );
     let obs = rel.observer.sink();
     obs.plan(&STEP_LABELS);
     // `ZZ_BUILD_CACHE=0` forces a real build: no probe, no reuse. Mirrors
