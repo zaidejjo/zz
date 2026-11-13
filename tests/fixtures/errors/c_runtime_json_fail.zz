@@ -1,0 +1,6 @@
+// features: error-case, imports, std-json
+// E2E: json.parse on malformed input must surface a runtime error
+// (exercises the json_parse_str fail path; its heap leak is fixed by inspection).
+import std.json
+
+json.parse("[1, 2").expect("bad json")
