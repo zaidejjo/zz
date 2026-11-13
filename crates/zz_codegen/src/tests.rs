@@ -56,7 +56,13 @@ fn native_run(src: &str) -> (i32, String) {
     let tmp = std::env::temp_dir().join(format!("zz-test-{}-{uniq}-out", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
     let bin = native_bin(&tmp, "zz_out");
-    build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
+    let mut opts = BuildOptions::dev();
+    // Tests need full float support to match VM behavior. needs_float_fmt is
+    // intentionally conservative and misses floats embedded inside JSON
+    // values that json.pretty formats via zz_canonical_double at runtime;
+    // mirror the chunk backend (zz_build/src/lib.rs) and link unconditionally.
+    opts.float_link = true;
+    build_native(&pruned, &reach, "main", opts, None, &bin)
         .unwrap_or_else(|e| panic!("build failed: {e}\n---\n{}", e));
     let r = compile::run_binary(&bin, &[]).unwrap();
     let _ = std::fs::remove_dir_all(&tmp);
@@ -621,7 +627,13 @@ func main() {
     let tmp = std::env::temp_dir().join(format!("zz-test-input-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
     let bin = native_bin(&tmp, "zz_out");
-    build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
+    let mut opts = BuildOptions::dev();
+    // Tests need full float support to match VM behavior. needs_float_fmt is
+    // intentionally conservative and misses floats embedded inside JSON
+    // values that json.pretty formats via zz_canonical_double at runtime;
+    // mirror the chunk backend (zz_build/src/lib.rs) and link unconditionally.
+    opts.float_link = true;
+    build_native(&pruned, &reach, "main", opts, None, &bin)
         .unwrap_or_else(|e| panic!("build failed: {e}\n---\n{}", e));
 
     // Pipe "Alice\n" into stdin; capture both stdout and stderr.
@@ -669,7 +681,13 @@ func main() {
     let tmp = std::env::temp_dir().join(format!("zz-test-range-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
     let bin = native_bin(&tmp, "zz_out");
-    build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
+    let mut opts = BuildOptions::dev();
+    // Tests need full float support to match VM behavior. needs_float_fmt is
+    // intentionally conservative and misses floats embedded inside JSON
+    // values that json.pretty formats via zz_canonical_double at runtime;
+    // mirror the chunk backend (zz_build/src/lib.rs) and link unconditionally.
+    opts.float_link = true;
+    build_native(&pruned, &reach, "main", opts, None, &bin)
         .unwrap_or_else(|e| panic!("build failed: {e}\n---\n{}", e));
     let (_, out) = compile::run_binary(&bin, &[]).unwrap();
     let _ = std::fs::remove_dir_all(&tmp);
@@ -1367,7 +1385,13 @@ func main() {
     let tmp = std::env::temp_dir().join(format!("zz-test-flush-{uniq}-{}-out", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
     let bin = native_bin(&tmp, "zz_out");
-    build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
+    let mut opts = BuildOptions::dev();
+    // Tests need full float support to match VM behavior. needs_float_fmt is
+    // intentionally conservative and misses floats embedded inside JSON
+    // values that json.pretty formats via zz_canonical_double at runtime;
+    // mirror the chunk backend (zz_build/src/lib.rs) and link unconditionally.
+    opts.float_link = true;
+    build_native(&pruned, &reach, "main", opts, None, &bin)
         .unwrap_or_else(|e| panic!("build failed: {e}\n---\n{}", e));
     let mut child = std::process::Command::new(&bin)
         .stdin(std::process::Stdio::piped())
@@ -1563,7 +1587,9 @@ fn build_temp_bin(src: &str) -> (PathBuf, PathBuf) {
     let tmp = std::env::temp_dir().join(format!("zz-link-{}-{uniq}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
     let bin = native_bin(&tmp, "zz_out");
-    build_native(&pruned, &reach, "main", BuildOptions::dev(), None, &bin)
+    let mut opts = BuildOptions::dev();
+    opts.float_link = true;
+    build_native(&pruned, &reach, "main", opts, None, &bin)
         .unwrap_or_else(|e| panic!("build failed: {e}"));
     (tmp, bin)
 }
