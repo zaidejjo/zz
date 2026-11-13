@@ -4628,11 +4628,15 @@ impl<'a> Emitter<'a> {
                     // `zz_index_set` consumes the value share (it moves
                     // strings and retains+releases the rest internally),
                     // so the generic branch must not release `_fv`. The
-                    // direct `zz_assign` fast path does not consume: it
-                    // retains non-strings (release our stack share) and
-                    // moves strings (do not).
+                    // direct `zz_assign` fast path retains non-strings
+                    // (release our stack share) and moves mutable strings
+                    // (do not release). For immutable ZZ_STR, zz_assign
+                    // *does* retain (core.h retain list), so the caller's
+                    // `_fv` share must be released to balance it — the old
+                    // condition skipped that release and leaked one string
+                    // share per fused string store.
                     out.push_str(&format!(
-                        "      int _fe = 0;\n      if (st[{s}].tag == ZZ_ARRAY && st[{s}].arr && st[{s}].arr->refs == 1 && _fix.tag == ZZ_INT && _fix.i >= 0 && _fix.i < (int64_t)st[{s}].arr->len) {{\n        zz_assign(&st[{s}].arr->items[(size_t)_fix.i], _fv);\n        if (_fv.tag != ZZ_STR && _fv.tag != ZZ_MUTABLE_STR) zz_release(&_fv);\n        zz_release(&_fix);\n      }} else {{\n        zz_index_set(&st[{s}], _fix, _fv, &_fe);\n        zz_release(&_fix);\n        if (_fe) {ctrap};\n      }}\n",
+                        "      int _fe = 0;\n      if (st[{s}].tag == ZZ_ARRAY && st[{s}].arr && st[{s}].arr->refs == 1 && _fix.tag == ZZ_INT && _fix.i >= 0 && _fix.i < (int64_t)st[{s}].arr->len) {{\n        zz_assign(&st[{s}].arr->items[(size_t)_fix.i], _fv);\n        if (_fv.tag != ZZ_MUTABLE_STR) zz_release(&_fv);\n        zz_release(&_fix);\n      }} else {{\n        zz_index_set(&st[{s}], _fix, _fv, &_fe);\n        zz_release(&_fix);\n        if (_fe) {ctrap};\n      }}\n",
                         ctrap = ctrap("index out of bounds")
                     ));
                     out.push_str("    }\n");
@@ -4678,7 +4682,7 @@ impl<'a> Emitter<'a> {
                 out.push_str("    { zz_value _v = st[--sp]; zz_value _ix = st[--sp];\n");
                 out.push_str("      int _e = 0;\n");
                 out.push_str(&format!(
-                    "      if ({base}.tag == ZZ_ARRAY && {base}.arr && {base}.arr->refs == 1 && _ix.tag == ZZ_INT && _ix.i >= 0 && _ix.i < (int64_t){base}.arr->len) {{\n        zz_assign(&{base}.arr->items[(size_t)_ix.i], _v);\n        if (_v.tag != ZZ_STR && _v.tag != ZZ_MUTABLE_STR) zz_release(&_v);\n      }} else {{\n        zz_index_set(&{base}, _ix, _v, &_e);\n      }}\n"
+                    "      if ({base}.tag == ZZ_ARRAY && {base}.arr && {base}.arr->refs == 1 && _ix.tag == ZZ_INT && _ix.i >= 0 && _ix.i < (int64_t){base}.arr->len) {{\n        zz_assign(&{base}.arr->items[(size_t)_ix.i], _v);\n        if (_v.tag != ZZ_MUTABLE_STR) zz_release(&_v);\n      }} else {{\n        zz_index_set(&{base}, _ix, _v, &_e);\n      }}\n"
                 ));
                 out.push_str("      zz_release(&_ix);\n");
                 out.push_str(&format!(
