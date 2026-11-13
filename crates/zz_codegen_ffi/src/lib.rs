@@ -1558,25 +1558,17 @@ pub fn link_args_for_target(
     // `foo.lib` makes the driver treat them as input files
     // (`error: no such file`), so the archive goes in by absolute path.
     if os == TargetOs::Windows {
+        // `zz_native_rt.lib` (the `staticlib` crate-type) is self-contained:
+        // rustc bakes std/alloc/core into it, so it alone provides every
+        // Rust-runtime symbol the generated program needs, including
+        // `zz_float_format_raw`. Linking `libstd-*.rlib` on top would only
+        // re-introduce its undefined symbols (`__rust_alloc`,
+        // `core::panicking`, `alloc::*`, ...) that nothing else defines.
+        // The MSVC import libs below cover the CRT/Win32 API the std objects
+        // reference externally (memset, HeapAlloc, __security_cookie, ...).
         let mut base = vec![libdir.join(lib_file_name_for(os)).display().to_string()];
         base.extend(sys_link_libs_windows().iter().map(|s| s.to_string()));
-        // Release installs ship the static libstd next to the archive.
-        if let Some(shipped) = find_shipped_std_rlib(&libdir) {
-            let mut flags = base.clone();
-            flags.insert(1, libdir.join(&shipped).display().to_string());
-            return Ok((flags, lib));
-        }
-        if let Ok(rustc_dir) = rustc_libdir_for_target(target) {
-            if let Ok(rlib) = find_std_rlib(&rustc_dir) {
-                let mut flags = base.clone();
-                flags.insert(1, rustc_dir.join(&rlib).display().to_string());
-                return Ok((flags, lib));
-            }
-        }
-        return Err(FfiError(format!(
-            "no std-*.rlib in {} or rustc libdir; native FFI link on Windows needs the static libstd",
-            libdir.display()
-        )));
+        return Ok((base, lib));
     }
 
     // Unix/macOS linking: -L and -l flags.
