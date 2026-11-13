@@ -392,6 +392,7 @@ impl<'a> FmtCtx<'a> {
                 generics,
                 methods,
                 pub_,
+                trait_name,
                 ..
             } => {
                 self.write_indent();
@@ -399,6 +400,12 @@ impl<'a> FmtCtx<'a> {
                     self.write_str("pub ");
                 }
                 self.write_str("impl ");
+                // `impl Trait for Type` prints the trait before the `for`;
+                // inherent impls print just the type.
+                if let Some(t) = trait_name {
+                    self.write_str(&t.join("."));
+                    self.write_str(" for ");
+                }
                 self.write_str(&name.join("."));
                 if !generics.is_empty() {
                     self.write_str("<");
@@ -421,6 +428,45 @@ impl<'a> FmtCtx<'a> {
                             self.write_line();
                         }
                         self.fmt_stmt(m, source);
+                    }
+                    self.indent -= 1;
+                    self.write_line();
+                    self.write_indent();
+                    self.write_str("}");
+                }
+            }
+            Stmt::Trait {
+                name,
+                methods,
+                pub_,
+                ..
+            } => {
+                self.write_indent();
+                if *pub_ {
+                    self.write_str("pub ");
+                }
+                self.write_str("trait ");
+                self.write_str(&name.join("."));
+                self.write_str(" {");
+                if methods.is_empty() {
+                    self.write_str("}");
+                } else {
+                    self.write_line();
+                    self.indent += 1;
+                    for (i, m) in methods.iter().enumerate() {
+                        if i > 0 {
+                            self.write_line();
+                        }
+                        self.write_indent();
+                        self.write_str("func ");
+                        self.write_str(&m.name);
+                        self.write_str("(");
+                        self.fmt_params(&m.params, source);
+                        self.write_str(")");
+                        if let Some(ret) = &m.ret {
+                            self.write_str(" -> ");
+                            self.fmt_ty(ret, source);
+                        }
                     }
                     self.indent -= 1;
                     self.write_line();

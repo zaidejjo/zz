@@ -53,6 +53,8 @@ fn stmt_has_decorators(stmt: &Stmt) -> bool {
             decorators, body, ..
         } => !decorators.is_empty() || block_has_decorators(body),
         Stmt::Impl { methods, .. } => methods.iter().any(stmt_has_decorators),
+        // Trait declarations carry signatures only — nothing to expand.
+        Stmt::Trait { .. } => false,
         Stmt::Decl { value, .. } => expr_has_decorators(value),
         Stmt::Return { value, .. } => value.as_ref().is_some_and(expr_has_decorators),
         Stmt::For { iter, body, .. } => expr_has_decorators(iter) || block_has_decorators(body),
@@ -337,6 +339,7 @@ fn expand_stmts(
                 methods,
                 span,
                 pub_,
+                trait_name,
             } => {
                 let tname = name.join(".");
                 let mut sibling: HashSet<String> = methods
@@ -468,6 +471,7 @@ fn expand_stmts(
                     methods: expanded_methods,
                     span: *span,
                     pub_: *pub_,
+                    trait_name: trait_name.clone(),
                 });
             }
             Stmt::For {

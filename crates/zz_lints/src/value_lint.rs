@@ -333,6 +333,7 @@ impl Walk {
             | Stmt::TypeAlias { .. }
             | Stmt::Enum { .. }
             | Stmt::Impl { .. }
+            | Stmt::Trait { .. }
             | Stmt::ExternBlock { .. }
             | Stmt::Link { .. }
             | Stmt::Break { .. }

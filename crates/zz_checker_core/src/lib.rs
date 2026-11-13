@@ -122,6 +122,54 @@ pub struct StructSig {
     pub fields: Vec<(String, Type)>,
 }
 
+/// Placeholder receiver type for a trait method declaration's `self`.
+///
+/// Trait signatures are stored once, at declaration time, before any
+/// implementor is known, so `self` is `Type::Named(SELF_TYPE_PARAM)`. The
+/// resolver substitutes the receiver's real type at every use site. Trait
+/// method signatures never take generics in v1, so the name cannot collide
+/// with a user parameter.
+pub const SELF_TYPE_PARAM: &str = "Self";
+
+/// A user `trait` declaration: named, signature-only methods.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct TraitSig {
+    /// Method name → signature. `params[0]` is the receiver, typed
+    /// [`SELF_TYPE_PARAM`]; later params and the return type may mention
+    /// it too. Deterministic codegen sorts keys.
+    pub methods: HashMap<String, FuncSig>,
+}
+
+impl TraitSig {
+    /// Method names in stable (sorted) order — codegen and diagnostics.
+    pub fn method_names(&self) -> Vec<&String> {
+        let mut names: Vec<&String> = self.methods.keys().collect();
+        names.sort();
+        names
+    }
+}
+
+/// Canonical registry key for the concrete type a bound is checked
+/// against: the plain name for structs/enums, the builtin alias
+/// (`str`, `int`, `float`, `bool`, `vec`, `option`, `result`) for
+/// builtins, and `None` for types that cannot implement a trait
+/// (unions, functions, opaque handles, inference variables).
+///
+/// Shared by bound checking and codegen so they cannot drift.
+pub fn trait_type_key(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Struct(name, _) | Type::Enum(name, _) => Some(name.clone()),
+        Type::Int => Some("int".to_string()),
+        Type::Float => Some("float".to_string()),
+        Type::Bool => Some("bool".to_string()),
+        Type::Str => Some("str".to_string()),
+        Type::Array(_) => Some("vec".to_string()),
+        Type::Option(_) => Some("option".to_string()),
+        Type::Result(_, _) => Some("result".to_string()),
+        _ => None,
+    }
+}
+
 /// A registered type alias: type parameters and the target type with
 /// parameters as `Type::Named` (e.g. `type Pair<T> = (T, T)` stores
 /// `Tuple([Named("T"), Named("T")])`). Uses resolve to the target, so
@@ -184,6 +232,10 @@ pub struct CheckResult {
     pub aliases: HashMap<String, AliasSig>,
     /// Top-level user enums (`enum Token { ... }`).
     pub enums: HashMap<String, EnumSig>,
+    /// Top-level user trait declarations.
+    pub traits: HashMap<String, TraitSig>,
+    /// Trait name → implementing type keys (all impls in this program).
+    pub trait_impls: HashMap<String, Vec<String>>,
     /// `try` site span → conversion impl span (`None` = identity).
     pub try_resolutions: HashMap<Span, Option<Span>>,
     /// `try` site span → conversion function name (`None` = identity).
@@ -206,6 +258,8 @@ pub struct CheckResult {
     pub pub_aliases: HashMap<String, AliasSig>,
     /// Only `pub` user enums (for cross-module export).
     pub pub_enums: HashMap<String, EnumSig>,
+    /// Only `pub` trait declarations (for cross-module export).
+    pub pub_traits: HashMap<String, TraitSig>,
 }
 
 /// One binding recorded for unused-variable warnings.
@@ -289,6 +343,13 @@ pub struct Checker {
     pub alias_expanding: Vec<String>,
     /// User enums (`enum Token { ... }`): exported, resolved payloads.
     pub enums: HashMap<String, EnumSig>,
+    /// User trait declarations (`trait Draw { ... }`): name → signatures.
+    pub traits: HashMap<String, TraitSig>,
+    /// Trait implementations: trait name → implementing type keys (see
+    /// [`trait_type_key`]). Bound checking consults this; codegen reads it
+    /// to build method dispatch tables. Appended in declaration order and
+    /// deduplicated by the checker.
+    pub trait_impls: HashMap<String, Vec<String>>,
     /// Extension methods (separate table): (TypeName, method) → (sig, def span).
     /// Holds `impl` on builtins and cross-type extensions. Lookup priority:
     /// inherent (`funcs`) → extension (here) → stdlib namespace.
@@ -414,6 +475,19 @@ pub struct Checker {
 }
 
 impl Checker {
+    /// Does `ty` carry a registered implementation of the user trait
+    /// `trait_name`? Bound checking for `<T: Draw>` funnels through here so
+    /// every call site agrees with codegen about what counts as an impl.
+    pub fn implements_trait(&self, ty: &Type, trait_name: &str) -> bool {
+        match trait_type_key(ty) {
+            Some(key) => self
+                .trait_impls
+                .get(trait_name)
+                .is_some_and(|types| types.iter().any(|t| t == &key)),
+            None => false,
+        }
+    }
+
     /// Scope-qualified key for an expression span under the item currently
     /// being checked.
     pub fn scope_key(&self, span: Span) -> SpanKey {
@@ -425,12 +499,17 @@ impl Checker {
             span,
         )
     }
+    /// Create a checker seeded with prior state. `initial_traits`/`initial_trait_impls`
+    /// carry cross-module pub traits and impls for bound checking.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         initial_bindings: HashMap<String, Type>,
         funcs: HashMap<String, FuncSig>,
         structs: HashMap<String, StructSig>,
         aliases: HashMap<String, AliasSig>,
         enums: HashMap<String, EnumSig>,
+        initial_traits: HashMap<String, TraitSig>,
+        initial_trait_impls: HashMap<String, Vec<String>>,
         initial_consts: HashMap<String, Span>,
     ) -> Self {
         let env = vec![initial_bindings];
@@ -443,6 +522,8 @@ impl Checker {
             alias_asts: HashMap::new(),
             alias_expanding: Vec::new(),
             enums,
+            traits: initial_traits,
+            trait_impls: initial_trait_impls,
             ext_methods: HashMap::new(),
             convert_impls: Vec::new(),
             try_resolutions: HashMap::new(),

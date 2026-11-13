@@ -78,6 +78,8 @@ fn pruned(src: &str) -> (zz_hir::TypedProgram, zz_hir::ReachableSet) {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
     );
     let tp = res.program;
     zz_hir::dce(&tp, "main")

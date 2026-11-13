@@ -136,6 +136,7 @@ fn mentions_pat(p: &Pattern, _name: &str) -> bool {
 fn mentions_stmt(s: &Stmt, name: &str) -> bool {
     match s {
         Stmt::Decl { value, .. } => mentions_ident(value, name),
+        Stmt::Trait { .. } => false,
         Stmt::Import { .. } | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Link { .. } => {
             false
         }
@@ -3075,6 +3076,21 @@ impl Lowerer {
         // Resolve callee name — handle method dispatch for Path/Field expressions.
         // Returns (cname, method_receiver) where method_receiver is the owned Expr
         // to insert as the first argument for method calls like `x.push(4)`.
+
+        // ── static trait dispatch ────────────────────────────────────────
+        // A generic receiver (`s.draw()` where `s: T`, `T: Draw`) has no
+        // concrete `Type.method` to resolve — generics are erased before
+        // codegen. Route the call through the per-(trait, method)
+        // dispatcher, which selects the implementor from the receiver's
+        // runtime type name (exactly what the VM's `{type_name}.{method}`
+        // lookup does). Runs before every other resolution so neither a
+        // lone `*.draw` function nor a `*.<method>` suffix scan can capture
+        // a trait call.
+        if let Some((recv, method)) = Self::split_method_callee(callee) {
+            if let Some(call) = self.lower_trait_call(&recv, &method, args, named, names, out) {
+                return call;
+            }
+        }
 
         let (cname, method_receiver): (String, Option<Expr>) = match callee {
             Expr::Ident { name, .. } => {

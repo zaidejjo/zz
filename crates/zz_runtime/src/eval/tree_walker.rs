@@ -114,6 +114,9 @@ impl Interp {
             }
             // Aliases erase at check time: nothing to register at runtime.
             Stmt::TypeAlias { .. } => Ok(Flow::Value(Value::Unit)),
+            // Traits erase at check time: dispatch runs through the impl
+            // methods registered as ordinary `Type.method` functions.
+            Stmt::Trait { .. } => Ok(Flow::Value(Value::Unit)),
             // Enums register their variant names so qualified
             // construction (`Token.IntLit(1)`) resolves. Values are
             // plain `Object`s — no other runtime state needed.

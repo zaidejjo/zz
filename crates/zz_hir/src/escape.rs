@@ -703,6 +703,8 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
         );
         res.program
     }
@@ -878,6 +880,8 @@ func main() {
             &parsed.program,
             HashMap::new(),
             funcs,
+            HashMap::new(),
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),

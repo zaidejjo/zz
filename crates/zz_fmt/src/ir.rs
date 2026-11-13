@@ -205,7 +205,11 @@ pub fn lower_program<'src>(program: &Program, source: &'src str) -> (Doc<'src>, 
 fn is_toplevel_def(stmt: &Stmt) -> bool {
     matches!(
         stmt,
-        Stmt::Func { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Impl { .. }
+        Stmt::Func { .. }
+            | Stmt::Struct { .. }
+            | Stmt::TypeAlias { .. }
+            | Stmt::Impl { .. }
+            | Stmt::Trait { .. }
     )
 }
 
@@ -1154,6 +1158,33 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 self.emit_block_body(lbrace, span.end, methods);
                 self.text("}");
             }
+            Stmt::Trait {
+                name,
+                methods,
+                span,
+                ..
+            } => {
+                if stmt_is_pub(stmt) {
+                    self.text("pub");
+                    self.space();
+                }
+                self.text("trait");
+                self.space();
+                for (i, n) in name.iter().enumerate() {
+                    if i > 0 {
+                        self.text(".");
+                    }
+                    self.text(n);
+                }
+                self.space();
+                self.text("{");
+                let lbrace = self
+                    .lbrace_index(span.start, span.end)
+                    .map(|i| self.toks[i].start)
+                    .unwrap_or(span.start);
+                self.emit_trait_body(lbrace, span.end, methods);
+                self.text("}");
+            }
             Stmt::For {
                 vars, iter, body, ..
             } => {
@@ -1275,6 +1306,74 @@ impl<'src, 'a> Ctx<'src, 'a> {
         });
         self.out.push(Doc::hard_line());
         self.consecutive_nls = 1;
+    }
+
+    /// Emit a `trait` body: each signature on its own line, comments in the
+    /// gaps preserved exactly like [`Ctx::emit_block_body`]. Signatures are
+    /// `TraitMethod` nodes rather than statements, so this mirrors the block
+    /// emitter instead of reusing it.
+    fn emit_trait_body(
+        &mut self,
+        lbrace: u32,
+        rbrace_end: u32,
+        methods: &[zz_frontend::ast::TraitMethod],
+    ) {
+        let brace_start = self
+            .lbrace_index(lbrace, rbrace_end)
+            .map(|i| self.toks[i].end)
+            .unwrap_or(lbrace);
+        let saved = std::mem::take(&mut self.out);
+        let mut prev_end = brace_start;
+        for m in methods {
+            self.out.push(Doc::hard_line());
+            self.consecutive_nls = 1;
+            self.emit_gap_newlines(prev_end, m.span.start);
+            self.emit_boundary_comments(m.span.start);
+            self.emit_trait_method_sig(m);
+            prev_end = m.span.end;
+        }
+        // Trivia before the closing `}`.
+        if let Some(idx) = self.rbrace_index(prev_end, rbrace_end) {
+            self.emit_gap_newlines(prev_end, self.toks[idx].start);
+            for c in &self.toks[idx].leading {
+                self.emit_trivia(c);
+            }
+        }
+        let body = std::mem::replace(&mut self.out, saved);
+        self.out.push(Doc::Indent {
+            contents: Box::new(Doc::Concat(body)),
+        });
+        self.out.push(Doc::hard_line());
+        self.consecutive_nls = 1;
+    }
+
+    /// `func name(self, a: T) -> R` — one signature inside a trait body.
+    fn emit_trait_method_sig(&mut self, m: &zz_frontend::ast::TraitMethod) {
+        self.text("func");
+        self.space();
+        self.text(m.name.clone());
+        self.text("(");
+        for (i, p) in m.params.iter().enumerate() {
+            if i > 0 {
+                self.text(", ");
+            }
+            self.text(p.name.name.clone());
+            if let Some(t) = &p.ty {
+                self.text(":");
+                self.emit_ty(t);
+            }
+            if let Some(d) = &p.default {
+                self.space();
+                self.text("=");
+                self.space();
+                self.emit_expr(d);
+            }
+        }
+        self.text(")");
+        if let Some(r) = &m.ret {
+            self.text(" -> ");
+            self.emit_ty(r);
+        }
     }
 
     /// Emit comment trivia attached to the token that starts exactly at
@@ -2028,6 +2127,7 @@ fn stmt_is_pub(stmt: &Stmt) -> bool {
         | Stmt::TypeAlias { pub_, .. }
         | Stmt::Enum { pub_, .. }
         | Stmt::Impl { pub_, .. }
+        | Stmt::Trait { pub_, .. }
         | Stmt::Import { pub_, .. } => *pub_,
         _ => false,
     }

@@ -14,23 +14,47 @@ pub struct Param {
 }
 
 /// A trait/type bound applicable to a generic parameter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TraitBound {
     Num,
     Ord,
     Eq,
     Display,
+    /// A user-declared trait named in a bound (`<T: Draw>`). The parser
+    /// accepts any identifier — single-file parsing cannot see the trait
+    /// table — and the checker validates the name (with a suggestion)
+    /// against its registered traits.
+    User(String),
 }
 
 impl TraitBound {
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> &str {
         match self {
             TraitBound::Num => "Num",
             TraitBound::Ord => "Ord",
             TraitBound::Eq => "Eq",
             TraitBound::Display => "Display",
+            TraitBound::User(n) => n,
         }
     }
+
+    /// True for the four built-in operator bounds (`Num`, `Ord`, `Eq`,
+    /// `Display`); false for a user-declared trait.
+    pub fn is_builtin(&self) -> bool {
+        !matches!(self, TraitBound::User(_))
+    }
+}
+
+/// One signature-only method in a `trait` declaration.
+///
+/// `params[0]` is always the `self` receiver (the parser rejects a
+/// signature without it). Bodies live in `impl Trait for Type` blocks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitMethod {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub ret: Option<Ty>,
+    pub span: Span,
 }
 
 /// A generic parameter declaration with its trait bounds:
@@ -158,17 +182,36 @@ pub enum Stmt {
         span: Span,
         pub_: bool,
     },
+    /// `trait Draw { func draw(self) }` — a static-dispatch trait
+    /// declaration. Methods are signatures only (no bodies, no generics);
+    /// implementations live in `impl Draw for Type` blocks. Traits are
+    /// checked and then erased: a bounded generic calls through the
+    /// trait, and the engines dispatch on the receiver's concrete type.
+    Trait {
+        name: Vec<String>,
+        methods: Vec<TraitMethod>,
+        span: Span,
+        pub_: bool,
+    },
     /// `impl Point { func dist(self) -> int { ... } }` — method block.
     /// Methods inside are registered as `TypeName.method_name` functions.
     /// `impl Box<T>` scopes `T` over every method (prepended to each
     /// method's own generics at registration, so call-site instantiation
     /// unifies struct arguments from the receiver automatically).
+    ///
+    /// `impl Trait for Type { ... }` sets `trait_name` to the trait's path
+    /// and `name` to the implementing type; methods are registered exactly
+    /// like inherent ones (so `value.method()` works unchanged) and the
+    /// pair is recorded in the trait-impl table for bound checking.
     Impl {
         name: Vec<String>,
         generics: Vec<Ident>,
         methods: Vec<Stmt>,
         span: Span,
         pub_: bool,
+        /// `Some(trait_path)` for `impl Trait for Type`, `None` for an
+        /// inherent `impl Type`.
+        trait_name: Option<Vec<String>>,
     },
     /// `type Tokens = [Token]` — a named type alias. Generic aliases
     /// take plain parameters (`type Pair<T> = (T, T)`); use sites name
@@ -269,6 +312,7 @@ impl Stmt {
             Stmt::CompoundAssign { span, .. } => *span,
             Stmt::ExternBlock { span, .. } | Stmt::Link { span, .. } => *span,
             Stmt::Impl { span, .. } => *span,
+            Stmt::Trait { span, .. } => *span,
             Stmt::Destructure { span, .. } => *span,
             Stmt::Expr(e) => e.span(),
         }

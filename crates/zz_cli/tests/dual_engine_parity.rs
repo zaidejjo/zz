@@ -1444,6 +1444,26 @@ parity_strict!(
     "generic_selective.zz"
 );
 parity_strict!(
+    parity_stdlib_trait_dispatch_basic,
+    "stdlib",
+    "trait_dispatch_basic.zz"
+);
+parity_strict!(
+    parity_stdlib_trait_dispatch_multi_impl,
+    "stdlib",
+    "trait_dispatch_multi_impl.zz"
+);
+parity_strict!(
+    parity_stdlib_trait_dispatch_multi_method,
+    "stdlib",
+    "trait_dispatch_multi_method.zz"
+);
+parity_strict!(
+    parity_stdlib_trait_dispatch_no_traits,
+    "stdlib",
+    "trait_dispatch_no_traits.zz"
+);
+parity_strict!(
     parity_stdlib_alias_module_calls,
     "stdlib",
     "alias_module_calls.zz"

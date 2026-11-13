@@ -1572,7 +1572,7 @@ impl TypeCheckOps for Checker {
                 Type::Int => Type::Int,
                 Type::Float => Type::Float,
                 Type::Named(n) => {
-                    if self.has_bound(&n, zz_span_ast::ast::TraitBound::Num) {
+                    if self.has_bound(&n, &zz_span_ast::ast::TraitBound::Num) {
                         Type::Named(n)
                     } else {
                         self.errors.push(error_at(
@@ -1682,7 +1682,7 @@ impl TypeCheckOps for Checker {
                     // carries the required bound (`Eq` for ==/!=, `Ord` for
                     // ordering). The concrete type is pinned at the call site.
                     (Type::Named(a), Type::Named(b)) if a == b => {
-                        if self.has_bound(a, needed) {
+                        if self.has_bound(a, &needed) {
                             Type::Bool
                         } else {
                             self.errors.push(error_at(
@@ -1698,7 +1698,7 @@ impl TypeCheckOps for Checker {
                         }
                     }
                     (Type::Named(n), _) | (_, Type::Named(n)) => {
-                        if self.has_bound(n, needed) {
+                        if self.has_bound(n, &needed) {
                             Type::Bool
                         } else {
                             self.errors.push(error_at(
@@ -1836,7 +1836,7 @@ impl TypeCheckOps for Checker {
             // `Num` bound. The result keeps the generic type; the concrete
             // type is pinned at the call site via instantiation.
             (Type::Named(a), Type::Named(b)) if a == b => {
-                if self.has_bound(a, TraitBound::Num) {
+                if self.has_bound(a, &TraitBound::Num) {
                     Type::Named(a.clone())
                 } else {
                     self.errors.push(error_at(
@@ -1862,12 +1862,12 @@ impl TypeCheckOps for Checker {
                 Type::Error
             }
             (Type::Named(n), t) | (t, Type::Named(n))
-                if self.has_bound(n, TraitBound::Num) && matches!(t, Type::Int | Type::Float) =>
+                if self.has_bound(n, &TraitBound::Num) && matches!(t, Type::Int | Type::Float) =>
             {
                 Type::Named(n.clone())
             }
             (Type::Named(n), Type::Var(_)) | (Type::Var(_), Type::Named(n)) => {
-                if self.has_bound(n, TraitBound::Num) {
+                if self.has_bound(n, &TraitBound::Num) {
                     Type::Named(n.clone())
                 } else {
                     self.errors.push(error_at(
@@ -2091,6 +2091,39 @@ impl TypeCheckOps for Checker {
     /// opaque tags, structs, and enums.
     fn resolve_method_sig(&self, recv_t: &Type, method: &str) -> Option<zz_checker_core::FuncSig> {
         match recv_t {
+            // A generic parameter resolves methods through its trait bounds:
+            // `func render<T: Draw>(s: T) { s.draw() }` finds `Draw.draw`.
+            // The `Self` placeholder becomes the parameter itself so the
+            // call's receiver unification sees `Named(T)` on both sides.
+            // Ambiguity across bounds is reported by the call site
+            // (`check_call_field_callee`), which can also see the span.
+            Type::Named(gen) => {
+                let mut found: Option<zz_checker_core::FuncSig> = None;
+                for bound in self.current_bounds.get(gen).into_iter().flatten() {
+                    let zz_span_ast::ast::TraitBound::User(tname) = bound else {
+                        continue;
+                    };
+                    let Some(msig) = self.traits.get(tname).and_then(|t| t.methods.get(method))
+                    else {
+                        continue;
+                    };
+                    if found.is_some() {
+                        continue;
+                    }
+                    let mut subs = std::collections::HashMap::new();
+                    subs.insert(
+                        zz_checker_core::SELF_TYPE_PARAM.to_string(),
+                        Type::Named(gen.clone()),
+                    );
+                    let mut sig = msig.clone();
+                    for (_, ty) in sig.params.iter_mut() {
+                        *ty = zz_infer::subst(ty, &subs);
+                    }
+                    sig.ret = zz_infer::subst(&sig.ret, &subs);
+                    found = Some(sig);
+                }
+                found
+            }
             Type::Str => {
                 zz_checker_core::lookup_std(&self.funcs, &format!("str.{method}")).cloned()
             }

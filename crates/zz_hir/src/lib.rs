@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 pub use zz_checker::{
-    check_program_typed, AliasSig, EnumSig, FuncSig, SpanKey, StructSig, Type, TOP_SCOPE,
+    check_program_typed, AliasSig, EnumSig, FuncSig, SpanKey, StructSig, TraitSig, Type, TOP_SCOPE,
 };
 pub use zz_frontend::ast::{Block, Expr, Program, Stmt};
 pub use zz_frontend::span::Span;
@@ -49,6 +49,10 @@ pub struct TypedProgram {
     pub structs: HashMap<String, StructSig>,
     /// Top-level user enum signatures (for VM construction detection).
     pub enums: HashMap<String, EnumSig>,
+    /// Top-level user trait declarations.
+    pub traits: HashMap<String, TraitSig>,
+    /// Trait name → implementing type keys (all impls in this program).
+    pub trait_impls: HashMap<String, Vec<String>>,
     /// `try` site span → conversion function name (`None` = identity).
     /// Mirrors the checker's `try_converts`; consulted by native codegen
     /// to emit error-conversion calls on early return.
@@ -73,6 +77,7 @@ pub struct TypedResult {
 
 /// Build a [`TypedProgram`] from parsed source and optional seed maps
 /// (for REPL sessions where prior statements' types persist).
+#[allow(clippy::too_many_arguments)]
 pub fn build_program(
     program: &Program,
     initial_bindings: HashMap<String, Type>,
@@ -80,6 +85,8 @@ pub fn build_program(
     initial_structs: HashMap<String, StructSig>,
     initial_aliases: HashMap<String, AliasSig>,
     initial_enums: HashMap<String, EnumSig>,
+    initial_traits: HashMap<String, TraitSig>,
+    initial_trait_impls: HashMap<String, Vec<String>>,
 ) -> TypedResult {
     // Expand decorators before checking so the typed program (consumed by
     // codegen) contains the lowered `__inner` + wrapper functions. The
@@ -92,6 +99,8 @@ pub fn build_program(
         initial_structs,
         initial_aliases,
         initial_enums,
+        initial_traits,
+        initial_trait_impls,
     );
     // Move (never clone) the result maps: each is freshly built per compile
     // (notably `funcs`, one entry per function) and used exactly once here.
@@ -100,6 +109,8 @@ pub fn build_program(
     let funcs = checked.funcs;
     let structs = checked.structs;
     let enums = checked.enums;
+    let traits = checked.traits.clone();
+    let trait_impls = checked.trait_impls.clone();
     let try_converts = checked.try_converts;
     TypedResult {
         program: TypedProgram {
@@ -109,6 +120,8 @@ pub fn build_program(
             funcs,
             structs,
             enums,
+            traits,
+            trait_impls,
             try_converts,
             module_origins: HashMap::new(),
         },
@@ -159,6 +172,8 @@ pub fn build_source(
         initial_structs,
         initial_aliases,
         initial_enums,
+        HashMap::new(),
+        HashMap::new(),
     ))
 }
 
@@ -178,6 +193,8 @@ pub fn merge_typed_programs(programs: Vec<TypedProgram>) -> TypedProgram {
     let mut funcs: HashMap<String, FuncSig> = HashMap::new();
     let mut structs: HashMap<String, StructSig> = HashMap::new();
     let mut enums: HashMap<String, EnumSig> = HashMap::new();
+    let mut traits: HashMap<String, TraitSig> = HashMap::new();
+    let mut trait_impls: HashMap<String, Vec<String>> = HashMap::new();
     let mut try_converts: HashMap<Span, Option<String>> = HashMap::new();
     let mut module_origins: HashMap<String, String> = HashMap::new();
     let mut span: Span = Span::new(0, 0);
@@ -188,6 +205,15 @@ pub fn merge_typed_programs(programs: Vec<TypedProgram>) -> TypedProgram {
         funcs.extend(tp.funcs);
         structs.extend(tp.structs);
         enums.extend(tp.enums);
+        traits.extend(tp.traits);
+        for (tname, types) in &tp.trait_impls {
+            let entry = trait_impls.entry(tname.clone()).or_default();
+            for t in types {
+                if !entry.contains(t) {
+                    entry.push(t.clone());
+                }
+            }
+        }
         try_converts.extend(tp.try_converts);
         module_origins.extend(tp.module_origins);
         if tp.program.span.end > span.end {
@@ -201,6 +227,8 @@ pub fn merge_typed_programs(programs: Vec<TypedProgram>) -> TypedProgram {
         funcs,
         structs,
         enums,
+        traits,
+        trait_impls,
         try_converts,
         module_origins,
     }

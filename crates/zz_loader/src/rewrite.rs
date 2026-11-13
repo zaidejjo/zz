@@ -124,8 +124,18 @@ impl<'a> Rewriter<'a> {
                     // A nested func shadows its own name within its body.
                     self.declare(&name.join("."));
                 }
-                for g in generics {
+                // Declare generics and canonicalize any bound naming a trait
+                // declared in this file to its canonical (`ns.Trait`) spelling,
+                // exactly like a call to a top-level function.
+                for g in generics.iter_mut() {
                     self.declare(&g.name.name);
+                    for bound in g.bounds.iter_mut() {
+                        if let zz_frontend::ast::TraitBound::User(tname) = bound {
+                            if !tname.contains('.') && self.top.contains(tname.as_str()) {
+                                *tname = format!("{}.{}", self.ns, tname);
+                            }
+                        }
+                    }
                 }
                 for p in params {
                     self.declare(&p.name.name);
@@ -185,10 +195,33 @@ impl<'a> Rewriter<'a> {
                     }
                 }
             }
-            Stmt::Impl { name, methods, .. } => {
+            // Trait declarations name types only; nothing to qualify or
+            // rewrite in their methods. The declaration itself is namespaced
+            // like every other top-level item so an importer can reach it by
+            // its canonical name (`support.shapes.Draw`).
+            Stmt::Trait { name, .. } => {
                 let already_qualified = name.len() > 1 && name[0] == self.ns;
                 if self.top.contains(&name.join(".")) && !already_qualified {
                     name[0] = format!("{}.{}", self.ns, name[0]);
+                }
+            }
+            Stmt::Impl {
+                name,
+                trait_name,
+                methods,
+                ..
+            } => {
+                let already_qualified = name.len() > 1 && name[0] == self.ns;
+                if self.top.contains(&name.join(".")) && !already_qualified {
+                    name[0] = format!("{}.{}", self.ns, name[0]);
+                }
+                // `impl Draw for Circle` in the trait's own module: qualify
+                // so the impl lands under the same key the declaration uses.
+                if let Some(tn) = trait_name {
+                    let already = tn.len() > 1 && tn[0] == self.ns;
+                    if self.top.contains(&tn.join(".")) && !already {
+                        tn[0] = format!("{}.{}", self.ns, tn[0]);
+                    }
                 }
                 for method in methods {
                     // Method names are relative to the impl type: registered

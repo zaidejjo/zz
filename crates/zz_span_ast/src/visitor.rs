@@ -246,6 +246,21 @@ pub trait AstVisitor {
                     self.walk_stmt(m);
                 }
             }
+            Stmt::Trait { methods, .. } => {
+                for m in methods {
+                    for p in &m.params {
+                        if let Some(t) = &p.ty {
+                            self.walk_ty(t);
+                        }
+                        if let Some(d) = &p.default {
+                            self.walk_expr(d);
+                        }
+                    }
+                    if let Some(t) = &m.ret {
+                        self.walk_ty(t);
+                    }
+                }
+            }
             Stmt::Return { value, .. } => {
                 if let Some(v) = value {
                     self.walk_expr(v);

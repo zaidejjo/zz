@@ -986,6 +986,8 @@ fn struct_method_call_resolves_at_compile_time() {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
         );
         Compiler::compile_program_typed(
             &parsed.program,
@@ -1095,6 +1097,8 @@ fn vm_compound_assign_fuses_like_plain_assign() {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
         );
         let chunk = super::Compiler::compile_program_typed(
             &parsed.program,
@@ -1170,6 +1174,8 @@ fn compile_ops(src: &str) -> Vec<Op> {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
     );
     let chunk = Compiler::compile_program_typed(
         &parsed.program,
@@ -1265,6 +1271,8 @@ fn vm_typed_int_comparisons_emit_fast_ops() {
         );
         let (_res, types) = zz_checker::check_program_typed(
             &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
@@ -1388,6 +1396,8 @@ fn vm_generic_struct_erases_like_monomorphic() {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
         );
         let chunk = super::Compiler::compile_program_typed(
             &parsed.program,
@@ -1462,6 +1472,8 @@ fn vm_guarded_match_arm_miss_reloads_scrutinee() {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
     );
     let chunk = super::Compiler::compile_program_typed(
         &parsed.program,
@@ -1532,6 +1544,8 @@ fn vm_if_let_result_does_not_alias_later_slots() {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
     );
     assert!(
         checked
@@ -2300,6 +2314,8 @@ fn vm_variant_method_op_shape() {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
         );
         let natives: HashSet<String> = [
             "option.unwrap_or",
@@ -2395,6 +2411,8 @@ fn vm_statement_if_in_loop_emits_no_value_dance() {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
     );
     let chunk = Compiler::compile_program_typed(
         &parsed.program,
@@ -2624,6 +2642,8 @@ fn while_sum_hot_shape_is_test_body_and_backedge() {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
     );
     let chunk = super::Compiler::compile_program_typed(
         &parsed.program,
@@ -3103,6 +3123,8 @@ fn vm_push_slot_int_imm_fuses_value_position_arith() {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
     );
     let chunk = Compiler::compile_program_typed(
         &parsed.program,
@@ -3179,6 +3201,8 @@ fn vm_jump_if_false_slot_cmp_fuses_if_guards() {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
     );
     let chunk = Compiler::compile_program_typed(
         &parsed.program,

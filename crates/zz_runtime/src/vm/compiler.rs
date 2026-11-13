@@ -2802,6 +2802,9 @@ impl Compiler {
             // later slot by one — `type A = int` followed by `x := 1` used to
             // panic in `StoreSlot`.
             Stmt::TypeAlias { .. } => StmtValue::None,
+            // Traits erase at check time: their impl methods are ordinary
+            // functions, reached through the runtime's method dispatch.
+            Stmt::Trait { .. } => StmtValue::None,
             // Enums register their variant names so qualified
             // construction (`Token.IntLit(1)`) resolves at runtime.
             // Values are plain `Object`s — no other state needed.

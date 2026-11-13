@@ -41,6 +41,9 @@ pub(crate) fn check_stmt(checker: &mut Checker, stmt: &Stmt) -> Type {
         Stmt::Struct { .. } => Type::Unit,
         Stmt::TypeAlias { .. } => Type::Unit,
         Stmt::Enum { .. } => Type::Unit,
+        // Trait declarations are registered in an earlier pass; their
+        // signatures carry no bodies to check.
+        Stmt::Trait { .. } => Type::Unit,
         Stmt::For {
             vars,
             iter,

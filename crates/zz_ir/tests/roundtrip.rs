@@ -446,6 +446,8 @@ fn check_typed(
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
     );
     assert!(
         result.errors.is_empty(),

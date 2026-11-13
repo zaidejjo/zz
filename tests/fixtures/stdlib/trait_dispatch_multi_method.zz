@@ -1,0 +1,32 @@
+// E2E: trait with multiple methods; each (trait, method) pair gets its
+// own dispatcher. Bounded generics call both methods.
+trait Counter {
+    func inc(self) -> int
+    func value(self) -> int
+}
+
+struct Boxed {
+    n: int,
+}
+
+impl Counter for Boxed {
+    func inc(self) -> int {
+        self.n = self.n + 1
+        return self.n
+    }
+    func value(self) -> int {
+        return self.n
+    }
+}
+
+func bump<T: Counter>(item: T) -> int {
+    item.inc()
+    return item.value()
+}
+
+func main() {
+    b := Boxed{n: 0}
+    println(bump(b))
+    println(bump(b))
+    println("trait_dispatch_multi_method_ok")
+}

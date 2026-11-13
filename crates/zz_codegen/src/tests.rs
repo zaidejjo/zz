@@ -31,6 +31,8 @@ fn build_reachable(src: &str) -> (TypedProgram, ReachableSet) {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
     );
     let tp = res.program;
     // DCE from main (bare name; tests avoid module namespacing).

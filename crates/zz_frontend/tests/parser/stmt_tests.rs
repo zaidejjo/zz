@@ -172,16 +172,19 @@ fn parses_generic_func_with_bounds() {
 }
 
 #[test]
-fn parses_generic_func_with_unknown_bound_errors() {
-    let p = parse("func f<T: Foo>(x: T) -> T { return x }");
-    assert!(!p.errors.is_empty());
-    assert!(
-        p.errors
-            .iter()
-            .any(|e| e.message.contains("unknown trait bound")),
-        "errors: {:?}",
-        p.errors
-    );
+fn parses_generic_func_with_user_bound() {
+    // User-defined bounds are accepted by the parser; the checker resolves
+    // them against declared traits (and suggests a fix on a typo).
+    let p = parse_ok("func f<T: Foo>(x: T) -> T { return x }");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func { generics, .. } => {
+            assert_eq!(
+                generics[0].bounds,
+                vec![zz_frontend::ast::TraitBound::User("Foo".to_string())]
+            );
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
 }
 
 #[test]
@@ -802,5 +805,90 @@ fn discard_assign_only_plain_assign() {
             .any(|e| e.message.contains("`_` is only valid in patterns")),
         "expected '_ is only valid in patterns' for `_ == 1`, got: {:?}",
         parsed.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn parses_trait_decl() {
+    let p = parse_ok("trait Draw {\n    func draw(self) -> str\n    func label(self) -> str\n}");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Trait {
+            name,
+            methods,
+            pub_,
+            ..
+        } => {
+            assert_eq!(*name, vec!["Draw".to_string()]);
+            assert!(!pub_);
+            assert_eq!(methods.len(), 2);
+            assert_eq!(methods[0].name, "draw");
+            assert_eq!(methods[0].params[0].name.name, "self");
+            assert!(methods[0].ret.is_some());
+            assert_eq!(methods[1].name, "label");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_pub_trait_decl() {
+    let p = parse_ok("pub trait Show {\n    func show(self) -> str\n}");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Trait { name, pub_, .. } => {
+            assert_eq!(*name, vec!["Show".to_string()]);
+            assert!(pub_);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_impl_trait_for_type() {
+    let p = parse_ok("impl Draw for Circle {\n    func draw(self) -> str { return \"c\" }\n}");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Impl {
+            name,
+            trait_name,
+            methods,
+            ..
+        } => {
+            assert_eq!(*name, vec!["Circle".to_string()]);
+            assert_eq!(trait_name.as_deref(), Some(&["Draw".to_string()][..]));
+            assert_eq!(methods.len(), 1);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_inherent_impl_without_trait() {
+    let p = parse_ok("impl Circle {\n    func grow(self) {}\n}");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Impl { trait_name, .. } => assert!(trait_name.is_none()),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_generic_trait_impl_target() {
+    let p = parse("impl Draw for Box<T> {\n    func draw(self) -> str { return \"\" }\n}");
+    assert!(
+        p.errors
+            .iter()
+            .any(|e| e.message.contains("generic") || e.message.contains("type parameter")),
+        "errors: {:?}",
+        p.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rejects_trait_method_with_body() {
+    let p = parse("trait Draw {\n    func draw(self) -> str { return \"c\" }\n}");
+    assert!(
+        p.errors
+            .iter()
+            .any(|e| e.message.contains("signature only")),
+        "errors: {:?}",
+        p.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
 }

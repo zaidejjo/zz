@@ -715,6 +715,7 @@ impl<'a> Lexer<'a> {
             "defer" => TokenKind::Defer,
             "pub" => TokenKind::Pub,
             "impl" => TokenKind::Impl,
+            "trait" => TokenKind::Trait,
             "const" => TokenKind::Const,
             "extern" => TokenKind::Extern,
             "mut" => TokenKind::Mut,

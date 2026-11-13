@@ -1772,6 +1772,7 @@ impl Lowerer {
             | Stmt::TypeAlias { .. }
             | Stmt::Enum { .. }
             | Stmt::Impl { .. }
+            | Stmt::Trait { .. }
             | Stmt::Import { .. } => {}
             // Top-level only: emitted in the preamble by `Lowerer::lower`.
             Stmt::ExternBlock { .. } | Stmt::Link { .. } => {}
@@ -3443,6 +3444,7 @@ impl Lowerer {
             | Stmt::Struct { .. }
             | Stmt::TypeAlias { .. }
             | Stmt::Enum { .. }
+            | Stmt::Trait { .. }
             | Stmt::Break { .. }
             | Stmt::Continue { .. }
             | Stmt::ExternBlock { .. }

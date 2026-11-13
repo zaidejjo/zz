@@ -1,0 +1,6 @@
+// E2E control: program with no traits must produce no trait dispatcher
+// section in any unit header or code.
+func main() {
+    println(str.is_empty(""))
+    println("trait_dispatch_no_traits_ok")
+}

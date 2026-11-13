@@ -206,6 +206,23 @@ fn collect_stmt_tokens(
                 collect_stmt_tokens(method, source, known, out);
             }
         }
+        Stmt::Trait { name, methods, .. } => {
+            push_keyword_token(stmt.span(), "trait", source, out);
+            push_name_tokens(name, TokenType::Struct, source, out);
+            for m in methods {
+                push_keyword_token(m.span, "func", source, out);
+                push_ident_token(&m.name, m.span, TokenType::Function, source, out);
+                for p in &m.params {
+                    push_ident_token(&p.name.name, p.name.span, TokenType::Parameter, source, out);
+                    if let Some(t) = &p.ty {
+                        collect_type_tokens(t, source, known, out);
+                    }
+                }
+                if let Some(r) = &m.ret {
+                    collect_type_tokens(r, source, known, out);
+                }
+            }
+        }
         Stmt::Decl {
             ty, name, value, ..
         } => {

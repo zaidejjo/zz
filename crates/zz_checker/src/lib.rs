@@ -10,8 +10,8 @@ pub use zz_unify as unify;
 pub use checker::{
     canonical_std_name, check_program, check_program_typed, check_program_with_consts,
     check_program_with_module_ns, check_program_with_module_ns_typed, contains_std,
-    is_std_module_head, lookup_std, AliasSig, CheckResult, ConvertImpl, EnumSig, FuncSig, SpanKey,
-    StructSig, STD_MODULES, TOP_SCOPE,
+    is_std_module_head, lookup_std, trait_type_key, AliasSig, CheckResult, ConvertImpl, EnumSig,
+    FuncSig, SpanKey, StructSig, TraitSig, SELF_TYPE_PARAM, STD_MODULES, TOP_SCOPE,
 };
 pub use zz_infer::subst as subst_type;
 pub use zz_types::Type;

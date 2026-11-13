@@ -1123,6 +1123,30 @@ int zz_enum_is(const zz_value *v, const char *qualified) {
     return strcmp(v->obj->type_name, qualified) == 0;
 }
 
+// Trait dispatch implementor test: exact match for struct implementors,
+// variant-prefix match for user-enum implementors (their stored type name
+// is `Enum.Variant`, while the trait impl is keyed by `Enum`).
+int zz_trait_type_is(const zz_value *v, const char *qualified) {
+    if (!v || !qualified || v->tag != ZZ_OBJECT || !v->obj || !v->obj->type_name) return 0;
+    const char *tn = v->obj->type_name;
+    size_t n = strlen(qualified);
+    if (n == 0 || strncmp(tn, qualified, n) != 0) return 0;
+    return tn[n] == '\0' || tn[n] == '.';
+}
+
+// Unreachable in a well-formed program: the checker rejects a trait method
+// call unless a bound provides it, and the generated dispatcher covers every
+// registered implementor. Reached only when a program bypasses the checker
+// (stale cache, REPL drift) — mirror the other native panic sites.
+zz_value zz_trait_missing_impl(const char *trait, const char *method, zz_value recv) {
+    const char *tn = NULL;
+    if (recv.tag == ZZ_OBJECT && recv.obj) tn = recv.obj->type_name;
+    fprintf(stderr,
+            "error: no implementation of trait `%s` for method `%s` (receiver: `%s`)\n",
+            trait ? trait : "?", method ? method : "?", tn ? tn : "?");
+    exit(1);
+}
+
 // Display shape test for user-enum variant values: a dotted type name
 // with no fields (unit variant) or exactly one `value` field (payload
 // variant). Mirrors the VM's Display rule so `println` agrees on both

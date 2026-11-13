@@ -823,6 +823,8 @@ fn setup_bench_interp(bench: &BenchInfo) -> Result<(Interp, Value), String> {
         loaded.structs,
         loaded.aliases,
         loaded.enums,
+        loaded.traits.clone(),
+        loaded.trait_impls.clone(),
     );
     let types = Arc::new(typed.program.types);
     let structs = typed.program.structs;

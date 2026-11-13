@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
-use zz_checker::{AliasSig, EnumSig, FuncSig, SpanKey, StructSig, Type};
+use zz_checker::{AliasSig, EnumSig, FuncSig, SpanKey, StructSig, TraitSig, Type};
 use zz_frontend::ast::Program;
 use zz_frontend::diag::RawDiag;
 use zz_frontend::span::Span;
@@ -53,6 +53,15 @@ pub struct CachedModule<'a> {
     /// Resolved pub enums (== `CheckResult.pub_enums`).
     #[serde(borrow)]
     pub pub_enums: std::borrow::Cow<'a, HashMap<String, EnumSig>>,
+    /// Resolved pub trait declarations (== `CheckResult.pub_traits`).
+    /// Only `pub` traits cross a module boundary.
+    #[serde(borrow)]
+    pub pub_traits: std::borrow::Cow<'a, HashMap<String, TraitSig>>,
+    /// Trait impls the module registered (trait name → implementing type
+    /// keys). Needed on a hit so call sites in later modules can validate
+    /// bounds against impls from this one.
+    #[serde(borrow)]
+    pub trait_impls: std::borrow::Cow<'a, HashMap<String, Vec<String>>>,
     /// Module's new bindings (== `CheckResult.bindings`).
     #[serde(borrow)]
     pub bindings: std::borrow::Cow<'a, HashMap<String, Type>>,
@@ -88,7 +97,7 @@ fn genesis(plugin_names: &[String]) -> String {
     let mut names = plugin_names.to_vec();
     names.sort();
     format!(
-        "zz-check-cache-v7|cli={}|build={}|plugins={}|seed={}",
+        "zz-check-cache-v8|cli={}|build={}|plugins={}|seed={}",
         env!("CARGO_PKG_VERSION"),
         zz_ir::build_stamp(),
         names.join(","),
@@ -657,6 +666,8 @@ impl<'a> CachedModule<'a> {
             pub_aliases: std::borrow::Cow::Owned(self.pub_aliases.into_owned()),
             enums: std::borrow::Cow::Owned(self.enums.into_owned()),
             pub_enums: std::borrow::Cow::Owned(self.pub_enums.into_owned()),
+            pub_traits: std::borrow::Cow::Owned(self.pub_traits.into_owned()),
+            trait_impls: std::borrow::Cow::Owned(self.trait_impls.into_owned()),
             bindings: std::borrow::Cow::Owned(self.bindings.into_owned()),
             pub_bindings: std::borrow::Cow::Owned(self.pub_bindings.into_owned()),
             diags: self.diags,
@@ -780,6 +791,8 @@ mod tests {
                 pub_aliases: Cow::Owned(HashMap::new()),
                 enums: Cow::Owned(HashMap::new()),
                 pub_enums: Cow::Owned(HashMap::new()),
+                pub_traits: Cow::Owned(HashMap::new()),
+                trait_impls: Cow::Owned(HashMap::new()),
                 bindings: Cow::Owned(HashMap::new()),
                 pub_bindings: Cow::Owned(HashMap::new()),
                 diags: Vec::new(),
@@ -803,6 +816,8 @@ mod tests {
             pub_aliases: Cow::Owned(HashMap::new()),
             enums: Cow::Owned(HashMap::new()),
             pub_enums: Cow::Owned(HashMap::new()),
+            pub_traits: Cow::Owned(HashMap::new()),
+            trait_impls: Cow::Owned(HashMap::new()),
             bindings: Cow::Owned(HashMap::new()),
             pub_bindings: Cow::Owned(HashMap::new()),
             diags: Vec::new(),

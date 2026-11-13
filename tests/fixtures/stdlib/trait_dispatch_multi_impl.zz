@@ -1,0 +1,38 @@
+// E2E: multiple implementors of the same trait; dispatcher forwards
+// to the right one based on runtime type name.
+trait Shape {
+    func area(self) -> float
+}
+
+struct Rect {
+    w: float,
+    h: float,
+}
+
+struct Circ {
+    r: float,
+}
+
+impl Shape for Rect {
+    func area(self) -> float {
+        return self.w * self.h
+    }
+}
+
+impl Shape for Circ {
+    func area(self) -> float {
+        return 3.14159 * self.r * self.r
+    }
+}
+
+func total<T: Shape>(a: T, b: T) -> float {
+    return a.area() + b.area()
+}
+
+func main() {
+    r := Rect{w: 3.0, h: 4.0}
+    c := Circ{r: 2.0}
+    println(total(r, r))
+    println(total(c, c))
+    println("trait_dispatch_multi_impl_ok")
+}

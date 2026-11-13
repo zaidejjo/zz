@@ -22,6 +22,8 @@ fn load(src: &str) -> (TypedProgram, String) {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
     );
     let main_key = "bench_memory_arena.main".to_string();
     let (pruned, _reach) = zz_hir::dce(&res.program, &main_key);
