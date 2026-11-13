@@ -511,6 +511,12 @@ zz_value zz_str_new_arena(const char *src, size_t len, zz_arena *arena) {
 #if ZZ_LINK_FLOAT
 #if defined(__APPLE__)
 #define ZZ_WEAK_IMPORT_FLOAT __attribute__((weak_import))
+#elif defined(ZZ_OS_WINDOWS)
+// MSVC/link.exe has no weak symbols: reference the float formatter
+// strongly. libzz_native_rt.lib is linked and FLOAT_FMT_SYMBOL is forced
+// undefined for every float program (zz_codegen_cc::push_link_inputs),
+// so the symbol always resolves — no silent NULL at runtime.
+#define ZZ_WEAK_IMPORT_FLOAT 
 #else
 #define ZZ_WEAK_IMPORT_FLOAT __attribute__((weak))
 #endif
@@ -536,6 +542,11 @@ static const char *zz_canonical_double(double x, char *stack, char **heap, size_
             "rebuild without --static)\n");
     exit(1);
 #else
+#if defined(ZZ_OS_WINDOWS)
+    // Strong reference on Windows (no weak symbols): zz_float_format_raw
+    // is always provided by libzz_native_rt.lib for float programs, so no
+    // null check is needed here (the symbol resolves at link time).
+#else
     if (!zz_float_format_raw) {
         fprintf(stderr,
                 "zz error: float formatting needs the Rust core "
@@ -543,6 +554,7 @@ static const char *zz_canonical_double(double x, char *stack, char **heap, size_
                 "rebuild without --static)\n");
         exit(1);
     }
+#endif
     size_t n = zz_float_format_raw(x, stack, ZZ_FLOAT_STACK);
     if (n < ZZ_FLOAT_STACK) {
         *heap = NULL;
