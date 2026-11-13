@@ -281,9 +281,18 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
             name,
             generics,
             methods,
+            trait_name,
             ..
         } => {
             out.push_str("Impl-kw[");
+            if let Some(t) = trait_name {
+                out.push_str("for ");
+                for p in t {
+                    out.push_str(p);
+                    out.push('.');
+                }
+                out.push(' ');
+            }
             for p in name {
                 out.push_str(p);
                 out.push('.');
@@ -297,6 +306,34 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
             out.push('{');
             for m in methods {
                 fp_stmt(m, out);
+            }
+            out.push_str("}]");
+        }
+        Stmt::Trait { name, methods, .. } => {
+            out.push_str("Trait-kw[");
+            for p in name {
+                out.push_str(p);
+                out.push('.');
+            }
+            out.push('{');
+            for m in methods {
+                out.push_str("func ");
+                out.push_str(&m.name);
+                out.push('(');
+                for p in &m.params {
+                    out.push_str(&p.name.name);
+                    if let Some(t) = &p.ty {
+                        out.push(':');
+                        fp_ty(t, out);
+                    }
+                    out.push(',');
+                }
+                out.push(')');
+                if let Some(r) = &m.ret {
+                    out.push_str("->");
+                    fp_ty(r, out);
+                }
+                out.push(';');
             }
             out.push_str("}]");
         }

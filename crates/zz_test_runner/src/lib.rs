@@ -2201,6 +2201,8 @@ fn setup_test_interp(test: &TestInfo, cover: bool) -> Result<(Interp, Value, Vec
         loaded.structs,
         loaded.aliases,
         loaded.enums,
+        loaded.traits.clone(),
+        loaded.trait_impls.clone(),
     );
     let types = Arc::new(typed.program.types);
     let structs = typed.program.structs;

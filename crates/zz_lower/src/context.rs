@@ -762,6 +762,10 @@ pub struct Lowerer {
     /// `None` when the receiver is already raw (writes back via `*self`)
     /// or for non-impl calls.
     pub(crate) impl_self_writeback: std::cell::RefCell<Option<(String, String)>>,
+    /// Names of types that implement at least one user trait. They always
+    /// use the boxed `zz_value` representation so a trait dispatcher can
+    /// forward `&args[0]` to the concrete method (`zz_value *self`).
+    pub(crate) trait_impl_types: std::collections::HashSet<String>,
     /// Unit-emission mode: definitions/prototypes use external linkage so
     /// per-module translation units link together. Off = single-TU
     /// `static` (byte-identical legacy output).
@@ -784,6 +788,10 @@ impl Lowerer {
         let escape = zz_hir::escape_analyze(&tp);
         let (import_fn_aliases, import_ns_aliases) = Self::collect_import_aliases(&tp);
         let readonly_params = super::param_escape::analyze(&tp.program, &tp.funcs, &tp.structs);
+        // Must exist before `compute_specialized`/`collect_globals`, which
+        // consult `is_unboxed_struct` for layout decisions.
+        let trait_impl_types: std::collections::HashSet<String> =
+            tp.trait_impls.values().flatten().cloned().collect();
         let mut lowerer = Lowerer {
             reachable_funcs,
             reachable_natives,
@@ -809,6 +817,7 @@ impl Lowerer {
             global_set: std::collections::HashSet::new(),
             scalar_fn_list: Vec::new(),
             readonly_params,
+            trait_impl_types,
             unit_mode: std::cell::Cell::new(false),
             impl_self_lvalue: std::cell::RefCell::new(None),
             impl_self_writeback: std::cell::RefCell::new(None),
@@ -1516,11 +1525,23 @@ impl Lowerer {
     /// the guard, `struct N { kid: N }` would overflow the compiler stack
     /// when the unboxed set is collected, whether or not N is ever built.
     pub(crate) fn is_unboxed_struct(&self, name: &str) -> bool {
+        // A type used as a trait implementor always uses the boxed
+        // `zz_value` representation: the per-(trait, method) dispatcher
+        // forwards `&args[0]` straight to `zz_fn_<Type>_<method>`, which
+        // only type-checks when the receiver is `zz_value *self`.
+        if self.trait_impl_types.contains(name) {
+            return false;
+        }
         let mut visiting = std::collections::HashSet::new();
         self.unboxed_inner(name, &mut visiting)
     }
 
     fn unboxed_inner(&self, name: &str, visiting: &mut std::collections::HashSet<String>) -> bool {
+        // Trait implementors are boxed (see `is_unboxed_struct`), so a
+        // struct embedding one cannot be inline either.
+        if self.trait_impl_types.contains(name) {
+            return false;
+        }
         if !visiting.insert(name.to_string()) {
             return false;
         }

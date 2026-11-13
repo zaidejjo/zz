@@ -4133,6 +4133,8 @@ fn bare_variant_constructor_keeps_outer_type_in_span_map() {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
         );
         span_types.into_values().collect()
     }
@@ -5140,6 +5142,8 @@ fn partial_results_on_broken_code() {
 
     let (checked, span_types) = check_program_typed(
         &program,
+        HashMap::new(),
+        HashMap::new(),
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),

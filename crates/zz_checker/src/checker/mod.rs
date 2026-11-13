@@ -37,6 +37,8 @@ pub fn check_program(
         initial_aliases,
         initial_enums,
         HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
         "",
     )
     .result
@@ -60,6 +62,8 @@ pub fn check_program_with_consts(
         initial_structs,
         initial_aliases,
         initial_enums,
+        HashMap::new(),
+        HashMap::new(),
         initial_consts,
         "",
     )
@@ -69,6 +73,10 @@ pub fn check_program_with_consts(
 /// Like [`check_program`], but also returns a deep-resolved type annotation
 /// map keyed by scoped expression key. The map is the typed view of the AST used
 /// by the HIR builder for native codegen.
+/// Like [`check_program`], but also returns a deep-resolved type annotation
+/// map keyed by scoped expression key. The map is the typed view of the AST used
+/// by the HIR builder for native codegen.
+#[allow(clippy::too_many_arguments)]
 pub fn check_program_typed(
     program: &Program,
     initial_bindings: HashMap<String, Type>,
@@ -76,6 +84,8 @@ pub fn check_program_typed(
     initial_structs: HashMap<String, StructSig>,
     initial_aliases: HashMap<String, AliasSig>,
     initial_enums: HashMap<String, EnumSig>,
+    initial_traits: HashMap<String, TraitSig>,
+    initial_trait_impls: HashMap<String, Vec<String>>,
 ) -> (CheckResult, std::collections::HashMap<SpanKey, Type>) {
     let out = check_program_impl(
         program,
@@ -84,6 +94,8 @@ pub fn check_program_typed(
         initial_structs,
         initial_aliases,
         initial_enums,
+        initial_traits,
+        initial_trait_impls,
         HashMap::new(),
         "",
     );
@@ -112,6 +124,8 @@ pub fn check_program_with_module_ns(
         initial_aliases,
         initial_enums,
         HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
         module_ns,
     )
     .result
@@ -121,6 +135,7 @@ pub fn check_program_with_module_ns(
 /// span types (needed by native codegen). Used by the AOT build path so
 /// cached modules can skip re-type-checking while still providing
 /// `span_types` for lowering.
+#[allow(clippy::too_many_arguments)]
 pub fn check_program_with_module_ns_typed(
     program: &Program,
     initial_bindings: HashMap<String, Type>,
@@ -128,6 +143,8 @@ pub fn check_program_with_module_ns_typed(
     initial_structs: HashMap<String, StructSig>,
     initial_aliases: HashMap<String, AliasSig>,
     initial_enums: HashMap<String, EnumSig>,
+    initial_traits: HashMap<String, TraitSig>,
+    initial_trait_impls: HashMap<String, Vec<String>>,
     module_ns: &str,
 ) -> (CheckResult, HashMap<SpanKey, Type>) {
     let outcome = check_program_impl(
@@ -137,6 +154,8 @@ pub fn check_program_with_module_ns_typed(
         initial_structs,
         initial_aliases,
         initial_enums,
+        initial_traits,
+        initial_trait_impls,
         HashMap::new(),
         module_ns,
     );
@@ -155,6 +174,8 @@ fn check_program_impl(
     initial_structs: HashMap<String, StructSig>,
     initial_aliases: HashMap<String, AliasSig>,
     initial_enums: HashMap<String, EnumSig>,
+    initial_traits: HashMap<String, TraitSig>,
+    initial_trait_impls: HashMap<String, Vec<String>>,
     initial_consts: HashMap<String, Span>,
     module_ns: &str,
 ) -> CheckerOutcome {
@@ -181,6 +202,8 @@ fn check_program_impl(
         initial_structs,
         initial_aliases,
         initial_enums,
+        initial_traits,
+        initial_trait_impls,
         initial_consts,
     );
     // Offset fresh-var ids above any `Var(id)` carried in seed signatures
@@ -431,6 +454,123 @@ fn check_program_impl(
         checker.convert_alias(&alias_name);
     }
 
+    // Pass 1a-bis: register `trait` declarations. Method signatures carry
+    // no bodies; `params[0]` is `Type::Named(SELF_TYPE_PARAM)` until a call
+    // site substitutes the concrete receiver type. Traits are erased after
+    // checking — codegen only needs the trait-impl table below.
+    let mut pub_traits_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for stmt in &program.stmts {
+        let Stmt::Trait {
+            name,
+            methods,
+            span: _,
+            pub_,
+        } = stmt
+        else {
+            continue;
+        };
+        let tname = name.join(".");
+        if checker.traits.contains_key(&tname) {
+            // Already registered from the seed (cross-module pub trait
+            // re-declared in the merged program). Keep the seed's
+            // signature; re-registering would be idempotent anyway.
+            continue;
+        }
+        let mut sigs: HashMap<String, FuncSig> = HashMap::new();
+        let mut spans: HashMap<String, Span> = HashMap::new();
+        for m in methods {
+            if let Some(prev) = spans.get(&m.name) {
+                checker.errors.push(zz_diag_core::error_at(
+                    format!("duplicate method `{}` in trait `{tname}`", m.name),
+                    m.span,
+                ));
+                checker
+                    .errors
+                    .push(zz_diag_core::error_at("previous definition here", *prev));
+                continue;
+            }
+            // Every trait method takes `self` first (static dispatch needs
+            // a receiver to route on).
+            match m.params.first() {
+                Some(p) if p.name.name == "self" => {}
+                Some(p) => {
+                    checker.errors.push(zz_diag_core::error_at(
+                        format!(
+                            "trait method `{}` must take `self` as its first parameter",
+                            m.name
+                        ),
+                        p.name.span,
+                    ));
+                    continue;
+                }
+                None => {
+                    checker.errors.push(zz_diag_core::error_at(
+                        format!(
+                            "trait method `{}` must take `self` as its first parameter",
+                            m.name
+                        ),
+                        m.span,
+                    ));
+                    continue;
+                }
+            }
+            if let Some(p) = m.params.first() {
+                if p.ty.is_some() {
+                    checker.errors.push(zz_diag_core::error_at(
+                        "`self` takes no type annotation in a trait method",
+                        p.name.span,
+                    ));
+                }
+            }
+            if let Some(dup) = m.params.iter().skip(1).find(|p| p.name.name == "self") {
+                checker.errors.push(zz_diag_core::error_at(
+                    "`self` may only be the first parameter",
+                    dup.name.span,
+                ));
+            }
+            let params: Vec<(String, Type)> = m
+                .params
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let ty = if i == 0 {
+                        Type::Named(SELF_TYPE_PARAM.to_string())
+                    } else {
+                        match &p.ty {
+                            Some(t) => checker.ast_to_type(t, &[]),
+                            None => checker.unifier.fresh_var(),
+                        }
+                    };
+                    (p.name.name.clone(), ty)
+                })
+                .collect();
+            let ret = match &m.ret {
+                Some(t) => checker.ast_to_type(t, &[]),
+                None => Type::Unit,
+            };
+            spans.insert(m.name.clone(), m.span);
+            sigs.insert(
+                m.name.clone(),
+                FuncSig {
+                    generics: Vec::new(),
+                    bounds: Vec::new(),
+                    params,
+                    has_default: m.params.iter().map(|p| p.default.is_some()).collect(),
+                    ret,
+                    is_extern: false,
+                    readonly: false,
+                    extern_c_symbol: None,
+                },
+            );
+        }
+        checker
+            .traits
+            .insert(tname.clone(), TraitSig { methods: sigs });
+        if *pub_ {
+            pub_traits_set.insert(tname);
+        }
+    }
+
     // Pass 1b: register impl method signatures so method calls resolve.
     // Inherent (`impl KnownStruct`) → `funcs[Type.method]` (existing).
     // Extension (`impl` on builtins or unknown/cross-module types) →
@@ -443,11 +583,28 @@ fn check_program_impl(
             name,
             generics: impl_generics,
             methods,
+            trait_name,
             ..
         } = stmt
         {
             let type_name = name.join(".");
             let is_known_struct = checker.structs.contains_key(&type_name);
+            let builtin_key = Checker::builtin_ext_key(&type_name);
+            let type_key = builtin_key.unwrap_or_else(|| type_name.clone());
+            // `impl` on a known enum is inherent, exactly like structs:
+            // methods land in `funcs[Enum.method]` with historical
+            // last-wins (re-checks of the same program stay idempotent
+            // instead of tripping the extension orphan rule).
+            // Trait impls: `impl Draw for Circle`. Validate that every trait
+            // method is covered exactly once, register the method signatures
+            // (so `item.draw()` resolves), and record the impl for bound
+            // checking (`trait_impls[Draw] = [Circle]`). Handled after
+            // `type_key` is known and before inherent/extension logic since
+            // a trait impl is neither.
+            if let Some(trait_path) = trait_name {
+                check_trait_impl(&mut checker, &type_key, trait_path, methods, stmt.span());
+                continue;
+            }
             // `impl` on a known enum is inherent, exactly like structs:
             // methods land in `funcs[Enum.method]` with historical
             // last-wins (re-checks of the same program stay idempotent
@@ -975,7 +1132,6 @@ fn check_program_impl(
     // persistence across REPL snippets.
     let const_bindings: HashMap<String, Span> =
         checker.const_env.first().cloned().unwrap_or_default();
-
     // Resolve each `try` site to its conversion function name so native
     // codegen can emit the call directly. `try_resolutions` holds the impl
     // span; join it against the `convert_to_` registries:
@@ -1010,6 +1166,14 @@ fn check_program_impl(
         .filter_map(|k| checker.enums.get(k).cloned().map(|v| (k.clone(), v)))
         .collect();
 
+    let pub_traits: HashMap<String, TraitSig> = pub_traits_set
+        .iter()
+        .filter_map(|k| checker.traits.get(k).cloned().map(|v| (k.clone(), v)))
+        .collect();
+
+    let traits = checker.traits.clone();
+    let trait_impls = checker.trait_impls.clone();
+
     // Dedup exact-duplicate diagnostics: same message at the same span
     // emitted more than once (defensive — the annotation cache already
     // prevents most repeats). Same message at a *different* span is a
@@ -1039,8 +1203,168 @@ fn check_program_impl(
             pub_structs,
             pub_aliases,
             pub_enums,
+            pub_traits,
+            traits,
+            trait_impls,
         },
         span_types,
+    }
+}
+
+/// Validate `impl Trait for Type { ... }`:
+/// - every trait method is implemented exactly once, no extras,
+/// - signatures match after substituting `Self` → implementing type,
+/// - register method signatures as `{type}.{method}` so bodies are checked
+///   by `check_stmt_impl` and calls resolve,
+/// - record `trait_impls[trait] = [type]` for bound checking.
+fn check_trait_impl(
+    checker: &mut Checker,
+    type_key: &str,
+    trait_path: &[String],
+    methods: &[Stmt],
+    span: Span,
+) {
+    let trait_key = trait_path.join(".");
+    let tsig = match checker.traits.get(&trait_key) {
+        Some(s) => s.clone(),
+        None => {
+            checker.errors.push(zz_diag_core::error_at(
+                format!("unknown trait `{trait_key}` in `impl`"),
+                span,
+            ));
+            return;
+        }
+    };
+
+    // Collect impl method sigs: params[0] = receiver (the implementing type),
+    // remaining params + ret from the method declaration.
+    let mut impl_sigs: HashMap<String, FuncSig> = HashMap::new();
+    let mut impl_names: HashMap<String, Span> = HashMap::new();
+    for method in methods {
+        if let Stmt::Func {
+            name,
+            params,
+            ret,
+            span: mspan,
+            ..
+        } = method
+        {
+            let mname = name.join(".");
+            if let Some(prev) = impl_names.insert(mname.clone(), *mspan) {
+                checker.errors.push(zz_diag_core::error_at(
+                    format!("duplicate method `{mname}` in `impl {trait_key} for {type_key}`"),
+                    *mspan,
+                ));
+                checker
+                    .errors
+                    .push(zz_diag_core::error_at("previous definition here", prev));
+                continue;
+            }
+            let mut sig_params: Vec<(String, Type)> = Vec::new();
+            for (i, p) in params.iter().enumerate() {
+                let ty = if i == 0 {
+                    // `self` is untyped by the trait grammar: the receiver is
+                    // the implementing type, as a struct so field access
+                    // inside the method body resolves (`Type::Struct`, not
+                    // `Type::Named`).
+                    Type::Struct(type_key.to_string(), Vec::new())
+                } else {
+                    match &p.ty {
+                        Some(t) => checker.ast_to_type(t, &[]),
+                        None => checker.unifier.fresh_var(),
+                    }
+                };
+                sig_params.push((p.name.name.clone(), ty));
+            }
+            let sig_ret = match ret {
+                Some(t) => checker.ast_to_type(t, &[]),
+                None => Type::Unit,
+            };
+            impl_sigs.insert(
+                mname.clone(),
+                FuncSig {
+                    generics: Vec::new(),
+                    bounds: Vec::new(),
+                    params: sig_params,
+                    has_default: params.iter().map(|p| p.default.is_some()).collect(),
+                    ret: sig_ret,
+                    is_extern: false,
+                    readonly: false,
+                    extern_c_symbol: None,
+                },
+            );
+        }
+    }
+
+    // Every trait method must be implemented with a matching signature.
+    for (mname, tsig) in &tsig.methods {
+        let Some(isig) = impl_sigs.get(mname) else {
+            checker.errors.push(zz_diag_core::error_at(
+                format!(
+                    "impl `{trait_key} for {type_key}` is missing method `{mname}` required by trait `{trait_key}`"
+                ),
+                span,
+            ));
+            continue;
+        };
+        if isig.params.len() != tsig.params.len() {
+            checker.errors.push(zz_diag_core::error_at(
+                format!(
+                    "method `{mname}` of impl `{trait_key} for {type_key}` takes {} parameters, trait requires {}",
+                    isig.params.len() - 1,
+                    tsig.params.len() - 1
+                ),
+                span,
+            ));
+            continue;
+        }
+        // params[0] (Self) substituted to `type_key`; rest must match exactly.
+        let ok = std::iter::zip(&isig.params, &tsig.params).all(|((_, at), (_, bt))| match bt {
+            Type::Named(n) if n == SELF_TYPE_PARAM => {
+                *at == Type::Struct(type_key.to_string(), Vec::new())
+            }
+            _ => *at == *bt,
+        });
+        if !ok {
+            checker.errors.push(zz_diag_core::error_at(
+                format!(
+                    "method `{mname}` signature in impl `{trait_key} for {type_key}` does not match trait `{trait_key}`"
+                ),
+                span,
+            ));
+        }
+        if isig.ret != tsig.ret {
+            checker.errors.push(zz_diag_core::error_at(
+                format!(
+                    "method `{mname}` return type in impl `{trait_key} for {type_key}` does not match trait `{trait_key}`"
+                ),
+                span,
+            ));
+        }
+    }
+
+    // No extra methods beyond the trait's.
+    for mname in impl_sigs.keys() {
+        if !tsig.methods.contains_key(mname.as_str()) {
+            checker.errors.push(zz_diag_core::error_at(
+                format!("method `{mname}` is not declared in trait `{trait_key}`",),
+                span,
+            ));
+        }
+    }
+
+    // Register impl method signatures so `check_stmt_impl` (Pass 2) can
+    // look them up and check bodies, and so `item.draw()` resolves.
+    for (mname, isig) in &impl_sigs {
+        checker
+            .funcs
+            .insert(format!("{type_key}.{mname}"), isig.clone());
+    }
+
+    // Record the impl so bound checking (`implements_trait`) finds it.
+    let entry = checker.trait_impls.entry(trait_key.clone()).or_default();
+    if !entry.contains(&type_key.to_string()) {
+        entry.push(type_key.to_string());
     }
 }
 
@@ -1075,6 +1399,8 @@ mod span_scope_tests {
         };
         let (res, types) = check_program_typed(
             &merged,
+            HashMap::new(),
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
@@ -1149,6 +1475,8 @@ mod unreachable_guard_tests {
 
     fn checker() -> Checker {
         Checker::new(
+            HashMap::new(),
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),

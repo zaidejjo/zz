@@ -484,6 +484,8 @@ impl<'a> Walker<'a> {
             // counts as mentioning: its body may capture outer tainted
             // storage (checked precisely by the main walk).
             Stmt::Func { .. } => true,
+            // Signatures only: no body, so nothing can be captured.
+            Stmt::Trait { .. } => false,
             Stmt::Return { value, .. } => value.as_ref().is_some_and(|v| self.mentions_tainted(v)),
             Stmt::Expr(e) => self.mentions_tainted(e),
             Stmt::Defer { expr: e, .. } => self.mentions_tainted(e),
@@ -974,6 +976,7 @@ impl<'a> Walker<'a> {
             | Stmt::TypeAlias { .. }
             | Stmt::Enum { .. }
             | Stmt::Impl { .. }
+            | Stmt::Trait { .. }
             | Stmt::ExternBlock { .. }
             | Stmt::Link { .. } => Flow::clean(),
         }
@@ -1765,6 +1768,7 @@ impl<'a> FlatUseScan<'a> {
             | Stmt::Struct { .. }
             | Stmt::TypeAlias { .. }
             | Stmt::Enum { .. }
+            | Stmt::Trait { .. }
             | Stmt::ExternBlock { .. }
             | Stmt::Link { .. } => {}
         }

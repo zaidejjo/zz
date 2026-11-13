@@ -261,6 +261,8 @@ pub(crate) fn scan_stmt_captured(
         Stmt::Enum { .. } => {}
         // Aliases bind no runtime names and their targets hold no values.
         Stmt::TypeAlias { .. } => {}
+        // Traits are erased at check time — no runtime names, no values.
+        Stmt::Trait { .. } => {}
         Stmt::Impl { methods, .. } => {
             for method in methods {
                 scan_stmt_captured(method, defined, free, nested);

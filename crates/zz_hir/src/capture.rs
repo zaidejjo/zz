@@ -124,6 +124,7 @@ impl<'a> Walk<'a> {
             Stmt::Struct { .. }
             | Stmt::TypeAlias { .. }
             | Stmt::Enum { .. }
+            | Stmt::Trait { .. }
             | Stmt::Import { .. }
             | Stmt::ExternBlock { .. }
             | Stmt::Link { .. } => {}

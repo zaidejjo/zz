@@ -518,6 +518,18 @@ int zz_enum_is(const zz_value *v, const char *qualified);
 // objects with a dotted type name). See `zz_object_is_enum_shape`.
 int zz_object_is_enum_shape(const struct zz_object *o);
 
+// ---- static trait dispatch helpers ------------------------------------
+// Implementor test for generated trait dispatchers: true when `v` is a
+// boxed object whose qualified type name is `qualified` exactly (struct
+// implementor) or a variant of it (`qualified.Variant`, user-enum
+// implementor). Unlike `zz_enum_is`, this is prefix-aware on purpose.
+int zz_trait_type_is(const zz_value *v, const char *qualified);
+// Unreachable in a well-formed program (the checker only accepts a trait
+// method call when a bound provides it, and the dispatcher lists every
+// implementor). Reached only via checker/runtime drift: report the
+// mismatch like the other native panics and exit 1.
+zz_value zz_trait_missing_impl(const char *trait, const char *method, zz_value recv);
+
 // ---- match extraction helpers ------------------------------------------
 // Returns the payload of a variant, or unit if tag doesn't match.
 zz_value zz_match_ok(zz_value v);

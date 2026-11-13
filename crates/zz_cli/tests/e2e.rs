@@ -1239,6 +1239,26 @@ e2e_success_test!(
     "stdlib",
     "generic_selective.zz"
 );
+e2e_success_test!(
+    e2e_stdlib_trait_dispatch_basic,
+    "stdlib",
+    "trait_dispatch_basic.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_trait_dispatch_multi_impl,
+    "stdlib",
+    "trait_dispatch_multi_impl.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_trait_dispatch_multi_method,
+    "stdlib",
+    "trait_dispatch_multi_method.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_trait_dispatch_no_traits,
+    "stdlib",
+    "trait_dispatch_no_traits.zz"
+);
 e2e_success_test!(e2e_stdlib_local_wildcard, "stdlib", "local_wildcard.zz");
 e2e_success_test!(e2e_stdlib_sqlz_sqlite, "stdlib", "sqlz_sqlite.zz");
 e2e_success_test!(e2e_stdlib_link_gates_test, "stdlib", "link_gates_test.zz");

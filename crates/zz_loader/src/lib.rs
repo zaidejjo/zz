@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use zz_checker::{
     check_program_with_module_ns_typed, AliasSig, CheckResult, EnumSig, FuncSig, SpanKey,
-    StructSig, Type,
+    StructSig, TraitSig, Type,
 };
 use zz_frontend::ast::{Block, Expr, ImportItem, Program, Stmt, Ty, TyKind};
 use zz_frontend::diag::{error_at, warning_at, RawDiag};
@@ -76,6 +76,11 @@ pub struct LoadResult {
     /// User enum definitions from all modules.
     #[allow(dead_code)]
     pub enums: HashMap<String, EnumSig>,
+    /// Cross-module `pub trait` declarations, for seeding bound checking
+    /// when AOT rebuilds a merged user program.
+    pub traits: HashMap<String, TraitSig>,
+    /// Trait → implementor type keys from all modules.
+    pub trait_impls: HashMap<String, Vec<String>>,
     /// Native implementations (stdlib + namespaced copies), for the
     /// interpreter.
     pub natives: HashMap<String, NativeEntry>,
@@ -167,6 +172,13 @@ struct Loader {
     aliases: HashMap<String, AliasSig>,
     /// Cross-module seed: `pub enum` definitions from previously loaded modules.
     enums: HashMap<String, EnumSig>,
+    /// Cross-module seed: `pub trait` declarations from previously loaded
+    /// modules. Bound checking needs the signature to resolve methods on a
+    /// generic receiver.
+    traits: HashMap<String, TraitSig>,
+    /// Cross-module seed: trait → implementing type keys. Bound validation
+    /// at a call site needs impls declared in other modules.
+    trait_impls: HashMap<String, Vec<String>>,
     /// Keys currently owned by the seed maps above (stdlib + plugin + prior
     /// modules' pubs). Lets each module's seed maps MOVE into the checker
     /// and come back via key-set restore instead of O(seed) clones per
@@ -430,6 +442,8 @@ fn load_program_impl(
         structs: HashMap::new(),
         aliases: HashMap::new(),
         enums: HashMap::new(),
+        traits: HashMap::new(),
+        trait_impls: HashMap::new(),
         seed_func_keys,
         seed_struct_keys: HashSet::new(),
         seed_alias_keys: HashSet::new(),
@@ -2921,6 +2935,20 @@ impl Loader {
                                     self.all_enums.insert(target.clone(), sig);
                                     found = true;
                                 }
+                                if let Some(sig) = self.traits.get(&full).cloned() {
+                                    // A bound is written with the imported
+                                    // spelling (`T: Draw`), so the signature
+                                    // must answer under that name. Implementors
+                                    // stay keyed by the trait's declaring name,
+                                    // so mirror the list under the alias too —
+                                    // otherwise `implements_trait` finds the
+                                    // trait but no implementor.
+                                    self.traits.insert(target.clone(), sig);
+                                    if let Some(types) = self.trait_impls.get(&full).cloned() {
+                                        self.trait_impls.insert(target.clone(), types);
+                                    }
+                                    found = true;
+                                }
                                 if !found {
                                     // #274: the symbol is missing because the
                                     // dependency itself failed — say so
@@ -3024,6 +3052,24 @@ impl Loader {
                                         self.all_enums.insert(bare, sig);
                                     }
                                 }
+                                // Traits imported by wildcard answer under
+                                // their bare name, with their implementors
+                                // mirrored under the same key.
+                                let tkeys: Vec<String> = self
+                                    .traits
+                                    .keys()
+                                    .filter(|k| k.starts_with(&prefix))
+                                    .cloned()
+                                    .collect();
+                                for key in tkeys {
+                                    let bare = key[prefix.len()..].to_string();
+                                    if let Some(sig) = self.traits.get(&key).cloned() {
+                                        self.traits.insert(bare.clone(), sig);
+                                        if let Some(types) = self.trait_impls.get(&key).cloned() {
+                                            self.trait_impls.insert(bare, types);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -3123,6 +3169,11 @@ impl Loader {
                                         // skip (variant construction is a
                                         // call, resolved via the enum table).
                                         let is_enum = self.enums.contains_key(&qualified);
+                                        // Traits are types in the bound-checking
+                                        // table, not values: skip (bound names
+                                        // resolve through the `traits` seed
+                                        // map, not through a `Decl` binding).
+                                        let is_trait = self.traits.contains_key(&qualified);
                                         let is_value = self
                                             .funcs
                                             .get(&qualified)
@@ -3130,7 +3181,9 @@ impl Loader {
                                             .unwrap_or(false)
                                             || self.natives.contains_key(&qualified)
                                             || self.bindings.contains_key(&qualified);
-                                        if (is_struct || is_alias || is_enum) && !is_value {
+                                        if (is_struct || is_alias || is_enum || is_trait)
+                                            && !is_value
+                                        {
                                             continue;
                                         }
                                         let parts = vec![ns.to_string(), sym_name.clone()];
@@ -3299,6 +3352,22 @@ impl Loader {
                             aliases.extend(cached.aliases.into_owned());
                             let mut enums = std::mem::take(&mut self.enums);
                             enums.extend(cached.enums.into_owned());
+                            let mut traits = std::mem::take(&mut self.traits);
+                            traits.extend(
+                                cached
+                                    .pub_traits
+                                    .iter()
+                                    .map(|(k, v)| (k.clone(), v.clone())),
+                            );
+                            let mut trait_impls = std::mem::take(&mut self.trait_impls);
+                            for (tname, types) in cached.trait_impls.into_owned() {
+                                let entry = trait_impls.entry(tname).or_default();
+                                for t in types {
+                                    if !entry.contains(&t) {
+                                        entry.push(t);
+                                    }
+                                }
+                            }
                             (
                                 CheckResult {
                                     errors: cached.diags,
@@ -3307,6 +3376,8 @@ impl Loader {
                                     structs,
                                     aliases,
                                     enums,
+                                    traits,
+                                    trait_impls,
                                     try_resolutions: HashMap::new(),
                                     try_converts: cached.try_converts.into_owned(),
                                     link_libs: Vec::new(),
@@ -3316,6 +3387,7 @@ impl Loader {
                                     pub_structs: cached.pub_structs.into_owned(),
                                     pub_aliases: cached.pub_aliases.into_owned(),
                                     pub_enums: cached.pub_enums.into_owned(),
+                                    pub_traits: cached.pub_traits.clone().into_owned(),
                                 },
                                 None,
                                 Some(cached.types.into_owned()),
@@ -3330,6 +3402,8 @@ impl Loader {
                                 std::mem::take(&mut self.structs),
                                 std::mem::take(&mut self.aliases),
                                 std::mem::take(&mut self.enums),
+                                std::mem::take(&mut self.traits),
+                                std::mem::take(&mut self.trait_impls),
                                 &module_ns,
                             );
                             (checked, Some(key), Some(st))
@@ -3346,6 +3420,8 @@ impl Loader {
                             std::mem::take(&mut self.structs),
                             std::mem::take(&mut self.aliases),
                             std::mem::take(&mut self.enums),
+                            std::mem::take(&mut self.traits),
+                            std::mem::take(&mut self.trait_impls),
                             &module_ns,
                         );
                         (checked, None, Some(st))
@@ -3360,6 +3436,8 @@ impl Loader {
                     std::mem::take(&mut self.structs),
                     std::mem::take(&mut self.aliases),
                     std::mem::take(&mut self.enums),
+                    std::mem::take(&mut self.traits),
+                    std::mem::take(&mut self.trait_impls),
                     &module_ns,
                 );
                 (checked, None, Some(st))
@@ -3405,6 +3483,10 @@ impl Loader {
             self.structs = seeded_structs;
             self.aliases = seeded_aliases;
             self.enums = seeded_enums;
+            // Traits/impls are append-only across modules, so the returned
+            // maps are already the full seed: take them wholesale.
+            self.traits = std::mem::take(&mut checked.traits);
+            self.trait_impls = std::mem::take(&mut checked.trait_impls);
             // Store the miss (own-only maps + pubs + diags, all borrowed —
             // zero copy before the tail moves them below).
             if let Some(key) = pending_key.as_deref() {
@@ -3419,6 +3501,8 @@ impl Loader {
                         pub_aliases: std::borrow::Cow::Borrowed(&checked.pub_aliases),
                         enums: std::borrow::Cow::Borrowed(&own_enums),
                         pub_enums: std::borrow::Cow::Borrowed(&checked.pub_enums),
+                        pub_traits: std::borrow::Cow::Borrowed(&checked.pub_traits),
+                        trait_impls: std::borrow::Cow::Borrowed(&checked.trait_impls),
                         bindings: std::borrow::Cow::Borrowed(&checked.bindings),
                         pub_bindings: std::borrow::Cow::Borrowed(&checked.pub_bindings),
                         diags: checked.errors.clone(),
@@ -3452,6 +3536,9 @@ impl Loader {
                         pub_structs: checked.pub_structs.clone(),
                         pub_aliases: checked.pub_aliases.clone(),
                         pub_enums: checked.pub_enums.clone(),
+                        pub_traits: checked.pub_traits.clone(),
+                        traits: checked.traits.clone(),
+                        trait_impls: checked.trait_impls.clone(),
                     },
                     span_types.unwrap_or_default(),
                 ));
@@ -3737,6 +3824,8 @@ impl Loader {
             structs: self.all_structs,
             aliases: self.all_aliases,
             enums: self.all_enums,
+            traits: self.traits,
+            trait_impls: self.trait_impls,
             natives: self.natives,
             consts: self.selected_consts,
             errors: self.errors,
@@ -4241,7 +4330,8 @@ fn namespace_program(program: &mut Program, ns: &str, ns_aliases: &HashMap<Strin
             Stmt::Func { name, .. }
             | Stmt::Struct { name, .. }
             | Stmt::TypeAlias { name, .. }
-            | Stmt::Enum { name, .. } => {
+            | Stmt::Enum { name, .. }
+            | Stmt::Trait { name, .. } => {
                 top.insert(name.join("."));
             }
             Stmt::Decl { name, .. } => {

@@ -1,5 +1,6 @@
 //! Recheck pipeline: parse → check → convert → publish diagnostics.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tower_lsp::lsp_types::{Diagnostic, Url};
@@ -88,6 +89,8 @@ pub async fn recheck_and_publish(state: Arc<GlobalState>, client: &Client, uri: 
             init_structs,
             init_aliases,
             init_enums,
+            HashMap::new(),
+            HashMap::new(),
         );
         Some((checked, span_types))
     })

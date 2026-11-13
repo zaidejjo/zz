@@ -16,10 +16,20 @@ pub trait InferOps {
     fn merge_types(&mut self, types: Vec<Type>) -> Type;
 
     /// Does the generic parameter currently in scope carry the given bound?
-    fn has_bound(&self, name: &str, bound: zz_span_ast::ast::TraitBound) -> bool;
+    fn has_bound(&self, name: &str, bound: &zz_span_ast::ast::TraitBound) -> bool;
 
     /// Does a concrete type satisfy a trait bound?
-    fn satisfies_bound(&self, ty: &Type, bound: zz_span_ast::ast::TraitBound) -> bool;
+    fn satisfies_bound(&self, ty: &Type, bound: &zz_span_ast::ast::TraitBound) -> bool;
+
+    /// Reject bound names that are neither builtin nor a declared trait.
+    /// The parser accepts any identifier as a bound (a single file cannot
+    /// see other modules' traits), so this is the only place a typo like
+    /// `<T: Draww>` is caught — with a suggestion.
+    fn validate_bound_names(
+        &mut self,
+        bounds: &[(String, Vec<zz_span_ast::ast::TraitBound>)],
+        span: Span,
+    );
 
     /// Validate that every generic parameter with a bound was instantiated
     /// with a concrete type satisfying that bound. Called at call sites after
@@ -116,18 +126,69 @@ impl InferOps for Checker {
     // --- generics ---------------------------------------------------------
 
     /// Does the generic parameter currently in scope carry the given bound?
-    fn has_bound(&self, name: &str, bound: zz_span_ast::ast::TraitBound) -> bool {
+    fn has_bound(&self, name: &str, bound: &zz_span_ast::ast::TraitBound) -> bool {
         self.current_bounds
             .get(name)
-            .is_some_and(|bs| bs.contains(&bound))
+            .is_some_and(|bs| bs.iter().any(|b| b == bound))
+    }
+
+    fn validate_bound_names(
+        &mut self,
+        bounds: &[(String, Vec<zz_span_ast::ast::TraitBound>)],
+        span: Span,
+    ) {
+        use zz_span_ast::ast::TraitBound as B;
+        let mut known: Vec<&String> = self.traits.keys().collect();
+        known.sort();
+        for (_, bs) in bounds {
+            for b in bs {
+                let B::User(name) = b else { continue };
+                if self.traits.contains_key(name) {
+                    continue;
+                }
+                // A bare bound naming an imported trait resolves through the
+                // import-alias map (`Draw` → `support.shapes.Draw`).
+                let canonical = self
+                    .import_aliases
+                    .get(name)
+                    .filter(|q| self.traits.contains_key(q.as_str()))
+                    .cloned()
+                    .unwrap_or_else(|| name.clone());
+                if canonical.as_str() != name.as_str() && self.traits.contains_key(&canonical) {
+                    continue;
+                }
+                let names: Vec<&str> = known.iter().map(|s| s.as_str()).collect();
+                let suggestion = suggest_confident(name, &names);
+                let noted = if names.is_empty() {
+                    "declare it first: `trait Name { func m(self) }`".to_string()
+                } else {
+                    format!("known traits: {}", names.join(", "))
+                };
+                let mut diag = error_at(
+                    format!(
+                        "unknown trait bound `{name}` (expected `Num`, `Ord`, `Eq`, `Display`, or a declared trait)"
+                    ),
+                    span,
+                )
+                .with_note(noted);
+                if let Some(s) = suggestion {
+                    diag = diag.with_note(format!("did you mean `{s}`?"));
+                }
+                self.errors.push(diag);
+            }
+        }
     }
 
     /// Does a concrete type satisfy a trait bound?
-    fn satisfies_bound(&self, ty: &Type, bound: zz_span_ast::ast::TraitBound) -> bool {
+    fn satisfies_bound(&self, ty: &Type, bound: &zz_span_ast::ast::TraitBound) -> bool {
         use zz_span_ast::ast::TraitBound as B;
         match ty {
             Type::Union(ms) => ms.iter().all(|m| self.satisfies_bound(m, bound)),
-            Type::Var(_) | Type::Named(_) | Type::Error | Type::Never => false,
+            // A generic parameter answers with its own bounds: `func
+            // f<T: Draw>(x: T)` may forward `x` to another `<U: Draw>`
+            // function, and an unconstrained `T` satisfies nothing.
+            Type::Named(n) => self.has_bound(n, bound),
+            Type::Var(_) | Type::Error | Type::Never => false,
             Type::Func(..) => false,
             Type::Unit | Type::Void => false,
             _ => match bound {
@@ -135,6 +196,17 @@ impl InferOps for Checker {
                 B::Ord => matches!(ty, Type::Int | Type::Float | Type::Str),
                 B::Eq => true,
                 B::Display => true,
+                B::User(trait_name) => {
+                    // A bare bound naming an imported trait resolves through
+                    // the import-alias map (`Draw` → `support.shapes.Draw`).
+                    let name = self
+                        .import_aliases
+                        .get(trait_name)
+                        .filter(|q| self.trait_impls.contains_key(q.as_str()))
+                        .cloned()
+                        .unwrap_or_else(|| trait_name.to_string());
+                    self.implements_trait(ty, &name)
+                }
             },
         }
     }
@@ -183,7 +255,7 @@ impl InferOps for Checker {
                 continue;
             }
             for b in bounds {
-                if !self.satisfies_bound(&rt, *b) {
+                if !self.satisfies_bound(&rt, b) {
                     self.errors.push(error_at(
                         format!(
                             "type `{rt}` does not satisfy bound `{}` for generic parameter `{gen}`",

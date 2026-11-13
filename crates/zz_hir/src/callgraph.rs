@@ -250,6 +250,8 @@ fn walk_stmt_for_graph(tp: &TypedProgram, stmt: &Stmt, caller: &str, cg: &mut Ca
                 walk_stmt_for_graph(tp, s, &fname, cg);
             }
         }
+        // Trait declarations carry no bodies: nothing to walk.
+        Stmt::Trait { .. } => {}
         Stmt::Impl { name, methods, .. } => {
             let tname = name.join(".");
             for m in methods {
@@ -703,6 +705,7 @@ pub fn prune_program(tp: &TypedProgram, reach: &ReachableSet) -> TypedProgram {
                 name,
                 generics,
                 methods,
+                trait_name,
                 ..
             } => {
                 let tname = name.join(".");
@@ -725,6 +728,7 @@ pub fn prune_program(tp: &TypedProgram, reach: &ReachableSet) -> TypedProgram {
                         methods: keep,
                         span: stmt.span(),
                         pub_: false,
+                        trait_name: trait_name.clone(),
                     });
                 }
             }
@@ -767,6 +771,10 @@ pub fn prune_program(tp: &TypedProgram, reach: &ReachableSet) -> TypedProgram {
         funcs: tp.funcs.clone(),
         structs: tp.structs.clone(),
         enums: tp.enums.clone(),
+        // Trait tables are tiny (names + signatures) and codegen reads them
+        // through the pruned program, so they pass through unchanged.
+        traits: tp.traits.clone(),
+        trait_impls: tp.trait_impls.clone(),
         try_converts: tp.try_converts.clone(),
         module_origins: tp.module_origins.clone(),
     }

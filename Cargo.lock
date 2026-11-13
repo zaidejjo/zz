@@ -3948,6 +3948,7 @@ dependencies = [
  "zz_sigs",
  "zz_span_ast",
  "zz_structs",
+ "zz_suggest",
  "zz_type_check",
  "zz_types",
  "zz_unify",

@@ -72,10 +72,6 @@ impl LoweredUnits {
     /// implementation so the per-unit build cannot drift from the single-TU
     /// build.
     pub fn apply_link_needs(&self, opts: &mut zz_codegen_types::BuildOptions) {
-        eprintln!(
-            "ZZ_DEBUG_LINK_NEEDS: native_rt={} float_fmt={}",
-            self.needs_native_rt, self.needs_float_fmt
-        );
         super::merge_link_needs(
             opts,
             self.needs_native_rt,
@@ -463,6 +459,19 @@ impl Lowerer {
             .map(|ns| format!("void zz_init_{}(void);\n", mangle(ns)))
             .collect();
 
+        // Trait dispatch prototypes: declared in every unit header so any
+        // bounded-generic call site (in any namespace) can call a dispatcher
+        // without an implicit-declaration error. Definitions are emitted once
+        // in the entry unit below (it sees every implementor prototype via
+        // base_header + program_header). Empty for programs without traits,
+        // so existing generated C is byte-identical.
+        let trait_protos = self.lower_trait_dispatch_prototypes();
+        let trait_defs = self.lower_trait_dispatchers();
+        let trait_section = if trait_protos.is_empty() {
+            String::new()
+        } else {
+            format!("// ---- trait dispatch prototypes ----\n{trait_protos}")
+        };
         // Process-global arenas used by unit code (e.g. collection array
         // initializers, per-function scratch). In single-TU mode they're
         // declared `static` in `globals_decl`/`emit_function`; in unit mode
@@ -477,13 +486,14 @@ impl Lowerer {
         // reference them. A zeroed arena makes the first allocation take the
         // overflow path with `cap == 0`, overrunning the heap.
         let base_header = format!(
-            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}\n// ---- stdlib forward declarations ----\n{stdlib_decls}// ---- dependency forward declarations ----\n{dep_decls}{glob_ext_dep}extern zz_arena _static_arena;\nextern zz_arena _func_arena;\n",
+            "{runtime_h}\n{runtime_c}\n{ffi_section}\n{extern_section}// ---- struct definitions ----\n{struct_preamble}\n{struct_debug_fns}{trait_section}// ---- stdlib forward declarations ----\n{stdlib_decls}// ---- dependency forward declarations ----\n{dep_decls}{glob_ext_dep}extern zz_arena _static_arena;\nextern zz_arena _func_arena;\n",
             runtime_h = RUNTIME_H,
             runtime_c = runtime_c,
             ffi_section = ffi_section,
             extern_section = extern_section,
             struct_preamble = struct_preamble,
             struct_debug_fns = struct_debug_fns,
+            trait_section = trait_section,
             stdlib_decls = stdlib_decls,
             dep_decls = dep_decls,
             glob_ext_dep = glob_ext_dep,
@@ -542,7 +552,10 @@ impl Lowerer {
             });
         }
 
-        // Entry glue: zz_main drives inits in encounter order.
+        // Entry glue: zz_main drives inits in encounter order. Trait
+        // dispatcher definitions live here once (entry unit sees every
+        // implementor prototype via base_header + program_header); a
+        // bounded-generic body in any unit can then resolve them at link.
         let mut driver = String::new();
         for ns in &init_order {
             driver.push_str(&format!("    zz_init_{}();\n", mangle(ns)));
@@ -583,8 +596,10 @@ impl Lowerer {
         // with_main first: zz_call_main calls it (single-TU path splices
         // it before zz_call_main the same way).
         let entry_code = format!(
-            "zz_arena _static_arena;\nzz_arena _func_arena;\n__attribute__((constructor)) static void zz_init_process_arenas(void) {{\n    zz_arena_init(&_static_arena, 65536);\n    zz_arena_init(&_func_arena, 65536);\n}}\n{}{}",
-            with_main, entry_glue
+            "zz_arena _static_arena;\nzz_arena _func_arena;\n__attribute__((constructor)) static void zz_init_process_arenas(void) {{\n    zz_arena_init(&_static_arena, 65536);\n    zz_arena_init(&_func_arena, 65536);\n}}\n{with_main}{trait_defs}{entry_glue}",
+            with_main = with_main,
+            trait_defs = trait_defs,
+            entry_glue = entry_glue
         );
         match units.iter_mut().find(|u| u.ns == entry_ns) {
             Some(u) => {
@@ -829,6 +844,8 @@ mod tests {
             structs,
             HashMap::new(),
             enums,
+            HashMap::new(),
+            HashMap::new(),
         );
         assert!(
             !user
@@ -889,6 +906,8 @@ mod tests {
             structs,
             HashMap::new(),
             enums,
+            HashMap::new(),
+            HashMap::new(),
         );
         assert!(
             !user
@@ -1420,6 +1439,8 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
         );
         let (pruned, reach) = zz_hir::dce(&user.program, "main");
         let lowerer = Lowerer::new(
@@ -1514,5 +1535,110 @@ mod tests {
             "{}",
             prelude.header
         );
+    }
+
+    /// A bounded-generic trait call emits a dispatcher prototype into every
+    /// unit header so any call site can resolve it at link without an
+    /// implicit-declaration error. Regression for per-unit builds (#trait-dispatch).
+    #[test]
+    fn trait_dispatch_prototype_in_every_program_unit_header() {
+        let units = lower_merged(
+            "trait Draw { func draw(self) -> str }\n\
+             struct Circle { r: int }\n\
+             impl Draw for Circle {\n\
+                 func draw(self) -> str { return \"circle:\" + str(self.r) }\n\
+             }\n\
+             func render<T: Draw>(item: T) -> str { return item.draw() }\n\
+             func main() { c := Circle{r: 2}; println(render(c)) }",
+        );
+        let dispatcher = "zz_trait_Draw_draw";
+        // Entry unit header carries the prototype.
+        let entry = unit(&units, "main");
+        assert!(
+            entry.header.contains(&format!("zz_value {dispatcher}(")),
+            "entry header missing dispatcher prototype:\n{}",
+            entry.header
+        );
+        // Every program unit header carries the prototype (cross-unit calls).
+        for u in &units.units {
+            if u.ns == "str" || u.ns == PRELUDE_NS {
+                continue; // stdlib units keep the narrow header
+            }
+            assert!(
+                u.header.contains(&format!("zz_value {dispatcher}(")),
+                "unit {} header missing dispatcher prototype:\n{}",
+                u.ns,
+                u.header
+            );
+        }
+        // Stdlib units never see program-only declarations (only if present).
+        if let Some(str_unit) = units.units.iter().find(|u| u.ns == "str") {
+            assert!(
+                !str_unit.header.contains(&format!("{dispatcher}(")),
+                "stdlib unit must not carry program trait dispatcher:\n{}",
+                str_unit.header
+            );
+        }
+    }
+
+    /// The dispatcher definition is emitted once in the entry unit, after
+    /// every implementor prototype it forwards to.
+    #[test]
+    fn trait_dispatch_definition_in_entry_unit() {
+        let units = lower_merged(
+            "trait Draw { func draw(self) -> str }\n\
+             struct Circle { r: int }\n\
+             impl Draw for Circle {\n\
+                 func draw(self) -> str { return \"circle:\" + str(self.r) }\n\
+             }\n\
+             func render<T: Draw>(item: T) -> str { return item.draw() }\n\
+             func main() { c := Circle{r: 2}; println(render(c)) }",
+        );
+        let dispatcher = "zz_trait_Draw_draw";
+        let entry = unit(&units, "main");
+        assert!(
+            entry.code.contains(&format!("zz_value {dispatcher}(")),
+            "entry code missing dispatcher definition:\n{}",
+            entry.code
+        );
+        // The definition forwards to the implementor's C function.
+        assert!(
+            entry.code.contains("zz_fn_Circle_draw"),
+            "dispatcher must forward to impl method:\n{}",
+            entry.code
+        );
+        // No other unit defines it (single definition, avoids link dupes).
+        for u in &units.units {
+            if u.ns == "main" {
+                continue;
+            }
+            assert!(
+                !u.code.contains(&format!("zz_value {dispatcher}(")),
+                "unit {} must not redefine dispatcher:\n{}",
+                u.ns,
+                u.code
+            );
+        }
+    }
+
+    /// Programs without traits produce byte-identical output to before the
+    /// trait section was added: no empty dispatcher section.
+    #[test]
+    fn no_trait_dispatch_section_when_no_traits() {
+        let units = lower_merged("func main() { println(str.is_empty(\"\")) }");
+        for u in &units.units {
+            assert!(
+                !u.header.contains("// ---- trait dispatch prototypes ----"),
+                "unit {} must not emit empty trait section:\n{}",
+                u.ns,
+                u.header
+            );
+            assert!(
+                !u.code.contains("zz_trait_"),
+                "unit {} must not contain trait dispatchers:\n{}",
+                u.ns,
+                u.code
+            );
+        }
     }
 }

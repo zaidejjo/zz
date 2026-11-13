@@ -1315,6 +1315,8 @@ fn typed_program_for_phased(
         loaded.structs,
         loaded.aliases,
         loaded.enums,
+        loaded.traits.clone(),
+        loaded.trait_impls.clone(),
     );
     // Tag each loaded module namespace with its origin so the codegen can
     // split unit headers into a project section and a dependency section,
@@ -1456,6 +1458,8 @@ fn chunk_module_for_phased(
         loaded.structs.clone(),
         loaded.aliases,
         loaded.enums.clone(),
+        loaded.traits.clone(),
+        loaded.trait_impls.clone(),
     );
     let native_names: std::sync::Arc<std::collections::HashSet<String>> =
         std::sync::Arc::new(loaded.natives.keys().cloned().collect());
@@ -1670,10 +1674,6 @@ pub fn build_release(
     mode: BuildMode,
     rel: &ReleaseOptions,
 ) -> Result<PathBuf, String> {
-    eprintln!(
-        "ZZ_DEBUG_BUILD_RELEASE: called path={:?} mode={:?}",
-        path, mode
-    );
     let obs = rel.observer.sink();
     obs.plan(&STEP_LABELS);
     // `ZZ_BUILD_CACHE=0` forces a real build: no probe, no reuse. Mirrors

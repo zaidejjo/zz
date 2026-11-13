@@ -1,0 +1,25 @@
+// E2E: bounded-generic trait dispatch through per-unit native build.
+// A single implementor of `Draw` is called via `render<T: Draw>`.
+trait Draw {
+    func draw(self) -> str
+}
+
+struct Circle {
+    r: int,
+}
+
+impl Draw for Circle {
+    func draw(self) -> str {
+        return "circle:" + str(self.r)
+    }
+}
+
+func render<T: Draw>(item: T) -> str {
+    return item.draw()
+}
+
+func main() {
+    c := Circle{r: 42}
+    println(render(c))
+    println("trait_dispatch_basic_ok")
+}

@@ -33,7 +33,7 @@ use zz_session::Session;
 
 const ZZ_KEYWORDS: &[&str] = &[
     "import", "as", "func", "return", "if", "else", "while", "match", "true", "false", "struct",
-    "for", "in", "break", "continue", "defer", "pub", "impl", "const",
+    "for", "in", "break", "continue", "defer", "pub", "impl", "trait", "const",
 ];
 
 const ZZ_BUILTINS: &[&str] = &[
@@ -342,6 +342,7 @@ impl ZZHighlighter {
             | TokenKind::Defer
             | TokenKind::Pub
             | TokenKind::Impl
+            | TokenKind::Trait
             | TokenKind::Const
             | TokenKind::Extern
             | TokenKind::Mut => (Color::Purple, true),

@@ -141,6 +141,41 @@ fn stmt_to_document_symbol(stmt: &Stmt, source: &str) -> Option<DocumentSymbol> 
                 },
             })
         }
+        Stmt::Trait {
+            name,
+            methods,
+            span,
+            ..
+        } => {
+            let full_name = name.join(".");
+            let children: Vec<DocumentSymbol> = methods
+                .iter()
+                .map(|m| DocumentSymbol {
+                    name: m.name.clone(),
+                    detail: m.ret.as_ref().map(|r| format!("-> {}", fmt_ty(r))),
+                    kind: SymbolKind::METHOD,
+                    tags: None,
+                    deprecated: None,
+                    range: span_to_range(source, m.span),
+                    selection_range: span_to_range(source, m.span),
+                    children: None,
+                })
+                .collect();
+            Some(DocumentSymbol {
+                name: full_name,
+                detail: Some("trait".to_string()),
+                kind: SymbolKind::INTERFACE,
+                tags: None,
+                deprecated: None,
+                range: span_to_range(source, *span),
+                selection_range: struct_name_range(name, source),
+                children: if children.is_empty() {
+                    None
+                } else {
+                    Some(children)
+                },
+            })
+        }
         Stmt::Impl {
             name,
             methods,
@@ -445,6 +480,19 @@ fn collect_workspace_symbols(
                 out.push(SymbolInformation {
                     name: full_name,
                     kind: SymbolKind::STRUCT,
+                    tags: None,
+                    deprecated: None,
+                    location: tower_lsp::lsp_types::Location {
+                        uri: uri.clone(),
+                        range: span_to_range(source, *span),
+                    },
+                    container_name: None,
+                });
+            }
+            Stmt::Trait { name, span, .. } => {
+                out.push(SymbolInformation {
+                    name: name.join("."),
+                    kind: SymbolKind::INTERFACE,
                     tags: None,
                     deprecated: None,
                     location: tower_lsp::lsp_types::Location {

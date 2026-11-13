@@ -19,6 +19,7 @@ mod green;
 mod move_elide;
 mod param_escape;
 mod stmt;
+mod traits;
 pub mod units;
 
 use zz_codegen_ffi::native_impl;
@@ -76,10 +77,6 @@ impl LoweredC {
     /// sanitizer runtime, ...) is one edit here instead of a copy in each
     /// caller.
     pub fn apply_link_needs(&self, opts: &mut zz_codegen_types::BuildOptions) {
-        eprintln!(
-            "ZZ_DEBUG_LINK_NEEDS: native_rt={} float_fmt={}",
-            self.needs_native_rt, self.needs_float_fmt
-        );
         merge_link_needs(
             opts,
             self.needs_native_rt,
@@ -641,6 +638,12 @@ impl Lowerer {
         }
 
         let closure_fwd = self.closure_forward_decls.borrow().join("");
+        // Trait dispatchers: prototypes join the forward declarations (any
+        // bounded generic body may call one), definitions trail `funcs`
+        // (every implementor they forward to is defined by then). Empty for
+        // programs without traits, keeping existing generated C identical.
+        forward_decls.push_str(&self.lower_trait_dispatch_prototypes());
+        funcs.push_str(&self.lower_trait_dispatchers());
         // Plugin extern prelude: real C declarations for reachable
         // `extern "C"` functions. Empty when none, keeping generated C
         // for existing programs byte-identical.

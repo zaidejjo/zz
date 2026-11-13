@@ -10,6 +10,7 @@ pub mod types;
 
 pub use expr::{Expr, FmtPart, Ident, Lit, MatchArm, Pattern};
 pub use stmt::{
-    Block, Decorator, ExternFunc, ImportItem, Param, Program, Stmt, TraitBound, TypeParam,
+    Block, Decorator, ExternFunc, ImportItem, Param, Program, Stmt, TraitBound, TraitMethod,
+    TypeParam,
 };
 pub use types::{BinOp, Ty, TyKind, UnOp};

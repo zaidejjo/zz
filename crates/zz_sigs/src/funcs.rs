@@ -44,10 +44,14 @@ impl FuncOps for Checker {
             }
         };
         let gen_names: Vec<String> = generics.iter().map(|g| g.name.name.clone()).collect();
-        let gen_bounds: Vec<(String, Vec<zz_span_ast::ast::TraitBound>)> = generics
+        let gen_bound_list: Vec<(String, Vec<zz_span_ast::ast::TraitBound>)> = generics
             .iter()
             .map(|g| (g.name.name.clone(), g.bounds.clone()))
             .collect();
+        // A user-trait bound must name a declared trait (the parser cannot
+        // check that in a single file). Reported here so a typo fails at the
+        // declaration, not later at some call site.
+        self.validate_bound_names(&gen_bound_list, stmt.span());
         let sig_params: Vec<(String, Type)> = params
             .iter()
             .map(|p| {
@@ -69,7 +73,7 @@ impl FuncOps for Checker {
             full_name,
             FuncSig {
                 generics: gen_names,
-                bounds: gen_bounds,
+                bounds: gen_bound_list,
                 params: sig_params,
                 has_default,
                 ret: sig_ret,

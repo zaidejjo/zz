@@ -267,6 +267,45 @@ pub(crate) fn check_call_print_builtin(
     Some(Type::Unit)
 }
 
+/// Report an ambiguous trait-bound method call (`T: A + B` where both traits
+/// declare `method`). Returns `true` when an error was reported, so the caller
+/// can stop resolving — there is no single dispatch slot to fill.
+fn report_ambiguous_trait_method(
+    checker: &mut Checker,
+    recv_t: &Type,
+    method: &str,
+    span: Span,
+) -> bool {
+    let Type::Named(gen) = recv_t else {
+        return false;
+    };
+    let mut providers: Vec<String> = Vec::new();
+    for bound in checker.current_bounds.get(gen).into_iter().flatten() {
+        let zz_span_ast::ast::TraitBound::User(tname) = bound else {
+            continue;
+        };
+        if checker
+            .traits
+            .get(tname)
+            .is_some_and(|t| t.methods.contains_key(method))
+            && !providers.contains(tname)
+        {
+            providers.push(tname.clone());
+        }
+    }
+    if providers.len() <= 1 {
+        return false;
+    }
+    checker.errors.push(error_at(
+        format!(
+            "method `{method}` is ambiguous for type parameter `{gen}`: provided by `{}` and `{}`",
+            providers[0], providers[1]
+        ),
+        span,
+    ));
+    true
+}
+
 /// Handle a `Field` callee (`obj.method(...)`): type-check the receiver,
 /// resolve the method signature against the receiver's type (builtins,
 /// struct/enum impls, embedded promotion), lint HTTP route/param usage,
@@ -282,6 +321,12 @@ pub(crate) fn check_call_field_callee(
 ) -> Option<Type> {
     let recv_t = checker.check_expr(obj);
     let recv_t = checker.unifier.resolve(&recv_t);
+    // Two trait bounds that both declare `method` make the call ambiguous:
+    // there is exactly one dispatch slot, and picking a bound silently would
+    // make the meaning depend on declaration order.
+    if report_ambiguous_trait_method(checker, &recv_t, &method, span) {
+        return Some(Type::Error);
+    }
     // Phase 2.2: `std.http` route + param lint on typed receivers.
     if matches!(checker.unifier.resolve(&recv_t), Type::HttpServer) && is_route_method(&method) {
         let root = match obj {
@@ -769,11 +814,20 @@ fn check_call_path_type_dispatch(
     span: Span,
 ) -> Option<Type> {
     let recv_t_resolved = checker.unifier.resolve(recv_t);
+    // `s.draw()` parses as a path callee, so the generic-receiver case is
+    // resolved here too: a `T: Draw` bound is the only thing that makes the
+    // call legal, and it must report the same ambiguity as the field form.
+    if report_ambiguous_trait_method(checker, &recv_t_resolved, method, span) {
+        return Some(Type::Error);
+    }
     let impl_owned = checker.receiver_impl_method(&recv_t_resolved, method);
     let free_sig = zz_checker_core::lookup_std(&checker.funcs, method).cloned();
     let mut sig = if impl_owned { None } else { free_sig.clone() };
     if sig.is_none() {
         sig = check_call_path_stdlib_ns(checker, &recv_t_resolved, method);
+    }
+    if sig.is_none() && matches!(recv_t_resolved, Type::Named(_)) {
+        sig = checker.resolve_method_sig(&recv_t_resolved, method);
     }
     // Embedded promotion.
     let mut promoted_recv: Option<Type> = None;

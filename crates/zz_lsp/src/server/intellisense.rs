@@ -271,6 +271,8 @@ fn expression_type_at(
         funcs: HashMap::new(),
         structs: HashMap::new(),
         enums: HashMap::new(),
+        traits: HashMap::new(),
+        trait_impls: HashMap::new(),
         try_converts: HashMap::new(),
         module_origins: HashMap::new(),
     };

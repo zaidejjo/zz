@@ -1302,6 +1302,8 @@ pub(crate) fn prepare_run_with_features(
         structs: _loaded_structs,
         aliases,
         enums: _loaded_enums,
+        traits: _loaded_traits,
+        trait_impls: _loaded_trait_impls,
         natives,
         consts,
         errors: _,
@@ -1319,6 +1321,8 @@ pub(crate) fn prepare_run_with_features(
         _loaded_structs,
         aliases,
         _loaded_enums,
+        _loaded_traits.clone(),
+        _loaded_trait_impls.clone(),
     );
     let interp = setup_interp(
         natives,

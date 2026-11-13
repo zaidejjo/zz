@@ -73,7 +73,11 @@ fn walk_stmt_in<'a>(
                 walk_stmt_in(tp, &fname, s, f);
             }
         }
-        Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Enum { .. } | Stmt::Import { .. } => {}
+        Stmt::Struct { .. }
+        | Stmt::TypeAlias { .. }
+        | Stmt::Enum { .. }
+        | Stmt::Trait { .. }
+        | Stmt::Import { .. } => {}
         Stmt::ExternBlock { .. } | Stmt::Link { .. } => {}
         Stmt::Impl { name, methods, .. } => {
             let tname = name.join(".");

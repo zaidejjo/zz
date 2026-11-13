@@ -7,7 +7,6 @@ use zz_span_ast::ast::{
     TyKind, TypeParam,
 };
 use zz_span_ast::Span;
-use zz_suggest::suggest_all;
 
 use super::Parser;
 
@@ -80,6 +79,7 @@ impl<'a> Parser<'a> {
                         self.parse_impl(false)
                     }
                     TokenKind::Import => self.parse_import(true),
+                    TokenKind::Trait => self.parse_trait(true),
                     // `pub type X = ...` — contextual alias (see parse_stmt).
                     TokenKind::Ident if self.at_type_alias_start() => self.parse_type_alias(true),
                     // `pub enum X { ... }` — contextual enum (see parse_stmt).
@@ -171,6 +171,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Struct => self.parse_struct(false),
             TokenKind::Impl => self.parse_impl(false),
+            TokenKind::Trait => self.parse_trait(false),
             TokenKind::At => {
                 if self.is_link_directive() {
                     self.parse_link()
@@ -800,8 +801,26 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn parse_impl(&mut self, pub_: bool) -> Stmt {
         let impl_tok = self.advance();
-        let name = self.parse_dotted_ident();
+        let first = self.parse_dotted_ident();
         let generics = self.parse_struct_generics();
+        // `impl Trait for Type { ... }` — the first name is the trait and the
+        // second the implementing type. Methods register under the *type*
+        // (so `value.method()` resolves unchanged) and the pair is recorded
+        // for bound checking.
+        let (trait_name, name) = if self.eat(TokenKind::For) {
+            let target = self.parse_dotted_ident();
+            if self.at(TokenKind::Lt) {
+                self.error_here(
+                    "`impl Trait for Type<...>` is not supported yet\n\
+                     hint: implement the trait on the unparameterized type and use a generic function bound instead",
+                );
+                // Consume the arguments so the body still parses.
+                let _ = self.parse_struct_generics();
+            }
+            (Some(first), target)
+        } else {
+            (None, first)
+        };
         if !self.eat(TokenKind::LBrace) {
             self.error_here("expected `{` to start impl body");
             self.skip_to_rbrace();
@@ -856,6 +875,107 @@ impl<'a> Parser<'a> {
             methods,
             span,
             pub_,
+            trait_name,
+        }
+    }
+
+    /// Parse `trait Name { func m(self) ... }` — signatures only.
+    pub(crate) fn parse_trait(&mut self, pub_: bool) -> Stmt {
+        let trait_tok = self.advance();
+        let name = self.parse_dotted_ident();
+        if self.at(TokenKind::Lt) {
+            self.error_here(
+                "traits cannot take type parameters yet\n\
+                 hint: make the *use site* generic (`func f<T: Draw>(x: T)`) and implement the trait on a concrete type",
+            );
+            // Consume the parameter list so the body still parses.
+            let _ = self.parse_struct_generics();
+        }
+        if !self.eat(TokenKind::LBrace) {
+            self.error_here("expected `{` to start trait body");
+            self.skip_to_rbrace();
+        }
+        let mut methods = Vec::new();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            self.skip_stmt_ends();
+            if self.at(TokenKind::RBrace) {
+                break;
+            }
+            if self.at(TokenKind::Pub) {
+                // Methods in a trait are always public; accept and drop `pub`
+                // so a copy-pasted impl signature still parses.
+                let pub_tok = self.advance();
+                if !self.at(TokenKind::Func) {
+                    self.error_here("expected `func` after `pub` in trait body");
+                    let _ = pub_tok;
+                    continue;
+                }
+            }
+            if self.at(TokenKind::Func) {
+                methods.push(self.parse_trait_method());
+            } else {
+                self.error_here(
+                    "expected a method signature (`func name(self, ...)`) in trait body",
+                );
+                if self.pos < self.toks.len() {
+                    self.advance();
+                }
+            }
+        }
+        let end = if self.eat(TokenKind::RBrace) {
+            self.previous().span
+        } else {
+            self.error_missing_close("}", "expected `}` to close trait body");
+            self.peek().span
+        };
+        let span = trait_tok.span.join(end);
+        Stmt::Trait {
+            name,
+            methods,
+            span,
+            pub_,
+        }
+    }
+
+    /// One `func name(self, ...) -> Ty` signature inside a `trait` body.
+    /// No body, no generics: the parser reports a `{` block with a hint.
+    pub(crate) fn parse_trait_method(&mut self) -> zz_span_ast::ast::TraitMethod {
+        let func_tok = self.advance();
+        let name = self
+            .expect_ident()
+            .map(|i| i.name)
+            .unwrap_or_else(|| "?".to_string());
+        if !self.eat(TokenKind::LParen) {
+            self.error_here("expected `(` after method name");
+        } else {
+            self.push_delim(TokenKind::LParen, self.previous().span);
+        }
+        let params = self.parse_param_list();
+        if !self.eat(TokenKind::RParen) {
+            self.error_missing_close(")", "expected `)` after parameters");
+        } else {
+            self.pop_delim(TokenKind::RParen, self.previous().span);
+        }
+        let ret = if self.eat(TokenKind::Arrow) {
+            Some(self.parse_type())
+        } else {
+            None
+        };
+        let end = ret.as_ref().map(|t| t.span).unwrap_or(self.previous().span);
+        let span = func_tok.span.join(end);
+        // Trait methods are declarations: a body belongs in the impl block.
+        if self.at(TokenKind::LBrace) {
+            self.error_here(
+                "trait methods declare a signature only\n\
+                 hint: write the body in `impl Trait for Type { ... }`",
+            );
+            let _ = self.parse_block();
+        }
+        zz_span_ast::ast::TraitMethod {
+            name,
+            params,
+            ret,
+            span,
         }
     }
 
@@ -1479,46 +1599,10 @@ impl<'a> Parser<'a> {
                         "Ord" => bounds.push(TraitBound::Ord),
                         "Eq" => bounds.push(TraitBound::Eq),
                         "Display" => bounds.push(TraitBound::Display),
-                        other => {
-                            // Sherlock: suggest the closest known bound
-                            // (`Number` → `Num`) with a fix.
-                            let known = ["Num", "Ord", "Eq", "Display"];
-                            let mut diag = error_at(
-                                format!("unknown trait bound `{other}` (expected `Num`, `Ord`, `Eq`, or `Display`)"),
-                                id.span,
-                            );
-                            if let Some((suggestion, _)) = suggest_all(other, &known).first() {
-                                diag = diag
-                                    .with_note(format!("did you mean `{suggestion}`?"))
-                                    .with_fixit(FixIt::safe(
-                                        id.span,
-                                        suggestion.to_string(),
-                                        "replace bound",
-                                    ));
-                            } else {
-                                // Prefix fallback for longer typos beyond
-                                // edit-distance threshold (`Number` → `Num`).
-                                let lower = other.to_lowercase();
-                                if let Some(prefix) = known
-                                    .iter()
-                                    .filter(|k| {
-                                        lower.starts_with(&k.to_lowercase())
-                                            || k.to_lowercase().starts_with(&lower)
-                                    })
-                                    .copied()
-                                    .max_by_key(|k| k.len())
-                                {
-                                    diag = diag
-                                        .with_note(format!("did you mean `{prefix}`?"))
-                                        .with_fixit(FixIt::safe(
-                                            id.span,
-                                            prefix.to_string(),
-                                            "replace bound",
-                                        ));
-                                }
-                            }
-                            self.push_error(diag);
-                        }
+                        // Any other name is a user trait. Single-file parsing
+                        // cannot see the trait table, so the checker validates
+                        // it (with a suggestion) against its registered traits.
+                        other => bounds.push(TraitBound::User(other.to_string())),
                     }
                 }
                 if self.eat(TokenKind::Plus) {
@@ -1910,6 +1994,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
             methods,
             span: mut sp,
             pub_,
+            trait_name,
         } => {
             span(&mut sp);
             Stmt::Impl {
@@ -1918,6 +2003,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
                 methods,
                 span: sp,
                 pub_,
+                trait_name,
             }
         }
         other => other,
