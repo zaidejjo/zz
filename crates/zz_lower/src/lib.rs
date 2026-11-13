@@ -76,6 +76,10 @@ impl LoweredC {
     /// sanitizer runtime, ...) is one edit here instead of a copy in each
     /// caller.
     pub fn apply_link_needs(&self, opts: &mut zz_codegen_types::BuildOptions) {
+        eprintln!(
+            "ZZ_DEBUG_LINK_NEEDS: native_rt={} float_fmt={}",
+            self.needs_native_rt, self.needs_float_fmt
+        );
         merge_link_needs(
             opts,
             self.needs_native_rt,

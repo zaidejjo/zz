@@ -47,9 +47,26 @@
 // it harmlessly.
 #include <winsock2.h>
 #include <windows.h>
-#include <threads.h>
+#include <io.h>   // _isatty/_fileno (UCRT declares these outside <unistd.h>)
+#include <stdlib.h>
 #include <stdatomic.h>
 
+// ---- C11 <threads.h> vs Win32 fallback ----------------------------------
+// clang-cl / mingw may not ship a conforming <threads.h> (MSVC never did).
+// When ZZ_HAS_C11_THREADS is not set explicitly, probe: GCC/clang define
+// __STDC_THREADS__ when <threads.h> is usable. Otherwise fall back to
+// CRITICAL_SECTION / CONDITION_VARIABLE / CreateThread, present on all
+// Windows versions the runtime targets (Vista+).
+#ifndef ZZ_HAS_C11_THREADS
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L && defined(__STDC_THREADS__)
+#define ZZ_HAS_C11_THREADS 1
+#else
+#define ZZ_HAS_C11_THREADS 0
+#endif
+#endif
+
+#if ZZ_HAS_C11_THREADS
+#include <threads.h>
 // C11 mtx_t has no portable static initializer, but the runtime declares a
 // few process-wide mutexes at file scope. Wrap mtx_t with a ready flag and
 // lazily initialize on first lock, serialized by a per-TU spinlock. Struct
@@ -67,7 +84,7 @@ ZZ_INLINE void zz_mtx_init(zz_mtx_t *m) {
     mtx_init(&m->m, mtx_plain);
     atomic_store_explicit(&m->ready, 1, memory_order_release);
 }
-ZZ_INLINE void zz_mtx_lock(zz_mtx_t *m) {
+ZZ_INLINE int zz_mtx_lock(zz_mtx_t *m) {
     if (!atomic_load_explicit(&m->ready, memory_order_acquire)) {
         while (atomic_flag_test_and_set_explicit(&zz_mtx_init_flag,
                                                  memory_order_acquire)) {
@@ -79,9 +96,11 @@ ZZ_INLINE void zz_mtx_lock(zz_mtx_t *m) {
         }
         atomic_flag_clear_explicit(&zz_mtx_init_flag, memory_order_release);
     }
-    mtx_lock(&m->m);
+    return mtx_lock(&m->m) == thrd_success ? 0 : -1;
 }
-ZZ_INLINE void zz_mtx_unlock(zz_mtx_t *m) { mtx_unlock(&m->m); }
+ZZ_INLINE int zz_mtx_unlock(zz_mtx_t *m) {
+    return mtx_unlock(&m->m) == thrd_success ? 0 : -1;
+}
 ZZ_INLINE void zz_mtx_destroy(zz_mtx_t *m) { mtx_destroy(&m->m); }
 ZZ_INLINE void zz_cnd_init(zz_cnd_t *c) { cnd_init(c); }
 ZZ_INLINE int  zz_cnd_wait(zz_cnd_t *c, zz_mtx_t *m) {
@@ -90,16 +109,91 @@ ZZ_INLINE int  zz_cnd_wait(zz_cnd_t *c, zz_mtx_t *m) {
 ZZ_INLINE void zz_cnd_signal(zz_cnd_t *c) { cnd_signal(c); }
 ZZ_INLINE void zz_cnd_broadcast(zz_cnd_t *c) { cnd_broadcast(c); }
 ZZ_INLINE void zz_cnd_destroy(zz_cnd_t *c) { cnd_destroy(c); }
-ZZ_INLINE int zz_thrd_create(zz_thrd_t *t, int (*fn)(void *), void *arg) {
+ZZ_INLINE int zz_thrd_create(zz_thrd_t *t, void *(*fn)(void *), void *arg) {
     return thrd_create(t, (thrd_start_t)fn, arg) == thrd_success ? 0 : -1;
 }
 ZZ_INLINE void zz_thrd_detach(zz_thrd_t t) { thrd_detach(t); }
 ZZ_INLINE void zz_thrd_join(zz_thrd_t t) {
-    // Windows threads are created detached (run to process death); join is
-    // only a clean-shutdown nicety on POSIX.
-    (void)t;
+    thrd_join(t, NULL);
+}
+ZZ_INLINE void zz_yield(void) { thrd_yield(); }
+#else  // ZZ_HAS_C11_THREADS == 0 — Win32 CRITICAL_SECTION / CONDITION_VARIABLE fallback
+typedef struct {
+    CRITICAL_SECTION cs;
+    atomic_int       ready;
+} zz_mtx_t;
+typedef CONDITION_VARIABLE zz_cnd_t;
+typedef HANDLE       zz_thrd_t;
+#define ZZ_MTX_INIT {0} // zero-init; the first zz_mtx_lock initializes it
+static atomic_flag zz_mtx_init_flag = ATOMIC_FLAG_INIT;
+ZZ_INLINE void zz_mtx_init(zz_mtx_t *m) {
+    InitializeCriticalSection(&m->cs);
+    atomic_store_explicit(&m->ready, 1, memory_order_release);
+}
+ZZ_INLINE int zz_mtx_lock(zz_mtx_t *m) {
+    if (!atomic_load_explicit(&m->ready, memory_order_acquire)) {
+        while (atomic_flag_test_and_set_explicit(&zz_mtx_init_flag,
+                                                 memory_order_acquire)) {
+            // spin: one-time, short
+        }
+        if (!atomic_load_explicit(&m->ready, memory_order_acquire)) {
+            InitializeCriticalSection(&m->cs);
+            atomic_store_explicit(&m->ready, 1, memory_order_release);
+        }
+        atomic_flag_clear_explicit(&zz_mtx_init_flag, memory_order_release);
+    }
+    EnterCriticalSection(&m->cs);
+    return 0;
+}
+ZZ_INLINE int zz_mtx_unlock(zz_mtx_t *m) {
+    LeaveCriticalSection(&m->cs);
+    return 0;
+}
+ZZ_INLINE void zz_mtx_destroy(zz_mtx_t *m) { DeleteCriticalSection(&m->cs); }
+ZZ_INLINE void zz_cnd_init(zz_cnd_t *c) { InitializeConditionVariable(c); }
+ZZ_INLINE int zz_cnd_wait(zz_cnd_t *c, zz_mtx_t *m) {
+    SleepConditionVariableCS(c, &m->cs, INFINITE);
+    return 0;
+}
+ZZ_INLINE void zz_cnd_signal(zz_cnd_t *c) { WakeConditionVariable(c); }
+ZZ_INLINE void zz_cnd_broadcast(zz_cnd_t *c) { WakeAllConditionVariable(c); }
+ZZ_INLINE void zz_cnd_destroy(zz_cnd_t *c) { (void)c; } // no resources to free
+// CreateThread takes `DWORD (WINAPI *)(LPVOID)`, but the runtime's thread
+// entry points follow the pthread shape (`void *(*)(void *)`). A tiny
+// trampoline bridges the two without a function-pointer cast (the cast
+// would be UB on 32-bit x86 __stdcall and trips -Wcast-function-type).
+typedef struct {
+    void *(*fn)(void *);
+    void *arg;
+} zz_thrd_start_t;
+ZZ_INLINE DWORD WINAPI zz_thrd_tramp(LPVOID p) {
+    zz_thrd_start_t *s = (zz_thrd_start_t *)p;
+    void *(*fn)(void *) = s->fn;
+    void *arg = s->arg;
+    free(s);
+    fn(arg);
+    return 0;
+}
+ZZ_INLINE int zz_thrd_create(zz_thrd_t *t, void *(*fn)(void *), void *arg) {
+    zz_thrd_start_t *s = (zz_thrd_start_t *)malloc(sizeof *s);
+    if (!s) return -1;
+    s->fn = fn;
+    s->arg = arg;
+    *t = CreateThread(NULL, 0, zz_thrd_tramp, s, 0, NULL);
+    if (*t == NULL) {
+        free(s);
+        return -1;
+    }
+    return 0;
+}
+ZZ_INLINE void zz_thrd_detach(zz_thrd_t t) { CloseHandle(t); }
+ZZ_INLINE void zz_thrd_join(zz_thrd_t t) {
+    WaitForSingleObject(t, INFINITE);
+    CloseHandle(t);
 }
 ZZ_INLINE void zz_yield(void) { SwitchToThread(); }
+#endif // ZZ_HAS_C11_THREADS
+
 // One-time init without pthread_once. The static `zz_once_t` values must
 // zero-initialize portably, so use an atomic-flag + done-flag spin (the
 // initializer body is short: pool/executor/fs-cache setup).

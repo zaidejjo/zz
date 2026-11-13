@@ -1670,6 +1670,10 @@ pub fn build_release(
     mode: BuildMode,
     rel: &ReleaseOptions,
 ) -> Result<PathBuf, String> {
+    eprintln!(
+        "ZZ_DEBUG_BUILD_RELEASE: called path={:?} mode={:?}",
+        path, mode
+    );
     let obs = rel.observer.sink();
     obs.plan(&STEP_LABELS);
     // `ZZ_BUILD_CACHE=0` forces a real build: no probe, no reuse. Mirrors
@@ -1959,6 +1963,11 @@ pub fn build_release(
             eprintln!("zz: timing chunk_lower={}ms", t_chunk.elapsed().as_millis());
         }
         lowered.apply_link_needs(&mut opts);
+        // Native builds always link the native runtime so `zz_float_format_raw`
+        // (used by float printing) is available. needs_float_fmt is
+        // intentionally conservative and misses floats used as local
+        // variables inside functions, so link unconditionally here.
+        opts.float_link = true;
         obs.done(
             STEP_OPTIMIZING,
             StepDetail::Optimized {

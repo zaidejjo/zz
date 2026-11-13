@@ -3415,7 +3415,9 @@ void zz_safepoint(void) {
 // Minimal HTTP server for AOT mode: thread-per-connection, fixed "OK" response.
 // Route handlers are not supported in AOT (no interpreter to call closures).
 
+#ifndef ZZ_OS_WINDOWS
 #include <pthread.h>
+#endif
 // platform.h is concatenated before this TU and defines ZZ_OS_WINDOWS on
 // Windows targets, where Winsock replaces the POSIX socket headers.
 // Linux/macOS keep the existing POSIX set (epoll is Linux-only; other
@@ -3425,6 +3427,12 @@ void zz_safepoint(void) {
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <io.h>
+#include <direct.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <signal.h>
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -3452,6 +3460,7 @@ void zz_safepoint(void) {
 #ifdef __linux__
 #include <malloc.h>
 #endif
+#endif // ZZ_OS_WINDOWS (socket/include set above)
 
 // One-time network startup (WSAStartup on Windows, no-op on POSIX).
 // Called lazily from the TCP natives so binaries pay nothing when the
@@ -3599,8 +3608,7 @@ zz_value zz_tcp_connect(zz_value addr, zz_value timeout_ms, int *err) {
             int pr = zz_poll(&pfd, 1, (int)toms);
             if (pr > 0) {
                 int soerr = 0;
-                socklen_t slen = sizeof soerr;
-                getsockopt(cfd, SOL_SOCKET, SO_ERROR, &soerr, &slen);
+                zz_getsockopt_int(cfd, SOL_SOCKET, SO_ERROR, &soerr);
                 if (soerr == 0) {
                     ok = 1;
                 } else {
@@ -4397,8 +4405,8 @@ zz_value zz_db_query_raw(zz_value db, const char *sql, zz_value *binds, size_t n
                    so 0 is false and anything else is true. Mirrors the
                    rusqlite mapping (see `sqlite_bool_decl`). */
                 const char *dt = sqlite3_column_decltype(st, i);
-                if (dt && (strcasecmp(dt, "BIT") == 0 || strcasecmp(dt, "BOOL") == 0
-                           || strcasecmp(dt, "BOOLEAN") == 0)) {
+                if (dt && (zz_strcasecmp(dt, "BIT") == 0 || zz_strcasecmp(dt, "BOOL") == 0
+                           || zz_strcasecmp(dt, "BOOLEAN") == 0)) {
                     val = zz_bool(iv != 0);
                 } else {
                     val = zz_int(iv);
@@ -4732,7 +4740,7 @@ static size_t http_head_len(Connection *c) {
 // Offset just past the first \r\n\r\n, or 0 when incomplete.
 static size_t http_head_end(const char *buf, size_t len) {
     if (len < 4) return 0;
-    void *end = memmem(buf, len, "\r\n\r\n", 4);
+    void *end = zz_memmem(buf, len, "\r\n\r\n", 4);
     if (!end) return 0;
     return (size_t)((const char *)end - buf) + 4;
 }
@@ -5505,7 +5513,6 @@ static int spawn_workers(int listen_fd, int port) {
     return 0;
 }
 #endif
-#endif
 
 // ---- HTTP routes + request/response natives (AOT) ----
 //
@@ -5728,7 +5735,7 @@ zz_value zz_http_serve_dir_at(zz_value server, zz_value prefix, zz_value dir, in
         return zz_int(0);
     }
     if (g_http_static_dir_count >= HTTP_MAX_STATIC_DIRS) return zz_int(0);
-    char *dcopy = strndup(zz_str_cptr(dir.s), dir.s->len);
+    char *dcopy = zz_strndup(zz_str_cptr(dir.s), dir.s->len);
     char *pcopy = malloc(256);
     if (!dcopy || !pcopy) {
         free(dcopy);
@@ -5752,8 +5759,8 @@ static zz_value http_route_add(const char *method, zz_value path, zz_value handl
     if (path.tag != ZZ_STR || !path.s) return zz_int(0);
     if (g_http_route_count >= HTTP_MAX_ROUTES - 1) return zz_int(0);
     http_route_entry *e = &g_http_route_table[g_http_route_count++];
-    e->method = strndup(method, strlen(method));
-    e->pattern = strndup(zz_str_cptr(path.s), path.s->len);
+    e->method = zz_strndup(method, strlen(method));
+    e->pattern = zz_strndup(zz_str_cptr(path.s), path.s->len);
     e->handler = zz_clone(handler);
     e->uses_req = uses_req;
     e->plen = strlen(e->pattern);
@@ -5887,7 +5894,7 @@ zz_value zz_http_hijack(zz_value server, zz_value path, zz_value handler, int *e
     }
     if (g_http_hijack_count >= HTTP_MAX_HIJACK_ROUTES) return zz_int(0);
     http_hijack_entry *e = &g_http_hijack_table[g_http_hijack_count++];
-    e->pattern = strndup(zz_str_cptr(path.s), path.s->len);
+    e->pattern = zz_strndup(zz_str_cptr(path.s), path.s->len);
     e->plen = strlen(e->pattern);
     e->handler = zz_clone(handler);
     return zz_int(0);
@@ -5948,7 +5955,7 @@ static int http_dict_find_ci(zz_value dict, const char *key, zz_value *out) {
     for (size_t i = 0; i < n; i++) {
         zz_str *k = zz_dict_key_str(&dict.dict->entries[i]);
         if (k && strlen(key) == k->len
-            && strcasecmp(key, zz_str_cptr(k)) == 0) {
+            && zz_strcasecmp(key, zz_str_cptr(k)) == 0) {
             *out = dict.dict->entries[i].val;
             return 1;
         }
@@ -6750,28 +6757,28 @@ static const char *http_static_mime(const char *path) {
     const char *dot = strrchr(base, '.');
     if (!dot) return "application/octet-stream";
     const char *ext = dot + 1;
-    if (strcasecmp(ext, "html") == 0 || strcasecmp(ext, "htm") == 0) return "text/html; charset=utf-8";
-    if (strcasecmp(ext, "css") == 0) return "text/css; charset=utf-8";
-    if (strcasecmp(ext, "mjs") == 0 || strcasecmp(ext, "js") == 0) return "application/javascript; charset=utf-8";
-    if (strcasecmp(ext, "json") == 0 || strcasecmp(ext, "map") == 0) return "application/json";
-    if (strcasecmp(ext, "wasm") == 0) return "application/wasm";
-    if (strcasecmp(ext, "xml") == 0) return "application/xml";
-    if (strcasecmp(ext, "csv") == 0) return "text/csv; charset=utf-8";
-    if (strcasecmp(ext, "txt") == 0 || strcasecmp(ext, "md") == 0) return "text/plain; charset=utf-8";
-    if (strcasecmp(ext, "png") == 0) return "image/png";
-    if (strcasecmp(ext, "jpg") == 0 || strcasecmp(ext, "jpeg") == 0) return "image/jpeg";
-    if (strcasecmp(ext, "gif") == 0) return "image/gif";
-    if (strcasecmp(ext, "svg") == 0) return "image/svg+xml";
-    if (strcasecmp(ext, "webp") == 0) return "image/webp";
-    if (strcasecmp(ext, "avif") == 0) return "image/avif";
-    if (strcasecmp(ext, "ico") == 0) return "image/x-icon";
-    if (strcasecmp(ext, "mp4") == 0) return "video/mp4";
-    if (strcasecmp(ext, "webm") == 0) return "video/webm";
-    if (strcasecmp(ext, "mp3") == 0) return "audio/mpeg";
-    if (strcasecmp(ext, "woff") == 0) return "font/woff";
-    if (strcasecmp(ext, "woff2") == 0) return "font/woff2";
-    if (strcasecmp(ext, "otf") == 0) return "font/otf";
-    if (strcasecmp(ext, "ttf") == 0) return "font/ttf";
+    if (zz_strcasecmp(ext, "html") == 0 || zz_strcasecmp(ext, "htm") == 0) return "text/html; charset=utf-8";
+    if (zz_strcasecmp(ext, "css") == 0) return "text/css; charset=utf-8";
+    if (zz_strcasecmp(ext, "mjs") == 0 || zz_strcasecmp(ext, "js") == 0) return "application/javascript; charset=utf-8";
+    if (zz_strcasecmp(ext, "json") == 0 || zz_strcasecmp(ext, "map") == 0) return "application/json";
+    if (zz_strcasecmp(ext, "wasm") == 0) return "application/wasm";
+    if (zz_strcasecmp(ext, "xml") == 0) return "application/xml";
+    if (zz_strcasecmp(ext, "csv") == 0) return "text/csv; charset=utf-8";
+    if (zz_strcasecmp(ext, "txt") == 0 || zz_strcasecmp(ext, "md") == 0) return "text/plain; charset=utf-8";
+    if (zz_strcasecmp(ext, "png") == 0) return "image/png";
+    if (zz_strcasecmp(ext, "jpg") == 0 || zz_strcasecmp(ext, "jpeg") == 0) return "image/jpeg";
+    if (zz_strcasecmp(ext, "gif") == 0) return "image/gif";
+    if (zz_strcasecmp(ext, "svg") == 0) return "image/svg+xml";
+    if (zz_strcasecmp(ext, "webp") == 0) return "image/webp";
+    if (zz_strcasecmp(ext, "avif") == 0) return "image/avif";
+    if (zz_strcasecmp(ext, "ico") == 0) return "image/x-icon";
+    if (zz_strcasecmp(ext, "mp4") == 0) return "video/mp4";
+    if (zz_strcasecmp(ext, "webm") == 0) return "video/webm";
+    if (zz_strcasecmp(ext, "mp3") == 0) return "audio/mpeg";
+    if (zz_strcasecmp(ext, "woff") == 0) return "font/woff";
+    if (zz_strcasecmp(ext, "woff2") == 0) return "font/woff2";
+    if (zz_strcasecmp(ext, "otf") == 0) return "font/otf";
+    if (zz_strcasecmp(ext, "ttf") == 0) return "font/ttf";
     return "application/octet-stream";
 }
 
@@ -7417,7 +7424,7 @@ static void http_scan_head(const char *head, size_t head_end,
             size_t nn = (size_t)(colon - (head + pos));
             const char *vs = colon + 1;
             size_t vn = eol - (size_t)(colon + 1 - head);
-            if (nn == 14 && strncasecmp(ns, "content-length", 14) == 0) {
+            if (nn == 14 && zz_strncasecmp(ns, "content-length", 14) == 0) {
                 http_trim_span(&vs, &vn);
                 size_t v = 0;
                 int ok = vn > 0;
@@ -7426,10 +7433,10 @@ static void http_scan_head(const char *head, size_t head_end,
                     else v = v * 10 + (size_t)(vs[k] - '0');
                 }
                 *content_length = ok ? v : 0;
-            } else if (nn == 6 && strncasecmp(ns, "expect", 6) == 0) {
+            } else if (nn == 6 && zz_strncasecmp(ns, "expect", 6) == 0) {
                 http_trim_span(&vs, &vn);
-                if (vn == 12 && strncasecmp(vs, "100-continue", 12) == 0) *expect_continue = 1;
-            } else if (nn == 10 && strncasecmp(ns, "connection", 10) == 0) {
+                if (vn == 12 && zz_strncasecmp(vs, "100-continue", 12) == 0) *expect_continue = 1;
+            } else if (nn == 10 && zz_strncasecmp(ns, "connection", 10) == 0) {
                 // Explicit Connection overrides the version default.
                 // Trim only leading SP/TAB for token search (values short).
                 const char *tvs = vs;
@@ -7976,7 +7983,7 @@ zz_value zz_http_with_headers(zz_value resp, zz_value extra, int *err) {
         int replaced = 0;
         for (size_t j = 0; j < hdrs.dict->len; j++) {
             zz_str *hk = zz_dict_key_str(&hdrs.dict->entries[j]);
-            if (hk && strcasecmp(zz_str_cptr(hk), zz_str_cptr(ek)) == 0) {
+            if (hk && zz_strcasecmp(zz_str_cptr(hk), zz_str_cptr(ek)) == 0) {
                 zz_release(&hdrs.dict->entries[j].val);
                 hdrs.dict->entries[j].val = zz_clone(ev);
                 replaced = 1;
@@ -8263,7 +8270,7 @@ zz_value zz_http_listen_tls(zz_value server, zz_value port, zz_value cert,
         size_t path_len = (size_t)(path_end - path_start);
 
         // Body starts after \r\n\r\n.
-        const char *header_end = memmem(req, req_len, "\r\n\r\n", 4);
+        const char *header_end = zz_memmem(req, req_len, "\r\n\r\n", 4);
         const char *body_start =
             header_end ? header_end + 4 : req + req_len;
         size_t body_len =
@@ -8389,7 +8396,7 @@ zz_value zz_http_listen_tls_cfg(zz_value server, zz_value port, zz_value cert,
         }
         size_t path_len = (size_t)(path_end - path_start);
 
-        const char *header_end = memmem(req, req_len, "\r\n\r\n", 4);
+        const char *header_end = zz_memmem(req, req_len, "\r\n\r\n", 4);
         const char *body_start =
             header_end ? header_end + 4 : req + req_len;
         size_t body_len =
@@ -11267,7 +11274,7 @@ zz_value zz_fs_is_generated(zz_value path, zz_value markers, int *err) {
                 }
                 for (size_t k = 0; k < nm && !generated; k++) {
                     if (mlen[k] == 0) continue;
-                    if (memmem(low, head_end, mbuf[k], mlen[k]) != NULL) generated = 1;
+                    if (zz_memmem(low, head_end, mbuf[k], mlen[k]) != NULL) generated = 1;
                 }
                 free(low);
             }

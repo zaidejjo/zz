@@ -18,6 +18,7 @@
 #define ZZ_RUNTIME_SOCKET_H
 
 #include "platform.h"
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef ZZ_OS_WINDOWS
@@ -86,8 +87,10 @@ ZZ_INLINE const char *zz_socket_strerror(int err) {
 #define ZZ_EPIPE       WSAECONNABORTED
 #define ZZ_ECONNRESET  WSAECONNRESET
 #define ZZ_ENOTCONN    WSAENOTCONN
-#define ZZ_POLLIN      WSAPOLLIN
-#define ZZ_POLLOUT     WSAPOLLOUT
+// Winsock exposes the poll event bits under the POSIX names (POLLIN/POLLOUT
+// are macros in ws2tcpip.h); there are no WSAPOLLIN/WSAPOLLOUT aliases.
+#define ZZ_POLLIN      POLLIN
+#define ZZ_POLLOUT     POLLOUT
 #else
 #define ZZ_EAGAIN      EAGAIN
 #define ZZ_EWOULDBLOCK EWOULDBLOCK
@@ -192,7 +195,58 @@ ZZ_INLINE int zz_poll(struct pollfd *pfds, int nfds, int timeout) {
 }
 ZZ_INLINE int zz_setsockopt(int fd, int level, int optname, const void *optval,
                            socklen_t optlen) {
+#ifdef ZZ_OS_WINDOWS
+    return setsockopt((SOCKET)fd, level, optname, (const char *)optval, (int)optlen);
+#else
     return setsockopt(fd, level, optname, optval, optlen);
+#endif
+}
+
+// int-valued getsockopt (SO_ERROR). Winsock wants `char *` for optval.
+ZZ_INLINE int zz_getsockopt_int(int fd, int level, int optname, int *out) {
+#ifdef ZZ_OS_WINDOWS
+    int len = (int)sizeof *out;
+    return getsockopt((SOCKET)fd, level, optname, (char *)out, &len);
+#else
+    socklen_t len = (socklen_t)sizeof *out;
+    return getsockopt(fd, level, optname, out, &len);
+#endif
+}
+
+// ---- string helpers (POSIX vs Win32) -------------------------------------
+// strcasecmp/strncasecmp are POSIX; Windows CRT has _stricmp/_strnicmp.
+// memmem is a GNU extension; Windows doesn't have it at all.
+#ifdef ZZ_OS_WINDOWS
+#define zz_strcasecmp(a, b) _stricmp((a), (b))
+#define zz_strncasecmp(a, b, n) _strnicmp((a), (b), (n))
+#else
+#define zz_strcasecmp(a, b) strcasecmp((a), (b))
+#define zz_strncasecmp(a, b, n) strncasecmp((a), (b), (n))
+#endif
+
+ZZ_INLINE void *zz_memmem(const void *haystack, size_t haystack_len,
+                          const void *needle, size_t needle_len) {
+    if (needle_len == 0) return (void *)haystack;
+    if (haystack_len < needle_len) return NULL;
+    const unsigned char *h = (const unsigned char *)haystack;
+    const unsigned char *n = (const unsigned char *)needle;
+    size_t limit = haystack_len - needle_len;
+    for (size_t i = 0; i <= limit; i++) {
+        if (memcmp(h + i, n, needle_len) == 0) return (void *)(h + i);
+    }
+    return NULL;
+}
+
+// strndup is POSIX 2008; the Windows CRT has no equivalent. Always provide
+// the portable spelling so the runtime has one call site.
+ZZ_INLINE char *zz_strndup(const char *s, size_t n) {
+    size_t len = 0;
+    while (len < n && s[len] != '\0') len++;
+    char *out = (char *)malloc(len + 1);
+    if (!out) return NULL;
+    memcpy(out, s, len);
+    out[len] = '\0';
+    return out;
 }
 
 #endif // ZZ_RUNTIME_SOCKET_H

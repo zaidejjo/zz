@@ -132,9 +132,9 @@ jobs:
                  "tier": "full", "timeout": 45, "clang_pin": "", "docker_smoke": false}
               ],
               "windows": [
-                {"name": "windows-x86_64", "runner": "windows-2025", "native": false,
+                {"name": "windows-x86_64", "runner": "windows-2025", "native": true,
                  "tier": "pr", "timeout": 60, "clang_pin": "", "docker_smoke": false},
-                {"name": "windows-aarch64", "runner": "windows-11-arm", "native": false,
+                {"name": "windows-aarch64", "runner": "windows-11-arm", "native": true,
                  "tier": "full", "timeout": 60, "clang_pin": "", "docker_smoke": false}
               ]
             }

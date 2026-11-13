@@ -2466,7 +2466,7 @@ fn listen_inner(
     // their read timeouts at the latest) or the budget expires.
     // A second SIGINT/SIGTERM force-exits via `_exit(130)` (see handler),
     // so a browser-held keep-alive can never wedge Ctrl+C.
-    if shutdown_requested() {}
+    shutdown_requested();
     let deadline = Instant::now() + limits.shutdown_timeout;
     while inflight.load(std::sync::atomic::Ordering::Relaxed) > 0 && Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));

@@ -27,12 +27,40 @@
 // Threading types come from platform.h's shim (pthread on POSIX, C11
 // <threads.h> on Windows). platform.h is concatenated before this header
 // in AOT builds and is included by runtime.h standalone.
+// POSIX threads and clock types (Windows uses platform.h's Win32 shim).
 #ifndef ZZ_OS_WINDOWS
 #include <pthread.h>
 #endif
+// MSVC's <math.h> hides M_PI/M_E unless _USE_MATH_DEFINES is defined
+// before the include (mingw defines them unconditionally). Force it on
+// Windows so the math natives compile identically on every toolchain.
+#ifdef ZZ_OS_WINDOWS
+#ifndef _USE_MATH_DEFINES
+#define _USE_MATH_DEFINES 1
+#endif
+#endif
 #include <math.h>
+// Fallback constants for toolchains that still don't expose them.
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+#ifndef M_E
+#define M_E 2.71828182845904523536
+#endif
 #include <time.h>
 #include <sys/stat.h>
+// Windows CRT has _S_IFMT/_S_IFDIR/_S_IFREG but no S_ISDIR/S_ISREG
+// macros; provide portable fallbacks (guarded so POSIX keeps its own).
+#ifndef S_ISDIR
+#if defined(_S_IFMT) && defined(_S_IFDIR)
+#define S_ISDIR(m) (((m) & _S_IFMT) == _S_IFDIR)
+#endif
+#endif
+#ifndef S_ISREG
+#if defined(_S_IFMT) && defined(_S_IFREG)
+#define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)
+#endif
+#endif
 // POSIX process environment + directories (`std.env` natives in core.c);
 // Windows uses CRT/Win32 equivalents there.
 #ifndef ZZ_OS_WINDOWS
