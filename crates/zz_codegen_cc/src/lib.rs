@@ -883,7 +883,14 @@ fn push_link_inputs(
     // natives. libstd links statically (rlib, #303), so fully-static
     // binaries work wherever the static system libs exist — no RUNPATH,
     // no sidecar, no Rust toolchain on the target.
-    if opts.native_rt || opts.float_link {
+    //
+    // The native runtime is linked for every AOT build (not only when the
+    // float formatter gate fires): `zz_float_format_raw` is needed by any
+    // program that prints a float, and `needs_float_fmt` can miss floats
+    // used only as local variables. Linking the staticlib here is harmless
+    // for int-only programs — nothing pulls `zz_float_format_raw` unless it
+    // is referenced.
+    if true {
         let (extra, rt_lib) = zz_codegen_ffi::link_args_for_target(opts.optimize, target)
             .map_err(|e| BuildError::NativeRt { reason: e.0 })?;
         // Pre-#303 fallback (shared libstd): sidecar the shipped shared
