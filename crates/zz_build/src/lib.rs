@@ -1959,6 +1959,14 @@ pub fn build_release(
             eprintln!("zz: timing chunk_lower={}ms", t_chunk.elapsed().as_millis());
         }
         lowered.apply_link_needs(&mut opts);
+        // Native builds always support float display (zz_float_format_raw
+        // from zz_native_rt.lib). needs_float_fmt is intentionally
+        // conservative (it only scans reachable types/bindings/signatures),
+        // so it misses floats used as local variables inside functions.
+        // Linking the native runtime for every native build is harmless for
+        // integer-only programs (nothing pulls zz_float_format_raw unless
+        // it's used) and is required for float programs.
+        opts.float_link = true;
         obs.done(
             STEP_OPTIMIZING,
             StepDetail::Optimized {
