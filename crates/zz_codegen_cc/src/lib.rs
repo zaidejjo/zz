@@ -805,8 +805,16 @@ pub fn build_with(
         .arg(format!("-DZZ_HAS_SQLITE3={}", u8::from(opts.sqlite_link)));
     push_link_inputs(&mut cmd, &opts, target, clang, output_path)?;
     let out = cmd.output().map_err(BuildError::Io)?;
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if opts.float_link {
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        eprintln!("ZZ_DEBUG_LINK_CMD: {args:?}");
+        eprintln!("ZZ_LINK_STDERR: {stderr}");
+    }
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         return Err(BuildError::CompileFailed { stderr });
     }
     Ok(clang.clone())
