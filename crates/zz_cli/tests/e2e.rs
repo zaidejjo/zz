@@ -102,6 +102,10 @@ fn normalize_stderr(stderr: &str) -> String {
 
 /// Returns true when `word` looks like a file path or a path:line:col
 /// diagnostic marker, so it should be replaced with `<path>`.
+///
+/// Handles Unix absolute/relative paths (`/...`), Windows absolute paths
+/// (`C:\...`, `C:/...`), UNC paths (`\\...`), and `name:line(:col)`
+/// diagnostic markers without a directory separator.
 fn is_path_like(word: &str) -> bool {
     if word.contains('/') || word.contains('\\') {
         return true;
@@ -144,15 +148,58 @@ fn hex_dump(s: &str, label: &str) -> String {
 
 /// Compare normalized stderr against a committed snapshot. Returns None on
 /// match, or Some((actual, expected)) on mismatch for detailed diagnostics.
+///
+/// The returned strings include a line-by-line diff followed by byte-level
+/// hex dumps so a mismatch (e.g. a Windows-only path or line-ending residue)
+/// is visible without rerunning on that platform.
 fn compare_snapshot(stderr: &str, expected: &str) -> Option<(String, String)> {
     if stderr == expected {
         None
     } else {
+        let diff = diff_lines(stderr, expected);
         Some((
-            format!("{}\n{}", stderr, hex_dump(stderr, "ACTUAL")),
+            format!(
+                "--- DIFF (actual vs expected) ---\n{diff}\n{}\n{}",
+                stderr,
+                hex_dump(stderr, "ACTUAL")
+            ),
             format!("{}\n{}", expected, hex_dump(expected, "EXPECTED")),
         ))
     }
+}
+
+/// Line-by-line unified diff of two normalized stderr strings. Marks lines
+/// only in `a` with `-`, only in `b` with `+`, and common lines with ` `.
+/// Stop after a bounded number of lines so huge mismatches stay readable.
+fn diff_lines(a: &str, b: &str) -> String {
+    let a_lines: Vec<&str> = a.lines().collect();
+    let b_lines: Vec<&str> = b.lines().collect();
+    let mut out = String::new();
+    let len = a_lines.len().max(b_lines.len());
+    let mut shown = 0usize;
+    for i in 0..len {
+        if shown >= 40 {
+            out.push_str("... (diff truncated) ...\n");
+            break;
+        }
+        let al = a_lines.get(i);
+        let bl = b_lines.get(i);
+        match (al, bl) {
+            (Some(x), Some(y)) if x == y => {
+                out.push_str(&format!(" {x}\n"));
+            }
+            (Some(x), _) => {
+                out.push_str(&format!("-{x}\n"));
+                shown += 1;
+            }
+            (_, Some(y)) => {
+                out.push_str(&format!("+{y}\n"));
+                shown += 1;
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Run `zz run <file>` and return (exit_code, stdout, stderr).
