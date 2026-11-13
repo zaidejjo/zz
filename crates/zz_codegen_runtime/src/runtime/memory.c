@@ -25,35 +25,30 @@ void *zz_arena_alloc(zz_arena *a, size_t size, size_t align) {
     // Objects larger than the largest class can't fit in a class region.
     // Allocate a dedicated block for them.
     if (size > ZZ_ARENA_CLASS_SIZES[ZZ_ARENA_NCLASSES - 1]) {
+        // Dedicated block for oversized objects: never aliases the class
+        // regions. The block is tracked as an overflow chunk so
+        // zz_arena_reset / destroy frees it. We deliberately do NOT touch
+        // a->buf: the primary stays available for class-region allocs and
+        // any live pointers into it remain valid (the old code returned
+        // a->buf itself while leaving a->buf pointing at it, so the next
+        // small alloc bumped into the same block and corrupted the object).
         size_t chunk_cap = (size > a->cap) ? size * 2 : a->cap;
-        // Adopt the current buffer instead of freeing it: callers may still
-        // hold pointers into it (e.g. a flat array growing in place copies
-        // from the previous buffer after the new block is allocated). The
-        // arena contract is that every live pointer stays valid until
-        // reset/destroy, so retaining the old block is required even when it
-        // holds no class-region data.
-        if (a->buf) {
-            zz_arena_chunk *old = (zz_arena_chunk *)malloc(sizeof(zz_arena_chunk));
-            if (old) {
-                old->buf = a->buf;
-                old->cap = a->cap;
-                old->next = a->chunks;
-                a->chunks = old;
-                a->buf = NULL;
-            } else {
-                free(a->buf);
-                a->buf = NULL;
-            }
-        }
-        a->buf = (char *)malloc(chunk_cap);
-        if (!a->buf) {
+        char *blk = (char *)malloc(chunk_cap);
+        if (!blk) {
             fprintf(stderr, "zz: arena chunk out of memory\n");
             exit(1);
         }
-        a->cap = chunk_cap;
-        // Reset class offsets since we're starting fresh.
-        for (int i = 0; i < ZZ_ARENA_NCLASSES; i++) a->offsets[i] = 0;
-        return a->buf;
+        zz_arena_chunk *node = (zz_arena_chunk *)malloc(sizeof(zz_arena_chunk));
+        if (!node) {
+            free(blk);
+            fprintf(stderr, "zz: arena chunk out of memory\n");
+            exit(1);
+        }
+        node->buf = blk;
+        node->cap = chunk_cap;
+        node->next = a->chunks;
+        a->chunks = node;
+        return blk;
     }
 
     // Lazily allocate the primary buffer on first use. Functions that

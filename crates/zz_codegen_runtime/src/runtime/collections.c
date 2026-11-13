@@ -675,22 +675,25 @@ zz_value zz_slice_value(zz_value obj, zz_value start, zz_value end, int *err) {
         if (si < 0) si = 0;
         if (ei > nchars) ei = nchars;
         if (si > ei) si = ei;
-        size_t byte_lo, byte_hi;
-        if (si >= nchars) {
-            byte_lo = obj.s->len;
-        } else {
-            size_t cl = 1;
-            byte_lo = zz_str_char_byte_off(obj.s, (size_t)si, &cl);
+        // Single UTF-8 pass locating both bounds instead of two separate
+        // O(n) scans (si then ei). Common case: scan to max(si, ei) once.
+        size_t byte_lo = obj.s->len, byte_hi = obj.s->len;
+        const unsigned char *p = (const unsigned char *)zz_str_cptr(obj.s);
+        size_t n = obj.s->len, i = 0;
+        int64_t c = 0;
+        int pending = 0;
+        if (si < nchars) pending |= 1;    // need lo
+        if (ei < nchars && ei > si) pending |= 2;  // need hi (ei==si ⇒ empty)
+        int got_lo = 0, got_hi = 0;
+        while (i < n && pending) {
+            size_t l = zz_utf8_seq_len(p + i, n - i);
+            if ((pending & 1) && !got_lo && c == si) { byte_lo = i; got_lo = 1; pending &= ~1; }
+            if ((pending & 2) && !got_hi && c == ei) { byte_hi = i; got_hi = 1; pending &= ~2; }
+            i += l;
+            c++;
         }
-        if (ei >= nchars) {
-            byte_hi = obj.s->len;
-        } else if (ei <= si) {
-            byte_hi = byte_lo;
-        } else {
-            size_t cl = 1;
-            byte_hi = zz_str_char_byte_off(obj.s, (size_t)ei, &cl);
-        }
-        zz_value out = zz_str_new(zz_str_cptr(obj.s) + byte_lo, byte_hi - byte_lo);
+        if (ei <= si) byte_hi = byte_lo;
+        zz_value out = zz_str_new((const char *)p + byte_lo, byte_hi - byte_lo);
         return out;
     }
     default:
@@ -1083,8 +1086,8 @@ zz_value zz_object_get_field(zz_value *obj, const char *name) {
 void zz_release_object(zz_value *v) {
     if (v->tag != ZZ_OBJECT || !v->obj) return;
     zz_object *o = v->obj;
-    if (o->refs == 0) return; // already freed
-    if (--o->refs == 0) {
+    if (__atomic_load_n(&o->refs, __ATOMIC_ACQUIRE) == 0) return; // already freed
+    if (__atomic_sub_fetch(&o->refs, 1, __ATOMIC_ACQ_REL) == 0) {
         for (size_t i = 0; i < o->len; i++) {
             zz_release(&o->fields[i * 2]);     // name (str)
             zz_release(&o->fields[i * 2 + 1]); // value

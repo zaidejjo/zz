@@ -358,8 +358,23 @@ static inline void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
         return;
     }
     if (d->len == d->cap) {
-        if (d->refs == ZZ_DICT_ARENA_MAGIC) return;
+        if (d->refs == ZZ_DICT_ARENA_MAGIC) {
+            // Arena dicts are fixed-capacity (pre-sized at construction via
+            // zz_dict_new_arena_sized). Overflow means the hint was too
+            // small — silently dropping the write corrupts data, so fail
+            // loud instead. Generated code uses zz_index_set which dup-grows
+            // and reseats, so this path is only hit by direct arena-dict
+            // callers that under-sized.
+            fprintf(stderr,
+                    "zz error: arena dict full (cap=%zu) in zz_dict_set; "
+                    "pre-size with zz_dict_new_arena_sized\n", d->cap);
+            exit(1);
+        }
         size_t nc = d->cap == 0 ? 4 : d->cap * 2;
+        if (nc < d->cap) {  // overflow guard
+            fprintf(stderr, "zz error: dict capacity overflow\n");
+            exit(1);
+        }
         size_t old_cap = d->cap;
         d->entries = (zz_dict_entry *)realloc(d->entries, nc * sizeof(zz_dict_entry));
         memset(&d->entries[old_cap], 0, (nc - old_cap) * sizeof(zz_dict_entry));

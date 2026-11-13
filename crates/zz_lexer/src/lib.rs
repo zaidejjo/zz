@@ -1652,7 +1652,24 @@ impl<'a> Lexer<'a> {
         loop {
             match self.peek_char_at(offset) {
                 Some(' ') | Some('\t') => offset += 1,
-                c => return is_interp_start(c),
+                c => {
+                    if !is_interp_start(c) {
+                        return false;
+                    }
+                    // A unary prefix operator needs an operand: `{!}`, `{-}`,
+                    // `{+}` (even with trailing spaces) are dead braces, not
+                    // interpolations.
+                    if matches!(c, Some('!') | Some('-') | Some('+')) {
+                        let mut o = offset + 1;
+                        loop {
+                            match self.peek_char_at(o) {
+                                Some(' ') | Some('\t') => o += 1,
+                                c => return is_interp_operand_start(c),
+                            }
+                        }
+                    }
+                    return true;
+                }
             }
         }
     }
@@ -1726,6 +1743,18 @@ pub fn is_interp_start(c: Option<char>) -> bool {
         Some(ch) if is_ident_start(ch) => true,
         Some(ch) if ch.is_ascii_digit() => true,
         Some('(') | Some('-') | Some('+') | Some('!') => true,
+        _ => false,
+    }
+}
+
+/// True when `c` can start the operand of a unary prefix operator inside an
+/// interpolation (`{!x}`, `{-5}`, `{(a)}`). A bare `{!}`, `{-}`, `{+}` (even
+/// with trailing spaces) is a dead brace, not an interpolation.
+pub fn is_interp_operand_start(c: Option<char>) -> bool {
+    match c {
+        Some(ch) if is_ident_start(ch) => true,
+        Some(ch) if ch.is_ascii_digit() => true,
+        Some('(') => true,
         _ => false,
     }
 }
