@@ -1174,8 +1174,8 @@ fn compile_ops(src: &str) -> Vec<Op> {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
     );
     let chunk = Compiler::compile_program_typed(
         &parsed.program,
@@ -1472,8 +1472,8 @@ fn vm_guarded_match_arm_miss_reloads_scrutinee() {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
     );
     let chunk = super::Compiler::compile_program_typed(
         &parsed.program,
@@ -1544,8 +1544,8 @@ fn vm_if_let_result_does_not_alias_later_slots() {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
     );
     assert!(
         checked
@@ -2411,8 +2411,8 @@ fn vm_statement_if_in_loop_emits_no_value_dance() {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
     );
     let chunk = Compiler::compile_program_typed(
         &parsed.program,
@@ -2642,8 +2642,8 @@ fn while_sum_hot_shape_is_test_body_and_backedge() {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
     );
     let chunk = super::Compiler::compile_program_typed(
         &parsed.program,
@@ -3123,8 +3123,8 @@ fn vm_push_slot_int_imm_fuses_value_position_arith() {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
     );
     let chunk = Compiler::compile_program_typed(
         &parsed.program,
@@ -3201,8 +3201,8 @@ fn vm_jump_if_false_slot_cmp_fuses_if_guards() {
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
     );
     let chunk = Compiler::compile_program_typed(
         &parsed.program,
