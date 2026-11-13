@@ -37,7 +37,34 @@ typedef struct {
     zz_str *singleton;   // heap-allocated once, freed at process exit (none)
 } zz_intern_entry;
 
-static zz_intern_entry zz_intern_table[ZZ_INTERN_BUCKETS];
+// Growable intern table: starts at ZZ_INTERN_BUCKETS and doubles when full,
+// so interning stays O(1) even for programs with thousands of literals
+// (a fixed 1024-slot table degrades to linear probing once full).
+static zz_intern_entry *zz_intern_table = NULL;
+static size_t zz_intern_buckets = 0;
+static size_t zz_intern_count = 0;  // occupied slots
+
+#define ZZ_INTERN_LOAD_NUM 3
+#define ZZ_INTERN_LOAD_DEN 4
+
+static uint32_t fnv1a(const char *s, size_t len);  // defined below
+
+static void zz_intern_grow(void) {
+    size_t nb = zz_intern_buckets == 0 ? ZZ_INTERN_BUCKETS : zz_intern_buckets * 2;
+    zz_intern_entry *nt = (zz_intern_entry *)calloc(nb, sizeof(zz_intern_entry));
+    if (!nt) return; // OOM: stay on current table (still correct, slower)
+    size_t mask = nb - 1;
+    for (size_t i = 0; i < zz_intern_buckets; i++) {
+        if (zz_intern_table[i].src == NULL) continue;
+        uint32_t h = fnv1a(zz_intern_table[i].src, zz_intern_table[i].len);
+        size_t j = (size_t)h & mask;
+        while (nt[j].src != NULL) j = (j + 1) & mask;
+        nt[j] = zz_intern_table[i];
+    }
+    free(zz_intern_table);
+    zz_intern_table = nt;
+    zz_intern_buckets = nb;
+}
 
 // Spawned threads evaluate string literals too, so interning must be
 // thread-safe: one mutex around lookup-or-create (first touch per literal
@@ -55,15 +82,17 @@ static uint32_t fnv1a(const char *s, size_t len) {
 
 static zz_str *intern_lookup_or_create(const char *src, size_t len) {
     zz_mtx_lock(&zz_intern_lock);
+    if (zz_intern_table == NULL || (zz_intern_count + 1) * ZZ_INTERN_LOAD_DEN > zz_intern_buckets * ZZ_INTERN_LOAD_NUM) {
+        zz_intern_grow();
+    }
     uint32_t h = fnv1a(src, len);
-    uint32_t idx = h % ZZ_INTERN_BUCKETS;
+    size_t mask = zz_intern_buckets - 1;
+    size_t idx = (size_t)h & mask;
     zz_str *found = NULL;
-    for (uint32_t probe = 0; probe < ZZ_INTERN_BUCKETS; probe++) {
-        uint32_t i = (idx + probe) % ZZ_INTERN_BUCKETS;
+    for (size_t probe = 0; probe < zz_intern_buckets; probe++) {
+        size_t i = (idx + probe) & mask;
         zz_intern_entry *e = &zz_intern_table[i];
-        if (e->src == NULL) {
-            break; // absent — fall through to create below
-        }
+        if (e->src == NULL) break; // absent — fall through to create below
         if (e->len == len && e->src == src) {
             // Same literal pointer: guaranteed match.
             found = e->singleton;
@@ -77,10 +106,8 @@ static zz_str *intern_lookup_or_create(const char *src, size_t len) {
         }
     }
     if (!found) {
-        // Absent (or table full — then the singleton is simply not cached):
-        // build an immortal copy via str_alloc.
-        for (uint32_t probe = 0; probe < ZZ_INTERN_BUCKETS; probe++) {
-            uint32_t i = (idx + probe) % ZZ_INTERN_BUCKETS;
+        for (size_t probe = 0; probe < zz_intern_buckets; probe++) {
+            size_t i = (idx + probe) & mask;
             zz_intern_entry *e = &zz_intern_table[i];
             if (e->src == NULL) {
                 zz_str *s = str_alloc(len);
@@ -92,13 +119,16 @@ static zz_str *intern_lookup_or_create(const char *src, size_t len) {
                 e->len = len;
                 e->singleton = s;
                 found = s;
+                zz_intern_count++;
                 break;
             }
         }
         if (!found) {
+            // Table still full (growth failed on OOM): build an immortal
+            // copy but do not cache it — still correct, just slower.
             zz_str *s = str_alloc(len);
             s->interned = 1;
-            s->hash = h;  // cache FNV-1a hash for dict fast path
+            s->hash = h;
             memcpy(zz_str_ptr(s), src, len);
             zz_str_ptr(s)[len] = '\0';
             found = s;

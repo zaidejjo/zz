@@ -2015,6 +2015,12 @@ zz_value zz_chan_send(zz_value chan, zz_value val, int *err) {
         return zz_unit();
     }
     if (ch->len == ch->cap) {
+        if (ch->cap > SIZE_MAX / 2) {
+            fprintf(stderr, "zz error: channel capacity overflow\n");
+            zz_mtx_unlock(&ch->lock);
+            *err = 1;
+            return zz_unit();
+        }
         size_t new_cap = ch->cap * 2;
         zz_value *new_queue = (zz_value *)malloc(sizeof(zz_value) * new_cap);
         if (!new_queue) {
