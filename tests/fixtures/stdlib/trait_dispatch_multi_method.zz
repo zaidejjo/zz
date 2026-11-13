@@ -1,3 +1,4 @@
+// features: field-store, func-call, func-return, generics, int-arith, locals, methods, print, return, struct-literal, structs, string-literal
 // E2E: trait with multiple methods; each (trait, method) pair gets its
 // own dispatcher. Bounded generics call both methods.
 trait Counter {

@@ -1,3 +1,4 @@
+// features: func-call, func-return, generics, locals, methods, print, return, struct-literal, structs, string-literal
 // E2E: bounded-generic trait dispatch through per-unit native build.
 // A single implementor of `Draw` is called via `render<T: Draw>`.
 trait Draw {

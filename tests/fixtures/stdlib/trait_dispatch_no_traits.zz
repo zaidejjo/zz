@@ -1,3 +1,4 @@
+// features: func-call, print, string-literal
 // E2E control: program with no traits must produce no trait dispatcher
 // section in any unit header or code.
 func main() {

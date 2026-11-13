@@ -1,3 +1,4 @@
+// features: imports, indexing, locals, match, option-result, print, string-literal, vm-only
 // E2E: std.pty pseudo-terminal primitives. Allocates a master/slave fd pair,
 // writes on the slave, reads on the master, and checks terminal properties.
 // VM-only (needs /dev/pts): EXCLUDED from native parity batch.

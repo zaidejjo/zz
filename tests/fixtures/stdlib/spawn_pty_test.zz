@@ -1,3 +1,4 @@
+// features: imports, locals, match, option-result, print, std-process, string-literal, vm-only
 // E2E: std.process.spawn_pty runs a child inside a pseudo-terminal; the
 // parent reads the child's output from the master fd.
 // VM-only (needs /dev/pts + fork): EXCLUDED from native parity batch.

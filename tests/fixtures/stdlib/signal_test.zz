@@ -1,3 +1,4 @@
+// features: closures, imports, option-result, print, string-literal, vm-only
 // E2E: std.signal yield-point delivery. Install a handler, raise the
 // signal, then run_pending to invoke it at a yield point.
 // VM-only: EXCLUDED from native parity batch.
