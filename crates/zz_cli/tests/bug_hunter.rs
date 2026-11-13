@@ -79,11 +79,17 @@ fn run_both(src: &str) -> (i32, String, String, i32, String, String) {
     )
 }
 
-/// True when `ZZ_SKIP_NATIVE=1`: skip the `--native` leg (unsupported C
-/// backend — Windows CI; the epoll/fork AOT server and FFI link are
-/// POSIX/Linux-only). VM legs still run everywhere.
+/// True when `ZZ_SKIP_NATIVE=1` **or** the host is Windows: skip the
+/// `--native` leg (unsupported C backend — Windows CI; the epoll/fork AOT
+/// server and FFI link are POSIX/Linux-only). VM legs still run everywhere.
+///
+/// Mirrors `tests/support/mod.rs::native_unsupported` (`cfg!(windows) ||
+/// ZZ_SKIP_NATIVE`). Windows legs are declared `native: false` in ci.yml,
+/// but `ZZ_SKIP_NATIVE=1` is only set for some scopes (PR fast/full,
+/// merge unit), so `misc`/`full` would otherwise run native and fail to
+/// link float-formatting programs (exit 1120).
 fn native_skipped() -> bool {
-    std::env::var("ZZ_SKIP_NATIVE").is_ok()
+    cfg!(windows) || std::env::var("ZZ_SKIP_NATIVE").is_ok()
 }
 
 /// Process-wide unique suffix for temp dirs (atomic: tests run in parallel
