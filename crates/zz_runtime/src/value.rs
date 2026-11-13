@@ -579,7 +579,7 @@ pub fn snapshot_funcs(
         for (k, v) in flat {
             fresh.define(k, deep_clone_value(v.clone(), &mut seen));
         }
-        let new_env = EnvLink::Owned(Rc::new(RefCell::new(fresh)));
+        let new_env = fresh.freeze();
         out.insert(
             name.clone(),
             FuncValue {
@@ -863,7 +863,7 @@ fn deep_clone_value(v: Value, seen: &mut HashMap<usize, Value>) -> Value {
             for (name, val) in flat {
                 fresh.define(&name, deep_clone_value(val, seen));
             }
-            let new_env = EnvLink::Owned(Rc::new(RefCell::new(fresh)));
+            let new_env = fresh.freeze();
             let cloned = Value::Func(std::rc::Rc::new(FuncValue {
                 params: fv.params.clone(),
                 body: fv.body.clone(),
