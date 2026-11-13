@@ -5,7 +5,6 @@ use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::{TcpListener, TcpStream};
-use std::rc::Rc;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize},
     Arc, Condvar, Mutex,
@@ -381,18 +380,21 @@ pub enum Value {
     Weak(Box<std::sync::Weak<Value>>),
 }
 
-// SAFETY: `Value` is safe to send across threads when used with
-// point-in-time snapshots (see `snapshot_env_cow`): frozen scopes are
-// immutable and `Send + Sync` by construction. The compiler cannot verify
-// the owned-scope discipline structurally, but all cross-thread usage
-// operates on frozen-shared or freshly-detached chains.
+// SAFETY: `Value` is `Send` because all cross-thread usage (via
+// `task.spawn`) operates on snapshots with frozen envs
+// (`EnvLink::Frozen`). `FuncValue.env` may be `EnvLink::Owned`
+// (`Rc<RefCell<Env>>`, not `Send`) for same-thread closures, but spawn
+// paths (`zz_stdlib::natives::concurrency::spawn` and
+// `spawn_hook`) always call `env.freeze_arc()` before crossing thread
+// boundaries, so only `Frozen` envs are ever sent across threads.
+// The compiler cannot verify this structurally.
 unsafe impl Send for Value {}
 unsafe impl Sync for Value {}
-// SAFETY: `FuncValue` is safe to send across threads only when its env
-// is self-contained (see `snapshot_funcs`, the sole cross-thread path:
-// every captured env is flattened into a fresh, unshared copy before the
-// move). Never move a `FuncValue` whose env aliases another thread's
-// scope chain. Same discipline as `Send for Value` above.
+// SAFETY: `FuncValue` is safe to send across threads when its env is
+// `EnvLink::Frozen` (see `spawn` and `spawn_hook`, which always call
+// `env.freeze_arc()` before crossing thread boundaries). Same-thread
+// closures may use `EnvLink::Owned` for mutable capture and must never
+// be sent across threads.
 unsafe impl Send for FuncValue {}
 
 /// Flatten a captured environment into a self-contained `HashMap`.
@@ -625,7 +627,7 @@ pub fn detach_cached_funcs(cached: &HashMap<String, FuncValue>) -> HashMap<Strin
         for (k, v) in flat {
             fresh.define(&k, deep_clone_value(v, &mut seen));
         }
-        let new_env = EnvLink::Owned(Rc::new(RefCell::new(fresh)));
+        let new_env = fresh.freeze();
         out.insert(
             name.clone(),
             FuncValue {
@@ -1318,6 +1320,11 @@ pub struct NativeFunc {
 pub struct FuncValue {
     pub params: Vec<Param>,
     pub body: Expr,
+    /// Captured environment. For cross-thread spawning, this must be
+    /// `EnvLink::Frozen` (see `snapshot_funcs` and `deep_clone_value`).
+    /// Same-thread closures may use `EnvLink::Owned` for mutable capture.
+    /// The `unsafe impl Send for Value` is sound only because spawn
+    /// paths freeze envs before crossing thread boundaries.
     pub env: EnvLink,
     /// Pre-compiled bytecode body, when the function was defined through the
     /// Phase 6 compiler. `None` for tree-walker-created closures.
