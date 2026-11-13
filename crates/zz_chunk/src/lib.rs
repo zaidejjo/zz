@@ -4561,8 +4561,15 @@ impl<'a> Emitter<'a> {
                 // swept). Non-string keys are ignored by `zz_dict_set`
                 // exactly like HIR (checker-valid programs never do).
                 let m = 2 * (*n as usize);
+                let func_name = self
+                    .module
+                    .funcs
+                    .get(id.0 as usize)
+                    .and_then(|f| self.module.strings.get(f.name.0 as usize))
+                    .map(|s| s.as_str())
+                    .unwrap_or("?");
                 out.push_str(&format!(
-                    "    {{ zz_value _d = zz_dict_new_sized({n}); for (int _k = 0; _k < {n}; _k++) {{ zz_value _kk = st[sp-{m}+2*_k]; zz_value _vv = st[sp-{m}+2*_k+1]; int _de = 0; zz_index_set(&_d, _kk, _vv, &_de); zz_release(&_kk); }} sp -= {m}; st[sp++] = _d; }}\n"
+                    "    {{ zz_value _d = zz_dict_new_sized({n}); for (int _k = 0; _k < {n}; _k++) {{ zz_value _kk = st[sp-{m}+2*_k]; zz_value _vv = st[sp-{m}+2*_k+1]; int _de = 0; zz_index_set(&_d, _kk, _vv, &_de); zz_release(&_kk); if (_de) {{ zz_index_trap(_d, _kk, \"{func_name}\"); }} }} sp -= {m}; st[sp++] = _d; }}\n"
                 ));
             }
             Op::ArrayPush => {
