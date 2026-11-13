@@ -530,7 +530,7 @@ size_t zz_float_format_raw(double x, char *buf, size_t cap) ZZ_WEAK_IMPORT_FLOAT
 // Render `x` canonically: `*out_len` bytes at the returned pointer
 // (`stack`, or malloc'd `*heap` when the core reports more than fits).
 // Callers `free(*heap)` (`free(NULL)` is a no-op).
-static const char *zz_canonical_double(double x, char *stack, char **heap, size_t *out_len) {
+const char *zz_canonical_double(double x, char *stack, char **heap, size_t *out_len) {
 #if !ZZ_LINK_FLOAT
     (void)x;
     (void)stack;
@@ -1432,16 +1432,22 @@ zz_value zz_binop_cat(zz_value a, zz_value b) {
         size_t la = a.s->len, lb = b.s->len;
         size_t need = la + lb;
         zz_str *out;
+        // Aliasing (a.s == b.s, e.g. `s = s + s`) means both operands are
+        // the same allocation. The in-place path would memcpy overlapping
+        // memory (UB), and the copy path would free the shared buffer
+        // twice if both releases run. Detect it up front: read from `a`
+        // for both halves and release `a` exactly once.
+        bool aliased = (a.s == b.s);
         // In-place fast path: a is uniquely owned (refs==1) and is NOT
         // interned (we must never mutate an interned singleton) and has
         // capacity for the result. SSO strings (cap==0) are reusable when
-        // the result still fits inline.
+        // the result still fits inline. Only valid for distinct operands.
         // Consume semantics: the caller transfers ownership of both inputs.
         // Generated code only ever passes owned temporaries (zz_clone bumps,
         // call results, literals) that are never read again, so releasing
         // what we don't reuse keeps `s = s + x` chains leak-free. Releases
         // are no-ops for interned singletons and arena strings (refs==0).
-        if (a.s->refs == 1 && !a.s->interned
+        if (!aliased && a.s->refs == 1 && !a.s->interned
             && (a.s->cap >= need || (a.s->cap == 0 && need <= ZZ_SSO_MAX))) {
             out = a.s;
             memcpy(zz_str_ptr(out) + la, zz_str_ptr(b.s), lb);
@@ -1456,9 +1462,13 @@ zz_value zz_binop_cat(zz_value a, zz_value b) {
         }
         out = str_alloc(need);
         memcpy(zz_str_ptr(out), zz_str_ptr(a.s), la);
-        memcpy(zz_str_ptr(out) + la, zz_str_ptr(b.s), lb);
+        if (aliased) {
+            memcpy(zz_str_ptr(out) + la, zz_str_ptr(a.s), lb);
+        } else {
+            memcpy(zz_str_ptr(out) + la, zz_str_ptr(b.s), lb);
+        }
         zz_release(&a);
-        zz_release(&b);
+        if (!aliased) zz_release(&b);
         zz_value v;
         v.tag = ZZ_STR;
         v.s = out;

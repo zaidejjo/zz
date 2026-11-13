@@ -216,6 +216,13 @@ void zz_print_value_display(FILE *out, const zz_value *v);
 char *zz_value_to_string(const zz_value *v);  // malloc'd (debug: keeps wrappers)
 char *zz_value_to_display_string(const zz_value *v);  // malloc'd (display: unwraps Option)
 char *zz_to_str_fmt(zz_value v, const char *spec);  // malloc'd
+// Canonical float rendering (shortest round-trip, Rust Display semantics).
+// `*out_len` bytes at the returned pointer (stack or malloc'd *heap;
+// caller frees *heap). Gated on ZZ_LINK_FLOAT.
+const char *zz_canonical_double(double x, char *stack, char **heap, size_t *out_len);
+// Stack covers every f64 Display rendering (longest observed: 5e-324
+// at 326 bytes).
+#define ZZ_FLOAT_STACK 1024
 
 #ifdef __cplusplus
 }

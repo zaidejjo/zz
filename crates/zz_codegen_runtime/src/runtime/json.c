@@ -153,7 +153,11 @@ static int json_parse_str(json_parser *p, zz_value *out) {
     *out = (zz_value){ZZ_STR, {.s = str}};
     return 0;
 fail:
-    free(str);
+    // str_alloc always committed a header (heap or SSO). Free the heap
+    // buffer when one was allocated, then recycle the header. Without this
+    // every malformed JSON string leaks its heap payload.
+    if (str->cap > 0) free(str->heap);
+    zz_str_header_free(str);
     return -1;
 }
 
@@ -299,13 +303,15 @@ void json_serialize(SB *sb, zz_value v) {
     case ZZ_INT:
         { char buf[32]; int n = snprintf(buf, sizeof buf, "%lld", (long long)v.i); sb_str(sb, buf, (size_t)n); }
         break;
-    case ZZ_FLOAT:
-        if (v.f == (double)(int64_t)v.f) {
-            char buf[32]; int n = snprintf(buf, sizeof buf, "%.0f", v.f); sb_str(sb, buf, (size_t)n);
-        } else {
-            char buf[64]; int n = snprintf(buf, sizeof buf, "%.15g", v.f); sb_str(sb, buf, (size_t)n);
-        }
+    case ZZ_FLOAT: {
+        char stack[ZZ_FLOAT_STACK];
+        char *heap = NULL;
+        size_t n = 0;
+        const char *s = zz_canonical_double(v.f, stack, &heap, &n);
+        sb_str(sb, s, n);
+        free(heap);
         break;
+    }
     case ZZ_STR: {
         sb_str(sb, "\"", 1);
         json_append_str_sb(sb, zz_str_cptr(v.s), v.s->len);
@@ -630,17 +636,15 @@ static void json_pretty_print(SB *sb, zz_value v, int indent) {
         sb_str(sb, buf, (size_t)n);
         break;
     }
-    case ZZ_FLOAT:
-        if (v.f == (double)(int64_t)v.f) {
-            char buf[32];
-            int n = snprintf(buf, sizeof buf, "%.0f", v.f);
-            sb_str(sb, buf, (size_t)n);
-        } else {
-            char buf[64];
-            int n = snprintf(buf, sizeof buf, "%.15g", v.f);
-            sb_str(sb, buf, (size_t)n);
-        }
+    case ZZ_FLOAT: {
+        char stack[ZZ_FLOAT_STACK];
+        char *heap = NULL;
+        size_t n = 0;
+        const char *s = zz_canonical_double(v.f, stack, &heap, &n);
+        sb_str(sb, s, n);
+        free(heap);
         break;
+    }
     case ZZ_STR:
         sb_str(sb, "\"", 1);
         json_append_str_sb(sb, zz_str_cptr(v.s), v.s->len);
@@ -740,6 +744,7 @@ zz_value zz_json_deep_get(zz_value j, zz_value path, int *err) {
                 current_owned = 1;
             } else {
                 zz_release(&seg_key);
+                if (current_owned) zz_release(&current);
                 char buf[192];
                 int n = snprintf(buf, sizeof buf, "key `%s` not found in path", seg_buf);
                 return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
@@ -751,12 +756,14 @@ zz_value zz_json_deep_get(zz_value j, zz_value path, int *err) {
             char *endptr;
             long idx = strtol(seg_buf, &endptr, 10);
             if (endptr != seg_buf + seg_len) {
+                if (current_owned) zz_release(&current);
                 char buf[192];
                 int n = snprintf(buf, sizeof buf,
                                  "expected numeric index for array in path, got `%s`", seg_buf);
                 return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
             }
             if (idx < 0 || (size_t)idx >= current.arr->len) {
+                if (current_owned) zz_release(&current);
                 char buf[192];
                 int n = snprintf(buf, sizeof buf, "index %ld out of bounds in path", idx);
                 return zz_variant_err(zz_str_owned(copy_cstr(buf, (size_t)n)));
@@ -766,6 +773,7 @@ zz_value zz_json_deep_get(zz_value j, zz_value path, int *err) {
             break;
         }
         default: {
+            if (current_owned) zz_release(&current);
             char buf[192];
             int n = snprintf(buf, sizeof buf, "cannot traverse into `%s` in path",
                              json_type_name_c(current));

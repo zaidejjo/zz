@@ -1,0 +1,31 @@
+// features: dicts, indexing, locals, print, std-str, string-literal
+// E2E: C runtime memory-safety audit
+//
+// Regression coverage:
+//   #1 zz_assign must retain ZZ_STR (else inner-local release frees an
+//      aliased heap string -> use-after-free).
+//   #2 zz_index_set/zz_dict_set must release ZZ_STR items consistently
+//      with zz_assign's retain (else the store aliases and frees).
+//   #5 zz_binop_cat must not double-free/overlap on self-concat `s + s`.
+import std.str
+
+// #1/#2: heap string aliased across an inner scope. The inner local's
+// release at block end must NOT free the string `base` still aliases.
+base := str.to_upper("hello")
+{
+    alias := base
+    println(alias)
+}
+{
+    d := {}
+    d["k"] = base
+    println(d["k"])
+}
+println(base)
+
+// #5: self-concat aliasing (both operands are the same owned string).
+s := "ab"
+s = s + s
+println(s)
+
+println("c_runtime_audit_ok")

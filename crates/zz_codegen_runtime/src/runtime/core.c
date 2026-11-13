@@ -120,24 +120,61 @@ int zz_values_equal(zz_value a, zz_value b) {
     }
     case ZZ_DICT: {
         zz_dict *da = a.dict, *db = b.dict;
-        if (!da || !db)
-            return da == db;
-        if (da->len != db->len)
-            return 0;
+        if (!da || !db) return da == db;
+        if (da->len != db->len) return 0;
+        if (da->len == 0) return 1;
+        // Build a hash index for db's entries so each da key lookup is O(1)
+        // instead of O(n) — the old nested scan made dict == O(n²). Falls
+        // back to linear scan when any key is non-hashable or alloc fails.
+        size_t cap = 16;
+        while (cap - (cap >> 2) < da->len) cap <<= 1;
+        size_t *idx = (size_t *)malloc(cap * sizeof(size_t));
+        if (!idx) goto dict_linear;
+        memset(idx, 0, cap * sizeof(size_t));
+        size_t mask = cap - 1;
+        int ok = 1;
+        for (size_t i = 0; i < db->len && ok; i++) {
+            size_t h;
+            if (!zz_dict_key_hash(db->entries[i].key, &h)) { ok = 0; break; }
+            size_t j = h & mask;
+            while (idx[j] != 0) j = (j + 1) & mask;
+            idx[j] = i + 1;
+        }
+        if (ok) {
+            for (size_t i = 0; i < da->len; i++) {
+                zz_dict_entry *e = &da->entries[i];
+                size_t h;
+                if (!zz_dict_key_hash(e->key, &h)) { ok = 0; break; }
+                size_t j = h & mask;
+                int found = 0;
+                while (idx[j] != 0) {
+                    zz_dict_entry *f = &db->entries[idx[j] - 1];
+                    if (zz_key_eq(e->key, f->key)) {
+                        if (!zz_values_equal(e->val, f->val)) { free(idx); return 0; }
+                        found = 1;
+                        break;
+                    }
+                    j = (j + 1) & mask;
+                }
+                if (!found) { free(idx); return 0; }
+            }
+            free(idx);
+            if (ok) return 1;
+        }
+        free(idx);
+    dict_linear:
         for (size_t i = 0; i < da->len; i++) {
             zz_dict_entry *e = &da->entries[i];
             int found = 0;
             for (size_t j = 0; j < db->len; j++) {
                 zz_dict_entry *f = &db->entries[j];
                 if (zz_key_eq(e->key, f->key)) {
-                    if (!zz_values_equal(e->val, f->val))
-                        return 0;
+                    if (!zz_values_equal(e->val, f->val)) return 0;
                     found = 1;
                     break;
                 }
             }
-            if (!found)
-                return 0;
+            if (!found) return 0;
         }
         return 1;
     }
@@ -1310,24 +1347,44 @@ zz_value zz_time_sleep_ms(zz_value ms, int *err) {
 
 // Pointer memo so cyclic values (arrays/dicts/closures referencing
 // themselves) terminate and shared subgraphs stay shared within one copy.
+// Open-addressing hash table keyed by source pointer: expected O(1) get/put
+// instead of the old O(n) linear scan. NULL src marks an empty slot (callers
+// never memoize NULL — they guard before calling). Small memos start in a
+// caller-provided inline store (spawn closures typically memoize 1–2
+// entries); growth promotes to a heap table.
 typedef struct {
     const void *src;
     zz_value dst;
 } zz_dup_entry;
 
 typedef struct {
-    zz_dup_entry *items;
-    size_t len;
-    size_t cap;
-    int owned; // 1 once `items` is heap (must be freed by the owner)
+    zz_dup_entry *items;   // hash table slots (power-of-two cap, open addressing)
+    size_t len;            // number of occupied slots
+    size_t cap;            // table capacity
+    int owned;             // 1 once items is heap (must be freed by the owner)
 } zz_dup_memo;
 
+// FNV-1a hash of a pointer value.
+static uint64_t zz_dup_ptr_hash(const void *p) {
+    uint64_t h = 1469598103934665603ULL;
+    const unsigned char *b = (const unsigned char *)&p;
+    for (size_t i = 0; i < sizeof(p); i++) {
+        h ^= b[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
 static int zz_dup_memo_get(zz_dup_memo *m, const void *src, zz_value *out) {
-    for (size_t i = 0; i < m->len; i++) {
+    if (m->cap == 0) return 0;
+    size_t mask = m->cap - 1;
+    size_t i = (size_t)zz_dup_ptr_hash(src) & mask;
+    while (m->items[i].src != NULL) {
         if (m->items[i].src == src) {
             *out = m->items[i].dst;
             return 1;
         }
+        i = (i + 1) & mask;
     }
     return 0;
 }
@@ -1338,19 +1395,34 @@ static int zz_dup_memo_get(zz_dup_memo *m, const void *src, zz_value *out) {
 #define ZZ_DUP_INLINE_CAP 8
 
 static void zz_dup_memo_put(zz_dup_memo *m, const void *src, zz_value dst) {
-    if (m->len == m->cap) {
-        size_t nc = m->cap * 2;
-        zz_dup_entry *nb =
-            (zz_dup_entry *)malloc(nc * sizeof(zz_dup_entry));
+    // Grow when load factor would exceed 3/4.
+    if (m->cap == 0 || (m->len + 1) * 4 > m->cap * 3) {
+        size_t nc = m->cap == 0 ? ZZ_DUP_INLINE_CAP : m->cap * 2;
+        zz_dup_entry *nb = (zz_dup_entry *)calloc(nc, sizeof(zz_dup_entry));
         if (!nb) return; // memo is best-effort dedup; the copy stays correct
-        for (size_t i = 0; i < m->len; i++) nb[i] = m->items[i];
+        size_t nmask = nc - 1;
+        for (size_t i = 0; i < m->cap; i++) {
+            if (m->items[i].src == NULL) continue;
+            size_t j = (size_t)zz_dup_ptr_hash(m->items[i].src) & nmask;
+            while (nb[j].src != NULL) j = (j + 1) & nmask;
+            nb[j] = m->items[i];
+        }
         if (m->owned) free(m->items);
         m->items = nb;
         m->cap = nc;
         m->owned = 1;
     }
-    m->items[m->len].src = src;
-    m->items[m->len].dst = dst;
+    size_t mask = m->cap - 1;
+    size_t i = (size_t)zz_dup_ptr_hash(src) & mask;
+    while (m->items[i].src != NULL) {
+        if (m->items[i].src == src) {
+            m->items[i].dst = dst; // update existing entry
+            return;
+        }
+        i = (i + 1) & mask;
+    }
+    m->items[i].src = src;
+    m->items[i].dst = dst;
     m->len++;
 }
 
@@ -3514,6 +3586,10 @@ static int tcp_resolve(const char *hostport, struct sockaddr_in *out) {
 
 static zz_tcp *tcp_alloc(int fd) {
     zz_tcp *t = (zz_tcp *)malloc(sizeof(zz_tcp));
+    if (!t) {
+        fprintf(stderr, "zz: out of memory (tcp)\n");
+        exit(1);
+    }
     t->fd = fd;
     t->closed = 0;
     return t;
