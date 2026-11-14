@@ -13228,8 +13228,13 @@ zz_value zz_encoding_url_decode(zz_value s, int *err) {
         if (src[i] == '%' && i + 2 < len) {
             signed char hi = hex_val[(unsigned char)src[i + 1]];
             signed char lo = hex_val[(unsigned char)src[i + 2]];
-            if (hi < 0 || lo < 0)
-                return zz_variant_err(zz_str_static("URL decode error: invalid escape"));
+            if (hi < 0 || lo < 0) {
+                // Lenient like the VM's urlencoding: an invalid %XX is emitted
+                // as a literal `%` rather than failing (e.g. url_decode("%zz")
+                // must succeed, matching the VM).
+                zz_str_ptr(out)[pos++] = '%';
+                continue;
+            }
             zz_str_ptr(out)[pos++] = (char)((hi << 4) | lo);
             i += 2;
         } else if (src[i] == '+') {
@@ -13286,11 +13291,16 @@ zz_value zz_encoding_base64_decode(zz_value s, int *err) {
     // or the last group may be shorter (2 or 3 chars for 1 or 2 output bytes).
     if (len % 4 != 0 && len % 4 != 2 && len % 4 != 3)
         return zz_variant_err(zz_str_static("base64 decode error: Invalid padding"));
-    // Validate characters.
+    // Validate characters. Mirror the base64 crate's error:
+    // `base64 decode error: Invalid symbol <byte>, offset <offset>.`
     for (size_t i = 0; i < len; i++) {
         unsigned char c = (unsigned char)src[i];
-        if (tbl[c] == 0 && c != 'A')
-            return zz_variant_err(zz_str_static("base64 decode error: invalid character"));
+        if (tbl[c] == 0 && c != 'A') {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "base64 decode error: Invalid symbol %u, offset %zu.",
+                     c, i);
+            return zz_variant_err(zz_str_new(msg, strlen(msg)));
+        }
     }
     size_t out_len = len * 3 / 4;
     zz_str *out = str_alloc(out_len);

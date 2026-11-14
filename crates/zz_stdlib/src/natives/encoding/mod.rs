@@ -50,7 +50,7 @@ fn hex_decode_fast(encoded: &str) -> Result<Vec<u8>, String> {
         let hi = HEX_VAL[bytes[i] as usize];
         let lo = HEX_VAL[bytes[i + 1] as usize];
         if hi < 0 || lo < 0 {
-            return Err("hex decode error: invalid digit found in string".to_string());
+            return Err("invalid digit found in string".to_string());
         }
         out.push((hi as u8) << 4 | (lo as u8));
         i += 2;

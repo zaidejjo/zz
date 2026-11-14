@@ -458,7 +458,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // (issue #215) fixed it — sweep reports FIXED.
 
         // --- Output differences (native runs but output differs) ---
-        "encoding_test" => Some("native: different error message format for bad base64/hex/url"),
         "math_extended_test" => Some("native: float precision + error message differences"),
         "extension_methods" => {
             Some("DEFERRED to HIR->IR lowering: extension-method call results missing + spurious conflict diagnostics on stderr")
@@ -1847,7 +1846,7 @@ parity_strict!(
     "stdlib",
     "json_extended_test.zz"
 );
-parity_known_failure!(parity_stdlib_encoding_test, "stdlib", "encoding_test.zz");
+parity_strict!(parity_stdlib_encoding_test, "stdlib", "encoding_test.zz");
 parity_strict!(parity_stdlib_filesystem, "stdlib", "filesystem.zz");
 parity_strict!(parity_stdlib_fs_test, "stdlib", "fs_test.zz");
 parity_strict!(
