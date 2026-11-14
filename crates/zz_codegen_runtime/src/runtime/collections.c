@@ -983,10 +983,17 @@ static int zz_embedded_match(const char *fname, const zz_value *slot) {
 
 // Detach one owner's interest from a shared struct header: when
 // `o->refs > 1`, move this value onto a private header whose slots hold
-// fresh shares (`zz_clone` bumps each field buffer exactly once, making
-// the previously undercounted clone-shares exact). The old header keeps
-// its remaining owners untouched. Uniquely-owned headers (refs == 1)
-// are returned as-is; non-objects are ignored.
+// fresh shares. The old header keeps its remaining owners untouched.
+// Uniquely-owned headers (refs == 1) are returned as-is; non-objects
+// are ignored.
+//
+// Strategy: block-copy all field slots with memcpy (one fast, branchless
+// memory operation instead of per-field zz_clone() calls that each pay
+// switch-statement + function-call overhead), then bump refcounts only
+// for heap-object fields in a second pass. Field names are interned
+// static strings (no bump needed) and scalar values copy trivially, so
+// only heap-object tags (str, array, dict, object, func, range, option,
+// result, json, db, weak) need atomic refcount increments.
 static void zz_object_detach(zz_value *obj) {
     if (!obj || obj->tag != ZZ_OBJECT || !obj->obj) return;
     zz_object *o = obj->obj;
@@ -997,8 +1004,68 @@ static void zz_object_detach(zz_value *obj) {
     fresh->refs = 1;
     fresh->type_name = o->type_name;
     fresh->len = o->len;
+    // Block-copy every field slot (names + values) at once.
+    memcpy(fresh->fields, o->fields, o->len * 2 * sizeof(zz_value));
+    // Bump refcounts for heap-object fields so the new header owns its
+    // shares. Scalars and interned strings need no bump.
     for (size_t i = 0; i < o->len * 2; i++) {
-        fresh->fields[i] = zz_clone(o->fields[i]);
+        zz_value f = fresh->fields[i];
+        switch (f.tag) {
+        case ZZ_STR:
+            if (f.s && !f.s->interned && f.s->refs > 0) {
+                if (zz_arc_relaxed_enabled()) f.s->refs += 1;
+                else __atomic_add_fetch(&f.s->refs, 1, __ATOMIC_RELAXED);
+            }
+            break;
+        case ZZ_MUTABLE_STR:
+            // Mutable strings are never shared: replace with an immutable
+            // copy so co-owners of the old header cannot observe mutation
+            // through the new header's field slot.
+            if (f.s && !f.s->interned) {
+                fresh->fields[i] = zz_str_new(zz_str_ptr(f.s), f.s->len);
+            }
+            break;
+        case ZZ_ARRAY:
+            zz_retain_array(fresh->fields[i].arr);
+            break;
+        case ZZ_BYTES:
+            zz_retain_bytes(fresh->fields[i].bytes);
+            break;
+        case ZZ_DICT:
+            zz_retain_dict(fresh->fields[i].dict);
+            break;
+        case ZZ_FUNC:
+            zz_retain_func(fresh->fields[i].fn);
+            break;
+        case ZZ_OBJECT:
+            zz_retain_object(fresh->fields[i].obj);
+            break;
+        case ZZ_RANGE:
+            if (fresh->fields[i].range) {
+                if (zz_arc_relaxed_enabled()) fresh->fields[i].range->refs += 1;
+                else __atomic_add_fetch(&fresh->fields[i].range->refs, 1,
+                                         __ATOMIC_RELAXED);
+            }
+            break;
+        case ZZ_OPTION_SOME:
+        case ZZ_RESULT_OK:
+        case ZZ_RESULT_ERR:
+        case ZZ_JSON:
+            zz_vbox_retain(fresh->fields[i].payload);
+            break;
+        case ZZ_DB:
+            if (fresh->fields[i].db) zz_db_retain_handle(fresh->fields[i].db);
+            break;
+        case ZZ_WEAK:
+            if (fresh->fields[i].weak) {
+                if (zz_arc_relaxed_enabled()) fresh->fields[i].weak->weak += 1;
+                else __atomic_add_fetch(&fresh->fields[i].weak->weak, 1,
+                                         __ATOMIC_RELAXED);
+            }
+            break;
+        default:
+            break;
+        }
     }
     o->refs--;
     obj->obj = fresh;
