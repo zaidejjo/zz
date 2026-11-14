@@ -1000,7 +1000,9 @@ impl Interp {
         let prefix = format!("{key}.convert_to_");
         let mut hits: Vec<(String, Value)> = Vec::new();
         // Bare (same-module) keys first, then namespaced cross-module keys.
-        for (name, fv) in &self.funcs.clone() {
+        // Iterate by ref: cloning the whole funcs map per error conversion is
+        // O(F) memory + time; a ref iteration is O(1) extra space.
+        for (name, fv) in &self.funcs {
             if name.starts_with(&prefix) {
                 hits.push((name.clone(), Value::Func(std::rc::Rc::clone(fv))));
             }
@@ -1008,7 +1010,7 @@ impl Interp {
         if hits.is_empty() {
             // Cross-module structs register as `ns.Type.convert_to_X`.
             let suffix = format!(".{prefix}");
-            for (name, fv) in &self.funcs.clone() {
+            for (name, fv) in &self.funcs {
                 if name.contains(&suffix)
                     || name
                         .split('.')

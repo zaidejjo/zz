@@ -780,11 +780,7 @@ fn check_program_impl(
                                 "conversion method must declare an explicit return type",
                                 method.span(),
                             ));
-                        } else if let Some(prev) = checker
-                            .convert_impls
-                            .iter()
-                            .find(|c| c.from_name == type_key)
-                        {
+                        } else if let Some(prev) = checker.convert_impls.get(&type_key) {
                             // V1: one conversion per source type (covers the
                             // spec's same-pair ambiguity and keeps runtime
                             // single-candidate dispatch sound).
@@ -800,14 +796,17 @@ fn check_program_impl(
                                 prev.span,
                             ));
                         } else {
-                            checker.convert_impls.push(ConvertImpl {
-                                from: self_ty.clone(),
-                                from_name: type_key.clone(),
-                                to: sig_ret.clone(),
-                                to_name: to_name.to_string(),
-                                func_name: full_name.clone(),
-                                span: method.span(),
-                            });
+                            checker.convert_impls.insert(
+                                type_key.clone(),
+                                ConvertImpl {
+                                    from: self_ty.clone(),
+                                    from_name: type_key.clone(),
+                                    to: sig_ret.clone(),
+                                    to_name: to_name.to_string(),
+                                    func_name: full_name.clone(),
+                                    span: method.span(),
+                                },
+                            );
                         }
                     }
                     if let Some(prev) = seen.insert(full_name.clone(), method.span()) {
@@ -1143,7 +1142,7 @@ fn check_program_impl(
         let func_name: Option<String> = match impl_span {
             None => None,
             Some(ispan) => {
-                if let Some(c) = checker.convert_impls.iter().find(|c| c.span == *ispan) {
+                if let Some(c) = checker.convert_impls.values().find(|c| c.span == *ispan) {
                     Some(c.func_name.clone())
                 } else if let Some(((tkey, mname), _)) = checker
                     .ext_methods

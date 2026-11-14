@@ -786,6 +786,13 @@ zz_value zz_iter_map(zz_value items, zz_value f, int *err) {
     zz_value arr = zz_iter_items(items);
     zz_value out = zz_array_new();
     if (!fn) return out;
+    // Pre-size to input length: avoids log(n) realloc+copy churn on growth
+    // (each push may realloc the items buffer). Output length == input
+    // length for map, so reserve exactly once up front.
+    {
+        int _err = 0;
+        zz_array_reserve(out, arr.arr->len, &_err);
+    }
     // Sync-call hygiene (B3): callbacks run outside the trampoline, so a
     // stale task frame would corrupt the owning task's resume state.
     // Green closures see NULL and take the stack-frame + thread-park path.
@@ -810,6 +817,12 @@ zz_value zz_iter_filter(zz_value items, zz_value f, int *err) {
     zz_value arr = zz_iter_items(items);
     zz_value out = zz_array_new();
     if (!fn) return out;
+    // Pre-size to input length (worst case every element passes). Avoids
+    // log(n) realloc+copy churn on growth.
+    {
+        int _err = 0;
+        zz_array_reserve(out, arr.arr->len, &_err);
+    }
     // Sync-call hygiene (B3): see zz_iter_map.
     zz_task_frame *saved_fr = zz_green_frame();
     zz_green_frame_set(NULL);
@@ -830,6 +843,10 @@ zz_value zz_iter_enumerate(zz_value items, int *err) {
     (void)err;
     zz_value arr = zz_iter_items(items);
     zz_value out = zz_array_new();
+    {
+        int _err = 0;
+        zz_array_reserve(out, arr.arr->len, &_err);
+    }
     for (size_t i = 0; i < arr.arr->len; i++) {
         zz_value pair = zz_tuple((zz_value){ZZ_INT, {.i = (int64_t)i}}, arr.arr->items[i]);
         zz_array_push(out.arr, pair);
@@ -845,6 +862,10 @@ zz_value zz_iter_zip(zz_value a, zz_value b, int *err) {
     zz_value br = zz_iter_items(b);
     zz_value out = zz_array_new();
     size_t n = ar.arr->len < br.arr->len ? ar.arr->len : br.arr->len;
+    {
+        int _err = 0;
+        zz_array_reserve(out, n, &_err);
+    }
     for (size_t i = 0; i < n; i++) {
         zz_value pair = zz_tuple(ar.arr->items[i], br.arr->items[i]);
         zz_array_push(out.arr, pair);
@@ -962,10 +983,17 @@ static int zz_embedded_match(const char *fname, const zz_value *slot) {
 
 // Detach one owner's interest from a shared struct header: when
 // `o->refs > 1`, move this value onto a private header whose slots hold
-// fresh shares (`zz_clone` bumps each field buffer exactly once, making
-// the previously undercounted clone-shares exact). The old header keeps
-// its remaining owners untouched. Uniquely-owned headers (refs == 1)
-// are returned as-is; non-objects are ignored.
+// fresh shares. The old header keeps its remaining owners untouched.
+// Uniquely-owned headers (refs == 1) are returned as-is; non-objects
+// are ignored.
+//
+// Strategy: block-copy all field slots with memcpy (one fast, branchless
+// memory operation instead of per-field zz_clone() calls that each pay
+// switch-statement + function-call overhead), then bump refcounts only
+// for heap-object fields in a second pass. Field names are interned
+// static strings (no bump needed) and scalar values copy trivially, so
+// only heap-object tags (str, array, dict, object, func, range, option,
+// result, json, db, weak) need atomic refcount increments.
 static void zz_object_detach(zz_value *obj) {
     if (!obj || obj->tag != ZZ_OBJECT || !obj->obj) return;
     zz_object *o = obj->obj;
@@ -976,8 +1004,68 @@ static void zz_object_detach(zz_value *obj) {
     fresh->refs = 1;
     fresh->type_name = o->type_name;
     fresh->len = o->len;
+    // Block-copy every field slot (names + values) at once.
+    memcpy(fresh->fields, o->fields, o->len * 2 * sizeof(zz_value));
+    // Bump refcounts for heap-object fields so the new header owns its
+    // shares. Scalars and interned strings need no bump.
     for (size_t i = 0; i < o->len * 2; i++) {
-        fresh->fields[i] = zz_clone(o->fields[i]);
+        zz_value f = fresh->fields[i];
+        switch (f.tag) {
+        case ZZ_STR:
+            if (f.s && !f.s->interned && f.s->refs > 0) {
+                if (zz_arc_relaxed_enabled()) f.s->refs += 1;
+                else __atomic_add_fetch(&f.s->refs, 1, __ATOMIC_RELAXED);
+            }
+            break;
+        case ZZ_MUTABLE_STR:
+            // Mutable strings are never shared: replace with an immutable
+            // copy so co-owners of the old header cannot observe mutation
+            // through the new header's field slot.
+            if (f.s && !f.s->interned) {
+                fresh->fields[i] = zz_str_new(zz_str_ptr(f.s), f.s->len);
+            }
+            break;
+        case ZZ_ARRAY:
+            zz_retain_array(fresh->fields[i].arr);
+            break;
+        case ZZ_BYTES:
+            zz_retain_bytes(fresh->fields[i].bytes);
+            break;
+        case ZZ_DICT:
+            zz_retain_dict(fresh->fields[i].dict);
+            break;
+        case ZZ_FUNC:
+            zz_retain_func(fresh->fields[i].fn);
+            break;
+        case ZZ_OBJECT:
+            zz_retain_object(fresh->fields[i].obj);
+            break;
+        case ZZ_RANGE:
+            if (fresh->fields[i].range) {
+                if (zz_arc_relaxed_enabled()) fresh->fields[i].range->refs += 1;
+                else __atomic_add_fetch(&fresh->fields[i].range->refs, 1,
+                                         __ATOMIC_RELAXED);
+            }
+            break;
+        case ZZ_OPTION_SOME:
+        case ZZ_RESULT_OK:
+        case ZZ_RESULT_ERR:
+        case ZZ_JSON:
+            zz_vbox_retain(fresh->fields[i].payload);
+            break;
+        case ZZ_DB:
+            if (fresh->fields[i].db) zz_db_retain_handle(fresh->fields[i].db);
+            break;
+        case ZZ_WEAK:
+            if (fresh->fields[i].weak) {
+                if (zz_arc_relaxed_enabled()) fresh->fields[i].weak->weak += 1;
+                else __atomic_add_fetch(&fresh->fields[i].weak->weak, 1,
+                                         __ATOMIC_RELAXED);
+            }
+            break;
+        default:
+            break;
+        }
     }
     o->refs--;
     obj->obj = fresh;
@@ -993,15 +1081,47 @@ static int zz_object_set_depth(zz_value *obj, const char *name, zz_value val, in
     // detaching, so embedded children detach level by level too.
     zz_object_detach(obj);
     zz_object *o = obj->obj;
-    for (size_t i = 0; i < o->len; i++) {
-        zz_value *fname = &o->fields[i * 2];
-        if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), name) == 0) {
-            zz_value *slot = &o->fields[i * 2 + 1];
-            zz_release(slot);
-            // Share convention (was zz_clone): heal arena-owned values to heap.
-            *slot = zz_clone_for_store(val);
-            return 1;
+    // Single-entry cache for repeated field writes on the same type, mirroring
+    // the getter's cache (zz_object_get_depth). `name` and `o->type_name` are
+    // pointer-stable C strings, so pointer comparison is valid. Hot paths like
+    // `rows[i].val = x` hit the cache on every write after the first, turning
+    // O(fields)·strcmp into O(1). Thread-local: per-thread statics, no cross-
+    // thread race; separate statics from the getter so each keeps its own entry.
+    static __thread const char *set_cached_type = NULL;
+    static __thread const char *set_cached_name = NULL;
+    static __thread size_t set_cached_index = 0;
+    static __thread int set_cached_found = 0;
+    int direct_found = 0;
+    size_t direct_index = 0;
+    if (o->type_name == set_cached_type && name == set_cached_name) {
+        direct_found = set_cached_found;
+        direct_index = set_cached_index;
+    } else {
+        for (size_t i = 0; i < o->len; i++) {
+            zz_value *fname = &o->fields[i * 2];
+            if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), name) == 0) {
+                set_cached_type = o->type_name;
+                set_cached_name = name;
+                set_cached_index = i;
+                set_cached_found = 1;
+                direct_found = 1;
+                direct_index = i;
+                break;
+            }
         }
+        if (!direct_found) {
+            set_cached_type = o->type_name;
+            set_cached_name = name;
+            set_cached_index = 0;
+            set_cached_found = 0;
+        }
+    }
+    if (direct_found) {
+        zz_value *slot = &o->fields[direct_index * 2 + 1];
+        zz_release(slot);
+        // Share convention (was zz_clone): heal arena-owned values to heap.
+        *slot = zz_clone_for_store(val);
+        return 1;
     }
     // Embedded promotion: `u.id = 1` writes `u.Base.id` transitively.
     if (depth < ZZ_EMBED_MAX_DEPTH) {

@@ -549,10 +549,21 @@ fn find_locked<'a>(
     lock: &'a zz_pm::lock::Lockfile,
     name: &str,
 ) -> Option<&'a zz_pm::lock::LockedDep> {
-    lock.deps.iter().find(|d| d.name == name).or_else(|| {
-        let want = normalize_pkg(name);
-        lock.deps.iter().find(|d| normalize_pkg(&d.name) == want)
-    })
+    // Single pass instead of up to two: exact name first, then
+    // `-`/`_`-normalized match (#486). Exact matches win immediately;
+    // normalized matches are recorded but only returned if no exact match.
+    // `normalize_pkg(name)` is computed once instead of once per dep.
+    let want = normalize_pkg(name);
+    let mut normalized: Option<&'a zz_pm::lock::LockedDep> = None;
+    for d in &lock.deps {
+        if d.name == name {
+            return Some(d);
+        }
+        if normalized.is_none() && normalize_pkg(&d.name) == want {
+            normalized = Some(d);
+        }
+    }
+    normalized
 }
 
 /// Find a manifest dependency under `-`/`_` agreement (same rule as

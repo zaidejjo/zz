@@ -204,12 +204,10 @@ fn read_until_delim<R: std::io::Read>(
     Ok(Some(buf))
 }
 
-/// Locate `needle` in `haystack` (naive scan; heads are small).
+/// Locate `needle` in `haystack` using memchr's Two-Way algorithm
+/// (O(n) worst case instead of O(n×m) naive scan).
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return None;
-    }
-    (0..=haystack.len() - needle.len()).find(|&i| &haystack[i..i + needle.len()] == needle)
+    memchr::memmem::find(haystack, needle)
 }
 
 /// Read exactly `total` body bytes: `buffered` bytes are already in hand,
@@ -1621,7 +1619,7 @@ fn allowed_methods(routes: &[(String, String, Value)], path: &str) -> String {
             continue;
         }
         let hit = p == path
-            || router::compile_pattern(p)
+            || router::compile_pattern_cached(p)
                 .and_then(|c| router::match_pattern(&c, path))
                 .is_some();
         if hit {

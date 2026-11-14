@@ -6,6 +6,32 @@
 //!
 //! Matching precedence: exact > param > wildcard. First-registered wins ties.
 //! Method mismatches are reported so dispatch can return 405 instead of 404.
+//!
+//! Patterns are compiled once per thread and memoized (`compile_pattern_cached`)
+//! so dispatch / 405 handling does not recompile every route on every request.
+
+use std::collections::HashMap;
+
+thread_local! {
+    /// Memoized compiled patterns, keyed by pattern string. Avoids recompiling
+    /// the same route pattern on every request / every 405 (#2, #7).
+    static PATTERN_CACHE: std::cell::RefCell<HashMap<String, RoutePattern>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Compile a route pattern, memoizing the result so the same pattern string is
+/// compiled once per thread instead of once per request.
+pub(crate) fn compile_pattern_cached(pattern: &str) -> Option<RoutePattern> {
+    PATTERN_CACHE.with(|cache| {
+        let mut c = cache.borrow_mut();
+        if let Some(p) = c.get(pattern) {
+            return Some(p.clone());
+        }
+        let compiled = compile_pattern(pattern)?;
+        c.insert(pattern.to_owned(), compiled.clone());
+        Some(compiled)
+    })
+}
 
 /// One compiled segment of a route pattern.
 #[derive(Debug, Clone, PartialEq)]
@@ -193,7 +219,7 @@ pub fn best_match(
             // Exact string equality short-circuits scoring entirely.
             return Some((idx, Vec::new()));
         }
-        let Some(compiled) = compile_pattern(pattern_str) else {
+        let Some(compiled) = compile_pattern_cached(pattern_str) else {
             continue;
         };
         let Some(params) = match_pattern(&compiled, path) else {
@@ -228,7 +254,7 @@ pub fn matches_other_method(routes: &[(String, String)], method: &str, path: &st
         if pattern_str == path {
             return true;
         }
-        if let Some(compiled) = compile_pattern(pattern_str) {
+        if let Some(compiled) = compile_pattern_cached(pattern_str) {
             if match_pattern(&compiled, path).is_some() {
                 return true;
             }

@@ -2698,6 +2698,40 @@ pub(crate) fn expect_array(
     }
 }
 
+/// Borrowed string accessor: O(1) instead of cloning the String.
+/// Use for read-only access; keep `expect_str` for mutating/taking ownership.
+#[allow(dead_code)]
+pub(crate) fn expect_str_ref<'a>(
+    args: &'a [Value],
+    i: usize,
+    name: &str,
+) -> Result<&'a str, EvalError> {
+    match args.get(i) {
+        Some(Value::Str(s)) => Ok(s.as_str()),
+        other => Err(EvalError::new(
+            format!("`{name}` expects a string, found `{other:?}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
+/// Borrowed array accessor: O(1) instead of cloning the Vec.
+/// Use for read-only access; keep `expect_array` for mutating/taking ownership.
+#[allow(dead_code)]
+pub(crate) fn expect_array_ref<'a>(
+    args: &'a [Value],
+    i: usize,
+    name: &str,
+) -> Result<&'a [Value], EvalError> {
+    match args.get(i) {
+        Some(Value::Array(vs)) => Ok(vs.as_slice()),
+        other => Err(EvalError::new(
+            format!("`{name}` expects an array, found `{other:?}`"),
+            zz_runtime::Span::new(0, 0),
+        )),
+    }
+}
+
 pub(crate) fn expect_func(args: &mut Vec<Value>, i: usize, name: &str) -> Result<Value, EvalError> {
     match arg(args, i, name)? {
         Value::Func(f) => Ok(Value::Func(std::rc::Rc::new((**f).clone()))),

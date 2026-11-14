@@ -226,9 +226,15 @@ pub(crate) fn json_merge(
     args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    let a = expect_json_owned(args, 0, "std.json.merge")?;
-    let b = expect_json_owned(args, 1, "std.json.merge")?;
-    Ok(Value::Json(Arc::new(zz_runtime::json::json_merge(&a, &b))))
+    // `json_merge` reads both documents (takes &JsonValue, &JsonValue) — it
+    // never mutates either — so borrow via expect_json_ref (O(1) Arc bump)
+    // instead of deep-cloning each whole document (O(document size)).
+    let a = expect_json_ref(args, 0, "std.json.merge")?;
+    let b = expect_json_ref(args, 1, "std.json.merge")?;
+    Ok(Value::Json(Arc::new(zz_runtime::json::json_merge(
+        a.as_ref(),
+        b.as_ref(),
+    ))))
 }
 
 pub(crate) fn json_deep_get(
