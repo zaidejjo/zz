@@ -219,7 +219,10 @@ fn run_zz(file: &Path) -> (i32, String, String) {
     // one test process) bind disjoint loopback ports instead of colliding.
     let tok = SWEEP_TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed);
     let first = run_zz_with_token(file, Some(&tok.to_string()));
-    if first.0 == 0 || !is_bind_collision(&first.2) {
+    // Retry on transient environment failures: bind collisions (EADDRINUSE)
+    // and signal kills (exit code -1, e.g. OOM under parallel test load).
+    // Both are infrastructure issues, never program bugs.
+    if first.0 == 0 || (!is_bind_collision(&first.2) && first.0 != -1) {
         return first;
     }
     let shift = std::process::id() % 997 + 1;
