@@ -355,7 +355,7 @@ pub struct Checker {
     /// inherent (`funcs`) → extension (here) → stdlib namespace.
     pub ext_methods: HashMap<(String, String), (FuncSig, Span)>,
     /// Minimal `convert_to_` registry for `try` error conversion.
-    pub convert_impls: Vec<ConvertImpl>,
+    pub convert_impls: HashMap<String, ConvertImpl>,
     /// `try` site span → convert impl span (`None` = identity, no conversion).
     /// Consumed by LSP hover to show the resolved conversion.
     pub try_resolutions: HashMap<Span, Option<Span>>,
@@ -525,7 +525,7 @@ impl Checker {
             traits: initial_traits,
             trait_impls: initial_trait_impls,
             ext_methods: HashMap::new(),
-            convert_impls: Vec::new(),
+            convert_impls: HashMap::new(),
             try_resolutions: HashMap::new(),
             env,
             const_env: vec![initial_consts],

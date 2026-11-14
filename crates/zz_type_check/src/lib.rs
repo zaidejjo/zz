@@ -2859,7 +2859,7 @@ impl TypeCheckOps for Checker {
         let mut out = Vec::new();
         let from_s = from.to_string();
         let to_s = to.to_string();
-        for c in &self.convert_impls {
+        for c in self.convert_impls.values() {
             if c.from == *from && c.to == *to {
                 out.push(Some(c.span));
             }
