@@ -520,12 +520,12 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // matches the VM (`shadow`) — sweep reports FIXED.
         // Move-append early exit: `?` error path prints wrong prefix.
         "move_append_early_exit" => Some("native: move_append_early_exit error path drops message"),
-        // Error fixtures where native should fail (VM exits 1) but
-        // native exits 0 — native error detection gap.
-        "http_tls_cert" => Some("error fixture: native exits 0, VM exits 1 (error detection gap)"),
-        "mysql_connect_refused" => {
-            Some("error fixture: native exits 0, VM exits 1 (error detection gap)")
-        }
+        // NOTE: `http_tls_cert` and `mysql_connect_refused` were listed here
+        // (native silently stored a statement-position native `Err` and
+        // exited 0 while the VM raised). Statement-position calls to raising
+        // natives (`my.connect`, `http.listen_tls`) now propagate `Err` via
+        // `zz_native_err_abort`, so native exits 1 like the VM — sweep
+        // reports FIXED.
         _ => None,
     }
 }

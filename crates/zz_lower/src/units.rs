@@ -775,7 +775,19 @@ fn emit_top_decl(
             return;
         }
     }
-    let val = lowerer.emit_expr(value, names, out);
+    let mut val = lowerer.emit_expr(value, names, out);
+    // A top-level statement-position call to a *raising* native propagates
+    // its error: native failures raise in the VM, so Err must not be stored
+    // silently into the global. `zz_native_err_abort` prints the error and
+    // exits 1; the void top-level prelude cannot `return`. Non-raising
+    // natives store the `Result` value (VM match).
+    if lowerer.callee_raises(value) {
+        let tmp = names.fresh("_top_err");
+        out.push_str(&format!(
+            "    zz_value {tmp} = {val};\n    if ({tmp}.tag == ZZ_RESULT_ERR) {{ zz_native_err_abort({tmp}); }}\n"
+        ));
+        val = tmp;
+    }
     let val_is_unboxed = val.starts_with("(int64_t)(")
         || val.starts_with("(double)(")
         || val.starts_with("(bool)(")

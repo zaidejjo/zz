@@ -9139,6 +9139,26 @@ int zz_main_result_code(zz_value r) {
     return 0;
 }
 
+/// Print a `Result` error payload to stderr (Display form, like the VM) and
+/// abort the process with exit code 1. Used for statement-position calls to
+/// *raising* natives (`my.connect`, `http.listen_tls`, …): a native failure
+/// raises in the VM, so the native must not silently store `Err` and
+/// continue. Valid in any function, including the void top-level prelude
+/// where `return` is not valid.
+///
+/// Only raising natives use this: natives whose VM counterpart wraps the
+/// error as `Ok(Result(Err))` (e.g. `json.deep_get`, `json.parse`) return a
+/// storable `Result` value instead, so they must NOT abort here.
+void zz_native_err_abort(zz_value v) {
+    if (v.tag == ZZ_RESULT_ERR && v.payload) {
+        char *msg = zz_value_to_display_string(v.payload);
+        fprintf(stderr, "%s\n", msg ? msg : "<error>");
+        free(msg);
+    }
+    zz_release(&v);
+    exit(1);
+}
+
 int main(int argc, char **argv) {
     zz_g_argc = argc;
     zz_g_argv = argv;

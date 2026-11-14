@@ -1481,6 +1481,13 @@ int zz_run(void);
 // Maps `main()`'s return value to a process exit code (`.err` → 1).
 int zz_main_result_code(zz_value r);
 
+// Abort with exit code 1 after printing a `Result` error payload (Display
+// form, like the VM). Used for statement-position calls to *raising* natives
+/// (`my.connect`, `http.listen_tls`, …): a native failure raises in the VM,
+// so the native must not silently store `Err` and continue. Valid in any
+// function, including the void top-level prelude where `return` is not valid.
+void zz_native_err_abort(zz_value v);
+
 // Externs defined by generated code:
 extern void zz_main(void);
 extern int zz_call_main(void);
