@@ -2752,7 +2752,12 @@ impl Lowerer {
                 out.push_str(&format!("        zz_release(&{tmp});\n"));
                 out.push_str(&format!("        return zz_variant_err({conv_tmp});\n"));
             } else {
-                out.push_str(&format!("        zz_release(&{tmp});\n"));
+                // Return the error payload directly: ownership transfers to
+                // the caller via `return`. Do NOT `zz_release(&tmp)` first —
+                // `zz_release_variant` nulls `tmp.payload`, which would make
+                // `zz_main_result_code` see `tag == ZZ_RESULT_ERR` with a
+                // NULL payload and silently exit 0 instead of reporting the
+                // error (move_append_early_exit, http_tls_cert, ...).
                 out.push_str(&format!("        return {tmp};\n"));
             }
         };

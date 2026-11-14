@@ -518,8 +518,11 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // that shares the module's name). Module-qualified free-function
         // calls no longer take a receiver write-back, so native now
         // matches the VM (`shadow`) — sweep reports FIXED.
-        // Move-append early exit: `?` error path prints wrong prefix.
-        "move_append_early_exit" => Some("native: move_append_early_exit error path drops message"),
+        // NOTE: `move_append_early_exit` was listed here (native's `?`
+        // error path dropped the payload via `zz_release` before `return`,
+        // nulling `payload` so `zz_main_result_code` saw `tag == ERR` but
+        // `payload == NULL` and exited 0). `emit_try` now returns the error
+        // directly without releasing first — sweep reports FIXED.
         // NOTE: `http_tls_cert` and `mysql_connect_refused` were listed here
         // (native silently stored a statement-position native `Err` and
         // exited 0 while the VM raised). Statement-position calls to raising
@@ -1121,7 +1124,7 @@ parity_strict!(
     "regression",
     "move_append_alias.zz"
 );
-parity_known_failure!(
+parity_strict!(
     parity_regression_move_append_early_exit,
     "regression",
     "move_append_early_exit.zz"
