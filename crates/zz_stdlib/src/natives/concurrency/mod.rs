@@ -674,10 +674,6 @@ fn spawn_from_parts(
     for (name, val) in snapshot.leaf {
         new_interp.env.define(&name, val);
     }
-    // Freeze the env so the entire interpreter (including its Rc<RefCell>
-    // env link) is safe to send across thread boundaries inside GreenTask.
-    // Owned scopes are cloned and frozen; frozen scopes are cloned as-is.
-    new_interp.env = EnvLink::Frozen(new_interp.env.freeze_arc());
 
     Executor::spawn_task(vm, new_interp, chunk, Arc::clone(&state));
 

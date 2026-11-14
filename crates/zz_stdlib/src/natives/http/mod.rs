@@ -3,8 +3,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::Write;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::natives::{arg, expect_str};
@@ -1934,7 +1933,7 @@ impl FuncSnapshot {
         for (k, v) in &self.env_snapshot {
             fresh.define(k, v.clone());
         }
-        let env = EnvLink::Owned(Rc::new(std::cell::RefCell::new(fresh)));
+        let env = EnvLink::Owned(Arc::new(Mutex::new(fresh)));
         Value::Func(std::rc::Rc::new(FuncValue {
             params: self.params.clone(),
             body: self.body.clone(),

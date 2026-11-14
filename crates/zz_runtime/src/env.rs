@@ -6,15 +6,14 @@
 //! values: freezing is copy-on-write (writers detach), so sharing is
 //! exactly as correct as cloning, at O(1) per spawn.
 
-use std::cell::RefCell;
+use std::cell::Cell;
 use std::collections::HashMap;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::value::Value;
 use crate::vm::Chunk;
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone)]
 pub struct Env {
     vars: HashMap<String, Value>,
     parent: Option<EnvLink>,
@@ -154,9 +153,13 @@ impl Bound {
 /// A scope-chain link: owned (single-threaded, mutable) or frozen
 /// (shared, immutable). Same method surface either way; frozen links
 /// detach (clone-on-write) when mutation is attempted.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Owned scopes use `Arc<Mutex<Env>>` so they are `Send` and can safely
+/// cross thread boundaries inside `GreenTask`. Frozen scopes are
+/// `Arc`-based and already `Send + Sync`.
+#[derive(Debug, Clone)]
 pub enum EnvLink {
-    Owned(Rc<RefCell<Env>>),
+    Owned(Arc<Mutex<Env>>),
     Frozen(Arc<FrozenScope>),
 }
 
@@ -172,7 +175,7 @@ impl Env {
         let vars = std::mem::take(&mut self.vars);
         let parent = self.parent.take().map(|link| match link {
             EnvLink::Owned(rc) => {
-                let env = rc.borrow();
+                let env = rc.lock().unwrap();
                 Arc::new(FrozenScope::new(env.vars.clone(), None))
             }
             EnvLink::Frozen(f) => Arc::clone(&f),
@@ -183,20 +186,20 @@ impl Env {
     /// Create a child scope sharing `parent` by reference. Assignments in
     /// the child are visible to the parent and vice versa.
     pub fn with_parent(parent: &EnvLink) -> EnvLink {
-        EnvLink::Owned(Rc::new(RefCell::new(Env {
+        EnvLink::Owned(Arc::new(Mutex::new(Env {
             vars: HashMap::new(),
             parent: Some(parent.clone()),
-            version: std::cell::Cell::new(0),
+            version: Cell::new(0),
         })))
     }
 
     /// Create a child scope whose parent is a frozen scope. Used when
     /// entering a compiled closure whose captured env is `Arc<FrozenScope>`.
     pub fn with_frozen_parent(parent: &Arc<FrozenScope>) -> EnvLink {
-        EnvLink::Owned(Rc::new(RefCell::new(Env {
+        EnvLink::Owned(Arc::new(Mutex::new(Env {
             vars: HashMap::new(),
             parent: Some(EnvLink::Frozen(parent.clone())),
-            version: std::cell::Cell::new(0),
+            version: Cell::new(0),
         })))
     }
 
@@ -268,9 +271,9 @@ impl Env {
         while let Some(link) = cur {
             let (key, parent, len, version) = match &link {
                 EnvLink::Owned(rc) => {
-                    let borrowed = rc.borrow();
+                    let borrowed = rc.lock().unwrap();
                     (
-                        Rc::as_ptr(rc) as *const () as usize,
+                        Arc::as_ptr(rc) as *const () as usize,
                         borrowed.parent.clone(),
                         borrowed.vars.len(),
                         borrowed.version(),
@@ -298,7 +301,7 @@ impl Env {
     /// Bumps the mutation version when anything was merged.
     pub fn absorb_locals(&mut self, child: &EnvLink) {
         let vars = match child {
-            EnvLink::Owned(rc) => rc.borrow().vars.clone(),
+            EnvLink::Owned(rc) => rc.lock().unwrap().vars.clone(),
             EnvLink::Frozen(f) => f.vars.clone(),
         };
         if vars.is_empty() {
@@ -352,7 +355,7 @@ impl Env {
         while let Some(link) = cur {
             let parent_opt = match &link {
                 EnvLink::Owned(rc) => {
-                    let env = rc.borrow();
+                    let env = rc.lock().unwrap();
                     chain.push(env.vars.clone());
                     env.parent.clone()
                 }
@@ -387,7 +390,7 @@ impl Default for EnvLink {
 impl EnvLink {
     /// Fresh owned root scope.
     pub fn new() -> Self {
-        EnvLink::Owned(Rc::new(RefCell::new(Env::new())))
+        EnvLink::Owned(Arc::new(Mutex::new(Env::new())))
     }
 
     /// Convert to an `Arc<FrozenScope>` for cross-thread sending.
@@ -395,7 +398,7 @@ impl EnvLink {
     pub fn freeze_arc(&self) -> Arc<FrozenScope> {
         match self {
             EnvLink::Owned(rc) => {
-                let env = rc.borrow().clone();
+                let env = rc.lock().unwrap().clone();
                 match env.freeze() {
                     EnvLink::Frozen(f) => f,
                     _ => unreachable!(),
@@ -411,7 +414,7 @@ impl EnvLink {
     /// keys).
     pub fn id(&self) -> usize {
         match self {
-            EnvLink::Owned(rc) => Rc::as_ptr(rc) as *const () as usize,
+            EnvLink::Owned(rc) => Arc::as_ptr(rc) as *const () as usize,
             EnvLink::Frozen(f) => Arc::as_ptr(f) as *const () as usize,
         }
     }
@@ -419,7 +422,7 @@ impl EnvLink {
     /// Pointer equality between links.
     pub fn ptr_eq(a: &EnvLink, b: &EnvLink) -> bool {
         match (a, b) {
-            (EnvLink::Owned(x), EnvLink::Owned(y)) => Rc::ptr_eq(x, y),
+            (EnvLink::Owned(x), EnvLink::Owned(y)) => Arc::ptr_eq(x, y),
             (EnvLink::Frozen(x), EnvLink::Frozen(y)) => Arc::ptr_eq(x, y),
             _ => false,
         }
@@ -432,7 +435,7 @@ impl EnvLink {
     /// Read a binding, leaf-first (owned borrows, frozen reads direct).
     pub fn get(&self, name: &str) -> Option<Value> {
         match self {
-            EnvLink::Owned(rc) => rc.borrow().get(name),
+            EnvLink::Owned(rc) => rc.lock().unwrap().get(name),
             EnvLink::Frozen(f) => f.get(name),
         }
     }
@@ -440,7 +443,7 @@ impl EnvLink {
     /// Project a binding without cloning it (see [`Env::bound`]).
     pub fn bound(&self, name: &str) -> Option<Bound> {
         match self {
-            EnvLink::Owned(rc) => rc.borrow().bound(name),
+            EnvLink::Owned(rc) => rc.lock().unwrap().bound(name),
             EnvLink::Frozen(f) => f.bound(name),
         }
     }
@@ -448,7 +451,7 @@ impl EnvLink {
     /// Read from this scope only (no parent walk).
     pub fn get_local(&self, name: &str) -> Option<Value> {
         match self {
-            EnvLink::Owned(rc) => rc.borrow().get_local(name),
+            EnvLink::Owned(rc) => rc.lock().unwrap().get_local(name),
             EnvLink::Frozen(f) => f.vars.get(name).cloned(),
         }
     }
@@ -456,7 +459,7 @@ impl EnvLink {
     /// Sorted names bound in this scope only (no parent walk).
     pub fn local_names(&self) -> Vec<String> {
         let mut names: Vec<String> = match self {
-            EnvLink::Owned(rc) => rc.borrow().vars.keys().cloned().collect(),
+            EnvLink::Owned(rc) => rc.lock().unwrap().vars.keys().cloned().collect(),
             EnvLink::Frozen(f) => f.vars.keys().cloned().collect(),
         };
         names.sort();
@@ -474,7 +477,7 @@ impl EnvLink {
         }
         match self {
             EnvLink::Owned(rc) => {
-                let mut borrowed = rc.borrow_mut();
+                let mut borrowed = rc.lock().unwrap();
                 borrowed.vars.clear();
                 borrowed.parent = None;
                 borrowed.bump();
@@ -486,7 +489,7 @@ impl EnvLink {
     /// This scope's binding count (for shape keys).
     pub fn len(&self) -> usize {
         match self {
-            EnvLink::Owned(rc) => rc.borrow().vars.len(),
+            EnvLink::Owned(rc) => rc.lock().unwrap().vars.len(),
             EnvLink::Frozen(f) => f.vars.len(),
         }
     }
@@ -499,7 +502,7 @@ impl EnvLink {
     /// Parent link, if any.
     pub fn parent_link(&self) -> Option<EnvLink> {
         match self {
-            EnvLink::Owned(rc) => rc.borrow().parent.clone(),
+            EnvLink::Owned(rc) => rc.lock().unwrap().parent.clone(),
             EnvLink::Frozen(f) => f.parent.clone().map(EnvLink::Frozen),
         }
     }
@@ -512,7 +515,7 @@ impl EnvLink {
             *self = self.detached_owned();
         }
         match self {
-            EnvLink::Owned(rc) => rc.borrow_mut().parent = parent,
+            EnvLink::Owned(rc) => rc.lock().unwrap().parent = parent,
             EnvLink::Frozen(_) => unreachable!("set_parent detaches frozen links first"),
         }
     }
@@ -527,7 +530,7 @@ impl EnvLink {
             *self = self.detached_owned();
         }
         match self {
-            EnvLink::Owned(rc) => rc.borrow_mut().define(name, value),
+            EnvLink::Owned(rc) => rc.lock().unwrap().define(name, value),
             EnvLink::Frozen(_) => unreachable!("define detaches frozen links first"),
         }
     }
@@ -535,14 +538,15 @@ impl EnvLink {
     /// Mutable access to a binding in this scope (no parent fallthrough).
     /// Detaches frozen links first (see `define`). No callers in the hot
     /// path; kept for API completeness.
-    pub fn get_mut(&mut self, name: &str) -> Option<std::cell::RefMut<'_, Value>> {
+    /// Mutable access to a binding in this scope (no parent fallthrough).
+    /// Detaches frozen links first (see `define`). No callers in the hot
+    /// path; kept for API completeness.
+    pub fn get_mut(&mut self, name: &str) -> Option<Value> {
         if self.is_frozen() {
             *self = self.detached_owned();
         }
         match self {
-            EnvLink::Owned(rc) => {
-                std::cell::RefMut::filter_map(rc.borrow_mut(), |env| env.get_mut(name)).ok()
-            }
+            EnvLink::Owned(rc) => rc.lock().unwrap().get_mut(name).cloned(),
             EnvLink::Frozen(_) => unreachable!("get_mut detaches frozen links first"),
         }
     }
@@ -568,16 +572,16 @@ impl EnvLink {
     fn assign_rec(link: &EnvLink, name: &str, value: Value) -> (bool, EnvLink) {
         match link {
             EnvLink::Owned(rc) => {
-                if rc.borrow().vars.contains_key(name) {
-                    rc.borrow_mut().define(name, value);
+                if rc.lock().unwrap().vars.contains_key(name) {
+                    rc.lock().unwrap().define(name, value);
                     (true, link.clone())
                 } else {
-                    let parent = rc.borrow().parent.clone();
+                    let parent = rc.lock().unwrap().parent.clone();
                     match parent {
                         Some(p) => {
                             let (ok, np) = Self::assign_rec(&p, name, value);
                             if ok {
-                                rc.borrow_mut().parent = Some(np);
+                                rc.lock().unwrap().parent = Some(np);
                             }
                             (ok, link.clone())
                         }
@@ -592,10 +596,10 @@ impl EnvLink {
                     let mut owned = Env {
                         vars: f.vars.clone(),
                         parent: f.parent.clone().map(EnvLink::Frozen),
-                        version: std::cell::Cell::new(0),
+                        version: Cell::new(0),
                     };
                     owned.define(name, value);
-                    (true, EnvLink::Owned(Rc::new(RefCell::new(owned))))
+                    (true, EnvLink::Owned(Arc::new(Mutex::new(owned))))
                 } else {
                     match &f.parent {
                         Some(fp) => {
@@ -617,10 +621,10 @@ impl EnvLink {
     pub fn owner_link(&self, name: &str) -> Option<EnvLink> {
         match self {
             EnvLink::Owned(rc) => {
-                if rc.borrow().vars.contains_key(name) {
+                if rc.lock().unwrap().vars.contains_key(name) {
                     return Some(self.clone());
                 }
-                rc.borrow().parent.clone()?.owner_link(name)
+                rc.lock().unwrap().parent.clone()?.owner_link(name)
             }
             EnvLink::Frozen(f) => {
                 if f.vars.contains_key(name) {
@@ -647,9 +651,9 @@ impl EnvLink {
     fn take_rec(link: &EnvLink, name: &str) -> (Option<Value>, EnvLink) {
         match link {
             EnvLink::Owned(rc) => {
-                if rc.borrow().vars.contains_key(name) {
+                if rc.lock().unwrap().vars.contains_key(name) {
                     let v = {
-                        let mut b = rc.borrow_mut();
+                        let mut b = rc.lock().unwrap();
                         let slot = b.vars.get_mut(name).unwrap();
                         let v = std::mem::replace(slot, Value::Unit);
                         b.bump();
@@ -657,12 +661,12 @@ impl EnvLink {
                     };
                     (Some(v), link.clone())
                 } else {
-                    let parent = rc.borrow().parent.clone();
+                    let parent = rc.lock().unwrap().parent.clone();
                     match parent {
                         Some(p) => {
                             let (val, np) = Self::take_rec(&p, name);
                             if val.is_some() {
-                                rc.borrow_mut().parent = Some(np);
+                                rc.lock().unwrap().parent = Some(np);
                             }
                             (val, link.clone())
                         }
@@ -684,7 +688,7 @@ impl EnvLink {
                         std::mem::replace(slot, Value::Unit)
                     };
                     owned.bump();
-                    (Some(v), EnvLink::Owned(Rc::new(RefCell::new(owned))))
+                    (Some(v), EnvLink::Owned(Arc::new(Mutex::new(owned))))
                 } else {
                     match &f.parent {
                         Some(fp) => {
@@ -718,16 +722,16 @@ impl EnvLink {
     fn try_assign_rec(link: &EnvLink, name: &str, value: Value) -> (Result<(), Value>, EnvLink) {
         match link {
             EnvLink::Owned(rc) => {
-                if rc.borrow().vars.contains_key(name) {
-                    rc.borrow_mut().define(name, value);
+                if rc.lock().unwrap().vars.contains_key(name) {
+                    rc.lock().unwrap().define(name, value);
                     (Ok(()), link.clone())
                 } else {
-                    let parent = rc.borrow().parent.clone();
+                    let parent = rc.lock().unwrap().parent.clone();
                     match parent {
                         Some(p) => {
                             let (res, np) = Self::try_assign_rec(&p, name, value);
                             if res.is_ok() {
-                                rc.borrow_mut().parent = Some(np);
+                                rc.lock().unwrap().parent = Some(np);
                             }
                             (res, link.clone())
                         }
@@ -740,10 +744,10 @@ impl EnvLink {
                     let mut owned = Env {
                         vars: f.vars.clone(),
                         parent: f.parent.clone().map(EnvLink::Frozen),
-                        version: std::cell::Cell::new(0),
+                        version: Cell::new(0),
                     };
                     owned.define(name, value);
-                    (Ok(()), EnvLink::Owned(Rc::new(RefCell::new(owned))))
+                    (Ok(()), EnvLink::Owned(Arc::new(Mutex::new(owned))))
                 } else {
                     match &f.parent {
                         Some(fp) => {
@@ -767,9 +771,9 @@ impl EnvLink {
         }
         match (self, child) {
             (EnvLink::Owned(rc), EnvLink::Owned(crc)) => {
-                let vars = crc.borrow().vars.clone();
+                let vars = crc.lock().unwrap().vars.clone();
                 if !vars.is_empty() {
-                    let mut this = rc.borrow_mut();
+                    let mut this = rc.lock().unwrap();
                     for (k, v) in vars {
                         this.vars.insert(k, v);
                     }
@@ -777,7 +781,7 @@ impl EnvLink {
                 }
             }
             (EnvLink::Owned(rc), EnvLink::Frozen(f)) => {
-                let mut this = rc.borrow_mut();
+                let mut this = rc.lock().unwrap();
                 if !f.vars.is_empty() {
                     for (k, v) in f.vars.iter() {
                         this.define(k, v.clone());
@@ -795,15 +799,15 @@ impl EnvLink {
     fn detached_owned(&self) -> EnvLink {
         let (vars, parent) = match self {
             EnvLink::Owned(rc) => {
-                let borrowed = rc.borrow();
+                let borrowed = rc.lock().unwrap();
                 (borrowed.vars.clone(), borrowed.parent.clone())
             }
             EnvLink::Frozen(f) => (f.vars.clone(), f.parent.clone().map(EnvLink::Frozen)),
         };
-        EnvLink::Owned(Rc::new(RefCell::new(Env {
+        EnvLink::Owned(Arc::new(Mutex::new(Env {
             vars,
             parent,
-            version: std::cell::Cell::new(0),
+            version: Cell::new(0),
         })))
     }
 
@@ -830,7 +834,7 @@ impl EnvLink {
             EnvLink::Frozen(f) => Arc::clone(f),
             EnvLink::Owned(rc) => {
                 let (vars, parent) = {
-                    let borrowed = rc.borrow();
+                    let borrowed = rc.lock().unwrap();
                     (borrowed.vars.clone(), borrowed.parent.clone())
                 };
                 let vars: HashMap<String, Value> = vars
@@ -856,7 +860,7 @@ impl EnvLink {
     /// Flatten the chain root→leaf (both link kinds).
     pub fn flatten(&self) -> HashMap<String, Value> {
         match self {
-            EnvLink::Owned(rc) => rc.borrow().flatten(),
+            EnvLink::Owned(rc) => rc.lock().unwrap().flatten(),
             EnvLink::Frozen(f) => {
                 let mut chain: Vec<HashMap<String, Value>> = Vec::new();
                 chain.push(f.vars.clone());
@@ -864,7 +868,7 @@ impl EnvLink {
                 while let Some(link) = cur {
                     match &link {
                         EnvLink::Owned(rc) => {
-                            let env = rc.borrow();
+                            let env = rc.lock().unwrap();
                             chain.push(env.vars.clone());
                             cur = env.parent.clone();
                         }
