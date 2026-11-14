@@ -458,7 +458,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // (issue #215) fixed it — sweep reports FIXED.
 
         // --- Output differences (native runs but output differs) ---
-        "math_extended_test" => Some("native: float precision + error message differences"),
         "extension_methods" => {
             Some("DEFERRED to HIR->IR lowering: extension-method call results missing + spurious conflict diagnostics on stderr")
         }
@@ -1830,7 +1829,7 @@ parity_strict!(
 );
 parity_strict!(parity_stdlib_http_hijack, "stdlib", "http_hijack_test.zz");
 parity_strict!(parity_stdlib_time_date, "stdlib", "time_date.zz");
-parity_known_failure!(
+parity_strict!(
     parity_stdlib_math_extended,
     "stdlib",
     "math_extended_test.zz"
