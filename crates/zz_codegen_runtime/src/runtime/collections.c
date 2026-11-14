@@ -1014,15 +1014,47 @@ static int zz_object_set_depth(zz_value *obj, const char *name, zz_value val, in
     // detaching, so embedded children detach level by level too.
     zz_object_detach(obj);
     zz_object *o = obj->obj;
-    for (size_t i = 0; i < o->len; i++) {
-        zz_value *fname = &o->fields[i * 2];
-        if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), name) == 0) {
-            zz_value *slot = &o->fields[i * 2 + 1];
-            zz_release(slot);
-            // Share convention (was zz_clone): heal arena-owned values to heap.
-            *slot = zz_clone_for_store(val);
-            return 1;
+    // Single-entry cache for repeated field writes on the same type, mirroring
+    // the getter's cache (zz_object_get_depth). `name` and `o->type_name` are
+    // pointer-stable C strings, so pointer comparison is valid. Hot paths like
+    // `rows[i].val = x` hit the cache on every write after the first, turning
+    // O(fields)·strcmp into O(1). Thread-local: per-thread statics, no cross-
+    // thread race; separate statics from the getter so each keeps its own entry.
+    static __thread const char *set_cached_type = NULL;
+    static __thread const char *set_cached_name = NULL;
+    static __thread size_t set_cached_index = 0;
+    static __thread int set_cached_found = 0;
+    int direct_found = 0;
+    size_t direct_index = 0;
+    if (o->type_name == set_cached_type && name == set_cached_name) {
+        direct_found = set_cached_found;
+        direct_index = set_cached_index;
+    } else {
+        for (size_t i = 0; i < o->len; i++) {
+            zz_value *fname = &o->fields[i * 2];
+            if (fname->tag == ZZ_STR && strcmp(zz_str_cptr(fname->s), name) == 0) {
+                set_cached_type = o->type_name;
+                set_cached_name = name;
+                set_cached_index = i;
+                set_cached_found = 1;
+                direct_found = 1;
+                direct_index = i;
+                break;
+            }
         }
+        if (!direct_found) {
+            set_cached_type = o->type_name;
+            set_cached_name = name;
+            set_cached_index = 0;
+            set_cached_found = 0;
+        }
+    }
+    if (direct_found) {
+        zz_value *slot = &o->fields[direct_index * 2 + 1];
+        zz_release(slot);
+        // Share convention (was zz_clone): heal arena-owned values to heap.
+        *slot = zz_clone_for_store(val);
+        return 1;
     }
     // Embedded promotion: `u.id = 1` writes `u.Base.id` transitively.
     if (depth < ZZ_EMBED_MAX_DEPTH) {
