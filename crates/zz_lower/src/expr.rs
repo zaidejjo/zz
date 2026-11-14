@@ -344,12 +344,39 @@ impl Lowerer {
                 for part in parts {
                     match part {
                         FmtPart::Text(t) => {
+                            if t.is_empty() {
+                                continue;
+                            }
                             let lit = self.emit_str_literal(t);
                             out.push_str(&format!(
                                 "    {{ zz_value _t = {lit}; zz_str_append_mut_str(&{fvar}, _t); zz_release(&_t); }}\n"
                             ));
                         }
                         FmtPart::Expr(inner, spec) => {
+                            // Direct scalar formatting into the builder:
+                            // avoids the per-part zz_to_str malloc +
+                            // memcpy + release (the dominant cost in scalar-
+                            // heavy f-strings like `{"item{i}"}` in loops).
+                            // Only valid with no format spec and a pure
+                            // scalar operand (`scalar_operand_c` guarantees
+                            // side-effect-free C text).
+                            if spec.is_none() {
+                                if let (Some(t), Some(raw)) = (
+                                    scalar_operand_type(inner, names),
+                                    scalar_operand_c(inner, names),
+                                ) {
+                                    let helper = match t {
+                                        "int64_t" => "zz_str_append_int",
+                                        "double" => "zz_str_append_double",
+                                        "bool" => "zz_str_append_bool",
+                                        _ => "",
+                                    };
+                                    if !helper.is_empty() {
+                                        out.push_str(&format!("    {helper}(&{fvar}, {raw});\n"));
+                                        continue;
+                                    }
+                                }
+                            }
                             let v = self.emit_expr(inner, names, out);
                             // Unboxed structs render through their generated
                             // `debug_string` (a raw C struct is not a

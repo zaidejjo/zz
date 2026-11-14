@@ -3155,7 +3155,18 @@ zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
     size_t len = s.s->len;
     const char *sd = ""; size_t slen = 0;
     if (sep.tag == ZZ_STR) { sd = zz_str_ptr(sep.s); slen = sep.s->len; }
-    zz_value arr = zz_array_new();
+    // Count separators first so we can pre-size the array and avoid the
+    // realloc cascade (cap 4→8→16→...→1M) that copies the whole items
+    // buffer on every grow.
+    size_t approx_count = 1;
+    if (slen > 0) {
+        const char *p = d;
+        while ((p = (const char *)memchr(p, sd[0], len - (p - d))) != NULL) {
+            approx_count++;
+            p += slen;
+        }
+    }
+    zz_value arr = zz_array_new_sized(approx_count);
     if (slen == 0) {
         // Empty separator: leading "" + one item per char (Unicode scalar
         // values, like the VM) + trailing "" — matches Rust `split("")`
@@ -3168,8 +3179,7 @@ zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
         while (i < len) {
             size_t l = zz_utf8_seq_len((const unsigned char *)(d + i), len - i);
             zz_value item = zz_str_new(d + i, l);
-            int sub_err = 0;
-            zz_vec_append(arr, item, &sub_err);
+            zz_array_push_adopt(arr, item);
             i += l;
         }
         {
@@ -3192,13 +3202,11 @@ zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
             // len-slen+1, silently dropping up to slen-1 tail chars —
             // invisible for single-char seps where next always reaches len.)
             zz_value item = zz_str_new(d + pos, len - pos);
-            int sub_err = 0;
-            zz_vec_append(arr, item, &sub_err);
+            zz_array_push_adopt(arr, item);
             break;
         }
         zz_value item = zz_str_new(d + pos, next - pos);
-        int sub_err = 0;
-        zz_vec_append(arr, item, &sub_err);
+        zz_array_push_adopt(arr, item);
         pos = next + slen;
     }
     return arr;
