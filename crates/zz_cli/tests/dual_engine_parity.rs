@@ -511,11 +511,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         "concurrency_batch_test" => Some(
             "native: concurrency batch SIGSEGV under parallel send/recv",
         ),
-        // Option.unwrap dispatched to result namespace when binding type
-        // unknown at lowering time.
-        "option_result_unwrap_test" => Some(
-            "native: Option.unwrap dispatched to result namespace",
-        ),
         // HTTP middleware p2: native misses CORS header key in dict.
         "http_middleware_p2" => Some(
             "native: http_middleware_p2 dict key lookup misses header",
@@ -1901,7 +1896,7 @@ parity_strict!(
     "net_unix_listener_shutdown.zz"
 );
 parity_strict!(parity_stdlib_cell_test, "stdlib", "cell_test.zz");
-parity_known_failure!(
+parity_strict!(
     parity_stdlib_option_result_unwrap_test,
     "stdlib",
     "option_result_unwrap_test.zz"

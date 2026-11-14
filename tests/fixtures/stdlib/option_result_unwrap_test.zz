@@ -1,4 +1,4 @@
-// features: func-call, known-divergence, locals, option-result, print, string-literal
+// features: func-call, locals, option-result, print, string-literal
 // E2E: option/result `.unwrap()` + `.unwrap_or()` must match byte-for-byte
 // on VM and AOT (#452: native had no lowering and failed with
 // `undefined reference to zz_fn_result__unwrap`). Success paths only;

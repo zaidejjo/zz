@@ -3349,28 +3349,50 @@ impl Lowerer {
                                 let typed_ns = if reachable_ns.contains(&"option")
                                     && reachable_ns.contains(&"result")
                                 {
-                                    let bare = obj_name.rsplit('.').next().unwrap_or(obj_name);
-                                    self.tp
+                                    // `obj_name` is module-qualified for top-level locals
+                                    // (e.g. `unwrap_probe.opt_some`), and `tp.bindings` /
+                                    // `names.checker_types` are keyed by that same qualified
+                                    // name. Stripping to the bare name (`.rsplit('.').next()`)
+                                    // misses the entry, so an `Option` receiver falls through
+                                    // to the `result.*` default below. Use the qualified name.
+                                    let receiver_ty = self
+                                        .tp
                                         .bindings
-                                        .get(bare)
-                                        .and_then(|ty| match ty {
-                                            zz_checker::Type::Result(_, _) => Some("result"),
-                                            zz_checker::Type::Option(_) => Some("option"),
-                                            _ => None,
-                                        })
-                                        .or_else(|| {
-                                            // Result bindings often missing (e.g. `.ok(x)` error type
-                                            // unresolved at binding time). For unwrap methods,
-                                            // `.ok(x)`/`.err(x)` create Results — default to "result".
-                                            if method == "unwrap"
-                                                || method == "unwrap_or"
-                                                || method == "expect"
-                                            {
-                                                Some("result")
-                                            } else {
-                                                None
+                                        .get(obj_name)
+                                        .or_else(|| names.checker_types.get(obj_name))
+                                        .cloned();
+                                    match receiver_ty {
+                                        Some(zz_checker::Type::Result(_, _)) => Some("result"),
+                                        Some(zz_checker::Type::Option(_)) => Some("option"),
+                                        Some(_) => None,
+                                        None => {
+                                            // Binding table lacks the receiver (e.g. constructor-
+                                            // inferred locals). Consult the span-resolved type
+                                            // before defaulting unwrap-ish methods to "result".
+                                            let span_ty = self
+                                                .ty_at(names, first_ident_span)
+                                                .and_then(|ty| match ty {
+                                                    zz_checker::Type::Option(_) => Some("option"),
+                                                    zz_checker::Type::Result(_, _) => {
+                                                        Some("result")
+                                                    }
+                                                    _ => None,
+                                                });
+                                            match span_ty {
+                                                Some(ns) => Some(ns),
+                                                None => {
+                                                    if method == "unwrap"
+                                                        || method == "unwrap_or"
+                                                        || method == "expect"
+                                                    {
+                                                        Some("result")
+                                                    } else {
+                                                        None
+                                                    }
+                                                }
                                             }
-                                        })
+                                        }
+                                    }
                                 } else {
                                     None
                                 };
