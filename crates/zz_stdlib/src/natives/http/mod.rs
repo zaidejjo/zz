@@ -1619,7 +1619,7 @@ fn allowed_methods(routes: &[(String, String, Value)], path: &str) -> String {
             continue;
         }
         let hit = p == path
-            || router::compile_pattern(p)
+            || router::compile_pattern_cached(p)
                 .and_then(|c| router::match_pattern(&c, path))
                 .is_some();
         if hit {
