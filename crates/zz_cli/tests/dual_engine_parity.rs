@@ -458,9 +458,10 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // (issue #215) fixed it — sweep reports FIXED.
 
         // --- Output differences (native runs but output differs) ---
-        "extension_methods" => {
-            Some("DEFERRED to HIR->IR lowering: extension-method call results missing + spurious conflict diagnostics on stderr")
-        }
+        // NOTE: `extension_methods` was listed here (extension-method call
+        // results missing + spurious conflict diagnostics on stderr) but
+        // receiver type/namespace resolution for qualified module globals
+        // and scalar-receiver boxing fixed it — sweep reports FIXED.
         // NOTE: `selective_import`, `multi_selective`, `symbol_alias`,
         // and `wildcard_import` were listed here (imported const binding
         // printed empty natively) but the sweep reports FIXED — native
@@ -479,12 +480,10 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // --- Phase 2/3 HTTP: VM-only natives abort loudly on AOT ---
         // `listen_tls`, `fetch_insecure` are VM-only (need rustls in C).
         // `hijack` is VM-only (needs WebSocket handshake in C).
-        "http_tls_p3" => Some(
-            "P3 AOT: listen_tls + fetch_insecure are VM-only; native returns error",
-        ),
-        "http_hijack_p3" => {
-            Some("P3 AOT: hijack is VM-only; native returns error")
+        "http_tls_p3" => {
+            Some("P3 AOT: listen_tls + fetch_insecure are VM-only; native returns error")
         }
+        "http_hijack_p3" => Some("P3 AOT: hijack is VM-only; native returns error"),
         // NOTE: `fs_comprehensive` was listed here (PID-embedded temp
         // paths) but the sweep reports FIXED — scratch paths are masked
         // by `mask_scratch_paths`, so it runs as strict parity now.
@@ -498,41 +497,31 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // --- Native backend bugs tracked as known divergence ---
         // Heap corruption in dict/heap-string lifecycle (double-free under
         // loop-arena reset): `edge_dict_loop_heap_str` aborts with SIGABRT.
-        "edge_dict_loop_heap_str" => Some(
-            "native: heap corruption in dict loop with heap-string values (SIGABRT)",
-        ),
+        "edge_dict_loop_heap_str" => {
+            Some("native: heap corruption in dict loop with heap-string values (SIGABRT)")
+        }
         // `clone(v)` movecow check: native reports index out of bounds.
-        "clone_test" => Some(
-            "native: clone_test movecow_check index out of bounds",
-        ),
+        "clone_test" => Some("native: clone_test movecow_check index out of bounds"),
         // Concurrent channel batch: native SIGSEGV under load.
-        "concurrency_batch_test" => Some(
-            "native: concurrency batch SIGSEGV under parallel send/recv",
-        ),
+        "concurrency_batch_test" => {
+            Some("native: concurrency batch SIGSEGV under parallel send/recv")
+        }
         // HTTP middleware p2: native misses CORS header key in dict.
-        "http_middleware_p2" => Some(
-            "native: http_middleware_p2 dict key lookup misses header",
-        ),
+        "http_middleware_p2" => Some("native: http_middleware_p2 dict key lookup misses header"),
         // Module-scope loop vars captured by closure: wrong captured value.
-        "module_scope_loop_capture" => Some(
-            "native: module-scope loop closure captures wrong variable",
-        ),
+        "module_scope_loop_capture" => {
+            Some("native: module-scope loop closure captures wrong variable")
+        }
         // Namespace collision: local shadows function parameter incorrectly.
-        "ns_collision" => Some(
-            "native: ns_collision local shadowing misresolved",
-        ),
+        "ns_collision" => Some("native: ns_collision local shadowing misresolved"),
         // Move-append early exit: `?` error path prints wrong prefix.
-        "move_append_early_exit" => Some(
-            "native: move_append_early_exit error path drops message",
-        ),
+        "move_append_early_exit" => Some("native: move_append_early_exit error path drops message"),
         // Error fixtures where native should fail (VM exits 1) but
         // native exits 0 — native error detection gap.
-        "http_tls_cert" => Some(
-            "error fixture: native exits 0, VM exits 1 (error detection gap)",
-        ),
-        "mysql_connect_refused" => Some(
-            "error fixture: native exits 0, VM exits 1 (error detection gap)",
-        ),
+        "http_tls_cert" => Some("error fixture: native exits 0, VM exits 1 (error detection gap)"),
+        "mysql_connect_refused" => {
+            Some("error fixture: native exits 0, VM exits 1 (error detection gap)")
+        }
         _ => None,
     }
 }
@@ -1075,6 +1064,14 @@ parity_strict!(
     parity_syntax_method_shadow_free,
     "syntax",
     "method_shadow_free.zz"
+);
+// Extension methods on builtins (`impl str`, `impl int`) must resolve the
+// receiver namespace for qualified module globals (`x` → `mod.x`) and box
+// raw scalar receivers into the method's `zz_value` slot.
+parity_strict!(
+    parity_syntax_extension_methods,
+    "syntax",
+    "extension_methods.zz"
 );
 parity_strict!(
     parity_syntax_for_annotated_decl,

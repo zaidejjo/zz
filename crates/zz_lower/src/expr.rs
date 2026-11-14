@@ -3257,40 +3257,19 @@ impl Lowerer {
                             // generic loop picks "vec" before "str" for methods
                             // like `.contains()` that exist on multiple types.
                             let mut found_ns = "";
-                            // Try type-based dispatch: check NameCtx's checker_types
-                            // (populated at Decl) for the receiver variable's resolved
-                            // type, then map to the matching namespace.
-                            let recv_type_ns = names
-                                .checker_types
-                                .get(obj_name.rsplit('.').next().unwrap_or(obj_name))
-                                .and_then(|ty| match ty {
-                                    zz_checker::Type::Str => Some("str"),
-                                    zz_checker::Type::Array(_) => Some("vec"),
-                                    zz_checker::Type::Dict(_, _) => Some("dict"),
-                                    zz_checker::Type::Option(_) => Some("option"),
-                                    zz_checker::Type::Result(_, _) => Some("result"),
-                                    zz_checker::Type::Db => Some("sqlz"),
-                                    zz_checker::Type::TcpStream | zz_checker::Type::TcpListener => {
-                                        Some("net")
-                                    }
-                                    zz_checker::Type::HttpServer
-                                    | zz_checker::Type::Response
-                                    | zz_checker::Type::HttpRequest => Some("http"),
-                                    zz_checker::Type::Json => Some("json"),
-                                    zz_checker::Type::Bytes => Some("bytes"),
-                                    zz_checker::Type::Chan => Some("chan"),
-                                    // Opaque handles dispatch on their module tag.
-                                    // Tags are dynamic, so leak once per tag —
-                                    // same pattern as struct namespaces in the VM.
-                                    zz_checker::Type::Opaque(tag) => Some(intern_tag(tag)),
-                                    _ => None,
-                                });
+                            // Try type-based dispatch: resolve the receiver
+                            // variable's type from every available table
+                            // (checker bindings, NameCtx checker types, the
+                            // module-global list, and the C type string) and
+                            // map it to the matching method namespace.
+                            let recv_type_ns = self.receiver_type_ns(names, obj_name);
                             // Also check the type checker's span_types map
                             // using the receiver's source span.
                             let span_type_ns =
                                 if let Some(zzty) = self.ty_at(names, first_ident_span) {
                                     match zzty {
                                         zz_checker::Type::Str => Some("str"),
+                                        zz_checker::Type::Int => Some("int"),
                                         zz_checker::Type::Array(_) => Some("vec"),
                                         zz_checker::Type::Dict(_, _) => Some("dict"),
                                         zz_checker::Type::Option(_) => Some("option"),
@@ -3317,7 +3296,12 @@ impl Lowerer {
                                 if self.ns_method_usable(type_ns, method)
                                     && (self.reachable_natives.contains(&candidate)
                                         || self.reachable_natives.contains(&std_candidate)
-                                        || native_supported(&candidate))
+                                        || native_supported(&candidate)
+                                        // ZZ impl methods on builtins (`impl int { double }`,
+                                        // `impl str { shout }`) are regular ZZ functions,
+                                        // not C natives — accept them too.
+                                        || self.tp.funcs.contains_key(&candidate)
+                                        || self.tp.funcs.contains_key(&std_candidate))
                                 {
                                     found_ns = type_ns;
                                 }
@@ -3753,6 +3737,7 @@ impl Lowerer {
                             // on the value).
                             let ns: &str = match zzty {
                                 zz_checker::Type::Array(_) => "vec",
+                                zz_checker::Type::Int => "int",
                                 zz_checker::Type::Str => "str",
                                 zz_checker::Type::Dict(_, _) => "dict",
                                 zz_checker::Type::Option(_) => "option",
@@ -4209,7 +4194,21 @@ impl Lowerer {
                 // arg drop.
                 arg_items.push(recv_val);
             } else {
-                let boxed = auto_box(&recv_val, None); // receiver is always zz_value
+                // The callee's receiver slot is always a boxed `zz_value`.
+                // A bare scalar receiver (e.g. an `int` module global
+                // `x.double()`) emits as a raw `int64_t`/`double`/`bool`,
+                // which must be boxed or the generated C hands a raw scalar
+                // where `zz_value *args` expects an object (wrong output,
+                // silently). Resolve the receiver's C type so `auto_box`
+                // wraps it; composite receivers are already `zz_value`.
+                let recv_ctype: Option<String> = match recv {
+                    Expr::Ident { name, .. } => names.lookup_type(name).map(str::to_string),
+                    Expr::Path { parts, .. } if parts.len() == 1 => {
+                        names.lookup_type(&parts[0]).map(str::to_string)
+                    }
+                    _ => None,
+                };
+                let boxed = auto_box(&recv_val, recv_ctype.as_deref());
                 arg_items.push(boxed);
             }
         }
@@ -5658,6 +5657,74 @@ impl Lowerer {
             || native_supported(name)
             || self.tp.funcs.contains_key(&twin)
             || native_supported(&twin)
+    }
+
+    /// Map a `zz_checker::Type` to its method-dispatch namespace string
+    /// (`str`→`str`, `int`→`int`, `Array`→`vec`, etc.). Returns `None` for
+    /// types that don't have a method namespace (e.g. scalars not in a
+    /// namespace, unit, etc.).
+    fn ns_for_ty(ty: Option<zz_checker::Type>) -> Option<&'static str> {
+        match ty {
+            Some(zz_checker::Type::Str) => Some("str"),
+            Some(zz_checker::Type::Int) => Some("int"),
+            Some(zz_checker::Type::Array(_)) => Some("vec"),
+            Some(zz_checker::Type::Dict(_, _)) => Some("dict"),
+            Some(zz_checker::Type::Option(_)) => Some("option"),
+            Some(zz_checker::Type::Result(_, _)) => Some("result"),
+            Some(zz_checker::Type::Db) => Some("sqlz"),
+            Some(zz_checker::Type::TcpStream | zz_checker::Type::TcpListener) => Some("net"),
+            Some(
+                zz_checker::Type::HttpServer
+                | zz_checker::Type::Response
+                | zz_checker::Type::HttpRequest,
+            ) => Some("http"),
+            Some(zz_checker::Type::Json) => Some("json"),
+            Some(zz_checker::Type::Bytes) => Some("bytes"),
+            Some(zz_checker::Type::Chan) => Some("chan"),
+            Some(zz_checker::Type::Opaque(tag)) => Some(intern_tag(&tag)),
+            _ => None,
+        }
+    }
+
+    /// Map a raw C type string to its method-dispatch namespace when the
+    /// spelling is unambiguous. Only unboxed scalars qualify (`int64_t`);
+    /// every composite is boxed as `zz_value`, so it must be resolved from
+    /// a checker type instead.
+    fn ns_for_ctype(ctype: &str) -> Option<&'static str> {
+        match ctype {
+            "int64_t" => Some("int"),
+            _ => None,
+        }
+    }
+
+    /// Resolve the receiver variable's method-dispatch namespace.
+    ///
+    /// Top-level module bindings are keyed by their qualified spelling
+    /// (`extension_methods.x`) in `tp.bindings`, `names.checker_types`,
+    /// and the module-global list, while function-local bindings use the
+    /// bare spelling (`x`). Try both, and consult each source in order of
+    /// fidelity: the checker's resolved binding type, the NameCtx checker
+    /// type recorded at `Decl`, the module-global C type, then the C type
+    /// in the names stack.
+    fn receiver_type_ns(&self, names: &NameCtx, name: &str) -> Option<&'static str> {
+        let bare = name.rsplit('.').next().unwrap_or(name);
+        for key in [name, bare] {
+            if let Some(ns) = Self::ns_for_ty(self.tp.bindings.get(key).cloned()) {
+                return Some(ns);
+            }
+            if let Some(ns) = Self::ns_for_ty(names.checker_types.get(key).cloned()) {
+                return Some(ns);
+            }
+            if let Some((_, _, ctype, _)) = self.global_list.iter().find(|(n, _, _, _)| n == key) {
+                if let Some(ns) = Self::ns_for_ctype(ctype) {
+                    return Some(ns);
+                }
+            }
+            if let Some(ns) = names.lookup_type(key).and_then(Self::ns_for_ctype) {
+                return Some(ns);
+            }
+        }
+        None
     }
 
     /// Whether this backend can actually call the `<ns>.<method>`
