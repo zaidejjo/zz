@@ -1,4 +1,4 @@
-// features: imports, known-divergence, match, option-result, print, std-net, std-time, string-literal
+// features: imports, match, option-result, print, std-net, std-time, string-literal
 // tests/fixtures/stdlib/net_tls_listener_shutdown.zz — TLS listener shutdown C twin.
 // Create a TLS listener, shut it down, verify .ok(true) on VM and AOT.
 // No client connects; just register + shutdown.

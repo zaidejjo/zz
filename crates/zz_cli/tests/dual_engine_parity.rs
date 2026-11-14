@@ -526,10 +526,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         "move_append_early_exit" => Some(
             "native: move_append_early_exit error path drops message",
         ),
-        // Native SIGSEGV in tls listener shutdown under concurrency.
-        "net_tls_listener_shutdown" => Some(
-            "native: net_tls_listener_shutdown SIGSEGV under concurrency",
-        ),
         // Error fixtures where native should fail (VM exits 1) but
         // native exits 0 — native error detection gap.
         "http_tls_cert" => Some(
