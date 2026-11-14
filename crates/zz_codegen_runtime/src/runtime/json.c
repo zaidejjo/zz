@@ -4,6 +4,12 @@
 // and serializes zz_values back to compact JSON text.
 #include "runtime.h"
 
+#include <math.h>
+
+// `zz_float_format_raw` is provided by libzz_native_rt (weak symbol on
+// non-Windows). Declared here so json.c can call it directly.
+size_t zz_float_format_raw(double x, char *buf, size_t cap);
+
 // Wrap a raw value as a JSON value (mirrors the VM's `Value::Json`).
 // The payload is a reference-counted box on the same path as
 // Option/Result variants (see `zz_vbox`).
@@ -304,10 +310,28 @@ void json_serialize(SB *sb, zz_value v) {
         { char buf[32]; int n = snprintf(buf, sizeof buf, "%lld", (long long)v.i); sb_str(sb, buf, (size_t)n); }
         break;
     case ZZ_FLOAT: {
+        // Match the VM's `format_number` (json.rs): integral floats < 1e15
+        // render without a decimal point (`1`, not `1.0`).
         char stack[ZZ_FLOAT_STACK];
         char *heap = NULL;
         size_t n = 0;
-        const char *s = zz_canonical_double(v.f, stack, &heap, &n);
+        const char *s;
+        if (isfinite(v.f) && floor(v.f) == v.f && fabs(v.f) < 1e15) {
+            n = snprintf(stack, sizeof stack, "%.0f", v.f);
+            s = stack;
+        } else {
+            n = zz_float_format_raw(v.f, stack, sizeof stack);
+            s = stack;
+        }
+        if (n >= sizeof stack) {
+            heap = (char *)malloc(n + 1);
+            if (!heap) {
+                fprintf(stderr, "zz: out of memory (float formatting)\n");
+                exit(1);
+            }
+            n = zz_float_format_raw(v.f, heap, n + 1);
+            s = heap;
+        }
         sb_str(sb, s, n);
         free(heap);
         break;
@@ -637,10 +661,28 @@ static void json_pretty_print(SB *sb, zz_value v, int indent) {
         break;
     }
     case ZZ_FLOAT: {
+        // Match the VM's `format_number` (json.rs): integral floats < 1e15
+        // render without a decimal point (`1`, not `1.0`).
         char stack[ZZ_FLOAT_STACK];
         char *heap = NULL;
         size_t n = 0;
-        const char *s = zz_canonical_double(v.f, stack, &heap, &n);
+        const char *s;
+        if (isfinite(v.f) && floor(v.f) == v.f && fabs(v.f) < 1e15) {
+            n = snprintf(stack, sizeof stack, "%.0f", v.f);
+            s = stack;
+        } else {
+            n = zz_float_format_raw(v.f, stack, sizeof stack);
+            s = stack;
+        }
+        if (n >= sizeof stack) {
+            heap = (char *)malloc(n + 1);
+            if (!heap) {
+                fprintf(stderr, "zz: out of memory (float formatting)\n");
+                exit(1);
+            }
+            n = zz_float_format_raw(v.f, heap, n + 1);
+            s = heap;
+        }
         sb_str(sb, s, n);
         free(heap);
         break;

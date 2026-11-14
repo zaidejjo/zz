@@ -1408,9 +1408,11 @@ char *zz_to_str_fmt(zz_value v, const char *spec) {
     if (v.tag == ZZ_OPTION_NONE) {
         return strdup_len("none", 4);
     }
-    // Float format: .Nf, .Ne, .Ng, etc.
-    if (v.tag == ZZ_FLOAT || (v.tag == ZZ_INT && spec[0] == '.')) {
-        double d = v.tag == ZZ_FLOAT ? v.f : (double)v.i;
+    // Float format: .Nf, .Ne, .Ng, etc. Only applies when the spec starts
+    // with '.' (integer specs like x/X/o/b/d on a float fall through to
+    // display string, matching the VM).
+    if (v.tag == ZZ_FLOAT && spec[0] == '.') {
+        double d = v.f;
         char fmt[32];
         snprintf(fmt, sizeof fmt, "%%%s", spec);
         char buf[256];
