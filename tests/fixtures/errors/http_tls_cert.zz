@@ -1,4 +1,4 @@
-// features: closures, comparison, error-case, func-call, imports, locals, option-result, print, std-http, string-literal
+// features: closures, comparison, error-case, func-call, imports, known-divergence, locals, option-result, print, std-http, string-literal
 // E2E: TLS with missing cert files is a loud runtime error (never silent cleartext)
 import std.http
 

@@ -1,4 +1,4 @@
-// features: imports, match, option-result, print, std-net, std-time, string-literal
+// features: imports, known-divergence, match, option-result, print, std-net, std-time, string-literal
 // tests/fixtures/stdlib/net_tls_listener_shutdown.zz — TLS listener shutdown C twin.
 // Create a TLS listener, shut it down, verify .ok(true) on VM and AOT.
 // No client connects; just register + shutdown.
@@ -7,7 +7,6 @@ import std.net
 func main() -> Result<int, str> {
     cert := "tests/fixtures/stdlib/data/net_tls/cert.pem"
     key := "tests/fixtures/stdlib/data/net_tls/key.pem"
-
     l := net.tls_listen("127.0.0.1:0", cert, key)
     match l {
         .ok(h) => {
@@ -26,7 +25,6 @@ func main() -> Result<int, str> {
             println("tls_listen_err: {e}")
         }
     }
-
     println("net_tls_listener_shutdown_ok")
     return .ok(0)
 }

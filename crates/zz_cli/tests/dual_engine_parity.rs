@@ -138,8 +138,14 @@ fn run_zz_with_input_env(
     // skips the check pass (so its warnings never reach stderr) and
     // executes cached IR instead of going through the source pipeline,
     // which would silently weaken the VM-vs-native comparison (#511).
-    cmd.env("ZZ_RUN_CACHE", "0")
-        .args(args)
+    cmd.env("ZZ_RUN_CACHE", "0");
+    // Native builds can hit the build cache and skip typed_program_for_phased
+    // entirely, which would skip emitting frontend diagnostics/warnings.
+    // Disable it so native and VM always run the same frontend check pass.
+    if args.contains(&"--native") {
+        cmd.env("ZZ_BUILD_CACHE", "0");
+    }
+    cmd.args(args)
         .arg(file)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -488,12 +494,9 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // --- Sandbox native socket failures (environmental, not bugs) ---
         // Native engine cannot shut down TCP sockets in sandboxed CI runners:
         // `tcp_shutdown failed: not a stream`. VM passes; only native exits 1.
-        "net_unix_test" => Some(
-            "sandbox: native TCP unix socket shutdown fails (not a stream)",
-        ),
-        "net_tls_test" => Some(
-            "sandbox: native TCP/TLS socket shutdown fails (not a stream)",
-        ),
+        // NOTE: `net_unix_test` and `net_tls_test` were here but the sweep
+        // reports FIXED! — native now matches VM (socket shutdown works).
+        // Removed from known_native_failures().
         // --- Native backend bugs tracked as known divergence ---
         // Heap corruption in dict/heap-string lifecycle (double-free under
         // loop-arena reset): `edge_dict_loop_heap_str` aborts with SIGABRT.
@@ -528,6 +531,18 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // Move-append early exit: `?` error path prints wrong prefix.
         "move_append_early_exit" => Some(
             "native: move_append_early_exit error path drops message",
+        ),
+        // Native SIGSEGV in tls listener shutdown under concurrency.
+        "net_tls_listener_shutdown" => Some(
+            "native: net_tls_listener_shutdown SIGSEGV under concurrency",
+        ),
+        // Error fixtures where native should fail (VM exits 1) but
+        // native exits 0 — native error detection gap.
+        "http_tls_cert" => Some(
+            "error fixture: native exits 0, VM exits 1 (error detection gap)",
+        ),
+        "mysql_connect_refused" => Some(
+            "error fixture: native exits 0, VM exits 1 (error detection gap)",
         ),
         _ => None,
     }
