@@ -512,8 +512,12 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         "module_scope_loop_capture" => {
             Some("native: module-scope loop closure captures wrong variable")
         }
-        // Namespace collision: local shadows function parameter incorrectly.
-        "ns_collision" => Some("native: ns_collision local shadowing misresolved"),
+        // NOTE: `ns_collision` was listed here (native wrote the call's
+        // `self` back to `env["ns_collision"]` for the module-qualified
+        // call `ns_collision.helper(...)`, clobbering the global binding
+        // that shares the module's name). Module-qualified free-function
+        // calls no longer take a receiver write-back, so native now
+        // matches the VM (`shadow`) — sweep reports FIXED.
         // Move-append early exit: `?` error path prints wrong prefix.
         "move_append_early_exit" => Some("native: move_append_early_exit error path drops message"),
         // Error fixtures where native should fail (VM exits 1) but
@@ -987,6 +991,10 @@ parity_strict!(
     "struct_array_index_field.zz"
 );
 parity_strict!(parity_stdlib_shadow_test, "stdlib", "shadow_test.zz");
+// `ns_collision`: module-qualified free-function calls no longer write the
+// call's `self` back to `env[<module name>]`, so a global binding that
+// shares the module's name is no longer clobbered.
+parity_strict!(parity_stdlib_ns_collision, "stdlib", "ns_collision.zz");
 parity_strict!(parity_syntax_destructuring, "syntax", "destructuring.zz");
 parity_strict!(
     parity_syntax_tuple_unboxed_struct,
