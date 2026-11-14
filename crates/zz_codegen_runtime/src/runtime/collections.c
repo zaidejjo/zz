@@ -786,6 +786,13 @@ zz_value zz_iter_map(zz_value items, zz_value f, int *err) {
     zz_value arr = zz_iter_items(items);
     zz_value out = zz_array_new();
     if (!fn) return out;
+    // Pre-size to input length: avoids log(n) realloc+copy churn on growth
+    // (each push may realloc the items buffer). Output length == input
+    // length for map, so reserve exactly once up front.
+    {
+        int _err = 0;
+        zz_array_reserve(out, arr.arr->len, &_err);
+    }
     // Sync-call hygiene (B3): callbacks run outside the trampoline, so a
     // stale task frame would corrupt the owning task's resume state.
     // Green closures see NULL and take the stack-frame + thread-park path.
@@ -810,6 +817,12 @@ zz_value zz_iter_filter(zz_value items, zz_value f, int *err) {
     zz_value arr = zz_iter_items(items);
     zz_value out = zz_array_new();
     if (!fn) return out;
+    // Pre-size to input length (worst case every element passes). Avoids
+    // log(n) realloc+copy churn on growth.
+    {
+        int _err = 0;
+        zz_array_reserve(out, arr.arr->len, &_err);
+    }
     // Sync-call hygiene (B3): see zz_iter_map.
     zz_task_frame *saved_fr = zz_green_frame();
     zz_green_frame_set(NULL);
@@ -830,6 +843,10 @@ zz_value zz_iter_enumerate(zz_value items, int *err) {
     (void)err;
     zz_value arr = zz_iter_items(items);
     zz_value out = zz_array_new();
+    {
+        int _err = 0;
+        zz_array_reserve(out, arr.arr->len, &_err);
+    }
     for (size_t i = 0; i < arr.arr->len; i++) {
         zz_value pair = zz_tuple((zz_value){ZZ_INT, {.i = (int64_t)i}}, arr.arr->items[i]);
         zz_array_push(out.arr, pair);
@@ -845,6 +862,10 @@ zz_value zz_iter_zip(zz_value a, zz_value b, int *err) {
     zz_value br = zz_iter_items(b);
     zz_value out = zz_array_new();
     size_t n = ar.arr->len < br.arr->len ? ar.arr->len : br.arr->len;
+    {
+        int _err = 0;
+        zz_array_reserve(out, n, &_err);
+    }
     for (size_t i = 0; i < n; i++) {
         zz_value pair = zz_tuple(ar.arr->items[i], br.arr->items[i]);
         zz_array_push(out.arr, pair);
