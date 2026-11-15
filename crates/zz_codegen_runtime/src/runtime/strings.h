@@ -54,7 +54,6 @@ zz_value zz_str_cast_arena(zz_value v, int *err, zz_arena *arena); // arena str 
 // Created via zz_str_new_mut; appended via zz_str_append_mut_*; frozen to
 // immutable ZZ_STR via zz_str_freeze when sharing is needed.
 zz_value zz_str_new_mut(size_t cap);                  // empty mutable string
-void zz_str_reset(zz_value *a);                       // reset len=0, reuse across loop iterations
 void zz_str_append_mut_str(zz_value *a, zz_value b);  // in-place append
 void zz_str_append_mut_lit(zz_value *a, const char *lit, size_t len);
 zz_value zz_str_freeze(zz_value v);   // mutable→immutable, may copy if shared
