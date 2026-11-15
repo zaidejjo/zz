@@ -1,0 +1,5 @@
+// Pure-ZZ trigonometry helpers.
+// Module: std.math
+// File: trig.zz (part of std.math split, see crates/zz_stdlib/zz/math/)
+// 
+// Functions to be added in Phase 9: sin, cos, tan, asin, acos, atan, deg variants

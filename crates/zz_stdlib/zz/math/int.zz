@@ -1,0 +1,81 @@
+// Pure-ZZ integer math helpers — aggregation & number theory.
+// Module: std.math
+// File: int.zz (part of std.math split, see crates/zz_stdlib/zz/math/)
+
+// ── Int aggregation ──────────────────────────────────────────────────────────
+
+func math.sum(arr: [int]) -> int {
+    total := 0
+    for x in arr {
+        total = total + x
+    }
+    return total
+}
+
+func math.product(arr: [int]) -> int {
+    total := 1
+    for x in arr {
+        total = total * x
+    }
+    return total
+}
+
+func math.count(arr: [int], target: int) -> int {
+    n := 0
+    for x in arr {
+        if x == target {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+// ── Number theory ────────────────────────────────────────────────────────────
+
+func math.gcd(a: int, b: int) -> int {
+    mut_a := a
+    if mut_a < 0 {
+        mut_a = 0 - mut_a
+    }
+    mut_b := b
+    if mut_b < 0 {
+        mut_b = 0 - mut_b
+    }
+    while mut_b != 0 {
+        tmp := mut_b
+        mut_b = mut_a % mut_b
+        mut_a = tmp
+    }
+    return mut_a
+}
+
+func math.lcm(a: int, b: int) -> int {
+    if a == 0 || b == 0 {
+        return 0
+    }
+    abs_a := a
+    if abs_a < 0 {
+        abs_a = 0 - abs_a
+    }
+    abs_b := b
+    if abs_b < 0 {
+        abs_b = 0 - abs_b
+    }
+    return (abs_a / math.gcd(abs_a, abs_b)) * abs_b
+}
+
+func math.factorial(n: int) -> Result<int, str> {
+    if n < 0 {
+        return .err("factorial: negative input")
+    }
+    if n > 20 {
+        return .err("factorial: input too large (max 20)")
+    }
+    result := 1
+    i := 2
+    while i <= n {
+        result = result * i
+        i = i + 1
+    }
+    return .ok(result)
+}

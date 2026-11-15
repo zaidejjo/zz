@@ -1,17 +1,6 @@
-// Pure-ZZ math helpers — compiled once, shared by VM and AOT.
+// Pure-ZZ scalar math helpers — int predicates & transforms.
 // Module: std.math
-// 
-// Functions that need float math (trig, log, sqrt, pow, constants,
-// rounding, linear algebra, statistics, random) stay as native Rust
-// in src/natives/math/mod.rs. Everything below is pure computation
-// and can run in both the bytecode VM and AOT codegen.
-// 
-// Design notes:
-//   - min/max are generic <T> — only need comparison operators.
-//   - sum/product have separate int and float variants because overflow
-//     semantics and precision requirements differ.
-//   - Array aggregation returns Option<T> to handle empty inputs safely.
-//   - Float summation uses Kahan compensated algorithm for precision.
+// File: scalar.zz (part of std.math split, see crates/zz_stdlib/zz/math/)
 
 // ── Scalar predicates & transforms (int) ─────────────────────────────────────
 
@@ -74,6 +63,9 @@ func math.clamp<T: Ord>(v: T, lo: T, hi: T) -> T {
         }
     }
 }
+// Pure-ZZ integer math helpers — aggregation & number theory.
+// Module: std.math
+// File: int.zz (part of std.math split, see crates/zz_stdlib/zz/math/)
 
 // ── Int aggregation ──────────────────────────────────────────────────────────
 
@@ -102,6 +94,59 @@ func math.count(arr: [int], target: int) -> int {
     }
     return n
 }
+
+// ── Number theory ────────────────────────────────────────────────────────────
+
+func math.gcd(a: int, b: int) -> int {
+    mut_a := a
+    if mut_a < 0 {
+        mut_a = 0 - mut_a
+    }
+    mut_b := b
+    if mut_b < 0 {
+        mut_b = 0 - mut_b
+    }
+    while mut_b != 0 {
+        tmp := mut_b
+        mut_b = mut_a % mut_b
+        mut_a = tmp
+    }
+    return mut_a
+}
+
+func math.lcm(a: int, b: int) -> int {
+    if a == 0 || b == 0 {
+        return 0
+    }
+    abs_a := a
+    if abs_a < 0 {
+        abs_a = 0 - abs_a
+    }
+    abs_b := b
+    if abs_b < 0 {
+        abs_b = 0 - abs_b
+    }
+    return (abs_a / math.gcd(abs_a, abs_b)) * abs_b
+}
+
+func math.factorial(n: int) -> Result<int, str> {
+    if n < 0 {
+        return .err("factorial: negative input")
+    }
+    if n > 20 {
+        return .err("factorial: input too large (max 20)")
+    }
+    result := 1
+    i := 2
+    while i <= n {
+        result = result * i
+        i = i + 1
+    }
+    return .ok(result)
+}
+// Pure-ZZ float aggregation & array statistics.
+// Module: std.math
+// File: stats.zz (part of std.math split, see crates/zz_stdlib/zz/math/)
 
 // ── Float aggregation (Kahan compensated summation) ──────────────────────────
 
@@ -191,53 +236,13 @@ func math.median_f(arr: [float]) -> Result<float, str> {
         .ok(sorted[mid])
     }
 }
-
-// ── Number theory ────────────────────────────────────────────────────────────
-
-func math.gcd(a: int, b: int) -> int {
-    mut_a := a
-    if mut_a < 0 {
-        mut_a = 0 - mut_a
-    }
-    mut_b := b
-    if mut_b < 0 {
-        mut_b = 0 - mut_b
-    }
-    while mut_b != 0 {
-        tmp := mut_b
-        mut_b = mut_a % mut_b
-        mut_a = tmp
-    }
-    return mut_a
-}
-
-func math.lcm(a: int, b: int) -> int {
-    if a == 0 || b == 0 {
-        return 0
-    }
-    abs_a := a
-    if abs_a < 0 {
-        abs_a = 0 - abs_a
-    }
-    abs_b := b
-    if abs_b < 0 {
-        abs_b = 0 - abs_b
-    }
-    return (abs_a / math.gcd(abs_a, abs_b)) * abs_b
-}
-
-func math.factorial(n: int) -> Result<int, str> {
-    if n < 0 {
-        return .err("factorial: negative input")
-    }
-    if n > 20 {
-        return .err("factorial: input too large (max 20)")
-    }
-    result := 1
-    i := 2
-    while i <= n {
-        result = result * i
-        i = i + 1
-    }
-    return .ok(result)
-}
+// Pure-ZZ float rounding helpers.
+// Module: std.math
+// File: rounding.zz (part of std.math split, see crates/zz_stdlib/zz/math/)
+// 
+// Functions to be added in Phase 4: round, floor, ceil, trunc
+// Pure-ZZ trigonometry helpers.
+// Module: std.math
+// File: trig.zz (part of std.math split, see crates/zz_stdlib/zz/math/)
+// 
+// Functions to be added in Phase 9: sin, cos, tan, asin, acos, atan, deg variants

@@ -1,0 +1,5 @@
+// Pure-ZZ float rounding helpers.
+// Module: std.math
+// File: rounding.zz (part of std.math split, see crates/zz_stdlib/zz/math/)
+// 
+// Functions to be added in Phase 4: round, floor, ceil, trunc
