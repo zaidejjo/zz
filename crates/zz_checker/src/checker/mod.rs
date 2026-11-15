@@ -4,6 +4,8 @@
 pub use zz_checker_core::*;
 
 use std::collections::HashMap;
+use std::fs;
+use std::process::Command;
 use std::sync::Arc;
 use zz_scope::ScopeOps;
 
@@ -1185,6 +1187,11 @@ fn check_program_impl(
             .retain(|e| seen.insert((e.message.clone(), e.span)));
     }
 
+    // Verify that declared `extern "C"` symbols exist in linked libraries.
+    // Requires a C toolchain; degrades to a warning when unavailable so
+    // `zz check` never hard-fails solely because no C compiler is present.
+    verify_extern_symbols(&mut checker);
+
     CheckerOutcome {
         result: CheckResult {
             errors: checker.errors,
@@ -1567,4 +1574,104 @@ mod unreachable_guard_tests {
             c.errors
         );
     }
+}
+
+// --- extern "C" symbol existence verification ---------------------------
+
+/// Verify that declared `extern "C"` symbols exist in at least one linked
+/// library. Only verified when `@link` libraries are declared (symbols
+/// without one are user-provided and the user is responsible).
+/// Requires a C toolchain; degrades to a warning when none is available.
+/// Results are warnings, not errors, because a library may be provided at
+/// link time through other means. Called at the end of `check_program_impl`.
+fn verify_extern_symbols(checker: &mut Checker) {
+    if checker.extern_symbols.is_empty() || checker.link_libs.is_empty() {
+        return;
+    }
+    let cc = match find_cc() {
+        Some(c) => c,
+        None => {
+            checker.errors.push(
+                zz_diag_core::warning(
+                    "cannot verify `extern \"C\"` symbol existence: no C compiler (cc/gcc/clang) found on PATH; symbol existence will be checked at link time",
+                )
+                .with_note("install a C compiler to enable check-time symbol verification"),
+            );
+            return;
+        }
+    };
+    let libs_list: String = checker
+        .link_libs
+        .iter()
+        .map(|l| format!("-l{l}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for (symbol, span) in checker.extern_symbols.iter() {
+        if !link_symbol_ok(&cc, symbol, &checker.link_libs) {
+            checker.errors.push(
+                zz_diag_core::warning_at(
+                    format!(
+                        "extern `extern \"C\"` symbol `{symbol}` not found when linking against {libs_list}\n\
+                         hint: ensure `{symbol}` is defined in one of those libraries, or add the correct `@link`",
+                    ),
+                    *span,
+                ),
+            );
+        }
+    }
+}
+
+/// Find a C compiler on PATH, preferring `cc`, then `gcc`, then `clang`.
+fn find_cc() -> Option<String> {
+    for name in ["cc", "gcc", "clang"] {
+        if Command::new(name).arg("--version").output().is_ok() {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/// Try to link a minimal program that references `symbol` against `libs`.
+/// Returns `true` when the link succeeds (symbol exists).
+fn link_symbol_ok(cc: &str, symbol: &str, libs: &[String]) -> bool {
+    let tmp = match std::env::temp_dir().to_str() {
+        Some(d) => d.to_string(),
+        None => return false,
+    };
+    let src = format!("extern void *{symbol};\nint main(void) {{ return (long){symbol}; }}\n");
+    let src_path = format!("{tmp}/zz_extern_check_{symbol}.c");
+    let obj_path = format!("{tmp}/zz_extern_check_{symbol}.o");
+    let bin_path = format!("{tmp}/zz_extern_check_{symbol}");
+    // Clean any previous artifacts.
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+    let _ = fs::remove_file(&bin_path);
+    // Write the test source.
+    if fs::write(&src_path, &src).is_err() {
+        return false;
+    }
+    // Compile to an object file (checks the symbol is declared).
+    let compile = Command::new(cc)
+        .arg("-c")
+        .arg(&src_path)
+        .arg("-o")
+        .arg(&obj_path)
+        .output();
+    let Ok(compile) = compile else {
+        return false;
+    };
+    if !compile.status.success() {
+        return false;
+    }
+    // Link against the specified libraries (checks the symbol exists).
+    let mut link = Command::new(cc);
+    link.arg(&obj_path).arg("-o").arg(&bin_path);
+    for lib in libs {
+        link.arg(format!("-l{lib}"));
+    }
+    let link = link.output();
+    let Ok(link) = link else {
+        return false;
+    };
+    link.status.success()
 }
