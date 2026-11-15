@@ -904,7 +904,8 @@ impl TypeCheckOps for Checker {
         let ty = self.check_expr_impl(e);
         // Unresolved types stay as `Var`s during the walk; the typed map is
         // deep-resolved at the end (see `check_program_typed`).
-        self.span_types.insert(self.scope_key(e.span()), ty.clone());
+        let key = self.scope_key(e.span());
+        self.span_types.insert(key, ty.clone());
         ty
     }
 
@@ -2909,8 +2910,8 @@ impl TypeCheckOps for Checker {
                 // match-arm) names otherwise leave no span entry, so
                 // lowering resolves their method calls untyped and
                 // multi-namespace methods misresolve (#417).
-                self.span_types
-                    .insert(self.scope_key(name.span), ty.clone());
+                let key = self.scope_key(name.span);
+                self.span_types.insert(key, ty.clone());
                 // Top-level destructured names are module globals (like
                 // top-level `Decl`): record them for `tp.bindings` so
                 // downstream passes (native globals collection) can type
