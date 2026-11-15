@@ -1250,6 +1250,10 @@ impl Lowerer {
                         Expr::Ident { name, .. } => {
                             let mut scratch = String::new();
                             let limit = self.emit_expr(right, names, &mut scratch);
+                            // Record array length for bounds-check elimination:
+                            // `while i < len(arr) { arr[i] ... }` → arr[i] is
+                            // provably in bounds because i < len(arr).
+                            Self::record_array_len_for_loop_bound(right, names, &limit);
                             (name.clone(), limit)
                         }
                         Expr::Binary {
@@ -1261,6 +1265,7 @@ impl Lowerer {
                             if let Expr::Ident { name, .. } = l.as_ref() {
                                 let mut scratch = String::new();
                                 let limit = self.emit_expr(right, names, &mut scratch);
+                                Self::record_array_len_for_loop_bound(right, names, &limit);
                                 (name.clone(), limit)
                             } else {
                                 (String::new(), String::new())
@@ -6520,6 +6525,26 @@ impl Lowerer {
             _ => "i",
         };
         format!("({boxed_val}).{field}")
+    }
+
+    /// Record that `arr`'s length equals `limit_expr` for bounds-check
+    /// elimination. Called when a while condition is `i < len(arr)`:
+    /// inside the loop, `arr[i]` is provably in bounds because `i < len(arr)`.
+    fn record_array_len_for_loop_bound(right: &Expr, names: &mut NameCtx, limit_expr: &str) {
+        if let Expr::Call { callee, args, .. } = right {
+            if let Expr::Ident {
+                name: callee_name, ..
+            } = callee.as_ref()
+            {
+                if callee_name == "len" && args.len() == 1 {
+                    if let Expr::Ident { name: arr_name, .. } = &args[0] {
+                        names
+                            .array_len_exprs
+                            .insert(arr_name.clone(), limit_expr.to_string());
+                    }
+                }
+            }
+        }
     }
 
     pub(crate) fn emit_str_literal(&self, s: &str) -> String {
