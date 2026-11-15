@@ -468,7 +468,11 @@ static inline zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
     // bump). The caller transfers ownership and must NOT release the item
     // afterwards — the array takes the single share. Used when f-strings are
     // passed straight to vec.append without an intervening freeze+clone.
+    // Freeze in place (mutable -> immutable, refs == 1 is exclusive) so
+    // consumers like zz_str_join see ZZ_STR, not ZZ_MUTABLE_STR.
     if (item.tag == ZZ_MUTABLE_STR && item.s && item.s->refs == 1) {
+        item.s->mutable = 0;
+        item.tag = ZZ_STR;
         a->items[a->len++] = item;
     } else {
         a->items[a->len++] = zz_clone_for_store(item);
@@ -506,6 +510,14 @@ static inline void zz_array_push_adopt(zz_value arr, zz_value item) {
     }
     a->items[a->len++] = item;
 }
+
+// vec.push_fast(arr, item) — append without any tag/grow checks. Caller must
+// ensure arr is a uniquely-owned ZZ_ARRAY with spare capacity (pre-sized).
+// Used by str_split where the array is pre-sized to the exact part count.
+static inline void zz_array_push_fast(zz_value arr, zz_value item) {
+    arr.arr->items[arr.arr->len++] = item;
+}
+
 zz_value zz_vec_push(zz_value arr, zz_value item, int *err);
 // Move-aware push for `x = vec.push(x, e)`: `taken` is owned (the caller
 // moved it out of its slot, which now holds unit). A uniquely-owned heap

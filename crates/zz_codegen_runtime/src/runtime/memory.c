@@ -385,7 +385,7 @@ void zz_release_arc(zz_value *v) {
 zz_value zz_clone_arc(zz_value v) {
     switch (v.tag) {
     case ZZ_STR:
-        if (v.s && !v.s->interned) {
+        if (v.s && !v.s->interned && v.s->refs > 0) {
             __atomic_add_fetch(&v.s->refs, 1, __ATOMIC_RELAXED);
         }
         break;

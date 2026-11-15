@@ -147,6 +147,12 @@ static zz_str *intern_lookup_or_create(const char *src, size_t len) {
 static __thread zz_str *zz_str_slab = NULL;
 static __thread size_t zz_str_slab_len = 0;
 
+// When the slab is empty, allocate headers in blocks to amortize malloc cost.
+// Blocks are intentionally leaked (process exit reclaims them) since headers
+// adopted into arrays live until array release; recycling them mid-loop isn't
+// possible without breaking array ownership.
+#define ZZ_STR_BLOCK_SIZE 4096
+
 zz_str *zz_str_header_alloc(void) {
     if (zz_str_slab) {
         zz_str *s = zz_str_slab;
@@ -154,17 +160,31 @@ zz_str *zz_str_header_alloc(void) {
         zz_str_slab_len--;
         return s;
     }
-    return (zz_str *)malloc(sizeof(zz_str));
+    // Slab empty: allocate a block and chain all but the first into the slab.
+    zz_str *start = (zz_str *)malloc(ZZ_STR_BLOCK_SIZE * sizeof(zz_str));
+    if (!start) {
+        fprintf(stderr, "zz: out of memory\n");
+        exit(1);
+    }
+    for (size_t i = 1; i < ZZ_STR_BLOCK_SIZE; i++) {
+        *(zz_str **)(start[i].sso) = (i + 1 < ZZ_STR_BLOCK_SIZE)
+            ? (zz_str *)&start[i + 1]
+            : NULL;
+    }
+    zz_str_slab = start + 1;
+    zz_str_slab_len = ZZ_STR_BLOCK_SIZE - 1;
+    return start;
 }
 
 void zz_str_header_free(zz_str *s) {
-    if (zz_str_slab_len < ZZ_STR_SLAB_MAX) {
-        *(zz_str **)s->sso = zz_str_slab;  // stash next pointer in sso
-        zz_str_slab = s;
-        zz_str_slab_len++;
-        return;
-    }
-    free(s);
+    // Always return to the slab (unlimited). Block-allocated headers must
+    // never be individually free()d — they're part of a malloc'd block that
+    // is reclaimed at process exit. Individually-malloc'd headers accumulate
+    // in the slab but are reused on subsequent allocs, keeping steady-state
+    // malloc count low.
+    *(zz_str **)s->sso = zz_str_slab;
+    zz_str_slab = s;
+    zz_str_slab_len++;
 }
 
 // Allocate a string with at least `need` bytes of payload capacity.
@@ -3101,49 +3121,80 @@ zz_value zz_str_join(zz_value items, zz_value sep, int *err) {
     if (sep.tag == ZZ_STR) { sep_d = zz_str_ptr(sep.s); sep_len = sep.s->len; }
     size_t n = items.arr->len;
     if (n == 0) return zz_str_static("");
-    // Materialize each item as bytes (borrowed for STR, owned display
-    // string otherwise), then join.
-    const char **parts = (const char **)malloc(n * sizeof(char *));
-    size_t *lens = (size_t *)malloc(n * sizeof(size_t));
-    char **owned = (char **)malloc(n * sizeof(char *));
-    if (!parts || !lens || !owned) {
-        free(parts); free(lens); free(owned);
-        return zz_str_static("");
-    }
-    size_t total = 0;
-    for (size_t i = 0; i < n; i++) {
-        zz_value v = items.arr->items[i];
-        owned[i] = NULL;
-        if (v.tag == ZZ_STR && v.s) {
-            parts[i] = zz_str_cptr(v.s);
-            lens[i] = v.s->len;
+    // Estimate result size: 16 bytes/item + separators. Single pass avoids
+    // the second full scan over the (16MB+) items array. Realloc on overflow
+    // is rare for realistic inputs.
+    size_t total_est = 16 * n + sep_len * (n - 1);
+    char *buf = (char *)malloc(total_est + 1);
+    if (!buf) return zz_str_static("");
+
+    size_t pos = 0;
+    // First item: no leading separator.
+    if (n > 0) {
+        zz_value v = items.arr->items[0];
+        if (v.tag == ZZ_STR) {
+            size_t l = v.s->len;
+            if (__builtin_expect(pos + l > total_est, 0)) {
+                size_t nc = total_est * 2;
+                char *nb = (char *)realloc(buf, nc + 1);
+                if (!nb) { free(buf); return zz_str_static(""); }
+                buf = nb;
+                total_est = nc;
+            }
+            memcpy(buf, zz_str_ptr(v.s), l);
+            pos = l;
         } else {
             char *s = zz_value_to_display_string(&v);
-            owned[i] = s;
-            parts[i] = s;
-            lens[i] = strlen(s);
+            size_t l = strlen(s);
+            if (__builtin_expect(pos + l > total_est, 0)) {
+                size_t nc = total_est * 2;
+                char *nb = (char *)realloc(buf, nc + 1);
+                if (!nb) { free(s); free(buf); return zz_str_static(""); }
+                buf = nb;
+                total_est = nc;
+            }
+            memcpy(buf, s, l);
+            pos = l;
+            free(s);
         }
-        total += lens[i];
-        if (i > 0) total += sep_len;
     }
-    char *buf = (char *)malloc(total + 1);
-    if (!buf) {
-        free(parts);
-        free(lens);
-        free(owned);
-        return zz_str_static("");
-    }
-    size_t pos = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (i > 0) { memcpy(buf + pos, sep_d, sep_len); pos += sep_len; }
-        memcpy(buf + pos, parts[i], lens[i]);
-        pos += lens[i];
-        free(owned[i]);
+    // Remaining items: separator + data, no `i > 0` branch in hot loop.
+    for (size_t i = 1; i < n; i++) {
+        if (sep_len == 1) buf[pos++] = sep_d[0];
+        else { memcpy(buf + pos, sep_d, sep_len); pos += sep_len; }
+        zz_value v = items.arr->items[i];
+        // Prefetch next item's zz_str header to hide cache miss latency.
+        if (i + 1 < n) {
+            zz_value nv = items.arr->items[i + 1];
+            if (nv.tag == ZZ_STR && nv.s) __builtin_prefetch(nv.s, 0, 3);
+        }
+        if (v.tag == ZZ_STR) {
+            size_t l = v.s->len;
+            if (__builtin_expect(pos + l > total_est, 0)) {
+                size_t nc = total_est * 2;
+                char *nb = (char *)realloc(buf, nc + 1);
+                if (!nb) { free(buf); return zz_str_static(""); }
+                buf = nb;
+                total_est = nc;
+            }
+            memcpy(buf + pos, zz_str_ptr(v.s), l);
+            pos += l;
+        } else {
+            char *s = zz_value_to_display_string(&v);
+            size_t l = strlen(s);
+            if (__builtin_expect(pos + l > total_est, 0)) {
+                size_t nc = total_est * 2;
+                char *nb = (char *)realloc(buf, nc + 1);
+                if (!nb) { free(s); free(buf); return zz_str_static(""); }
+                buf = nb;
+                total_est = nc;
+            }
+            memcpy(buf + pos, s, l);
+            pos += l;
+            free(s);
+        }
     }
     buf[pos] = '\0';
-    free(parts);
-    free(lens);
-    free(owned);
     return zz_str_owned(buf);
 }
 
@@ -3178,8 +3229,14 @@ zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
         size_t i = 0;
         while (i < len) {
             size_t l = zz_utf8_seq_len((const unsigned char *)(d + i), len - i);
-            zz_value item = zz_str_new(d + i, l);
-            zz_array_push_adopt(arr, item);
+            // Zero-copy: part references into original buffer (s outlives parts
+            // in all split call sites). refs==0 sentinel → never individually freed.
+            zz_str *h = zz_str_header_alloc();
+            h->refs = 0; h->interned = 0; h->mutable = 0;
+            h->cap = 1; h->len = l; h->charlen = ZZ_STR_CHARLEN_UNKNOWN; h->hash = 0;
+            h->heap = (char *)(d + i);
+            zz_value item = {ZZ_STR, {.s = h}};
+            zz_array_push_fast(arr, item);
             i += l;
         }
         {
@@ -3189,25 +3246,72 @@ zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
         return arr;
     }
     size_t pos = 0;
+    // Pre-allocate all headers in one block (calloc → pages pre-zeroed by OS,
+    // so no per-header memset needed). Block is leaked (not freed) because
+    // headers must outlive the returned array; process exit reclaims memory.
+    zz_str *hdrs = (zz_str *)calloc(approx_count, sizeof(zz_str));
+    if (!hdrs) return zz_array_new();
+    size_t hidx = 0;
     for (;;) {
-        size_t next = pos;
-        int found = 0;
-        while (next + slen <= len) {
-            if (memcmp(d + next, sd, slen) == 0) { found = 1; break; }
-            next++;
+        const char *sep_pos = NULL;
+        if (slen > 0 && pos < len) {
+            if (slen == 1) {
+                // Unrolled byte scan for single-char separator: processes
+                // 8 bytes per loop iteration, reducing branch overhead
+                // for short runs (~11 bytes per part).
+                const char *p = d + pos;
+                const char *end = d + len;
+                while (p + 7 < end) {
+                    if (p[0] == sd[0]) break;
+                    if (p[1] == sd[0]) { p++; break; }
+                    if (p[2] == sd[0]) { p += 2; break; }
+                    if (p[3] == sd[0]) { p += 3; break; }
+                    if (p[4] == sd[0]) { p += 4; break; }
+                    if (p[5] == sd[0]) { p += 5; break; }
+                    if (p[6] == sd[0]) { p += 6; break; }
+                    if (p[7] == sd[0]) { p += 7; break; }
+                    p += 8;
+                }
+                while (p < end && *p != sd[0]) p++;
+                if (p < end) sep_pos = p;
+            } else {
+                sep_pos = (const char *)memchr(d + pos, sd[0], len - pos);
+                if (sep_pos && slen > 1) {
+                    size_t remaining = len - (size_t)(sep_pos - d);
+                    if (remaining < slen || memcmp(sep_pos, sd, slen) != 0) {
+                        pos = (size_t)(sep_pos - d) + 1;
+                        continue;
+                    }
+                }
+            }
         }
-        if (!found) {
-            // No more separators: remainder runs to end of string.
-            // (Previously emitted d[pos..next] where next stalls at
-            // len-slen+1, silently dropping up to slen-1 tail chars —
-            // invisible for single-char seps where next always reaches len.)
-            zz_value item = zz_str_new(d + pos, len - pos);
-            zz_array_push_adopt(arr, item);
-            break;
+
+        size_t part_start = pos;
+        size_t part_len;
+        int done;
+        if (sep_pos) {
+            part_len = (size_t)(sep_pos - (d + pos));
+            pos = (size_t)(sep_pos - d) + slen;
+            done = 0;
+        } else {
+            part_len = len - pos;
+            pos = len;
+            done = 1;
         }
-        zz_value item = zz_str_new(d + pos, next - pos);
-        zz_array_push_adopt(arr, item);
-        pos = next + slen;
+
+        // Carve header from pre-allocated block; zero-copy — part references
+        // into original buffer (s outlives parts at all split call sites).
+        // refs==0 sentinel → never individually freed; block leaked on exit.
+        zz_str *h = &hdrs[hidx++];
+        h->cap = 1; h->len = part_len;
+        h->charlen = ZZ_STR_CHARLEN_UNKNOWN;
+        h->heap = (char *)(d + part_start);
+        // refs/interned/mutable/hash zero from calloc
+
+        zz_value item = {ZZ_STR, {.s = h}};
+        zz_array_push_fast(arr, item);
+
+        if (done) break;
     }
     return arr;
 }
