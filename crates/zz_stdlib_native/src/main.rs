@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use zz_codegen_cc::{clang_flags, detect_clang, BuildOptions};
-use zz_codegen_ffi::{ffi_decl, ffi_impl};
+use zz_codegen_ffi::ffi_impl;
 use zz_frontend::parse;
 use zz_hir::build_program;
 use zz_lower::Lowerer;
