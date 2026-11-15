@@ -2244,7 +2244,7 @@ global cache, run entries included."
 fn build_cmd(args: &[String]) -> Result<(), String> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "usage: zz build [-p|--release|-O3|--static|--dynamic|--full|--pgo] [--target <triple>] [--cc <clang|zig>] [--embed <dir>] [--features <list>|--all-features] [-o <name>] [<file.zz>]\n\
+            "usage: zz build [-p|--release|-O3|--static|--dynamic|--full|--pgo|--optimize-max] [--target <triple>] [--cc <clang|zig>] [--embed <dir>] [--features <list>|--all-features] [-o <name>] [<file.zz>]\n\
              \n\
              compile a native binary (cached; defaults to a static self-contained build).\n\
              \n\
@@ -2254,7 +2254,8 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
                --dynamic            fast dynamic debug build (-O0 -g)\n  \
                --static             static build, explicit\n  \
                --full               max optimization (full LTO; with `-- <args>` runs PGO training first)\n  \
-               --pgo                profile-guided optimization build\n\
+               --pgo                profile-guided optimization build\n  \
+               --optimize-max       maximum optimization: full LTO + PGO use + native CPU + relaxed float\n\
              \n\
              FLAGS:\n  \
                --target <triple>    cross-compile via clang --target=\n  \
@@ -2311,10 +2312,18 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
             .to_string());
     }
     let is_pgo = flag_args.iter().any(|a| a == "--pgo");
+    let is_optimize_max = flag_args.iter().any(|a| a == "--optimize-max");
     if is_full && is_pgo {
         return Err("cannot combine `--full` and `--pgo`\n\
              hint: --full runs its own instrument-train-optimize pipeline; pass training args after `--` instead"
             .to_string());
+    }
+    if is_optimize_max && (is_full || is_pgo || is_static || is_dynamic) {
+        return Err(
+            "cannot combine `--optimize-max` with `--full`, `--pgo`, `--static`, or `--dynamic`\n\
+             hint: --optimize-max is a standalone max-optimization mode"
+                .to_string(),
+        );
     }
     let verbose = flag_args.iter().any(|a| a == "--verbose");
     let allow_source_builds = flag_args.iter().any(|a| a == "--allow-source-builds");
@@ -2381,6 +2390,8 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         zz_build::BuildMode::Static
     } else if is_full {
         zz_build::BuildMode::Full
+    } else if is_optimize_max {
+        zz_build::BuildMode::OptimizeMax
     } else if release {
         zz_build::BuildMode::Release
     } else if is_dynamic {
@@ -2420,6 +2431,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         zz_build::BuildMode::Static => "static",
         zz_build::BuildMode::Pgo | zz_build::BuildMode::PgoUse => "pgo",
         zz_build::BuildMode::Full | zz_build::BuildMode::FullPgo => "full",
+        zz_build::BuildMode::OptimizeMax => "optimize-max",
     };
     // `--full -- <train args>`: max optimization with PGO —
     // instrument, train, merge, rebuild optimized (mirrors `zz profile`

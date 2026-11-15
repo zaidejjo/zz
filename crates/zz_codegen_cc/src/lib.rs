@@ -706,6 +706,13 @@ pub fn clang_flags_with(
             // The system linker may not understand foreign triples.
             flags.push("-fuse-ld=lld".to_string());
         }
+    } else {
+        // Host build: use lld when available for faster linking
+        // (especially noticeable with ThinLTO/full LTO). Falls back to the
+        // system linker if lld is not installed.
+        if !cfg!(windows) && !cfg!(target_os = "macos") {
+            flags.push("-fuse-ld=lld".to_string());
+        }
     }
     // Winsock: the C runtime's net layer calls WSAStartup/socket regardless
     // of the target, and a plain host build on Windows needs the import
@@ -1116,6 +1123,7 @@ pub fn build_options_fingerprint_with(
         None => 0u8.hash(&mut h),
     }
     opts.relaxed_float.hash(&mut h);
+    opts.optimize_max.hash(&mut h);
     // The build identity, not just the flags: AOT objects are this
     // compiler's output, so a rebuilt `zz` (dirty codegen, new C
     // template) must never reuse them. Same class as the sanitizer
@@ -1924,7 +1932,13 @@ mod tests {
     #[test]
     fn lld_only_cross() {
         let native = clang_flags(&release_opts(), None);
-        assert!(!native.iter().any(|f| f == "-fuse-ld=lld"));
+        // Host Linux uses lld for faster linking; macOS/Windows use their
+        // native linkers.
+        if cfg!(target_os = "linux") {
+            assert!(native.iter().any(|f| f == "-fuse-ld=lld"));
+        } else {
+            assert!(!native.iter().any(|f| f == "-fuse-ld=lld"));
+        }
         let cross = clang_flags(&release_opts(), Some("aarch64-unknown-linux-gnu"));
         assert!(cross.iter().any(|f| f == "-fuse-ld=lld"));
     }

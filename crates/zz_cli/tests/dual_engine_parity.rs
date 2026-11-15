@@ -1267,6 +1267,42 @@ parity_strict!(
     "regression",
     "edge_cast_float_nan.zz"
 );
+
+// ZZ_RELAXED_FLOAT=1 parity: NaN/inf/domain-error behavior must match
+// between VM and native when the NaN-preserving middle ground is active.
+// This guards against -ffast-math-style fold differences leaking in.
+#[test]
+fn parity_relaxed_float_edge_float_format() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("regression").join("edge_float_format.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+    let input = stdin_for(&path);
+    let vm = run_zz_with_input_env(&["run"], &path, &input, Some("ZZ_RELAXED_FLOAT=1"));
+    let native = run_zz_with_input_env(
+        &["run", "--native"],
+        &path,
+        &input,
+        Some("ZZ_RELAXED_FLOAT=1"),
+    );
+    assert_parity_strict(&path, vm, native, false);
+}
+
+#[test]
+fn parity_relaxed_float_edge_cast_float_nan() {
+    let fixtures = fixtures_dir();
+    let path = fixtures.join("regression").join("edge_cast_float_nan.zz");
+    assert!(path.exists(), "fixture not found: {}", path.display());
+    let input = stdin_for(&path);
+    let vm = run_zz_with_input_env(&["run"], &path, &input, Some("ZZ_RELAXED_FLOAT=1"));
+    let native = run_zz_with_input_env(
+        &["run", "--native"],
+        &path,
+        &input,
+        Some("ZZ_RELAXED_FLOAT=1"),
+    );
+    assert_parity_strict(&path, vm, native, false);
+}
+
 parity_strict!(
     parity_regression_edge_slice_clamp,
     "regression",

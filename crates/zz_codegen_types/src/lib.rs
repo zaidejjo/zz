@@ -36,6 +36,10 @@ pub struct BuildOptions {
     /// never on cross builds (`--target`) where it could change results on
     /// other CPUs / with other toolchains.
     pub relaxed_float: bool,
+    /// Max-optimization mode: full LTO + PGO use + native CPU + relaxed
+    /// float. Opt-in via `--optimize-max`; trades build time and float
+    /// semantics for peak runtime speed.
+    pub optimize_max: bool,
     pub plugin_artifacts: Vec<PathBuf>,
     pub plugin_link_args: Vec<String>,
     pub embed_assets: Vec<EmbedAsset>,
@@ -65,6 +69,7 @@ impl BuildOptions {
             native_cpu: false,
             profile_path: None,
             relaxed_float: false,
+            optimize_max: false,
         }
     }
 
@@ -90,6 +95,7 @@ impl BuildOptions {
             native_cpu: false,
             profile_path: None,
             relaxed_float: false,
+            optimize_max: false,
         }
     }
 
@@ -115,6 +121,7 @@ impl BuildOptions {
             native_cpu: false,
             profile_path: None,
             relaxed_float: false,
+            optimize_max: false,
         }
     }
 
@@ -140,6 +147,33 @@ impl BuildOptions {
             native_cpu: false,
             profile_path: None,
             relaxed_float: false,
+            optimize_max: false,
+        }
+    }
+
+    pub fn optimize_max() -> Self {
+        BuildOptions {
+            optimize: true,
+            strip: true,
+            static_link: false,
+            gc_sections: true,
+            thin_lto: false,
+            full_lto: true,
+            pgo: PgoMode::Use,
+            native_rt: false,
+            pg_link: false,
+            float_link: false,
+            curl_link: false,
+            sqlite_link: false,
+            allow_static_downgrade: false,
+            plugin_artifacts: Vec::new(),
+            plugin_link_args: Vec::new(),
+            embed_assets: Vec::new(),
+            verbose: false,
+            native_cpu: true,
+            profile_path: None,
+            relaxed_float: true,
+            optimize_max: true,
         }
     }
 
@@ -165,6 +199,7 @@ impl BuildOptions {
             native_cpu: true,
             profile_path: None,
             relaxed_float: false,
+            optimize_max: false,
         }
     }
 
@@ -190,6 +225,7 @@ impl BuildOptions {
             native_cpu: true,
             profile_path: None,
             relaxed_float: false,
+            optimize_max: false,
         }
     }
 
@@ -215,6 +251,7 @@ impl BuildOptions {
             native_cpu: false,
             profile_path: None,
             relaxed_float: false,
+            optimize_max: false,
         }
     }
 }
