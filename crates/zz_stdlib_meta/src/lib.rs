@@ -12,7 +12,13 @@ use std::collections::HashMap;
 
 use zz_checker::FuncSig;
 
+pub mod c_impl;
+pub mod ffi_impl;
+pub mod inventory;
 pub mod table;
+
+pub use c_impl::native_impl;
+pub use ffi_impl::{ffi_decl, ffi_impl};
 
 /// Build the complete stdlib signature table.
 ///
@@ -39,5 +45,22 @@ mod tests {
         assert!(rows.contains_key("print"));
         assert!(rows.contains_key("std.str.length"));
         assert_eq!(rows["std.vec.push"].generics, vec!["T"]);
+    }
+
+    /// The inventory is the committed tier classification. Every signature
+    /// must get exactly one tier; a missing entry means a new stdlib function
+    /// landed without saying where (and how) it is implemented.
+    #[test]
+    fn inventory_covers_every_signature() {
+        let mut missing: Vec<String> = crate::build()
+            .keys()
+            .filter(|name| crate::inventory::tier_of(name).is_none())
+            .cloned()
+            .collect();
+        missing.sort();
+        assert!(
+            missing.is_empty(),
+            "unclassified stdlib entries (add to inventory): {missing:?}"
+        );
     }
 }
