@@ -1506,83 +1506,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // VM uses Rust bodies during transition.
 
     // ── std.math trigonometry ──
-    m.insert(
-        "std.math.sin".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_sin,
-        },
-    );
-    m.insert(
-        "std.math.cos".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_cos,
-        },
-    );
-    m.insert(
-        "std.math.tan".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_tan,
-        },
-    );
-    m.insert(
-        "std.math.asin".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_asin,
-        },
-    );
-    m.insert(
-        "std.math.acos".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_acos,
-        },
-    );
-    m.insert(
-        "std.math.atan".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_atan,
-        },
-    );
-    m.insert(
-        "std.math.sin_deg".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_sin_deg,
-        },
-    );
-    m.insert(
-        "std.math.cos_deg".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_cos_deg,
-        },
-    );
-    m.insert(
-        "std.math.tan_deg".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_tan_deg,
-        },
-    );
-    m.insert(
-        "std.math.to_radians".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_to_radians,
-        },
-    );
-    m.insert(
-        "std.math.to_degrees".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_to_degrees,
-        },
-    );
 
     // ── std.math logarithms & exponents ──
 
@@ -2492,7 +2415,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // table without the other will fail CI here rather than at runtime.
     assert_eq!(
         m.len(),
-        453,
+        442,
         "natives registry count drifted; update this assertion"
     );
 

@@ -88,6 +88,18 @@ pub const PURE_ZZ: &[&str] = &[
     "std.math.exp",
     "std.math.hypot",
     "std.math.root",
+    // PNSA: math.trig moved to pure-Zz (trig.zz).
+    "std.math.sin",
+    "std.math.cos",
+    "std.math.tan",
+    "std.math.asin",
+    "std.math.acos",
+    "std.math.atan",
+    "std.math.sin_deg",
+    "std.math.cos_deg",
+    "std.math.tan_deg",
+    "std.math.to_radians",
+    "std.math.to_degrees",
     // PNSA: math.random/rand_range moved to pure-Zz (log.zz).
     "std.math.random",
     "std.math.rand_range",

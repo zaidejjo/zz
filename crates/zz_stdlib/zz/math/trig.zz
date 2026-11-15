@@ -2,4 +2,124 @@
 // Module: std.math
 // File: trig.zz (part of std.math split, see crates/zz_stdlib/zz/math/)
 // 
-// Functions to be added in Phase 9: sin, cos, tan, asin, acos, atan, deg variants
+// Trig via Taylor series with range reduction.
+// PI, E, TAU etc. are std.math constants (Const tier), available as math.PI, math.E, math.TAU.
+
+// ── Sine ───────────────────────────────────────────────────────────────────
+
+func math.sin(x: float) -> float {
+    // Range reduction to [-PI, PI] for better convergence
+    pi := math.PI
+    two_pi := 2.0 * pi
+    xx := x
+    while xx > pi {
+        xx = xx - two_pi
+    }
+    while xx < -pi {
+        xx = xx + two_pi
+    }
+    // Taylor series: sin(x) = x - x³/3! + x⁵/5! - x⁷/7! + ...
+    result := xx
+    term := xx
+    xx2 := xx * xx
+    i := 1
+    while i < 20 {
+        term = -term * xx2 / float((2 * i) * (2 * i + 1))
+        result = result + term
+        i = i + 1
+    }
+    return result
+}
+
+// ── Cosine ─────────────────────────────────────────────────────────────────
+
+func math.cos(x: float) -> float {
+    // cos(x) = sin(x + PI/2)
+    return math.sin(x + math.PI / 2.0)
+}
+
+// ── Tangent ────────────────────────────────────────────────────────────────
+
+func math.tan(x: float) -> float {
+    return math.sin(x) / math.cos(x)
+}
+
+// ── Arcsine ────────────────────────────────────────────────────────────────
+
+func math.asin(x: float) -> float {
+    if x < -1.0 || x > 1.0 {
+        return 0.0 / 0.0 // NaN
+        
+    }
+    // arcsin(x) = x + x³/6 + 3x⁵/40 + 5x⁷/112 + ...
+    result := x
+    term := x
+    x2 := x * x
+    n := 1
+    while n < 50 {
+        term = term * x2 * float((2 * n - 1) * (2 * n - 1)) / float((2 * n) * (2 * n + 1))
+        result = result + term
+        n = n + 1
+    }
+    return result
+}
+
+// ── Arccosine ──────────────────────────────────────────────────────────────
+
+func math.acos(x: float) -> float {
+    return math.PI / 2.0 - math.asin(x)
+}
+
+// ── Arctangent ─────────────────────────────────────────────────────────────
+
+func math.atan(x: float) -> float {
+    if x == 0.0 {
+        return 0.0
+    }
+    neg := x < 0.0
+    ax := x
+    if neg {
+        ax = -ax
+    }
+    result := 0.0
+    if ax <= 1.0 {
+        term := ax
+        ax2 := ax * ax
+        n := 1
+        while n < 50 {
+            result = result + term
+            term = -term * ax2 * float(2 * n - 1) / float(2 * n + 1)
+            n = n + 1
+        }
+    } else {
+        result = math.PI / 2.0 - math.atan(1.0 / ax)
+    }
+    if neg {
+        return -result
+    }
+    return result
+}
+
+// ── Degrees conversion ─────────────────────────────────────────────────────
+
+func math.to_radians(deg: float) -> float {
+    return deg * math.PI / 180.0
+}
+
+func math.to_degrees(rad: float) -> float {
+    return rad * 180.0 / math.PI
+}
+
+// ── Degree variants ────────────────────────────────────────────────────────
+
+func math.sin_deg(x: float) -> float {
+    return math.sin(math.to_radians(x))
+}
+
+func math.cos_deg(x: float) -> float {
+    return math.cos(math.to_radians(x))
+}
+
+func math.tan_deg(x: float) -> float {
+    return math.tan(math.to_radians(x))
+}

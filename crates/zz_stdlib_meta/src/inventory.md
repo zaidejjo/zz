@@ -7,10 +7,10 @@ Total entries: 700
 
 | tier | entries |
 |---|---:|
-| CRuntime | 306 |
+| CRuntime | 295 |
 | Const | 6 |
 | FfiStaticlib | 154 |
-| PureZz | 233 |
+| PureZz | 244 |
 | VmOnly | 1 |
 
 | tier | name | implementation |
@@ -374,13 +374,13 @@ Total entries: 700
 | Const | `std.math.SQRT_2` | `stdlib_consts` |
 | CRuntime | `std.math.TAU` | `zz_math_tau` |
 | PureZz | `std.math.abs` | `zz/math/mod.zz` |
-| CRuntime | `std.math.acos` | `zz_math_acos` |
-| CRuntime | `std.math.asin` | `zz_math_asin` |
-| CRuntime | `std.math.atan` | `zz_math_atan` |
+| PureZz | `std.math.acos` | `zz/math/mod.zz` |
+| PureZz | `std.math.asin` | `zz/math/mod.zz` |
+| PureZz | `std.math.atan` | `zz/math/mod.zz` |
 | PureZz | `std.math.ceil` | `zz/math/mod.zz` |
 | PureZz | `std.math.clamp` | `zz/math/mod.zz` |
-| CRuntime | `std.math.cos` | `zz_math_cos` |
-| CRuntime | `std.math.cos_deg` | `zz_math_cos_deg` |
+| PureZz | `std.math.cos` | `zz/math/mod.zz` |
+| PureZz | `std.math.cos_deg` | `zz/math/mod.zz` |
 | PureZz | `std.math.count` | `zz/math/mod.zz` |
 | PureZz | `std.math.dot_product` | `zz/math/mod.zz` |
 | PureZz | `std.math.exp` | `zz/math/mod.zz` |
@@ -414,15 +414,15 @@ Total entries: 700
 | PureZz | `std.math.root` | `zz/math/mod.zz` |
 | PureZz | `std.math.round` | `zz/math/mod.zz` |
 | PureZz | `std.math.signum` | `zz/math/mod.zz` |
-| CRuntime | `std.math.sin` | `zz_math_sin` |
-| CRuntime | `std.math.sin_deg` | `zz_math_sin_deg` |
+| PureZz | `std.math.sin` | `zz/math/mod.zz` |
+| PureZz | `std.math.sin_deg` | `zz/math/mod.zz` |
 | PureZz | `std.math.sqrt` | `zz/math/mod.zz` |
 | PureZz | `std.math.sum` | `zz/math/mod.zz` |
 | PureZz | `std.math.sum_f` | `zz/math/mod.zz` |
-| CRuntime | `std.math.tan` | `zz_math_tan` |
-| CRuntime | `std.math.tan_deg` | `zz_math_tan_deg` |
-| CRuntime | `std.math.to_degrees` | `zz_math_to_degrees` |
-| CRuntime | `std.math.to_radians` | `zz_math_to_radians` |
+| PureZz | `std.math.tan` | `zz/math/mod.zz` |
+| PureZz | `std.math.tan_deg` | `zz/math/mod.zz` |
+| PureZz | `std.math.to_degrees` | `zz/math/mod.zz` |
+| PureZz | `std.math.to_radians` | `zz/math/mod.zz` |
 | PureZz | `std.math.trunc` | `zz/math/mod.zz` |
 | CRuntime | `std.net.accept` | `zz_tcp_accept` |
 | CRuntime | `std.net.close` | `zz_tcp_shutdown` |
