@@ -73,6 +73,11 @@ jobs:
         run: cargo fmt --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
+      - name: stdlib table drift (regen --check)
+        # Generated files (currently `zz_stdlib::funcs`) must match the
+        # declarative table in `zz_stdlib_meta`. Fails when a signature was
+        # edited by hand without regenerating.
+        run: cargo run -q -p zz_stdlib_meta --bin regen -- --check
       - name: actionlint (workflow syntax + shellcheck)
         # Not preinstalled on the Ubuntu images (exit 127 otherwise). Pinned
         # release tarballs: no third-party action, no dangling "latest".

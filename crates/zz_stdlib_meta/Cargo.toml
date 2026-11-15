@@ -1,0 +1,9 @@
+[package]
+name = "zz_stdlib_meta"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Single declarative source of truth for ZZ stdlib signatures and AOT/FFI registration"
+
+[dependencies]
+zz_checker = { path = "../zz_checker" }
