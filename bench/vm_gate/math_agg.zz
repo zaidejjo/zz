@@ -1,0 +1,29 @@
+// Gate: math aggregation workload for the PR 2 migration — sum/mean over a
+// 10^6-element f64 array, i.e. 2e6 element-passes with both accumulators
+// (the plan's §5 size). Array construction is outside the timed region; the
+// values are exact in f64, so `result=` is independent of the accumulation
+// algorithm (naive vs Kahan) and the gate compares speed only.
+import std.math
+import std.time
+
+func main() {
+    n := 1000000
+    arr:[float] = []
+    for i in 0..n {
+        arr.push(if i % 2 == 0 {
+            1.0
+        } else {
+            2.0
+        })
+    }
+    t0 := time.now_ms()
+    sum := math.sum_f(arr)
+    mean := 0.0
+    match math.mean_f(arr) {
+        .ok(v) => mean = v
+        .err(_) => mean = 0.0 - 1.0
+    }
+    t1 := time.now_ms()
+    // sum = 1.5e6, mean = 1.5 — both exactly representable.
+    println("math_agg: {t1 - t0}ms result={int(sum)}:{int(mean * 10.0)}")
+}
