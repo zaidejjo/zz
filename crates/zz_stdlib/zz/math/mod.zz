@@ -298,6 +298,47 @@ func math.magnitude(v: [float]) -> float {
         .err(_) => return 0.0
     }
 }
+
+// ── Matrix multiplication ────────────────────────────────────────────────────
+
+func math.matrix_mul(m1: [[float]], m2: [[float]]) -> Result<[[float]], str> {
+    if vec.len(m1) == 0 || vec.len(m2) == 0 {
+        return .err("matrix_mul: empty matrix")
+    }
+    rows1 := vec.len(m1)
+    cols1 := vec.len(m1[0])
+    rows2 := vec.len(m2)
+    cols2 := vec.len(m2[0])
+    if cols1 != rows2 {
+        return .err("matrix_mul: dimension mismatch")
+    }
+    // Build result matrix rows1 x cols2
+    result := []
+    i := 0
+    while i < rows1 {
+        row := []
+        j := 0
+        while j < cols2 {
+            // Extract column j from m2 as a 1D array
+            col := []
+            k := 0
+            while k < rows2 {
+                col.push(m2[k][j])
+                k = k + 1
+            }
+            // Dot product of row i of m1 with column j of m2
+            dp := math.dot_product(m1[i], col)
+            match dp {
+                .ok(v) => row.push(v)
+                .err(_) => return .err("matrix_mul: dot product failed")
+            }
+            j = j + 1
+        }
+        result.push(row)
+        i = i + 1
+    }
+    return .ok(result)
+}
 // Pure-ZZ float rounding helpers.
 // Module: std.math
 // File: rounding.zz (part of std.math split, see crates/zz_stdlib/zz/math/)
