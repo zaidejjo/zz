@@ -7,10 +7,10 @@ Total entries: 700
 
 | tier | entries |
 |---|---:|
-| CRuntime | 319 |
+| CRuntime | 315 |
 | Const | 6 |
 | FfiStaticlib | 154 |
-| PureZz | 220 |
+| PureZz | 224 |
 | VmOnly | 1 |
 
 | tier | name | implementation |
@@ -377,7 +377,7 @@ Total entries: 700
 | CRuntime | `std.math.acos` | `zz_math_acos` |
 | CRuntime | `std.math.asin` | `zz_math_asin` |
 | CRuntime | `std.math.atan` | `zz_math_atan` |
-| CRuntime | `std.math.ceil` | `zz_math_ceil` |
+| PureZz | `std.math.ceil` | `zz/math/mod.zz` |
 | PureZz | `std.math.clamp` | `zz/math/mod.zz` |
 | CRuntime | `std.math.cos` | `zz_math_cos` |
 | CRuntime | `std.math.cos_deg` | `zz_math_cos_deg` |
@@ -385,7 +385,7 @@ Total entries: 700
 | PureZz | `std.math.dot_product` | `zz/math/mod.zz` |
 | CRuntime | `std.math.exp` | `zz_math_exp` |
 | CRuntime | `std.math.factorial` | `zz_math_factorial` |
-| CRuntime | `std.math.floor` | `zz_math_floor` |
+| PureZz | `std.math.floor` | `zz/math/mod.zz` |
 | CRuntime | `std.math.gcd` | `zz_math_gcd` |
 | CRuntime | `std.math.hypot` | `zz_math_hypot` |
 | PureZz | `std.math.is_even` | `zz/math/mod.zz` |
@@ -412,7 +412,7 @@ Total entries: 700
 | CRuntime | `std.math.rand_range` | `zz_math_rand_range` |
 | CRuntime | `std.math.random` | `zz_math_random` |
 | CRuntime | `std.math.root` | `zz_math_root` |
-| CRuntime | `std.math.round` | `zz_math_round` |
+| PureZz | `std.math.round` | `zz/math/mod.zz` |
 | PureZz | `std.math.signum` | `zz/math/mod.zz` |
 | CRuntime | `std.math.sin` | `zz_math_sin` |
 | CRuntime | `std.math.sin_deg` | `zz_math_sin_deg` |
@@ -423,7 +423,7 @@ Total entries: 700
 | CRuntime | `std.math.tan_deg` | `zz_math_tan_deg` |
 | CRuntime | `std.math.to_degrees` | `zz_math_to_degrees` |
 | CRuntime | `std.math.to_radians` | `zz_math_to_radians` |
-| CRuntime | `std.math.trunc` | `zz_math_trunc` |
+| PureZz | `std.math.trunc` | `zz/math/mod.zz` |
 | CRuntime | `std.net.accept` | `zz_tcp_accept` |
 | CRuntime | `std.net.close` | `zz_tcp_shutdown` |
 | CRuntime | `std.net.local_addr` | `zz_tcp_local_addr` |

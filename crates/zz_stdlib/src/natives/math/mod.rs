@@ -27,81 +27,12 @@ fn to_float(v: &Value) -> Option<f64> {
 // PNSA: math.abs moved to pure-Zz (scalar.zz, T: Num + Ord).
 // Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
-pub(crate) fn math_round(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, EvalError> {
-    let v = args
-        .first()
-        .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for round", span))?;
-    match v {
-        Value::Int(i) => Ok(Value::Int(i)),
-        Value::Float(f) => Ok(Value::Float(f.round())),
-        other => Err(EvalError::new(
-            format!("round expects a number, found `{}`", other.type_name()),
-            span,
-        )),
-    }
-}
+// PNSA: math.floor/ceil/trunc/round moved to pure-Zz (rounding.zz).
+// PNSA: math.abs/signum moved to pure-Zz (scalar.zz, T: Num + Ord).
+// Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
 
-pub(crate) fn math_floor(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, EvalError> {
-    let v = args
-        .first()
-        .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for floor", span))?;
-    match v {
-        Value::Float(f) => Ok(Value::Int(f.floor() as i64)),
-        Value::Int(i) => Ok(Value::Int(i)),
-        other => Err(EvalError::new(
-            format!("floor expects `float`, found `{}`", other.type_name()),
-            span,
-        )),
-    }
-}
-
-pub(crate) fn math_ceil(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, EvalError> {
-    let v = args
-        .first()
-        .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for ceil", span))?;
-    match v {
-        Value::Float(f) => Ok(Value::Int(f.ceil() as i64)),
-        Value::Int(i) => Ok(Value::Int(i)),
-        other => Err(EvalError::new(
-            format!("ceil expects `float`, found `{}`", other.type_name()),
-            span,
-        )),
-    }
-}
-
-pub(crate) fn math_trunc(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, EvalError> {
-    let v = args
-        .first()
-        .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for trunc", span))?;
-    match v {
-        Value::Int(i) => Ok(Value::Int(i)),
-        Value::Float(f) => Ok(Value::Float(f.trunc())),
-        other => Err(EvalError::new(
-            format!("trunc expects a number, found `{}`", other.type_name()),
-            span,
-        )),
-    }
-}
+// PNSA: math.floor/ceil/trunc/round moved to pure-Zz (rounding.zz).
+// Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
 
 // ── PNSA: clamp moved to pure-ZZ (generic <T: Ord> -> T) ────────────────────
 // math.clamp is now PureZz in scalar.zz — handles int, float, str.

@@ -1478,20 +1478,8 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     }
 
     // std.math
-    m.insert(
-        "std.math.floor".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_floor,
-        },
-    );
-    m.insert(
-        "std.math.ceil".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_ceil,
-        },
-    );
+    // PNSA: math.floor/ceil/trunc/round moved to pure-Zz (rounding.zz).
+    // Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
     m.insert(
         "std.math.sqrt".into(),
         NativeEntry {
@@ -1515,22 +1503,8 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     );
 
     // ── std.math utilities & rounding ──
-    m.insert(
-        "std.math.round".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_round,
-        },
-    );
-    m.insert(
-        "std.math.trunc".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_trunc,
-        },
-    );
     // PNSA: math.clamp moved to pure-ZZ (generic <T: Ord> -> T).
-    // PNSA: math.signum moved to pure-Zz (scalar.zz).
+    // PNSA: math.signum moved to pure-Zz (scalar.zz, T: Num + Ord).
     // Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
     m.insert(
         "std.math.hypot".into(),
@@ -2581,7 +2555,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // table without the other will fail CI here rather than at runtime.
     assert_eq!(
         m.len(),
-        466,
+        462,
         "natives registry count drifted; update this assertion"
     );
 

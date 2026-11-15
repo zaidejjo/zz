@@ -2,4 +2,48 @@
 // Module: std.math
 // File: rounding.zz (part of std.math split, see crates/zz_stdlib/zz/math/)
 // 
-// Functions to be added in Phase 4: round, floor, ceil, trunc
+// floor/ceil return int (per signature table), trunc/round return float.
+// Uses ZZ built-in int(v) truncation-toward-zero plus adjustment.
+
+// ── Float rounding ──────────────────────────────────────────────────────────
+
+func math.floor(v: float) -> int {
+    n := int(v)
+    match n {
+        .some(i) => return if v < 0.0 && v - float(i) != 0.0 {
+            i - 1
+        } else {
+            i
+        }
+        .none => return 0
+    }
+}
+
+func math.ceil(v: float) -> int {
+    n := int(v)
+    match n {
+        .some(i) => return if v > 0.0 && v - float(i) != 0.0 {
+            i + 1
+        } else {
+            i
+        }
+        .none => return 0
+    }
+}
+
+func math.trunc(v: float) -> float {
+    n := int(v)
+    match n {
+        .some(i) => return float(i)
+        .none => return 0.0
+    }
+}
+
+func math.round(v: float) -> float {
+    // round(x) = sign(x) * floor(abs(x) + 0.5)
+    if v < 0.0 {
+        return -float(math.floor(-v + 0.5))
+    } else {
+        return float(math.floor(v + 0.5))
+    }
+}

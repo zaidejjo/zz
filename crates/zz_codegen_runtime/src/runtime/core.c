@@ -9408,34 +9408,8 @@ zz_value zz_math_sqrt(zz_value v, int *err) {
     return (zz_value){ZZ_FLOAT, {.f = sqrt(d)}};
 }
 
-// math.floor(v) → int
-zz_value zz_math_floor(zz_value v, int *err) {
-    (void)err;
-    double d = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
-    return (zz_value){ZZ_INT, {.i = (int64_t)floor(d)}};
-}
-
-// math.ceil(v) → int
-zz_value zz_math_ceil(zz_value v, int *err) {
-    (void)err;
-    double d = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
-    return (zz_value){ZZ_INT, {.i = (int64_t)ceil(d)}};
-}
-
-// math.round(v) → preserves Int for int input, Float otherwise (matches VM).
-zz_value zz_math_round(zz_value v, int *err) {
-    (void)err;
-    if (v.tag == ZZ_INT) return v;
-    if (v.tag == ZZ_FLOAT) return (zz_value){ZZ_FLOAT, {.f = round(v.f)}};
-    return (zz_value){ZZ_INT, {.i = 0}};
-}
-
-// math.trunc(v) → float
-zz_value zz_math_trunc(zz_value v, int *err) {
-    (void)err;
-    double d = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = trunc(d)}};
-}
+// PNSA: math.floor/ceil/trunc/round moved to pure-Zz (rounding.zz).
+// C twins removed; symbols resolved from libzz_stdlib.a in AOT.
 
 // PNSA: math.signum moved to pure-Zz (scalar.zz).
 // C twin removed; symbol resolved from libzz_stdlib.a in AOT.

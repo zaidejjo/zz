@@ -1212,10 +1212,8 @@ zz_value zz_black_box(zz_value v, int *err);
 // C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 zz_value zz_math_sqrt(zz_value v, int *err);
 zz_value zz_math_pow(zz_value a, zz_value b, int *err);
-zz_value zz_math_floor(zz_value v, int *err);
-zz_value zz_math_ceil(zz_value v, int *err);
-zz_value zz_math_round(zz_value v, int *err);
-zz_value zz_math_trunc(zz_value v, int *err);
+// PNSA: math.floor/ceil/trunc/round moved to pure-Zz (rounding.zz).
+// C twins removed; symbols resolved from libzz_stdlib.a in AOT.
 // PNSA: math.signum moved to pure-Zz (scalar.zz).
 // C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 zz_value zz_math_hypot(zz_value x, zz_value y, int *err);
