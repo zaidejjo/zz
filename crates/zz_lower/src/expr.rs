@@ -447,9 +447,7 @@ impl Lowerer {
                 // fields (`zz_object_set_field`) — instead want the bare
                 // builder: they clone internally, so an extra retain would
                 // leak. `fmt_borrow` marks those retaining positions.
-                if adopt {
-                    fvar
-                } else if fmt_borrow || self.native_call_args.get() {
+                if adopt || fmt_borrow || self.native_call_args.get() {
                     fvar
                 } else {
                     format!("zz_clone({fvar})")
@@ -4298,8 +4296,8 @@ impl Lowerer {
         // so check both spellings.
         let impl_name_for_cname = native_impl(&cname);
         let is_zz_vec_append = is_native_call
-            && (impl_name_for_cname.map_or(false, |n| n == "zz_vec_append")
-                || (impl_name_for_cname.map_or(false, |n| n == "zz_vec_push") && saved_void));
+            && ((impl_name_for_cname == Some("zz_vec_append"))
+                || ((impl_name_for_cname == Some("zz_vec_push")) && saved_void));
         self.adopt_arg.set(is_zz_vec_append);
         let _guard2 = AdoptArgGuard {
             cell: &self.adopt_arg,
