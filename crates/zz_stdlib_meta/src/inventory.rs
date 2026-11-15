@@ -80,6 +80,7 @@ pub const PURE_ZZ: &[&str] = &[
     "std.math.ceil",
     "std.math.trunc",
     "std.math.round",
+    "std.math.sqrt",
     // PNSA: precompiled native stdlib number theory.
     "std.math.factorial",
     "std.math.gcd",

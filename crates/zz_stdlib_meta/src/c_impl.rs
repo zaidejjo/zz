@@ -124,7 +124,8 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         // math
         // PNSA: math.abs moved to pure-Zz (scalar.zz).
         // Symbol resolved from libzz_stdlib.a in AOT.
-        "math.sqrt" | "std.math.sqrt" => Some("zz_math_sqrt"),
+        // PNSA: math.sqrt moved to pure-Zz (log.zz).
+        // Symbol resolved from libzz_stdlib.a in AOT.
         "math.pow" | "std.math.pow" => Some("zz_math_pow"),
         // PNSA: math.floor/ceil/trunc/round moved to pure-Zz (rounding.zz).
         // Symbols resolved from libzz_stdlib.a in AOT.

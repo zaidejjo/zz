@@ -1,0 +1,25 @@
+// Pure-ZZ float root helpers.
+// Module: std.math
+// File: log.zz (part of std.math split, see crates/zz_stdlib/zz/math/)
+// 
+// sqrt via Newton's method. log/exp/pow are transcendental — stay Native
+// until a ZZ approximation is proven fast enough.
+
+// ── Square root ────────────────────────────────────────────────────────────
+
+func math.sqrt(v: float) -> float {
+    if v < 0.0 {
+        return 0.0
+    }
+    if v == 0.0 {
+        return 0.0
+    }
+    // Newton's method: x_{n+1} = (x_n + v / x_n) / 2
+    x := v
+    i := 0
+    while i < 20 {
+        x = (x + v / x) / 2.0
+        i = i + 1
+    }
+    return x
+}

@@ -241,27 +241,8 @@ pub(crate) fn math_exp(
 
 // ── Square root (existing, kept for compat) ─────────────────────────────────
 
-pub(crate) fn math_sqrt(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, EvalError> {
-    let v = args
-        .first()
-        .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for sqrt", span))?;
-    match v {
-        Value::Int(i) => Ok(Value::Float((i as f64).sqrt())),
-        Value::Float(f) => Ok(Value::Float(f.sqrt())),
-        other => Err(EvalError::new(
-            format!(
-                "sqrt expects `int` or `float`, found `{}`",
-                other.type_name()
-            ),
-            span,
-        )),
-    }
-}
+// PNSA: math.sqrt moved to pure-Zz (log.zz, Newton's method).
+// Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
 pub(crate) fn math_pow(
     _interp: &mut Interp,
