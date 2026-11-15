@@ -79,6 +79,8 @@ pub const PURE_ZZ: &[&str] = &[
     "std.math.gcd",
     "std.math.lcm",
     "std.math.isqrt",
+    // PNSA: linear algebra.
+    "std.math.dot_product",
     "math.sum",
     "math.product",
     "math.count",

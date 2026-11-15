@@ -9638,23 +9638,8 @@ zz_value zz_math_rand_range(zz_value min, zz_value max, int *err) {
     return (zz_value){ZZ_FLOAT, {.f = lo + r * (hi - lo)}};
 }
 
-// math.dot_product(v1, v2) → .ok(float) or .err(str)
-zz_value zz_math_dot_product(zz_value v1, zz_value v2, int *err) {
-    (void)err;
-    if (v1.tag != ZZ_ARRAY || v2.tag != ZZ_ARRAY || !v1.arr || !v2.arr)
-        return zz_variant_err(zz_str_static("dot_product: expected two arrays"));
-    if (v1.arr->len != v2.arr->len)
-        return zz_variant_err(zz_str_static("dot_product: arrays must have same length"));
-    double sum = 0.0;
-    for (size_t i = 0; i < v1.arr->len; i++) {
-        double a = v1.arr->items[i].tag == ZZ_FLOAT ? v1.arr->items[i].f :
-                   (v1.arr->items[i].tag == ZZ_INT ? (double)v1.arr->items[i].i : 0.0);
-        double b = v2.arr->items[i].tag == ZZ_FLOAT ? v2.arr->items[i].f :
-                   (v2.arr->items[i].tag == ZZ_INT ? (double)v2.arr->items[i].i : 0.0);
-        sum += a * b;
-    }
-    return zz_variant_ok((zz_value){ZZ_FLOAT, {.f = sum}});
-}
+// PNSA: math.dot_product moved to pure-Zz (linalg.zz).
+// C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 
 // math.magnitude(v) → float
 zz_value zz_math_magnitude(zz_value v, int *err) {

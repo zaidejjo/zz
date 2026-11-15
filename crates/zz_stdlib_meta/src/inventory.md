@@ -7,10 +7,10 @@ Total entries: 700
 
 | tier | entries |
 |---|---:|
-| CRuntime | 324 |
+| CRuntime | 323 |
 | Const | 6 |
 | FfiStaticlib | 154 |
-| PureZz | 215 |
+| PureZz | 216 |
 | VmOnly | 1 |
 
 | tier | name | implementation |
@@ -382,7 +382,7 @@ Total entries: 700
 | CRuntime | `std.math.cos` | `zz_math_cos` |
 | CRuntime | `std.math.cos_deg` | `zz_math_cos_deg` |
 | PureZz | `std.math.count` | `zz/math/mod.zz` |
-| CRuntime | `std.math.dot_product` | `zz_math_dot_product` |
+| PureZz | `std.math.dot_product` | `zz/math/mod.zz` |
 | CRuntime | `std.math.exp` | `zz_math_exp` |
 | CRuntime | `std.math.factorial` | `zz_math_factorial` |
 | CRuntime | `std.math.floor` | `zz_math_floor` |

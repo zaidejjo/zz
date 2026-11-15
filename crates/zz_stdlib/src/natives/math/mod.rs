@@ -443,36 +443,8 @@ fn as_float_array(v: &Value, name: &str, span: Span) -> Result<Vec<f64>, EvalErr
     }
 }
 
-pub(crate) fn math_dot_product(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, EvalError> {
-    let v1 = as_float_array(
-        args.first()
-            .ok_or_else(|| EvalError::new("missing argument `v1` for dot_product", span))?,
-        "dot_product",
-        span,
-    )?;
-    let v2 = as_float_array(
-        args.get(1)
-            .ok_or_else(|| EvalError::new("missing argument `v2` for dot_product", span))?,
-        "dot_product",
-        span,
-    )?;
-    if v1.len() != v2.len() {
-        return Ok(Value::Result(Box::new(Err(Value::Str(
-            format!(
-                "dot_product: length mismatch ({} vs {})",
-                v1.len(),
-                v2.len()
-            )
-            .into(),
-        )))));
-    }
-    let sum: f64 = v1.iter().zip(v2.iter()).map(|(a, b)| a * b).sum();
-    Ok(Value::Result(Box::new(Ok(Value::Float(sum)))))
-}
+// PNSA: math.dot_product moved to pure-Zz (linalg.zz).
+// Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
 pub(crate) fn math_magnitude(
     _interp: &mut Interp,

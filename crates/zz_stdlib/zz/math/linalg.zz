@@ -1,0 +1,19 @@
+// Pure-ZZ linear algebra helpers.
+// Module: std.math
+// File: linalg.zz (part of std.math split, see crates/zz_stdlib/zz/math/)
+
+// ── Dot product ──────────────────────────────────────────────────────────────
+
+func math.dot_product(v1: [float], v2: [float]) -> Result<float, str> {
+    if vec.len(v1) != vec.len(v2) {
+        return .err("dot_product: length mismatch")
+    }
+    sum := 0.0
+    i := 0
+    n := vec.len(v1)
+    while i < n {
+        sum = sum + v1[i] * v2[i]
+        i = i + 1
+    }
+    return .ok(sum)
+}
