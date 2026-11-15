@@ -9394,11 +9394,6 @@ zz_value zz_bool_cast(zz_value v, int *err) {
 // C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 
 // math.sqrt(v)
-zz_value zz_math_sqrt(zz_value v, int *err) {
-    (void)err;
-    double d = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = sqrt(d)}};
-}
 
 // PNSA: math.floor/ceil/trunc/round moved to pure-Zz (rounding.zz).
 // C twins removed; symbols resolved from libzz_stdlib.a in AOT.

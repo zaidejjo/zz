@@ -1,19 +1,3 @@
-use crate::natives::arg;
-use zz_runtime::{EvalError, Interp, Span, Value};
-
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
-fn expect_float(args: &mut Vec<Value>, i: usize, name: &str) -> Result<f64, EvalError> {
-    match arg(args, i, name)? {
-        Value::Int(i) => Ok(*i as f64),
-        Value::Float(f) => Ok(*f),
-        other => Err(EvalError::new(
-            format!("`{name}` expects a number, found `{other}`"),
-            Span::new(0, 0),
-        )),
-    }
-}
-
 // ── Utilities & Rounding ────────────────────────────────────────────────────
 
 // PNSA: math.abs moved to pure-Zz (scalar.zz, T: Num + Ord).

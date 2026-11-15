@@ -130,9 +130,6 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         // Symbols resolved from libzz_stdlib.a in AOT.
         // PNSA: math.signum moved to pure-Zz (scalar.zz).
         // Symbol resolved from libzz_stdlib.a in AOT.
-        "math.factorial" | "std.math.factorial" => Some("zz_math_factorial"),
-        "math.gcd" | "std.math.gcd" => Some("zz_math_gcd"),
-        "math.lcm" | "std.math.lcm" => Some("zz_math_lcm"),
         "math.PI" | "std.math.PI" => Some("zz_math_pi"),
         "math.E" | "std.math.E" => Some("zz_math_e"),
         "math.TAU" | "std.math.TAU" => Some("zz_math_tau"),

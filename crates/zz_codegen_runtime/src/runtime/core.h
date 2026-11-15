@@ -1210,7 +1210,6 @@ zz_value zz_assert_snapshot(zz_value actual, zz_value name, int *err);
 zz_value zz_black_box(zz_value v, int *err);
 // PNSA: math.abs moved to pure-Zz (scalar.zz).
 // C twin removed; symbol resolved from libzz_stdlib.a in AOT.
-zz_value zz_math_sqrt(zz_value v, int *err);
 // PNSA: math.floor/ceil/trunc/round moved to pure-Zz (rounding.zz).
 // C twins removed; symbols resolved from libzz_stdlib.a in AOT.
 // PNSA: math.signum moved to pure-Zz (scalar.zz).
