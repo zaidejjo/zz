@@ -8,7 +8,7 @@
 
 func math.sqrt(v: float) -> float {
     if v < 0.0 {
-        return 0.0
+        return 0.0 / 0.0 // NaN
     }
     if v == 0.0 {
         return 0.0
