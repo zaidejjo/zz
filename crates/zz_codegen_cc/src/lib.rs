@@ -808,6 +808,7 @@ pub fn build_with(
         .arg(format!("-DZZ_HAS_CURL={}", u8::from(opts.curl_link)))
         .arg(format!("-DZZ_HAS_SQLITE3={}", u8::from(opts.sqlite_link)));
     push_link_inputs(&mut cmd, &opts, target, clang, output_path)?;
+    let t_cc = std::time::Instant::now();
     let out = cmd.output().map_err(BuildError::Io)?;
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     if opts.float_link {
@@ -817,6 +818,9 @@ pub fn build_with(
             .collect();
         eprintln!("ZZ_DEBUG_LINK_CMD: {args:?}");
         eprintln!("ZZ_LINK_STDERR: {stderr}");
+    }
+    if opts.verbose {
+        eprintln!("zz: timing cc_link={}ms", t_cc.elapsed().as_millis());
     }
     if !out.status.success() {
         return Err(BuildError::CompileFailed { stderr });
@@ -1308,6 +1312,7 @@ pub fn compile_units_with_sink(
     // Completion counter for the progress sink: cache hits count too, so
     // `file_done` always runs 1..=total regardless of the hit ratio.
     let completed = std::sync::atomic::AtomicUsize::new(0);
+    let t_cc_compile = std::time::Instant::now();
     let results: Vec<Result<PathBuf, BuildError>> = pool.install(|| {
         use rayon::prelude::*;
         staged
@@ -1356,7 +1361,14 @@ pub fn compile_units_with_sink(
     for r in results {
         objs.push(r?);
     }
+    if opts.verbose {
+        eprintln!(
+            "zz: timing units_cc_compile={}ms",
+            t_cc_compile.elapsed().as_millis()
+        );
+    }
     sink.linking();
+    let t_link = std::time::Instant::now();
     let mut cmd = Command::new(&clang.path);
     if clang.zig {
         cmd.arg("cc");
@@ -1380,6 +1392,9 @@ pub fn compile_units_with_sink(
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         return Err(BuildError::CompileFailed { stderr });
+    }
+    if opts.verbose {
+        eprintln!("zz: timing units_link={}ms", t_link.elapsed().as_millis());
     }
     sink.linked();
     Ok(clang.clone())
