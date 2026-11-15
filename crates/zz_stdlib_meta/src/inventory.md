@@ -7,10 +7,10 @@ Total entries: 700
 
 | tier | entries |
 |---|---:|
-| CRuntime | 308 |
+| CRuntime | 306 |
 | Const | 6 |
 | FfiStaticlib | 154 |
-| PureZz | 231 |
+| PureZz | 233 |
 | VmOnly | 1 |
 
 | tier | name | implementation |
@@ -409,8 +409,8 @@ Total entries: 700
 | PureZz | `std.math.pow` | `zz/math/mod.zz` |
 | PureZz | `std.math.product` | `zz/math/mod.zz` |
 | PureZz | `std.math.product_f` | `zz/math/mod.zz` |
-| CRuntime | `std.math.rand_range` | `zz_math_rand_range` |
-| CRuntime | `std.math.random` | `zz_math_random` |
+| PureZz | `std.math.rand_range` | `zz/math/mod.zz` |
+| PureZz | `std.math.random` | `zz/math/mod.zz` |
 | PureZz | `std.math.root` | `zz/math/mod.zz` |
 | PureZz | `std.math.round` | `zz/math/mod.zz` |
 | PureZz | `std.math.signum` | `zz/math/mod.zz` |

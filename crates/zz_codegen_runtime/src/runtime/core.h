@@ -1231,7 +1231,6 @@ zz_value zz_math_cos_deg(zz_value x, int *err);
 zz_value zz_math_tan_deg(zz_value x, int *err);
 zz_value zz_math_to_radians(zz_value deg, int *err);
 zz_value zz_math_to_degrees(zz_value rad, int *err);
-zz_value zz_math_random(zz_value unused, int *err);
 zz_value zz_math_is_nan(zz_value x, int *err);
 zz_value zz_math_is_inf(zz_value x, int *err);
 zz_value zz_math_pi(zz_value unused, int *err);
@@ -1242,7 +1241,6 @@ zz_value zz_math_nan(zz_value unused, int *err);
 // PNSA: math.isqrt/math.mean/math.median/math.dot_product/math.magnitude/math.matrix_mul moved to pure-Zz.
 // C twins removed; symbols resolved from libzz_stdlib.a in AOT.
 zz_value zz_math_rand_range(zz_value min, zz_value max, int *err);
-zz_value zz_time_now_ms(zz_value unused, int *err);
 zz_value zz_time_sleep_ms(zz_value ms, int *err);
 
 // ---- type casts ---------------------------------------------------------

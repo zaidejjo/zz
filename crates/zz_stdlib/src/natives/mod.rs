@@ -1480,13 +1480,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // std.math
     // PNSA: math.floor/ceil/trunc/round moved to pure-Zz (rounding.zz).
     // Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
-    m.insert(
-        "std.math.random".into(),
-        NativeEntry {
-            arity: 0,
-            f: math::math_random,
-        },
-    );
 
     // ── std.math utilities & rounding ──
     // PNSA: math.clamp moved to pure-ZZ (generic <T: Ord> -> T).
@@ -1603,13 +1596,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // ── PNSA: mean/median moved to pure-Zz (stats.zz) ────────────────────────
     // math.mean/math.median delegate to mean_f/median_f (PureZz).
     // Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
-    m.insert(
-        "std.math.rand_range".into(),
-        NativeEntry {
-            arity: 2,
-            f: math::math_rand_range,
-        },
-    );
 
     // std.time
     m.insert(
@@ -2506,7 +2492,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // table without the other will fail CI here rather than at runtime.
     assert_eq!(
         m.len(),
-        455,
+        453,
         "natives registry count drifted; update this assertion"
     );
 

@@ -207,47 +207,7 @@ pub(crate) fn math_to_degrees(
 // PNSA: math.pow moved to pure-Zz (log.zz, exp(y*log(x))).
 // Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
-// Deterministic LCG seed so VM and AOT produce identical random sequences
-// (parity requires backend-identical output). Seeding from wall-clock time
-// made math_random/rand_range differ between engines every run.
-const MATH_RAND_SEED: u64 = 0x9E3779B97F4A7C15;
-
-pub(crate) fn math_random(
-    _interp: &mut Interp,
-    _args: &mut Vec<Value>,
-    _span: Span,
-) -> Result<Value, EvalError> {
-    let mut state = MATH_RAND_SEED;
-    state = state
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407);
-    let unit = (state >> 33) as f64 / (1u64 << 31) as f64;
-    Ok(Value::Float(unit))
-}
-
-// ── Linear Algebra & Vectors ────────────────────────────────────────────────
-// All linear algebra functions moved to pure-Zz (linalg.zz):
-//   dot_product, magnitude, matrix_mul
-// Rust bodies and C twins removed; symbols resolved from libzz_stdlib.a in AOT.
-
-// ── Basic Statistics & Random ───────────────────────────────────────────────
-
-// ── PNSA: mean/median moved to pure-Zz (stats.zz) ────────────────────────────
-// math.mean/math.median delegate to mean_f/median_f (PureZz).
-// Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
-
-pub(crate) fn math_rand_range(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    _span: Span,
-) -> Result<Value, EvalError> {
-    let min = expect_float(args, 0, "rand_range")?;
-    let max = expect_float(args, 1, "rand_range")?;
-    // Reuse the same deterministic LCG as math_random (MATH_RAND_SEED).
-    let mut state = MATH_RAND_SEED;
-    state = state
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407);
-    let unit = (state >> 33) as f64 / (1u64 << 31) as f64;
-    Ok(Value::Float(min + unit * (max - min)))
-}
+// ── PNSA: math.random/rand_range moved to pure-Zz (log.zz).
+// Rust bodies removed; symbol resolved from libzz_stdlib.a in AOT.
+// Note: ZZ has no mutable global state, so random() returns 0.5.
+// A future ZZ feature (mutable globals) could implement a proper LCG.

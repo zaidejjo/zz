@@ -88,6 +88,9 @@ pub const PURE_ZZ: &[&str] = &[
     "std.math.exp",
     "std.math.hypot",
     "std.math.root",
+    // PNSA: math.random/rand_range moved to pure-Zz (log.zz).
+    "std.math.random",
+    "std.math.rand_range",
     // PNSA: precompiled native stdlib number theory.
     "std.math.factorial",
     "std.math.gcd",

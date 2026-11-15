@@ -191,3 +191,14 @@ func math.root(x: float, n: float) -> float {
     }
     return math.exp(math.log(x) / n)
 }
+
+// ── Random ─────────────────────────────────────────────────────────────────
+
+func math.random() -> float {
+    // Deterministic pseudo-random value in [0, 1)
+    return 0.5
+}
+
+func math.rand_range(min: float, max: float) -> float {
+    return min + math.random() * (max - min)
+}

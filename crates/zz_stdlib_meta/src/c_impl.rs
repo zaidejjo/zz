@@ -144,7 +144,6 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "math.tan_deg" | "std.math.tan_deg" => Some("zz_math_tan_deg"),
         "math.to_radians" | "std.math.to_radians" => Some("zz_math_to_radians"),
         "math.to_degrees" | "std.math.to_degrees" => Some("zz_math_to_degrees"),
-        "math.random" | "std.math.random" => Some("zz_math_random"),
         "math.is_nan" | "std.math.is_nan" => Some("zz_math_is_nan"),
         "math.is_inf" | "std.math.is_inf" => Some("zz_math_is_inf"),
         "math.PI" | "std.math.PI" => Some("zz_math_pi"),
@@ -154,7 +153,6 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "math.NAN" | "std.math.NAN" => Some("zz_math_nan"),
         // PNSA: math.isqrt/math.mean/math.median/math.dot_product/math.magnitude/math.matrix_mul moved to pure-Zz.
         // Symbols resolved from libzz_stdlib.a in AOT.
-        "math.rand_range" | "std.math.rand_range" => Some("zz_math_rand_range"),
         // json
         "json.parse" | "std.json.parse" => Some("zz_json_parse"),
         "json.stringify" | "std.json.stringify" => Some("zz_json_stringify"),

@@ -9495,13 +9495,6 @@ zz_value zz_math_to_degrees(zz_value rad, int *err) {
 // so VM and AOT produce identical random sequences.
 static uint64_t math_rand_state = 0x9E3779B97F4A7C15ULL;
 
-zz_value zz_math_random(zz_value unused, int *err) {
-    (void)unused; (void)err;
-    math_rand_state = math_rand_state * 6364136223846793005ULL
-        + 1442695040888963407ULL;
-    double unit = (double)((math_rand_state >> 33) & 0x7FFFFFFF) / (double)(1u << 31);
-    return (zz_value){ZZ_FLOAT, {.f = unit}};
-}
 
 // math.is_nan(x) → bool
 zz_value zz_math_is_nan(zz_value x, int *err) {
@@ -9543,16 +9536,6 @@ zz_value zz_math_nan(zz_value unused, int *err) {
 // C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 
 // math.rand_range(min, max) → float
-zz_value zz_math_rand_range(zz_value min, zz_value max, int *err) {
-    (void)err;
-    double lo = min.tag == ZZ_FLOAT ? min.f : (min.tag == ZZ_INT ? (double)min.i : 0.0);
-    double hi = max.tag == ZZ_FLOAT ? max.f : (max.tag == ZZ_INT ? (double)max.i : 0.0);
-    // Deterministic LCG matching the Rust VM: each call restarts from MATH_RAND_SEED.
-    uint64_t state = 0x9E3779B97F4A7C15ULL;
-    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-    double r = (double)((state >> 33) & 0x7FFFFFFF) / (double)(1u << 31);
-    return (zz_value){ZZ_FLOAT, {.f = lo + r * (hi - lo)}};
-}
 
 // PNSA: math.dot_product moved to pure-Zz (linalg.zz).
 // C twin removed; symbol resolved from libzz_stdlib.a in AOT.
