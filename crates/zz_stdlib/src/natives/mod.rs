@@ -1582,27 +1582,9 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: math::math_isqrt,
         },
     );
-    m.insert(
-        "std.math.factorial".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_factorial,
-        },
-    );
-    m.insert(
-        "std.math.gcd".into(),
-        NativeEntry {
-            arity: 2,
-            f: math::math_gcd,
-        },
-    );
-    m.insert(
-        "std.math.lcm".into(),
-        NativeEntry {
-            arity: 2,
-            f: math::math_lcm,
-        },
-    );
+    // PNSA: factorial/gcd/lcm moved to pure-Zz (int.zz).
+    // Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
+    // VM uses Rust bodies during transition.
 
     // ── std.math trigonometry ──
     m.insert(
@@ -2647,7 +2629,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // table without the other will fail CI here rather than at runtime.
     assert_eq!(
         m.len(),
-        477,
+        474,
         "natives registry count drifted; update this assertion"
     );
 
