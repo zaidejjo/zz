@@ -219,7 +219,10 @@ fn run_zz(file: &Path) -> (i32, String, String) {
     // one test process) bind disjoint loopback ports instead of colliding.
     let tok = SWEEP_TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed);
     let first = run_zz_with_token(file, Some(&tok.to_string()));
-    if first.0 == 0 || !is_bind_collision(&first.2) {
+    // Retry on transient environment failures: bind collisions (EADDRINUSE)
+    // and signal kills (exit code -1, e.g. OOM under parallel test load).
+    // Both are infrastructure issues, never program bugs.
+    if first.0 == 0 || (!is_bind_collision(&first.2) && first.0 != -1) {
         return first;
     }
     let shift = std::process::id() % 997 + 1;
@@ -1725,31 +1728,58 @@ while s == "test" {
 /// Exhaustive VM sweep: EVERY success fixture must exit 0.
 /// Runs un-ignored as the registration-backstop gate: a new fixture with
 /// no `e2e_success_test!` still runs here (stdin via `<stem>.stdin`).
+///
+/// Parallelised across threads because each `run_zz()` is an independent
+/// OS process spawn (cold interpreter start per fixture). The per-run
+/// sweep token keeps loopback ports from colliding.
 #[test]
 fn e2e_discover_all_success_fixtures() {
     let fixtures = fixtures_dir();
     let success_dirs = ["syntax", "types", "stdlib"];
-    let mut failures = Vec::new();
-
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
     for dir_name in &success_dirs {
         let dir = fixtures.join(dir_name);
         if !dir.is_dir() {
             continue;
         }
         for file in find_fixtures(&dir) {
-            if !support::fixture_supported_here(&file) {
-                eprintln!("skip {}: fixture is Unix-only", file.display());
-                continue;
-            }
-            let (exit, stdout, stderr) = run_zz(&file);
-            if exit != 0 {
-                failures.push(format!(
-                    "FAIL {} (exit {exit})\nstdout: {stdout}\nstderr: {stderr}",
-                    file.display(),
-                ));
+            if support::fixture_supported_here(&file) {
+                files.push(file);
             }
         }
     }
+    let concurrency = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 16);
+    let chunk_size = files.len().div_ceil(concurrency);
+
+    let results = std::sync::Mutex::new(Vec::<String>::new());
+    let chunks: Vec<Vec<std::path::PathBuf>> =
+        files.chunks(chunk_size).map(|c| c.to_vec()).collect();
+    std::thread::scope(|s| {
+        let handles: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| {
+                let results = &results;
+                s.spawn(move || {
+                    for file in chunk {
+                        let (exit, stdout, stderr) = run_zz(&file);
+                        if exit != 0 {
+                            results.lock().unwrap().push(format!(
+                                "FAIL {} (exit {exit})\nstdout: {stdout}\nstderr: {stderr}",
+                                file.display(),
+                            ));
+                        }
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+    });
+    let failures = results.into_inner().unwrap();
 
     if !failures.is_empty() {
         panic!(

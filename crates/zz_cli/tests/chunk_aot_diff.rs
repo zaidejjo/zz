@@ -840,13 +840,29 @@ func main() {
 }
 "#;
 
+/// Removes a temp directory on drop, so `zz-chunk-diff-*` scratch is
+/// reaped even when an assertion panics mid-test.
+struct TempDirGuard(PathBuf);
+impl std::ops::Deref for TempDirGuard {
+    type Target = PathBuf;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn chunk_matches_hir_stdout_and_exit() {
     if !require_native() {
         return;
     }
     // One dir per backend so output names never collide.
-    let root = std::env::temp_dir().join(format!("zz-chunk-diff-{}", std::process::id()));
+    let root =
+        TempDirGuard(std::env::temp_dir().join(format!("zz-chunk-diff-{}", std::process::id())));
     for (name, src) in CASES {
         for backend in ["hir", "chunk"] {
             let dir = root.join(format!("{name}_{backend}"));
@@ -882,5 +898,4 @@ fn chunk_matches_hir_stdout_and_exit() {
             "{name}: stdout differs\n--- hir ---\n{hir_out}\n--- chunk ---\n{chunk_out}"
         );
     }
-    let _ = std::fs::remove_dir_all(&root);
 }

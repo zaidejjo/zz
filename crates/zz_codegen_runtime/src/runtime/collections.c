@@ -1415,22 +1415,10 @@ zz_value zz_vec_len(zz_value v, int *err) {
 zz_value zz_vec_push(zz_value arr, zz_value item, int *err) {
     if (arr.tag != ZZ_ARRAY) return zz_unit();
     zz_array *a = arr.arr;
-    // In-place fast path when uniquely owned: no alias exists to observe
-    // the mutation, so returning the same handle preserves value semantics
-    // while turning `vec.push(a, x)` in a loop from O(n²) into O(n).
-    // Stack/lit/arena/0 sentinels are uniquely owned by construction.
-    int uniquely_owned = (a->refs == 1
-        || a->refs == ZZ_ARRAY_STACK_MAGIC
-        || a->refs == ZZ_ARRAY_LIT_MAGIC
-        || a->refs == ZZ_ARRAY_ARENA_MAGIC
-        || a->refs == 0);
-    if (uniquely_owned) {
-        // `zz_array_push` migrates stack/lit/arena items to malloc on grow
-        // and takes element ownership (move convention).
-        zz_array_push(a, item);
-        return arr;
-    }
-    // Shared (refs != 1): copy-on-write so the caller's array is untouched.
+    // Always copy-on-write: the caller may still use `arr` after the call
+    // (free-function form `vec.push(arr, x)`), so never mutate in place.
+    // The in-place fast path lives only in `zz_vec_push_take`, used for
+    // the self-reassign pattern `x = vec.push(x, e)` where `x` is dead.
     zz_value out = zz_array_dup(a);
     if (!out.arr) { if (err) *err = 1; return zz_unit(); }
     zz_array_push(out.arr, item);

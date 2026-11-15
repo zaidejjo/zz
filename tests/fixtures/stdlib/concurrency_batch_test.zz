@@ -1,4 +1,4 @@
-// features: closures, for-loop, func-call, imports, int-arith, locals, print, ranges, std-chan, std-task, string-literal
+// features: closures, for-loop, func-call, imports, int-arith, known-divergence, locals, print, ranges, std-chan, std-task, string-literal
 // E2E: batched channel ops — 4 senders each send 200 msgs in one batch, main drains with recv_batch.
 import std.chan
 import std.task

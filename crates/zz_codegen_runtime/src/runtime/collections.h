@@ -354,6 +354,8 @@ static inline void zz_dict_set(zz_dict *d, zz_value key, zz_value val) {
     if (!d) return;
     size_t pos;
     if (zz_dict_find(d, key, &pos)) {
+        // Release old value via retain-convention of zz_assign, then
+        // assign the new value (which zz_assign will retain for us).
         zz_assign(&d->entries[pos].val, val);
         return;
     }

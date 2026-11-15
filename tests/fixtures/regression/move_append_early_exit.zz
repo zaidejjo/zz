@@ -16,13 +16,13 @@ func build(i: int) -> Result<[int], str> {
 
 r := build(1)
 match r {
-    .ok(v) => println("r_len={len(v)}"),
-    .err(e) => println("early:{e}"),
+    .ok(v) => println("r_len={len(v)}")
+    .err(e) => println("early:{e}")
 }
 r2 := build(0)
 match r2 {
-    .ok(v) => println("r2_len={len(v)}"),
-    .err(e) => println("early:{e}"),
+    .ok(v) => println("r2_len={len(v)}")
+    .err(e) => println("early:{e}")
 }
 
 // Closure observing the array across a push sees the stored value.

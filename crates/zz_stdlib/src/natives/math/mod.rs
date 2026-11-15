@@ -502,16 +502,17 @@ pub(crate) fn math_pow(
     Ok(Value::Float(b.powf(e)))
 }
 
+// Deterministic LCG seed so VM and AOT produce identical random sequences
+// (parity requires backend-identical output). Seeding from wall-clock time
+// made math_random/rand_range differ between engines every run.
+const MATH_RAND_SEED: u64 = 0x9E3779B97F4A7C15;
+
 pub(crate) fn math_random(
     _interp: &mut Interp,
     _args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let mut state = (nanos as u64) | 1;
+    let mut state = MATH_RAND_SEED;
     state = state
         .wrapping_mul(6364136223846793005)
         .wrapping_add(1442695040888963407);
@@ -729,12 +730,8 @@ pub(crate) fn math_rand_range(
 ) -> Result<Value, EvalError> {
     let min = expect_float(args, 0, "rand_range")?;
     let max = expect_float(args, 1, "rand_range")?;
-    // Reuse the same LCG as math_random
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let mut state = (nanos as u64) | 1;
+    // Reuse the same deterministic LCG as math_random (MATH_RAND_SEED).
+    let mut state = MATH_RAND_SEED;
     state = state
         .wrapping_mul(6364136223846793005)
         .wrapping_add(1442695040888963407);

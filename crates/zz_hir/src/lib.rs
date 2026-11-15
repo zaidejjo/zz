@@ -75,13 +75,50 @@ pub struct TypedResult {
     pub diagnostics: Vec<zz_frontend::diag::RawDiag>,
 }
 
+/// Remove seed signatures for `impl <builtin>` methods the program declares
+/// itself.
+///
+/// Pipelines type-check each module once to build the shared `funcs` table,
+/// then re-check the combined program with that table as the seed (both the
+/// native AOT and bytecode paths do this). Re-seeding the program's own
+/// builtin extension methods makes the second pass report them as
+/// extension/orphan conflicts with a "previous definition" that is really
+/// the same declaration. The loader's authoritative per-module check already
+/// rejected genuine collisions, so strip only the exact keys this program
+/// re-registers; duplicates *within* the program still trip the checker's
+/// `seen` guard, and real stdlib seeds (`std.str.length`) are untouched.
+fn strip_own_builtin_impls(program: &Program, funcs: &mut HashMap<String, FuncSig>) {
+    for stmt in &program.stmts {
+        let Stmt::Impl {
+            name,
+            methods,
+            trait_name,
+            ..
+        } = stmt
+        else {
+            continue;
+        };
+        if trait_name.is_some() {
+            continue;
+        }
+        let Some(type_key) = zz_checker::checker::Checker::builtin_ext_key(&name.join(".")) else {
+            continue;
+        };
+        for method in methods {
+            if let Stmt::Func { name: mname, .. } = method {
+                funcs.remove(&format!("{}.{}", type_key, mname.join(".")));
+            }
+        }
+    }
+}
+
 /// Build a [`TypedProgram`] from parsed source and optional seed maps
 /// (for REPL sessions where prior statements' types persist).
 #[allow(clippy::too_many_arguments)]
 pub fn build_program(
     program: &Program,
     initial_bindings: HashMap<String, Type>,
-    initial_funcs: HashMap<String, FuncSig>,
+    mut initial_funcs: HashMap<String, FuncSig>,
     initial_structs: HashMap<String, StructSig>,
     initial_aliases: HashMap<String, AliasSig>,
     initial_enums: HashMap<String, EnumSig>,
@@ -92,6 +129,9 @@ pub fn build_program(
     // codegen) contains the lowered `__inner` + wrapper functions. The
     // checker re-expands idempotently; diagnostics merge in order.
     let (expanded, mut diags) = zz_frontend::decorators::expand_program(program);
+    // Re-checks seed `funcs` with this program's own registrations; drop
+    // them so builtin extension methods do not self-conflict.
+    strip_own_builtin_impls(&expanded, &mut initial_funcs);
     let (checked, span_types) = check_program_typed(
         &expanded,
         initial_bindings,

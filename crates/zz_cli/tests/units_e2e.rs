@@ -62,13 +62,30 @@ pub func origin() -> Point {
 "#;
 
 /// Fresh temp project dir with main.zz + helper.zz.
-fn temp_project() -> PathBuf {
+///
+/// The returned guard removes the dir on drop so `zz-units-e2e-*` scratch
+/// is reaped even if an assertion panics before the test's own cleanup.
+fn temp_project() -> TempProject {
     let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!("zz-units-e2e-{}-{uniq}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("tmpdir");
     std::fs::write(dir.join("main.zz"), MAIN_ZZ).expect("fixture");
     std::fs::write(dir.join("helper.zz"), HELPER_ZZ).expect("fixture");
-    dir
+    TempProject(dir)
+}
+
+/// Guard that removes a units-e2e temp dir on drop.
+struct TempProject(PathBuf);
+impl std::ops::Deref for TempProject {
+    type Target = PathBuf;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl Drop for TempProject {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn zz() -> PathBuf {
@@ -117,5 +134,4 @@ fn units_split_matches_single_tu() {
     assert_eq!(c1, 0, "split-TU exit");
     assert!(o0.contains("units_ok"), "single-TU output sanity: {o0:?}");
     assert_eq!(o0, o1, "split-TU output must match single-TU");
-    let _ = std::fs::remove_dir_all(&dir);
 }

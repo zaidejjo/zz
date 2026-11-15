@@ -15,6 +15,16 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// Removes a temp directory on drop, ignoring errors. Used to guarantee
+/// `zz-build-*` / `zz-units-*` scratch dirs are reaped even when clang
+/// fails mid-build and the function returns early.
+struct TempDir(PathBuf);
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 pub mod cache;
 
 pub use zz_codegen_types::*;
@@ -753,9 +763,10 @@ pub fn build_with(
     let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
 
     // Write the source to a unique temp .c file (tests run in parallel).
-    let tmpdir = std::env::temp_dir().join(format!("zz-build-{}-{uniq}", std::process::id()));
-    std::fs::create_dir_all(&tmpdir)?;
-    let src_path = tmpdir.join("prog.c");
+    let tmpdir =
+        TempDir(std::env::temp_dir().join(format!("zz-build-{}-{uniq}", std::process::id())));
+    std::fs::create_dir_all(&tmpdir.0)?;
+    let src_path = tmpdir.0.join("prog.c");
     // Per-binary `--embed` tables ride along in the program TU (never in
     // the precompiled archive, which is shared across programs).
     let full_source = if opts.embed_assets.is_empty() {
@@ -1226,8 +1237,9 @@ pub fn compile_units_with_sink(
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let tmpdir = std::env::temp_dir().join(format!("zz-units-{}-{uniq}", std::process::id()));
-    std::fs::create_dir_all(&tmpdir)?;
+    let tmpdir =
+        TempDir(std::env::temp_dir().join(format!("zz-units-{}-{uniq}", std::process::id())));
+    std::fs::create_dir_all(&tmpdir.0)?;
     let dump_dir = std::env::var("ZZ_DUMP_C").ok().map(PathBuf::from);
     // Per-unit object cache (`~/.zz/cache/objects/units/<slug>/`): a TU's
     // object depends only on the exact bytes we compile (this unit's header
@@ -1259,12 +1271,12 @@ pub fn compile_units_with_sink(
             staged.push((PathBuf::new(), cached, None));
             continue;
         }
-        let src_path = tmpdir.join(format!("{stem}.c"));
+        let src_path = tmpdir.0.join(format!("{stem}.c"));
         std::fs::write(&src_path, &tu)?;
         if let Some(dir) = &dump_dir {
             let _ = std::fs::write(dir.join(format!("{stem}.c")), &tu);
         }
-        staged.push((src_path, tmpdir.join(format!("{stem}.o")), Some(cached)));
+        staged.push((src_path, tmpdir.0.join(format!("{stem}.o")), Some(cached)));
     }
     // Parallel unit compilation. clang -O3 TUs are memory-heavy (~1-2 GB
     // each), so we cap jobs by both core count and an estimated per-job
@@ -1314,28 +1326,47 @@ pub fn compile_units_with_sink(
                     sink.file_done(completed.fetch_add(1, Ordering::Relaxed) + 1);
                     return Ok(obj.clone());
                 }
-                let mut cmd = Command::new(&clang.path);
-                if clang.zig {
-                    cmd.arg("cc");
-                    if let Some(t) = target {
-                        cmd.arg("-target").arg(t);
+                // Compile the TU, retrying once on a transient failure.
+                // clang's atomic object publish (temp → rename) can race
+                // under heavy parallel load (e.g. full `cargo test` with
+                // many clang jobs at once) and abort with "unable to rename
+                // temporary ... : No such file or directory". A retry with
+                // a fresh temp file resolves it without failing the build.
+                let mut last_err: Option<String> = None;
+                for _ in 0..2 {
+                    let mut cmd = Command::new(&clang.path);
+                    if clang.zig {
+                        cmd.arg("cc");
+                        if let Some(t) = target {
+                            cmd.arg("-target").arg(t);
+                        }
                     }
-                }
-                for flag in &cflags {
-                    if flag == "-s" || flag.starts_with("-Wl,") || flag == "-static" {
-                        continue;
+                    for flag in &cflags {
+                        if flag == "-s" || flag.starts_with("-Wl,") || flag == "-static" {
+                            continue;
+                        }
+                        cmd.arg(flag);
                     }
-                    cmd.arg(flag);
+                    cmd.arg("-c")
+                        .arg(src_path)
+                        .arg("-o")
+                        .arg(obj)
+                        .arg(format!("-DZZ_HAS_CURL={}", u8::from(opts.curl_link)))
+                        .arg(format!("-DZZ_HAS_SQLITE3={}", u8::from(opts.sqlite_link)));
+                    let out = match cmd.output() {
+                        Ok(o) => o,
+                        Err(e) => {
+                            last_err = Some(e.to_string());
+                            continue;
+                        }
+                    };
+                    if out.status.success() {
+                        last_err = None;
+                        break;
+                    }
+                    last_err = Some(String::from_utf8_lossy(&out.stderr).into_owned());
                 }
-                cmd.arg("-c")
-                    .arg(src_path)
-                    .arg("-o")
-                    .arg(obj)
-                    .arg(format!("-DZZ_HAS_CURL={}", u8::from(opts.curl_link)))
-                    .arg(format!("-DZZ_HAS_SQLITE3={}", u8::from(opts.sqlite_link)));
-                let out = cmd.output().map_err(BuildError::Io)?;
-                if !out.status.success() {
-                    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+                if let Some(stderr) = last_err {
                     return Err(BuildError::CompileFailed { stderr });
                 }
                 // Publish the fresh object for future builds (same key =

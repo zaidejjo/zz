@@ -170,6 +170,56 @@ impl Lowerer {
         }
     }
 
+    /// True when `e` is a call to a reachable native whose VM counterpart
+    /// *raises* `EvalError` on failure (rather than returning a storable
+    /// `Result(Err)` value, like `json.deep_get`/`json.parse`). For raising
+    /// natives a statement-position call must propagate `Err`: abort with
+    /// `zz_native_err_abort`. Non-raising natives return a `Result` value
+    /// that the VM stores, so they must NOT abort here.
+    pub(crate) fn callee_raises(&self, e: &Expr) -> bool {
+        use zz_frontend::ast::Expr as E;
+        let (joined, head) = match e {
+            E::Call { callee, .. } => match callee.as_ref() {
+                E::Ident { name, .. } => {
+                    return self.reachable_natives.contains(name) && Self::raising_native(name);
+                }
+                E::Path { parts, .. } if !parts.is_empty() => (parts.join("."), parts[0].as_str()),
+                E::Field { obj, name, .. } if matches!(obj.as_ref(), E::Ident { .. }) => {
+                    let obj_name = match obj.as_ref() {
+                        E::Ident { name, .. } => name.as_str(),
+                        _ => unreachable!(),
+                    };
+                    (format!("{obj_name}.{name}"), obj_name)
+                }
+                _ => return false,
+            },
+            _ => return false,
+        };
+        let canonical = self
+            .import_ns_aliases
+            .get(head)
+            .map(|ns| format!("{ns}.{}", &joined[joined.find('.').unwrap_or(0) + 1..]))
+            .unwrap_or_else(|| joined.clone());
+        (self.reachable_natives.contains(&canonical) || self.reachable_natives.contains(&joined))
+            && (Self::raising_native(&canonical) || Self::raising_native(&joined))
+    }
+
+    /// Natives whose VM implementation returns `Err(EvalError)` (raises) on
+    /// failure instead of wrapping the error as `Ok(Result(Err))`. Only these
+    /// abort on a statement-position `Err`; Result-returning natives store
+    /// the value and are handled by `match`/`?`.
+    fn raising_native(name: &str) -> bool {
+        matches!(
+            name,
+            "std.http.listen_tls"
+                | "std.http.listen_tls_cfg"
+                | "http.listen_tls"
+                | "http.listen_tls_cfg"
+                | "std.sqlz.mysql.connect"
+                | "sqlz.mysql.connect"
+        )
+    }
+
     pub(crate) fn emit_stmt(
         &self,
         stmt: &Stmt,
@@ -1661,13 +1711,26 @@ impl Lowerer {
                     let release_result = stmt_call_needs_release(self, e, names);
                     let val = self.emit_expr(e, names, out);
                     *self.void_context.borrow_mut() = false;
-                    // Flat push in a pre-reserved counted loop: push code
-                    // already emitted inline (no grow guard) by emit_expr;
-                    // skip the `(void)(zz_unit())` wrapper.
-                    // Also skip when `emit_call` already emitted a complete
-                    // statement (temp decls + call + releases) and returned
-                    // `zz_unit()`.
-                    if !self.skip_flat_push_grow.get() {
+                    // A discarded statement-position call to a *raising* native
+                    // propagates its error: native failures raise in the VM,
+                    // so the native must not silently store `Err` and continue.
+                    // `zz_native_err_abort` prints the error and exits 1; it
+                    // works in any function including the void top-level
+                    // prelude where `return` is not valid. Non-raising natives
+                    // (e.g. `json.deep_get`) return a storable `Result` value,
+                    // so they are not aborted here. For `Ok` results this is a
+                    // no-op, so existing behavior is unchanged.
+                    if !self.skip_flat_push_grow.get() && self.callee_raises(e) {
+                        let tmp = names.fresh("_stmt");
+                        out.push_str(&format!(
+                            "    zz_value {tmp} = {val};\n    if ({tmp}.tag == ZZ_RESULT_ERR) {{ zz_native_err_abort({tmp}); }}\n"
+                        ));
+                        if release_result {
+                            out.push_str(&format!("    zz_release(&{tmp});\n"));
+                        } else {
+                            out.push_str(&format!("    (void){tmp};\n"));
+                        }
+                    } else if !self.skip_flat_push_grow.get() {
                         if release_result {
                             let tmp = names.fresh("_stmt");
                             out.push_str(&format!(
@@ -2800,7 +2863,9 @@ impl Lowerer {
             // driver stays put while a fresh per-iteration copy cell shadows
             // it for the body (spawned closures dup at creation, so later
             // iterations cannot disturb them — same isolation as below).
-            let loop_cell: Option<String> = if names.capture_set.contains(v) {
+            let loop_cell: Option<String> = if names.capture_set.contains(v)
+                || vars.iter().any(|var| var.name.as_str() == v.as_str())
+            {
                 if green {
                     let (ptr2, deref2, n2) = self.green_cell(names, "int64_t", true, out, None);
                     out.push_str(&format!("    {deref2} = {cid};\n"));

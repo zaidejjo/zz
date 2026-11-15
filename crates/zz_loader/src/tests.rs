@@ -7,7 +7,10 @@ use std::fs;
 /// them), but `cargo nextest` gives every test its own process, so the
 /// counter alone restarts at 0 in each worker and two tests would share
 /// `/tmp/zz_loader_test_0` — one wiping the other's project mid-run.
-fn temp_project(files: &[(&str, &str)]) -> PathBuf {
+///
+/// The returned guard removes the dir on drop so `/tmp` does not fill
+/// up across the ~70 loader tests.
+fn temp_project(files: &[(&str, &str)]) -> TempProject {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -19,9 +22,27 @@ fn temp_project(files: &[(&str, &str)]) -> PathBuf {
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(p, contents).unwrap();
     }
-    dir
+    TempProject(dir)
 }
 
+/// Guard that removes a loader test temp dir on drop.
+struct TempProject(PathBuf);
+impl std::ops::Deref for TempProject {
+    type Target = PathBuf;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl AsRef<Path> for TempProject {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+impl Drop for TempProject {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 /// Check that there are no hard errors (warnings are OK).
 fn no_errors(result: &LoadResult) -> bool {
     result.errors.iter().all(|e| {
@@ -2415,7 +2436,7 @@ version = \"0.1.0\"\n\
 dir = \"commands\"\n\
 sig = \"func([str]) -> int\"\n";
 
-fn collection_project(files: &[(&str, &str)]) -> PathBuf {
+fn collection_project(files: &[(&str, &str)]) -> TempProject {
     let mut all = vec![("zz.toml", COLLECTION_MANIFEST)];
     all.extend_from_slice(files);
     all.push(("commands/.keep", ""));

@@ -1333,7 +1333,7 @@ pub struct NativeFunc {
 
 /// A callable value: parameter list, body expression, and the environment
 /// captured at definition time (shared by reference).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct FuncValue {
     pub params: Vec<Param>,
     pub body: Expr,

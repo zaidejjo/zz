@@ -4680,11 +4680,27 @@ impl Compiler {
                             // sub-struct, not the outer binding; the runtime
                             // write-back guard below skips those so the outer
                             // struct is never corrupted by a mismatched type.
+                            //
+                            // Module-qualified free-function calls
+                            // (`ns_collision.helper(x)` where `helper` is a
+                            // free func under module `ns_collision`) must NOT
+                            // get a write-back: `ns_collision` is a namespace,
+                            // not a receiver, so writing the call's `self`
+                            // back to `env["ns_collision"]` would clobber an
+                            // unrelated global binding that happens to share
+                            // the module's name. Only real object-receiver
+                            // method calls (whose `head.method` is not a
+                            // registered free function) keep the write-back.
                             let head = parts[0].clone();
-                            let recv_home = Some(TakeHome::Env(head));
+                            let joined = parts.join(".");
+                            let recv_home = if self.func_info_contains(&joined) {
+                                None
+                            } else {
+                                Some(TakeHome::Env(head))
+                            };
                             self.emit(Op::CallPath {
                                 parts: parts.clone(),
-                                joined: parts.join("."),
+                                joined,
                                 argc: argc as u16,
                                 span: *span,
                                 pspan: *pspan,

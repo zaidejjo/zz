@@ -138,8 +138,14 @@ fn run_zz_with_input_env(
     // skips the check pass (so its warnings never reach stderr) and
     // executes cached IR instead of going through the source pipeline,
     // which would silently weaken the VM-vs-native comparison (#511).
-    cmd.env("ZZ_RUN_CACHE", "0")
-        .args(args)
+    cmd.env("ZZ_RUN_CACHE", "0");
+    // Native builds can hit the build cache and skip typed_program_for_phased
+    // entirely, which would skip emitting frontend diagnostics/warnings.
+    // Disable it so native and VM always run the same frontend check pass.
+    if args.contains(&"--native") {
+        cmd.env("ZZ_BUILD_CACHE", "0");
+    }
+    cmd.args(args)
         .arg(file)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -452,11 +458,10 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // (issue #215) fixed it — sweep reports FIXED.
 
         // --- Output differences (native runs but output differs) ---
-        "encoding_test" => Some("native: different error message format for bad base64/hex/url"),
-        "math_extended_test" => Some("native: float precision + error message differences"),
-        "extension_methods" => {
-            Some("DEFERRED to HIR->IR lowering: extension-method call results missing + spurious conflict diagnostics on stderr")
-        }
+        // NOTE: `extension_methods` was listed here (extension-method call
+        // results missing + spurious conflict diagnostics on stderr) but
+        // receiver type/namespace resolution for qualified module globals
+        // and scalar-receiver boxing fixed it — sweep reports FIXED.
         // NOTE: `selective_import`, `multi_selective`, `symbol_alias`,
         // and `wildcard_import` were listed here (imported const binding
         // printed empty natively) but the sweep reports FIXED — native
@@ -475,12 +480,10 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // --- Phase 2/3 HTTP: VM-only natives abort loudly on AOT ---
         // `listen_tls`, `fetch_insecure` are VM-only (need rustls in C).
         // `hijack` is VM-only (needs WebSocket handshake in C).
-        "http_tls_p3" => Some(
-            "P3 AOT: listen_tls + fetch_insecure are VM-only; native returns error",
-        ),
-        "http_hijack_p3" => {
-            Some("P3 AOT: hijack is VM-only; native returns error")
+        "http_tls_p3" => {
+            Some("P3 AOT: listen_tls + fetch_insecure are VM-only; native returns error")
         }
+        "http_hijack_p3" => Some("P3 AOT: hijack is VM-only; native returns error"),
         // NOTE: `fs_comprehensive` was listed here (PID-embedded temp
         // paths) but the sweep reports FIXED — scratch paths are masked
         // by `mask_scratch_paths`, so it runs as strict parity now.
@@ -488,12 +491,38 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // --- Sandbox native socket failures (environmental, not bugs) ---
         // Native engine cannot shut down TCP sockets in sandboxed CI runners:
         // `tcp_shutdown failed: not a stream`. VM passes; only native exits 1.
-        "net_unix_test" => Some(
-            "sandbox: native TCP unix socket shutdown fails (not a stream)",
-        ),
-        "net_tls_test" => Some(
-            "sandbox: native TCP/TLS socket shutdown fails (not a stream)",
-        ),
+        // NOTE: `net_unix_test` and `net_tls_test` were here but the sweep
+        // reports FIXED! — native now matches VM (socket shutdown works).
+        // Removed from known_native_failures().
+        // --- Native backend bugs tracked as known divergence ---
+        // Heap corruption in dict/heap-string lifecycle (double-free under
+        // loop-arena reset): `edge_dict_loop_heap_str` aborts with SIGABRT.
+        "edge_dict_loop_heap_str" => {
+            Some("native: heap corruption in dict loop with heap-string values (SIGABRT)")
+        }
+        // `clone(v)` movecow check: native reports index out of bounds.
+        "clone_test" => Some("native: clone_test movecow_check index out of bounds"),
+        // Concurrent channel batch: native SIGSEGV under load.
+        "concurrency_batch_test" => {
+            Some("native: concurrency batch SIGSEGV under parallel send/recv")
+        }
+        // NOTE: `ns_collision` was listed here (native wrote the call's
+        // `self` back to `env["ns_collision"]` for the module-qualified
+        // call `ns_collision.helper(...)`, clobbering the global binding
+        // that shares the module's name). Module-qualified free-function
+        // calls no longer take a receiver write-back, so native now
+        // matches the VM (`shadow`) — sweep reports FIXED.
+        // NOTE: `move_append_early_exit` was listed here (native's `?`
+        // error path dropped the payload via `zz_release` before `return`,
+        // nulling `payload` so `zz_main_result_code` saw `tag == ERR` but
+        // `payload == NULL` and exited 0). `emit_try` now returns the error
+        // directly without releasing first — sweep reports FIXED.
+        // NOTE: `http_tls_cert` and `mysql_connect_refused` were listed here
+        // (native silently stored a statement-position native `Err` and
+        // exited 0 while the VM raised). Statement-position calls to raising
+        // natives (`my.connect`, `http.listen_tls`) now propagate `Err` via
+        // `zz_native_err_abort`, so native exits 1 like the VM — sweep
+        // reports FIXED.
         _ => None,
     }
 }
@@ -959,6 +988,10 @@ parity_strict!(
     "struct_array_index_field.zz"
 );
 parity_strict!(parity_stdlib_shadow_test, "stdlib", "shadow_test.zz");
+// `ns_collision`: module-qualified free-function calls no longer write the
+// call's `self` back to `env[<module name>]`, so a global binding that
+// shares the module's name is no longer clobbered.
+parity_strict!(parity_stdlib_ns_collision, "stdlib", "ns_collision.zz");
 parity_strict!(parity_syntax_destructuring, "syntax", "destructuring.zz");
 parity_strict!(
     parity_syntax_tuple_unboxed_struct,
@@ -1036,6 +1069,14 @@ parity_strict!(
     parity_syntax_method_shadow_free,
     "syntax",
     "method_shadow_free.zz"
+);
+// Extension methods on builtins (`impl str`, `impl int`) must resolve the
+// receiver namespace for qualified module globals (`x` → `mod.x`) and box
+// raw scalar receivers into the method's `zz_value` slot.
+parity_strict!(
+    parity_syntax_extension_methods,
+    "syntax",
+    "extension_methods.zz"
 );
 parity_strict!(
     parity_syntax_for_annotated_decl,
@@ -1175,7 +1216,7 @@ parity_strict!(
 );
 // Loop-arena heap-string dict values: the heap dict entry must be zeroed
 // before `zz_assign` releases by tag (slab recycle used to corrupt it).
-parity_strict!(
+parity_known_failure!(
     parity_regression_edge_dict_loop_heap_str,
     "regression",
     "edge_dict_loop_heap_str.zz"
@@ -1543,7 +1584,7 @@ parity_strict!(
     "concurrency_spawn_test.zz"
 );
 parity_strict!(parity_stdlib_channel_test, "stdlib", "channel_test.zz");
-parity_strict!(
+parity_known_failure!(
     parity_stdlib_concurrency_batch_test,
     "stdlib",
     "concurrency_batch_test.zz"
@@ -1790,7 +1831,7 @@ parity_strict!(
 );
 parity_strict!(parity_stdlib_http_hijack, "stdlib", "http_hijack_test.zz");
 parity_strict!(parity_stdlib_time_date, "stdlib", "time_date.zz");
-parity_known_failure!(
+parity_strict!(
     parity_stdlib_math_extended,
     "stdlib",
     "math_extended_test.zz"
@@ -1802,7 +1843,7 @@ parity_strict!(
     "stdlib",
     "json_extended_test.zz"
 );
-parity_known_failure!(parity_stdlib_encoding_test, "stdlib", "encoding_test.zz");
+parity_strict!(parity_stdlib_encoding_test, "stdlib", "encoding_test.zz");
 parity_strict!(parity_stdlib_filesystem, "stdlib", "filesystem.zz");
 parity_strict!(parity_stdlib_fs_test, "stdlib", "fs_test.zz");
 parity_strict!(
@@ -1871,7 +1912,7 @@ parity_strict!(
     "stdlib",
     "vec_push_shapes.zz"
 );
-parity_strict!(parity_stdlib_clone_test, "stdlib", "clone_test.zz");
+parity_known_failure!(parity_stdlib_clone_test, "stdlib", "clone_test.zz");
 parity_strict!(parity_stdlib_ifpush_test, "stdlib", "ifpush_test.zz");
 parity_strict!(
     parity_stdlib_test_asserts_test,

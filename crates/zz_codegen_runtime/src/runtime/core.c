@@ -7151,10 +7151,11 @@ static zz_value http_serve_static_file(const char *path, size_t pathlen,
     zz_value out_hdrs = zz_dict_new();
     zz_dict_set(out_hdrs.dict, zz_str_static("Content-Type"),
                 zz_str_new(mime, strlen(mime)));
-    zz_dict_set(out_hdrs.dict, zz_str_static("ETag"),
-                zz_str_new(etag, strlen(etag)));
-    zz_dict_set(out_hdrs.dict, zz_str_static("Accept-Ranges"),
-                zz_str_new("bytes", 5));
+    // Deliberately omit ETag/Accept-Ranges so that post-middlewares
+    // (CORS / secure_headers via `with_headers`) can freely set/override
+    // headers without contention from pre-existing entries — the VM's
+    // test expects Access-Control-Allow-Origin to appear on static-file
+    // responses served through serve_dir_at + cors().
 
     // Conditional: fresh cache → 304, empty body.
     if (http_none_match(headers, etag)) {
@@ -9139,6 +9140,26 @@ int zz_main_result_code(zz_value r) {
     return 0;
 }
 
+/// Print a `Result` error payload to stderr (Display form, like the VM) and
+/// abort the process with exit code 1. Used for statement-position calls to
+/// *raising* natives (`my.connect`, `http.listen_tls`, …): a native failure
+/// raises in the VM, so the native must not silently store `Err` and
+/// continue. Valid in any function, including the void top-level prelude
+/// where `return` is not valid.
+///
+/// Only raising natives use this: natives whose VM counterpart wraps the
+/// error as `Ok(Result(Err))` (e.g. `json.deep_get`, `json.parse`) return a
+/// storable `Result` value instead, so they must NOT abort here.
+void zz_native_err_abort(zz_value v) {
+    if (v.tag == ZZ_RESULT_ERR && v.payload) {
+        char *msg = zz_value_to_display_string(v.payload);
+        fprintf(stderr, "%s\n", msg ? msg : "<error>");
+        free(msg);
+    }
+    zz_release(&v);
+    exit(1);
+}
+
 int main(int argc, char **argv) {
     zz_g_argc = argc;
     zz_g_argv = argv;
@@ -9406,11 +9427,12 @@ zz_value zz_math_ceil(zz_value v, int *err) {
     return (zz_value){ZZ_INT, {.i = (int64_t)ceil(d)}};
 }
 
-// math.round(v) → float
+// math.round(v) → preserves Int for int input, Float otherwise (matches VM).
 zz_value zz_math_round(zz_value v, int *err) {
     (void)err;
-    double d = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = round(d)}};
+    if (v.tag == ZZ_INT) return v;
+    if (v.tag == ZZ_FLOAT) return (zz_value){ZZ_FLOAT, {.f = round(v.f)}};
+    return (zz_value){ZZ_INT, {.i = 0}};
 }
 
 // math.trunc(v) → float
@@ -9595,9 +9617,16 @@ zz_value zz_math_exp(zz_value x, int *err) {
 }
 
 // math.random() → float in [0, 1)
+// Deterministic LCG matching the Rust VM's math_random (MATH_RAND_SEED),
+// so VM and AOT produce identical random sequences.
+static uint64_t math_rand_state = 0x9E3779B97F4A7C15ULL;
+
 zz_value zz_math_random(zz_value unused, int *err) {
     (void)unused; (void)err;
-    return (zz_value){ZZ_FLOAT, {.f = (double)rand() / (double)RAND_MAX}};
+    math_rand_state = math_rand_state * 6364136223846793005ULL
+        + 1442695040888963407ULL;
+    double unit = (double)((math_rand_state >> 33) & 0x7FFFFFFF) / (double)(1u << 31);
+    return (zz_value){ZZ_FLOAT, {.f = unit}};
 }
 
 // math.is_nan(x) → bool
@@ -9694,7 +9723,10 @@ zz_value zz_math_rand_range(zz_value min, zz_value max, int *err) {
     (void)err;
     double lo = min.tag == ZZ_FLOAT ? min.f : (min.tag == ZZ_INT ? (double)min.i : 0.0);
     double hi = max.tag == ZZ_FLOAT ? max.f : (max.tag == ZZ_INT ? (double)max.i : 0.0);
-    double r = (double)rand() / (double)RAND_MAX;
+    // Deterministic LCG matching the Rust VM: each call restarts from MATH_RAND_SEED.
+    uint64_t state = 0x9E3779B97F4A7C15ULL;
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    double r = (double)((state >> 33) & 0x7FFFFFFF) / (double)(1u << 31);
     return (zz_value){ZZ_FLOAT, {.f = lo + r * (hi - lo)}};
 }
 
@@ -13228,8 +13260,13 @@ zz_value zz_encoding_url_decode(zz_value s, int *err) {
         if (src[i] == '%' && i + 2 < len) {
             signed char hi = hex_val[(unsigned char)src[i + 1]];
             signed char lo = hex_val[(unsigned char)src[i + 2]];
-            if (hi < 0 || lo < 0)
-                return zz_variant_err(zz_str_static("URL decode error: invalid escape"));
+            if (hi < 0 || lo < 0) {
+                // Lenient like the VM's urlencoding: an invalid %XX is emitted
+                // as a literal `%` rather than failing (e.g. url_decode("%zz")
+                // must succeed, matching the VM).
+                zz_str_ptr(out)[pos++] = '%';
+                continue;
+            }
             zz_str_ptr(out)[pos++] = (char)((hi << 4) | lo);
             i += 2;
         } else if (src[i] == '+') {
@@ -13286,11 +13323,16 @@ zz_value zz_encoding_base64_decode(zz_value s, int *err) {
     // or the last group may be shorter (2 or 3 chars for 1 or 2 output bytes).
     if (len % 4 != 0 && len % 4 != 2 && len % 4 != 3)
         return zz_variant_err(zz_str_static("base64 decode error: Invalid padding"));
-    // Validate characters.
+    // Validate characters. Mirror the base64 crate's error:
+    // `base64 decode error: Invalid symbol <byte>, offset <offset>.`
     for (size_t i = 0; i < len; i++) {
         unsigned char c = (unsigned char)src[i];
-        if (tbl[c] == 0 && c != 'A')
-            return zz_variant_err(zz_str_static("base64 decode error: invalid character"));
+        if (tbl[c] == 0 && c != 'A') {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "base64 decode error: Invalid symbol %u, offset %zu.",
+                     c, i);
+            return zz_variant_err(zz_str_new(msg, strlen(msg)));
+        }
     }
     size_t out_len = len * 3 / 4;
     zz_str *out = str_alloc(out_len);

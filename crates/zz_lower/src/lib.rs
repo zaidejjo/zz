@@ -462,7 +462,20 @@ impl Lowerer {
                             continue;
                         }
                     }
-                    let val = self.emit_expr(value, &mut names, &mut out);
+                    let mut val = self.emit_expr(value, &mut names, &mut out);
+                    // A top-level statement-position call to a *raising* native
+                    // propagates its error: native failures raise in the VM,
+                    // so Err must not be stored silently into the global.
+                    // `zz_native_err_abort` prints the error and exits 1;
+                    // `zz_main` (top-level) is void so `return` is not valid.
+                    // Non-raising natives store the `Result` value (VM match).
+                    if self.callee_raises(value) {
+                        let tmp = names.fresh("_top_err");
+                        out.push_str(&format!(
+                            "    zz_value {tmp} = {val};\n    if ({tmp}.tag == ZZ_RESULT_ERR) {{ zz_native_err_abort({tmp}); }}\n"
+                        ));
+                        val = tmp;
+                    }
                     // Raw-scalar detection: cast-prefixed expressions plus
                     // bare scalar globals (`zz_global_x` for int64_t /
                     // double / bool globals emit raw — no cast prefix —
