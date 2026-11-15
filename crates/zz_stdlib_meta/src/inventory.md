@@ -7,10 +7,10 @@ Total entries: 700
 
 | tier | entries |
 |---|---:|
-| CRuntime | 327 |
+| CRuntime | 325 |
 | Const | 6 |
 | FfiStaticlib | 154 |
-| PureZz | 212 |
+| PureZz | 214 |
 | VmOnly | 1 |
 
 | tier | name | implementation |
@@ -400,9 +400,9 @@ Total entries: 700
 | CRuntime | `std.math.matrix_mul` | `zz_math_matrix_mul` |
 | PureZz | `std.math.max` | `zz/math/mod.zz` |
 | PureZz | `std.math.max_arr` | `zz/math/mod.zz` |
-| CRuntime | `std.math.mean` | `zz_math_mean` |
+| PureZz | `std.math.mean` | `zz/math/mod.zz` |
 | PureZz | `std.math.mean_f` | `zz/math/mod.zz` |
-| CRuntime | `std.math.median` | `zz_math_median` |
+| PureZz | `std.math.median` | `zz/math/mod.zz` |
 | PureZz | `std.math.median_f` | `zz/math/mod.zz` |
 | PureZz | `std.math.min` | `zz/math/mod.zz` |
 | PureZz | `std.math.min_arr` | `zz/math/mod.zz` |

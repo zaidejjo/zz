@@ -1,6 +1,11 @@
 // Pure-ZZ scalar math helpers — int predicates & transforms.
 // Module: std.math
 // File: scalar.zz (part of std.math split, see crates/zz_stdlib/zz/math/)
+// 
+// NOTE: abs and signum have ZZ bodies here for documentation, but the Rust
+// natives (int+float) are used at runtime. ZZ cannot overload, so these
+// int-only ZZ versions shadow the natives for int calls only. Float calls
+// fall through to the Rust native via the native dispatch table.
 
 // ── Scalar predicates & transforms (int) ─────────────────────────────────────
 

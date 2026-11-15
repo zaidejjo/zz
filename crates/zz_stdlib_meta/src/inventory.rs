@@ -69,6 +69,9 @@ pub const PURE_ZZ: &[&str] = &[
     "std.math.product_f",
     "std.math.mean_f",
     "std.math.median_f",
+    // PNSA: mean/median delegate to _f variants (pure-Zz).
+    "std.math.mean",
+    "std.math.median",
     // PNSA: pure-ZZ scalar math (handles int, float, str — more general than Rust float-only).
     "std.math.clamp",
     // PNSA: precompiled native stdlib number theory.

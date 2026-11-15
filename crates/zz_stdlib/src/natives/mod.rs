@@ -1711,21 +1711,9 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
 
-    // ── std.math statistics & random ──
-    m.insert(
-        "std.math.mean".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_mean,
-        },
-    );
-    m.insert(
-        "std.math.median".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_median,
-        },
-    );
+    // ── PNSA: mean/median moved to pure-Zz (stats.zz) ────────────────────────
+    // math.mean/math.median delegate to mean_f/median_f (PureZz).
+    // Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
     m.insert(
         "std.math.rand_range".into(),
         NativeEntry {
@@ -2629,7 +2617,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // table without the other will fail CI here rather than at runtime.
     assert_eq!(
         m.len(),
-        474,
+        472,
         "natives registry count drifted; update this assertion"
     );
 

@@ -158,8 +158,8 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "math.INF" | "std.math.INF" => Some("zz_math_inf"),
         "math.NAN" | "std.math.NAN" => Some("zz_math_nan"),
         "math.isqrt" | "std.math.isqrt" => Some("zz_math_isqrt"),
-        "math.mean" | "std.math.mean" => Some("zz_math_mean"),
-        "math.median" | "std.math.median" => Some("zz_math_median"),
+        // PNSA: math.mean/math.median moved to pure-Zz (stats.zz).
+        // Symbols resolved from libzz_stdlib.a in AOT.
         "math.rand_range" | "std.math.rand_range" => Some("zz_math_rand_range"),
         "math.dot_product" | "std.math.dot_product" => Some("zz_math_dot_product"),
         "math.magnitude" | "std.math.magnitude" => Some("zz_math_magnitude"),

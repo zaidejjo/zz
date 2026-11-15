@@ -9635,46 +9635,8 @@ zz_value zz_math_isqrt(zz_value n, int *err) {
     return zz_variant_ok((zz_value){ZZ_INT, {.i = x}});
 }
 
-// math.mean(list) → .ok(float) or .err(str)
-zz_value zz_math_mean(zz_value list, int *err) {
-    (void)err;
-    if (list.tag != ZZ_ARRAY || !list.arr || list.arr->len == 0)
-        return zz_variant_err(zz_str_static("mean: empty list"));
-    double sum = 0.0;
-    for (size_t i = 0; i < list.arr->len; i++) {
-        zz_value v = list.arr->items[i];
-        sum += v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
-    }
-    return zz_variant_ok((zz_value){ZZ_FLOAT, {.f = sum / (double)list.arr->len}});
-}
-
-// math.median(list) → .ok(float) or .err(str)
-zz_value zz_math_median(zz_value list, int *err) {
-    (void)err;
-    if (list.tag != ZZ_ARRAY || !list.arr || list.arr->len == 0)
-        return zz_variant_err(zz_str_static("median: empty list"));
-    // Copy to temp array, sort, find median.
-    size_t n = list.arr->len;
-    double *vals = (double *)malloc(n * sizeof(double));
-    for (size_t i = 0; i < n; i++) {
-        zz_value v = list.arr->items[i];
-        vals[i] = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
-    }
-    // Simple insertion sort (median lists are typically small).
-    for (size_t i = 1; i < n; i++) {
-        double key = vals[i];
-        size_t j = i;
-        while (j > 0 && vals[j-1] > key) { vals[j] = vals[j-1]; j--; }
-        vals[j] = key;
-    }
-    double result;
-    if (n % 2 == 1)
-        result = vals[n / 2];
-    else
-        result = (vals[n/2 - 1] + vals[n/2]) / 2.0;
-    free(vals);
-    return zz_variant_ok((zz_value){ZZ_FLOAT, {.f = result}});
-}
+// PNSA: math.mean/math.median moved to pure-Zz (stats.zz).
+// C twins removed; symbols resolved from libzz_stdlib.a in AOT.
 
 // math.rand_range(min, max) → float
 zz_value zz_math_rand_range(zz_value min, zz_value max, int *err) {

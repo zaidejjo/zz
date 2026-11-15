@@ -598,53 +598,9 @@ pub(crate) fn math_matrix_mul(
 
 // ── Basic Statistics & Random ───────────────────────────────────────────────
 
-pub(crate) fn math_mean(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, EvalError> {
-    let vals = as_float_array(
-        args.first()
-            .ok_or_else(|| EvalError::new("missing argument for mean", span))?,
-        "mean",
-        span,
-    )?;
-    if vals.is_empty() {
-        return Ok(Value::Result(Box::new(Err(Value::Str(
-            "mean: empty list".to_string().into(),
-        )))));
-    }
-    let sum: f64 = vals.iter().sum();
-    Ok(Value::Result(Box::new(Ok(Value::Float(
-        sum / vals.len() as f64,
-    )))))
-}
-
-pub(crate) fn math_median(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, EvalError> {
-    let mut vals = as_float_array(
-        args.first()
-            .ok_or_else(|| EvalError::new("missing argument for median", span))?,
-        "median",
-        span,
-    )?;
-    if vals.is_empty() {
-        return Ok(Value::Result(Box::new(Err(Value::Str(
-            "median: empty list".to_string().into(),
-        )))));
-    }
-    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = vals.len();
-    let median = if n % 2 == 0 {
-        (vals[n / 2 - 1] + vals[n / 2]) / 2.0
-    } else {
-        vals[n / 2]
-    };
-    Ok(Value::Result(Box::new(Ok(Value::Float(median)))))
-}
+// ── PNSA: mean/median moved to pure-Zz (stats.zz) ────────────────────────────
+// math.mean/math.median delegate to mean_f/median_f (PureZz).
+// Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
 
 pub(crate) fn math_rand_range(
     _interp: &mut Interp,

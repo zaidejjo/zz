@@ -1246,8 +1246,8 @@ zz_value zz_math_tau(zz_value unused, int *err);
 zz_value zz_math_inf(zz_value unused, int *err);
 zz_value zz_math_nan(zz_value unused, int *err);
 zz_value zz_math_isqrt(zz_value n, int *err);
-zz_value zz_math_mean(zz_value list, int *err);
-zz_value zz_math_median(zz_value list, int *err);
+// PNSA: math.mean/math.median moved to pure-Zz (stats.zz).
+// C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 zz_value zz_math_rand_range(zz_value min, zz_value max, int *err);
 zz_value zz_math_dot_product(zz_value v1, zz_value v2, int *err);
 zz_value zz_math_magnitude(zz_value v, int *err);
