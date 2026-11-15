@@ -7,10 +7,10 @@ Total entries: 700
 
 | tier | entries |
 |---|---:|
-| CRuntime | 321 |
+| CRuntime | 319 |
 | Const | 6 |
 | FfiStaticlib | 154 |
-| PureZz | 218 |
+| PureZz | 220 |
 | VmOnly | 1 |
 
 | tier | name | implementation |
@@ -373,7 +373,7 @@ Total entries: 700
 | Const | `std.math.SQRT_1_2` | `stdlib_consts` |
 | Const | `std.math.SQRT_2` | `stdlib_consts` |
 | CRuntime | `std.math.TAU` | `zz_math_tau` |
-| CRuntime | `std.math.abs` | `zz_math_abs` |
+| PureZz | `std.math.abs` | `zz/math/mod.zz` |
 | CRuntime | `std.math.acos` | `zz_math_acos` |
 | CRuntime | `std.math.asin` | `zz_math_asin` |
 | CRuntime | `std.math.atan` | `zz_math_atan` |
@@ -413,7 +413,7 @@ Total entries: 700
 | CRuntime | `std.math.random` | `zz_math_random` |
 | CRuntime | `std.math.root` | `zz_math_root` |
 | CRuntime | `std.math.round` | `zz_math_round` |
-| CRuntime | `std.math.signum` | `zz_math_signum` |
+| PureZz | `std.math.signum` | `zz/math/mod.zz` |
 | CRuntime | `std.math.sin` | `zz_math_sin` |
 | CRuntime | `std.math.sin_deg` | `zz_math_sin_deg` |
 | CRuntime | `std.math.sqrt` | `zz_math_sqrt` |

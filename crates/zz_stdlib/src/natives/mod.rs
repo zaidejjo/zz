@@ -1479,13 +1479,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
 
     // std.math
     m.insert(
-        "std.math.abs".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_abs,
-        },
-    );
-    m.insert(
         "std.math.floor".into(),
         NativeEntry {
             arity: 1,
@@ -1537,14 +1530,8 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
         },
     );
     // PNSA: math.clamp moved to pure-ZZ (generic <T: Ord> -> T).
+    // PNSA: math.signum moved to pure-Zz (scalar.zz).
     // Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
-    m.insert(
-        "std.math.signum".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_signum,
-        },
-    );
     m.insert(
         "std.math.hypot".into(),
         NativeEntry {
@@ -2594,7 +2581,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // table without the other will fail CI here rather than at runtime.
     assert_eq!(
         m.len(),
-        468,
+        466,
         "natives registry count drifted; update this assertion"
     );
 

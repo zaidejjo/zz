@@ -24,27 +24,8 @@ fn to_float(v: &Value) -> Option<f64> {
 
 // ── Utilities & Rounding ────────────────────────────────────────────────────
 
-pub(crate) fn math_abs(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, EvalError> {
-    let v = args
-        .first()
-        .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for abs", span))?;
-    match v {
-        Value::Int(i) => Ok(Value::Int(i.abs())),
-        Value::Float(f) => Ok(Value::Float(f.abs())),
-        other => Err(EvalError::new(
-            format!(
-                "abs expects `int` or `float`, found `{}`",
-                other.type_name()
-            ),
-            span,
-        )),
-    }
-}
+// PNSA: math.abs moved to pure-Zz (scalar.zz, T: Num + Ord).
+// Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
 pub(crate) fn math_round(
     _interp: &mut Interp,
@@ -126,24 +107,8 @@ pub(crate) fn math_trunc(
 // math.clamp is now PureZz in scalar.zz — handles int, float, str.
 // Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
-pub(crate) fn math_signum(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, EvalError> {
-    let v = args
-        .first()
-        .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for signum", span))?;
-    match v {
-        Value::Int(i) => Ok(Value::Int(i.signum())),
-        Value::Float(f) => Ok(Value::Float(f.signum())),
-        other => Err(EvalError::new(
-            format!("signum expects a number, found `{}`", other.type_name()),
-            span,
-        )),
-    }
-}
+// PNSA: math.signum moved to pure-Zz (scalar.zz, T: Num + Ord).
+// Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
 pub(crate) fn math_hypot(
     _interp: &mut Interp,

@@ -122,14 +122,16 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "cell.drop" | "std.cell.drop" => Some("zz_cell_drop"),
         "bytes.finish" | "std.bytes.finish" => Some("zz_bytes_finish"),
         // math
-        "math.abs" | "std.math.abs" => Some("zz_math_abs"),
+        // PNSA: math.abs moved to pure-Zz (scalar.zz).
+        // Symbol resolved from libzz_stdlib.a in AOT.
         "math.sqrt" | "std.math.sqrt" => Some("zz_math_sqrt"),
         "math.pow" | "std.math.pow" => Some("zz_math_pow"),
         "math.floor" | "std.math.floor" => Some("zz_math_floor"),
         "math.ceil" | "std.math.ceil" => Some("zz_math_ceil"),
         "math.round" | "std.math.round" => Some("zz_math_round"),
         "math.trunc" | "std.math.trunc" => Some("zz_math_trunc"),
-        "math.signum" | "std.math.signum" => Some("zz_math_signum"),
+        // PNSA: math.signum moved to pure-Zz (scalar.zz).
+        // Symbol resolved from libzz_stdlib.a in AOT.
         "math.hypot" | "std.math.hypot" => Some("zz_math_hypot"),
         "math.root" | "std.math.root" => Some("zz_math_root"),
         "math.factorial" | "std.math.factorial" => Some("zz_math_factorial"),

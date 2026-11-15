@@ -9398,13 +9398,8 @@ zz_value zz_bool_cast(zz_value v, int *err) {
 }
 
 // zz_str(v) — cast to string.
-// math.abs(v)
-zz_value zz_math_abs(zz_value v, int *err) {
-    (void)err;
-    if (v.tag == ZZ_INT) return (zz_value){ZZ_INT, {.i = v.i < 0 ? -v.i : v.i}};
-    if (v.tag == ZZ_FLOAT) return (zz_value){ZZ_FLOAT, {.f = fabs(v.f)}};
-    return v;
-}
+// PNSA: math.abs moved to pure-Zz (scalar.zz).
+// C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 
 // math.sqrt(v)
 zz_value zz_math_sqrt(zz_value v, int *err) {
@@ -9442,19 +9437,8 @@ zz_value zz_math_trunc(zz_value v, int *err) {
     return (zz_value){ZZ_FLOAT, {.f = trunc(d)}};
 }
 
-// math.signum(v) → same type
-zz_value zz_math_signum(zz_value v, int *err) {
-    (void)err;
-    if (v.tag == ZZ_INT) {
-        int64_t s = (v.i > 0) - (v.i < 0);
-        return (zz_value){ZZ_INT, {.i = s}};
-    }
-    if (v.tag == ZZ_FLOAT) {
-        double s = (v.f > 0.0) - (v.f < 0.0);
-        return (zz_value){ZZ_FLOAT, {.f = s}};
-    }
-    return v;
-}
+// PNSA: math.signum moved to pure-Zz (scalar.zz).
+// C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 
 // math.hypot(x, y) → float
 zz_value zz_math_hypot(zz_value x, zz_value y, int *err) {
