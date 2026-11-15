@@ -685,13 +685,6 @@ pub struct Lowerer {
     /// to the callee — the array owns it after the call.
     /// Consumed at `emit_expr` entry so nested expressions never see it.
     pub(crate) adopt_arg: std::cell::Cell<bool>,
-    /// Pending f-string builder declarations to hoist before the current
-    /// loop body. Populated during f-string lowering when `adopt_arg &&
-    /// loop_depth >= 1`; consumed by while/for lowering before the body.
-    pub(crate) loop_fmt_builders: std::cell::RefCell<Vec<(String, usize)>>,
-    /// Monotonic counter for unique f-string builder names in hoisted
-    /// loop contexts.
-    pub(crate) fmt_seq: std::cell::Cell<usize>,
     /// Set for the next `emit_expr` when the value is consumed by a
     /// *retaining* runtime helper (`zz_vec_append`, `zz_object_set_field`)
     /// rather than taking ownership. An f-string builder is a scoped local
@@ -841,8 +834,6 @@ impl Lowerer {
             loop_scope_depth: std::cell::Cell::new(0),
             native_call_args: std::cell::Cell::new(false),
             adopt_arg: std::cell::Cell::new(false),
-            loop_fmt_builders: std::cell::RefCell::new(Vec::new()),
-            fmt_seq: std::cell::Cell::new(0),
             fmt_borrow: std::cell::Cell::new(false),
             skip_flat_push_grow: std::cell::Cell::new(false),
             accumulated_names: std::cell::RefCell::new(std::collections::HashSet::new()),
