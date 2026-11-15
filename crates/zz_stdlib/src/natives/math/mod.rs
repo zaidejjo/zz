@@ -446,20 +446,8 @@ fn as_float_array(v: &Value, name: &str, span: Span) -> Result<Vec<f64>, EvalErr
 // PNSA: math.dot_product moved to pure-Zz (linalg.zz).
 // Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
-pub(crate) fn math_magnitude(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, EvalError> {
-    let v = as_float_array(
-        args.first()
-            .ok_or_else(|| EvalError::new("missing argument for magnitude", span))?,
-        "magnitude",
-        span,
-    )?;
-    let sum: f64 = v.iter().map(|x| x * x).sum();
-    Ok(Value::Float(sum.sqrt()))
-}
+// PNSA: math.magnitude moved to pure-Zz (linalg.zz).
+// Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
 pub(crate) fn math_matrix_mul(
     _interp: &mut Interp,

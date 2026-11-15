@@ -17,3 +17,14 @@ func math.dot_product(v1: [float], v2: [float]) -> Result<float, str> {
     }
     return .ok(sum)
 }
+
+// ── Magnitude ────────────────────────────────────────────────────────────────
+
+func math.magnitude(v: [float]) -> float {
+    // magnitude = sqrt(dot_product(v, v))
+    dot := math.dot_product(v, v)
+    match dot {
+        .ok(d) => return math.sqrt(d)
+        .err(_) => return 0.0
+    }
+}

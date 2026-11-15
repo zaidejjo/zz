@@ -9641,18 +9641,8 @@ zz_value zz_math_rand_range(zz_value min, zz_value max, int *err) {
 // PNSA: math.dot_product moved to pure-Zz (linalg.zz).
 // C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 
-// math.magnitude(v) → float
-zz_value zz_math_magnitude(zz_value v, int *err) {
-    (void)err;
-    if (v.tag != ZZ_ARRAY || !v.arr) return (zz_value){ZZ_FLOAT, {.f = 0.0}};
-    double sum = 0.0;
-    for (size_t i = 0; i < v.arr->len; i++) {
-        double d = v.arr->items[i].tag == ZZ_FLOAT ? v.arr->items[i].f :
-                   (v.arr->items[i].tag == ZZ_INT ? (double)v.arr->items[i].i : 0.0);
-        sum += d * d;
-    }
-    return (zz_value){ZZ_FLOAT, {.f = sqrt(sum)}};
-}
+// PNSA: math.magnitude moved to pure-Zz (linalg.zz).
+// C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 
 // math.matrix_mul(m1, m2) → .ok(array) or .err(str)
 // Mirrors the VM implementation: both args are arrays of arrays of

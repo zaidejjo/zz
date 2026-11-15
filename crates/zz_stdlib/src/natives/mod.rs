@@ -1683,13 +1683,8 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
 
     // ── PNSA: math.dot_product moved to pure-Zz (linalg.zz).
     // Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
-    m.insert(
-        "std.math.magnitude".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_magnitude,
-        },
-    );
+    // PNSA: math.magnitude moved to pure-Zz (linalg.zz).
+    // Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
     m.insert(
         "std.math.matrix_mul".into(),
         NativeEntry {
@@ -2604,7 +2599,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // table without the other will fail CI here rather than at runtime.
     assert_eq!(
         m.len(),
-        470,
+        469,
         "natives registry count drifted; update this assertion"
     );
 

@@ -7,10 +7,10 @@ Total entries: 700
 
 | tier | entries |
 |---|---:|
-| CRuntime | 323 |
+| CRuntime | 322 |
 | Const | 6 |
 | FfiStaticlib | 154 |
-| PureZz | 216 |
+| PureZz | 217 |
 | VmOnly | 1 |
 
 | tier | name | implementation |
@@ -396,7 +396,7 @@ Total entries: 700
 | CRuntime | `std.math.lcm` | `zz_math_lcm` |
 | CRuntime | `std.math.log` | `zz_math_log` |
 | CRuntime | `std.math.log10` | `zz_math_log10` |
-| CRuntime | `std.math.magnitude` | `zz_math_magnitude` |
+| PureZz | `std.math.magnitude` | `zz/math/mod.zz` |
 | CRuntime | `std.math.matrix_mul` | `zz_math_matrix_mul` |
 | PureZz | `std.math.max` | `zz/math/mod.zz` |
 | PureZz | `std.math.max_arr` | `zz/math/mod.zz` |
