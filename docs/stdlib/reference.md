@@ -1,6 +1,6 @@
 # Stdlib reference — generated
 
-Exhaustive signature index: **696 entries across 42 groups**.
+Exhaustive signature index: **711 entries across 44 groups**.
 Generated from compiled `FuncSig` data (`crates/zz_stdlib/src/funcs.rs`
 via `dump_sigs`) — do not hand-edit. Regenerate with
 `python3 scripts/gen-stdlib-ref.py`. Semantics: per-module guides linked below.
@@ -99,12 +99,14 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.cell.new` | `new<T>(v: T) -> cell` |
 | `std.cell.set` | `set<T>(c: cell, v: T) -> Result<bool, str>` |
 
-## `chan` — 3 entries ([guide](chan.md))
+## `chan` — 5 entries ([guide](chan.md))
 
 | Function | Signature |
 |---|---|
 | `std.chan.recv` | `recv<T>(ch: chan) -> T` |
+| `std.chan.recv_batch` | `recv_batch<T>(ch: chan, n: int) -> [T]` |
 | `std.chan.send` | `send<T>(ch: chan, v: T) -> unit` |
+| `std.chan.send_batch` | `send_batch<T>(ch: chan, arr: [T]) -> unit` |
 | `std.chan.try_recv` | `try_recv<T>(ch: chan) -> Option<T>` |
 
 ## `colors` — 51 entries ([guide](colors.md))
@@ -596,7 +598,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.path.join_all` | `join_all(parts: [str]) -> str` |
 | `std.path.normalize` | `normalize(path: str) -> str` |
 
-## `process` — 6 entries ([guide](process.md))
+## `process` — 7 entries ([guide](process.md))
 
 | Function | Signature |
 |---|---|
@@ -605,6 +607,7 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.process.run` | `run(cmd: str, argv: [str]) -> Result<[int | str | str], str>` |
 | `std.process.run_with_env` | `run_with_env(cmd: str, argv: [str], env: [str]) -> Result<[int | str | str], str>` |
 | `std.process.spawn` | `spawn(cmd: str, argv: [str]) -> Result<process, str>` |
+| `std.process.spawn_pty` | `spawn_pty(cmd: str, argv: [str], slave_fd: int) -> Result<int, str>` |
 | `std.process.wait` | `wait(child: process) -> Result<[int | str | str], str>` |
 
 ## `property` — 14 entries ([guide](property.md))
@@ -625,6 +628,19 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.property.shrink_value` | `shrink_value<T>(prop: func(T) -> bool, shrink: func(T) -> [T], v: T) -> T` |
 | `std.property.step` | `step(state: int) -> int` |
 | `std.property.stream` | `stream(seed: int, i: int) -> int` |
+
+## `pty` — 8 entries ([guide](overview.md))
+
+| Function | Signature |
+|---|---|
+| `std.pty.grantpt` | `grantpt(fd: int) -> Result<unit, str>` |
+| `std.pty.isatty` | `isatty(fd: int) -> bool` |
+| `std.pty.open` | `open() -> Result<[int], str>` |
+| `std.pty.ptsname` | `ptsname(fd: int) -> Result<str, str>` |
+| `std.pty.read` | `read(fd: int, n: int) -> Result<str, str>` |
+| `std.pty.set_winsz` | `set_winsz(fd: int, cols: int, rows: int) -> Result<unit, str>` |
+| `std.pty.unlockpt` | `unlockpt(fd: int) -> Result<unit, str>` |
+| `std.pty.write` | `write(fd: int, data: str) -> Result<int, str>` |
 
 ## `regexp` — 7 entries ([guide](regexp.md))
 
@@ -664,6 +680,15 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 | `std.set.union` | `union(a: [str], b: [str]) -> [str]` |
 | `std.set.union_int` | `union_int(a: [int], b: [int]) -> [int]` |
 
+## `signal` — 4 entries ([guide](overview.md))
+
+| Function | Signature |
+|---|---|
+| `std.signal.install` | `install(signum: int, handler: func() -> unit) -> Result<unit, str>` |
+| `std.signal.pending` | `pending(signum: int) -> bool` |
+| `std.signal.raise` | `raise(signum: int) -> Result<unit, str>` |
+| `std.signal.run_pending` | `run_pending() -> Result<unit, str>` |
+
 ## `span` — 2 entries ([guide](overview.md))
 
 | Function | Signature |
@@ -677,10 +702,10 @@ A `= …` param has a default and may be omitted. Bare names (`print`,
 |---|---|
 | `std.sqlz.close` | `close(db: db) -> unit` |
 | `std.sqlz.exec` | `exec(db: db, sql: str) -> int` |
-| `std.sqlz.mysql.close` | `close(db: db) -> unit` |
-| `std.sqlz.mysql.connect` | `connect(conninfo: str) -> db` |
-| `std.sqlz.mysql.exec` | `exec(db: db, sql: str) -> int` |
-| `std.sqlz.mysql.query` | `query<T>(db: db, sql: str) -> [T]` |
+| `std.sqlz.mysql.close` | `close(db: db) -> Result<unit, str>` |
+| `std.sqlz.mysql.connect` | `connect(conninfo: str) -> Result<db, str>` |
+| `std.sqlz.mysql.exec` | `exec(db: db, sql: str) -> Result<int, str>` |
+| `std.sqlz.mysql.query` | `query(db: db, sql: str) -> Result<[T], str>` |
 | `std.sqlz.open` | `open(path: str) -> db` |
 | `std.sqlz.postgres.close` | `close(db: db) -> unit` |
 | `std.sqlz.postgres.connect` | `connect(conninfo: str) -> db` |
