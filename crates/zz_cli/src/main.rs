@@ -2440,6 +2440,12 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     if is_full && dashdash.is_some() {
         return build_full_with_training(path, &rel, &train_args);
     }
+    // `--optimize-max`: instrument, train (no args — standalone mode),
+    // merge, rebuild optimized with full LTO + PGO use + native CPU +
+    // relaxed float.
+    if is_optimize_max {
+        return build_optimize_max(path, &rel);
+    }
     // Phased output (#629): one numbered, timed line per build step. The
     // header names the target — the package for a project build, the file
     // for a loose one — so `zz build` never shows an internal path.
@@ -2586,7 +2592,118 @@ fn build_full_with_training(
     Ok(())
 }
 
-/// Split `profile` args at `--`: `(flag side, training args)`.
+/// `zz build --optimize-max <file.zz>`: maximum optimization — instrument,
+/// train (no args), merge, rebuild optimized with full LTO + PGO use +
+/// native CPU + relaxed float.
+fn build_optimize_max(path: &str, rel: &zz_build::ReleaseOptions) -> Result<(), String> {
+    // Fail fast: merging needs llvm-profdata.
+    if std::process::Command::new("llvm-profdata")
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        return Err("llvm-profdata not found\n\
+            hint: install LLVM tools (apt: llvm, brew: llvm) to use `--optimize-max`"
+            .to_string());
+    }
+    let p = std::path::Path::new(path);
+    crate::enforce_project_zz(p)?;
+    let target = zz_build::build_target(p);
+    crate::ui::header(&format!("building {} (optimize-max)", target.label()));
+    let progress = std::sync::Arc::new(crate::build_progress::BuildProgress::new(
+        crate::build_progress::Style::Nested,
+    ));
+    let pgo_rel = zz_build::ReleaseOptions {
+        observer: zz_build::ObserverSlot::new(progress.clone()),
+        ..rel.clone()
+    };
+    crate::ui::step(1, 4, "Instrumented build");
+    let instrumented = zz_build::build_release(p, zz_build::BuildMode::Pgo, &pgo_rel)?;
+    crate::ui::ok("instrumented build done");
+
+    crate::ui::step(2, 4, "Training run");
+    let prof_dir = std::env::temp_dir().join(format!("zz-om-profile-{}", std::process::id()));
+    if prof_dir.exists() {
+        let _ = std::fs::remove_dir_all(&prof_dir);
+    }
+    std::fs::create_dir_all(&prof_dir).map_err(|e| format!("cannot create profile dir: {e}"))?;
+    let profraw = prof_dir.join("zz.profraw");
+    let status = std::process::Command::new(&instrumented)
+        .env("LLVM_PROFILE_FILE", &profraw)
+        .status()
+        .map_err(|e| format!("cannot run training binary: {e}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_dir_all(&prof_dir);
+        return Err(format!(
+            "training run failed (exit {})\n\
+              hint: the workload must succeed for profile data to be valid",
+            status.code().unwrap_or(-1)
+        ));
+    }
+
+    crate::ui::step(3, 4, "Merging profile");
+    let mut raw_files: Vec<std::path::PathBuf> = std::fs::read_dir(&prof_dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("profraw"))
+                .collect()
+        })
+        .unwrap_or_default();
+    raw_files.sort();
+    if raw_files.is_empty() {
+        let _ = std::fs::remove_dir_all(&prof_dir);
+        return Err("no profile data collected\n\
+            hint: the training run must execute instrumented code"
+            .to_string());
+    }
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {e}"))?;
+    let profdata = cwd.join("default.profdata");
+    let merge = std::process::Command::new("llvm-profdata")
+        .arg("merge")
+        .arg("-o")
+        .arg(&profdata)
+        .args(&raw_files)
+        .output()
+        .map_err(|e| format!("cannot run llvm-profdata: {e}"))?;
+    let _ = std::fs::remove_dir_all(&prof_dir);
+    if !merge.status.success() {
+        return Err(format!(
+            "llvm-profdata merge failed: {}\n\
+              hint: inspect {} and retry",
+            String::from_utf8_lossy(&merge.stderr).trim(),
+            profdata.display()
+        ));
+    }
+
+    crate::ui::step(
+        4,
+        4,
+        "Optimized build (full LTO + PGO + native CPU + relaxed float)",
+    );
+    let dest = match zz_build::build_release(p, zz_build::BuildMode::OptimizeMax, &pgo_rel) {
+        Ok(dest) => {
+            let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+            progress.after_cache_hit(&dest, meta);
+            crate::ui::ok(&format!(
+                "built {} (optimize-max, {})",
+                dest.display(),
+                crate::ui::human_bytes(meta)
+            ));
+            dest
+        }
+        Err(e) => {
+            return Err(format!(
+                "{e}\nhint: {} left in place — fix and re-run to retry phase 2",
+                profdata.display()
+            ));
+        }
+    };
+    let _ = std::fs::remove_file(&profdata);
+    println!("built {}", dest.display());
+    Ok(())
+}
 fn split_train_args(args: &[String]) -> (&[String], Vec<String>) {
     match args.iter().position(|a| a == "--") {
         Some(i) => (&args[..i], args.get(i + 1..).unwrap_or(&[]).to_vec()),
