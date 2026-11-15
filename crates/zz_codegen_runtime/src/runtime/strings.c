@@ -3118,7 +3118,7 @@ zz_value zz_str_join(zz_value items, zz_value sep, int *err) {
     // Fast path: flat string array from str.split — contiguous (ptr,len)
     // pairs, no per-item tag check or zz_str pointer chase.
     if (items.tag == ZZ_FLAT_STR_ARRAY) {
-        zz_flat_str_array *f = (zz_flat_str_array *)items.arr;
+        zz_flat_str_array *f = items.flat_str;
         if (!f || f->len == 0) return zz_str_static("");
         const char *sep_d = "";
         size_t sep_len = 0;
@@ -3235,7 +3235,7 @@ zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
         zz_flat_str_array *f = (zz_flat_str_array *)calloc(1, sizeof(zz_flat_str_array));
         if (!f) return zz_array_new();
         f->refs = 1;
-        return (zz_value){ZZ_FLAT_STR_ARRAY, {.arr = f}};
+        return (zz_value){ZZ_FLAT_STR_ARRAY, {.flat_str = f}};
     }
     const char *d = zz_str_ptr(s.s);
     size_t len = s.s->len;
@@ -3255,8 +3255,7 @@ zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
     if (!f) return zz_array_new();
     f->refs = 1;
     f->len = approx_count;
-    f->pairs = (struct { const char *ptr; size_t len; } *)
-        calloc(approx_count, sizeof(struct { const char *ptr; size_t len; }));
+    f->pairs = (zz_flat_str_pair *)calloc(approx_count, sizeof(zz_flat_str_pair));
     if (!f->pairs) { free(f); return zz_array_new(); }
     size_t n = 0;
     if (slen == 0) {
@@ -3272,7 +3271,7 @@ zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
         }
         f->pairs[n].ptr = d + len; f->pairs[n].len = 0; n++;
         f->len = n;
-        return (zz_value){ZZ_FLAT_STR_ARRAY, {.arr = f}};
+        return (zz_value){ZZ_FLAT_STR_ARRAY, {.flat_str = f}};
     }
     size_t pos = 0;
     for (;;) {
@@ -3332,7 +3331,7 @@ zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
         if (done) break;
     }
     f->len = n;
-    return (zz_value){ZZ_FLAT_STR_ARRAY, {.arr = f}};
+    return (zz_value){ZZ_FLAT_STR_ARRAY, {.flat_str = f}};
 }
 
 // Fast int64 → decimal (P7): two-digit lookup table writes pairs per

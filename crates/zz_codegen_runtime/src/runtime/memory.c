@@ -353,7 +353,7 @@ void zz_release_arc(zz_value *v) {
         zz_release_array(v->arr);
         break;
     case ZZ_FLAT_STR_ARRAY:
-        zz_release_flat_str_array((zz_flat_str_array *)v->arr);
+        zz_release_flat_str_array(v->flat_str);
         break;
     case ZZ_BYTES:
         zz_release_bytes(v->bytes);
@@ -411,8 +411,8 @@ zz_value zz_clone_arc(zz_value v) {
         zz_retain_array(v.arr);
         break;
     case ZZ_FLAT_STR_ARRAY:
-        if (v.arr) {
-            zz_flat_str_array *f = (zz_flat_str_array *)v.arr;
+        if (v.flat_str) {
+            zz_flat_str_array *f = v.flat_str;
             __atomic_add_fetch(&f->refs, 1, __ATOMIC_RELAXED);
         }
         break;

@@ -1363,7 +1363,7 @@ zz_value zz_len(zz_value v, int *err) {
         return (zz_value){ZZ_INT, {.i = (int64_t)zz_str_char_len(v.s)}};
     }
     if (v.tag == ZZ_FLAT_STR_ARRAY) {
-        return (zz_value){ZZ_INT, {.i = (int64_t)((zz_flat_str_array *)v.arr)->len}};
+        return (zz_value){ZZ_INT, {.i = (int64_t)v.flat_str->len}};
     }
     if (v.tag == ZZ_DICT) {
         return (zz_value){ZZ_INT, {.i = v.dict ? (int64_t)v.dict->len : 0}};

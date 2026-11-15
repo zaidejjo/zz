@@ -120,13 +120,15 @@ typedef enum {
 // owned data buffer. Used by str.split (zero-copy parts referencing the
 // original string buffer) and consumed by str.join (single memcpy pass,
 // no per-item tag check or zz_str pointer chase).
+typedef struct zz_flat_str_pair {
+    const char *ptr;
+    size_t len;
+} zz_flat_str_pair;
+
 typedef struct zz_flat_str_array {
     size_t refs;     // atomic reference count (ARC)
     size_t len;      // number of parts
-    struct {
-        const char *ptr;
-        size_t len;
-    } *pairs;        // array of len (ptr,len) pairs
+    zz_flat_str_pair *pairs;  // array of len (ptr,len) pairs
     char *owned;     // malloc'd data buffer we own (free on release), or NULL
 } zz_flat_str_array;
 
@@ -278,6 +280,7 @@ struct zz_value {
         zz_vfs *vfs;         // fs provider handle (ZZ_VFS)
         zz_bytes *bytes;     // byte buffer (ZZ_BYTES)
         zz_weak *weak;       // weak reference (ZZ_WEAK)
+        zz_flat_str_array *flat_str;  // flat string array (ZZ_FLAT_STR_ARRAY)
     };
 };
 
@@ -851,7 +854,7 @@ static inline void zz_release(zz_value *v) {
         zz_release_array(v->arr);
         break;
     case ZZ_FLAT_STR_ARRAY:
-        zz_release_flat_str_array((zz_flat_str_array *)v->arr);
+        zz_release_flat_str_array(v->flat_str);
         break;
     case ZZ_BYTES:
         zz_release_bytes(v->bytes);
@@ -1006,8 +1009,8 @@ static inline zz_value zz_clone(zz_value v) {
         zz_retain_array(v.arr);
         break;
     case ZZ_FLAT_STR_ARRAY:
-        if (v.arr) {
-            zz_flat_str_array *f = (zz_flat_str_array *)v.arr;
+        if (v.flat_str) {
+            zz_flat_str_array *f = v.flat_str;
             if (zz_arc_relaxed_enabled()) f->refs += 1;
             else __atomic_add_fetch(&f->refs, 1, __ATOMIC_RELAXED);
         }
