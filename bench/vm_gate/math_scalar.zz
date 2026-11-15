@@ -1,0 +1,30 @@
+// Gate: scalar math workload for the PR 2 migration — the functions that are
+// candidates for a pure-ZZ implementation (abs/signum/clamp/gcd/lcm/factorial)
+// exercised in one hot loop. Integer-derived results are exact, so `result=`
+// catches a semantic change as well as a timing regression.
+import std.math
+import std.time
+
+func main() {
+    t0 := time.now_ms()
+    acc := 0
+    facc := 0.0
+    for i in 0..500000 {
+        x := (i % 41) - 20
+        acc = acc + math.abs(x)
+        acc = acc + math.signum(x)
+        // `std.math.clamp` is typed `-> float` in the signature table (it
+        // accepts int/float), so accumulate it separately.
+        facc = facc + math.clamp(x, -10, 10)
+        acc = acc + math.gcd(x + 21, 12)
+        acc = acc + math.lcm(x + 21, 6)
+        match math.factorial(i % 10) {
+            .ok(v) => acc = acc + v
+            .err(_) => acc = acc + 1
+        }
+    }
+    t1 := time.now_ms()
+    // `facc` is a deterministic sum of exact halves; interpolation keeps it
+    // readable without a fallible `int()` conversion.
+    println("math_scalar: {t1 - t0}ms result={acc}:{facc}")
+}
