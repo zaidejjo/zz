@@ -4963,6 +4963,11 @@ impl Compiler {
                 self.patch_jump(j2);
             }
             Expr::Block(b) => self.compile_block(b),
+            Expr::Is { .. } => {
+                // Flow-sensitive `is` narrowing is a checker concern; the
+                // bytecode VM does not yet lower runtime `is` tests.
+                unimplemented!("`expr is T` is not yet lowered to bytecode");
+            }
             Expr::Fmt { parts, .. } => {
                 // sqlz context: when this Fmt is the SQL arg of
                 // `sqlz.query`/`sqlz.exec`, emit DbQuery

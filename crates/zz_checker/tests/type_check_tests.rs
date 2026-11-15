@@ -4161,6 +4161,66 @@ fn bare_variant_constructor_keeps_outer_type_in_span_map() {
     );
 }
 
+// --- flow-sensitive type narrowing (`if x is T` + match-arm bindings) ------
+
+/// Check `src` and return all resolved span types (values only).
+fn span_types_of(src: &str) -> Vec<Type> {
+    let parsed = zz_frontend::parse(src);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let (_checked, span_types) = zz_checker::check_program_typed(
+        &parsed.program,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    span_types.into_values().collect()
+}
+
+#[test]
+fn if_is_narrows_variable_in_then_branch() {
+    // `x` is `Array<Union<int, str>>`; `x + 1` would error without narrowing.
+    // `if x is int` narrows `x` to `int` in the then-branch, so `y := x + 1`
+    // type-checks there (narrowing overrides the env binding for lookups).
+    let span_types =
+        span_types_of("func main() {\n    x := [1, \"hi\"]\n    if x is int { y := x + 1 }\n}\n");
+    assert!(
+        !span_types.iter().any(|t| matches!(t, Type::Error)),
+        "narrowed `x` must type `y := x + 1` as int without error, got {span_types:?}"
+    );
+}
+
+#[test]
+fn if_is_does_not_leak_narrowing_past_branch() {
+    // Narrowing is scoped to the then-branch. Outside, `x` keeps its
+    // original type (`Array<Union<int, str>>`), so `x + 1` must error here.
+    let span_types =
+        span_types_of("func main() {\n    x := [1, \"hi\"]\n    if x is int { }\n    x + 1\n}\n");
+    assert!(
+        span_types.iter().any(|t| matches!(t, Type::Error)),
+        "using `x` as `int` past the branch must error (`x` is `Array<Union<int, str>>`), got {span_types:?}"
+    );
+}
+
+#[test]
+fn match_arm_binding_narrowing() {
+    // Match-arm bindings narrow the bound name inside the arm body.
+    let span_types = span_types_of(
+        "enum Box<T> { V(T), E }\nfunc main() {\n    b := Box.V(1)\n    match b { .V(x) => x + 1, _ => 0 }\n}\n",
+    );
+    assert!(
+        !span_types.iter().any(|t| matches!(t, Type::Error)),
+        "match-arm binding `x` narrowed to int, `x + 1` must type-check, got {span_types:?}"
+    );
+}
+
 // --- explicit return for named functions ----------------------------------
 
 #[test]

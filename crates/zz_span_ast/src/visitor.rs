@@ -115,6 +115,10 @@ pub trait AstVisitor {
                     self.walk_expr(x);
                 }
             }
+            Expr::Is { expr, ty, .. } => {
+                self.walk_expr(expr);
+                self.walk_ty(ty);
+            }
             Expr::While { cond, body, .. } => {
                 self.walk_expr(cond);
                 self.walk_block(body);

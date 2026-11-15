@@ -104,6 +104,7 @@ impl Walk {
             Expr::Paren { expr, .. } | Expr::Unary { expr, .. } | Expr::Try { expr, .. } => {
                 self.walk_expr_use(expr)
             }
+            Expr::Is { expr, .. } => self.walk_expr_use(expr),
             Expr::Binary { left, right, .. } => {
                 self.walk_expr_use(left);
                 self.walk_expr_use(right);

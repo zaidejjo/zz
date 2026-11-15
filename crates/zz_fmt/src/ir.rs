@@ -1705,6 +1705,11 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 self.text(op.symbol());
                 self.emit_expr(expr);
             }
+            Expr::Is { expr, ty, .. } => {
+                self.emit_expr(expr);
+                self.text(" is ");
+                self.emit_ty(ty);
+            }
             Expr::Binary {
                 op, left, right, ..
             } => {

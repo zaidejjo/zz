@@ -10,6 +10,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use zz_arena::Interner;
 use zz_diag_core::{error_at, RawDiag, SecondaryLabel};
 use zz_span_ast::ast::{Stmt, Ty};
 use zz_span_ast::span::Span;
@@ -458,6 +459,17 @@ pub struct Checker {
     /// top-level function (or `Type.method`) whose body is being checked;
     /// empty at top level (keys then use [`TOP_SCOPE`]).
     pub scope: Vec<Arc<str>>,
+    /// Interns the `func` string of every [`SpanKey`] so all keys for the
+    /// same enclosing function share one heap allocation instead of one
+    /// `Arc<str>` per checked expression. Reduces checker peak RSS on
+    /// large modules (Phase 1 of the checker improvement plan).
+    pub func_interner: Interner,
+    /// Flow-sensitive type narrowing: one map per scope depth, parallel to
+    /// [`env`]. Holds refined types for names narrowed by `if x is T`
+    /// (then-branch) and match-arm bindings. `lookup_opt` consults the map
+    /// for the current depth before falling back to the scope walk, so a
+    /// narrowed type is visible only inside the scope that introduced it.
+    pub narrowing: Vec<std::collections::HashMap<String, Type>>,
     /// Shadow cache: innermost binding per name → (scope depth, type).
     /// Makes variable lookup O(1) amortized instead of O(depth). Entries are
     /// inserted on `define` and evicted for the popped depth on `pop_scope`;
@@ -489,15 +501,11 @@ impl Checker {
     }
 
     /// Scope-qualified key for an expression span under the item currently
-    /// being checked.
-    pub fn scope_key(&self, span: Span) -> SpanKey {
-        SpanKey::new(
-            self.scope
-                .last()
-                .cloned()
-                .unwrap_or_else(|| Arc::from(TOP_SCOPE)),
-            span,
-        )
+    /// being checked. Interns the enclosing function name so all keys in
+    /// the same function share one `func` allocation.
+    pub fn scope_key(&mut self, span: Span) -> SpanKey {
+        let func = self.scope.last().map(|s| s.as_ref()).unwrap_or(TOP_SCOPE);
+        SpanKey::new(self.func_interner.intern_arc(func), span)
     }
     /// Create a checker seeded with prior state. `initial_traits`/`initial_trait_impls`
     /// carry cross-module pub traits and impls for bound checking.
@@ -550,6 +558,8 @@ impl Checker {
             module_aliases: HashMap::new(),
             span_types: std::collections::HashMap::new(),
             scope: Vec::new(),
+            func_interner: Interner::new(),
+            narrowing: vec![std::collections::HashMap::new()],
             scope_cache: std::collections::HashMap::new(),
             names_at_depth: vec![Vec::new()],
             link_libs: Vec::new(),

@@ -96,7 +96,8 @@ fn expr_has_decorators(expr: &Expr) -> bool {
         | Expr::Unary { expr, .. }
         | Expr::Try { expr, .. }
         | Expr::Closure { body: expr, .. }
-        | Expr::Field { obj: expr, .. } => expr_has_decorators(expr),
+        | Expr::Field { obj: expr, .. }
+        | Expr::Is { expr, .. } => expr_has_decorators(expr),
         Expr::Tuple { items, .. } | Expr::Array { elems: items, .. } => {
             items.iter().any(expr_has_decorators)
         }

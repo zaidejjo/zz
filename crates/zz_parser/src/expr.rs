@@ -1466,7 +1466,20 @@ impl<'a> Parser<'a> {
         if self.at_ident("let") {
             return self.parse_if_let(if_tok);
         }
-        let cond = self.parse_expr();
+        let mut cond = self.parse_expr();
+        // `if x is T { ... }` — flow-sensitive type test. `is` is an
+        // ident keyword here (keywords are idents in this lexer), so it
+        // only binds when it directly follows the condition expression.
+        if self.at_ident("is") {
+            self.advance(); // consume `is`
+            let ty = self.parse_type();
+            let span = cond.span().join(ty.span);
+            cond = Expr::Is {
+                expr: Box::new(cond),
+                ty: Box::new(ty),
+                span,
+            };
+        }
         self.check_assign_in_condition();
         let then = self.parse_block();
         let els = self.parse_else();

@@ -154,6 +154,14 @@ pub enum Expr {
         els: Option<Box<Expr>>,
         span: Span,
     },
+    /// Type test: `expr is T`. Evaluates to `bool`; when used as an `if`
+    /// condition it narrows `expr` (when it is a variable) to `T` in the
+    /// then-branch (flow-sensitive type narrowing).
+    Is {
+        expr: Box<Expr>,
+        ty: Box<Ty>,
+        span: Span,
+    },
     /// `?` postfix or prefix `try <postfix-chain>`: unwrap Option/Result or propagate.
     /// `try a.b().c()` = whole chain; `try a.b() + c` = only `a.b()`.
     Try {
@@ -249,6 +257,7 @@ impl Expr {
             | Expr::While { span, .. }
             | Expr::Match { span, .. }
             | Expr::IfLet { span, .. }
+            | Expr::Is { span, .. }
             | Expr::Try { span, .. }
             | Expr::Variant { span, .. }
             | Expr::Array { span, .. }

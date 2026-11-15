@@ -8,6 +8,7 @@
 //! file mentioning `self` 5k times stores it once.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Compact identifier handle. `u32` keeps AST nodes small; 4B identifiers
 /// support every real-world codebase (4B distinct strings).
@@ -25,7 +26,7 @@ impl Symbol {
 #[derive(Debug, Default)]
 pub struct Interner {
     map: HashMap<String, u32>,
-    strings: Vec<Box<str>>,
+    strings: Vec<Arc<str>>,
 }
 
 impl Interner {
@@ -53,12 +54,20 @@ impl Interner {
             (id as usize) < u32::MAX as usize,
             "interner exhausted: too many distinct strings"
         );
-        let owned: Box<str> = s.into();
+        let owned: Arc<str> = Arc::from(s);
         // SAFETY of the borrow: we clone the key for the map, so the map
         // never borrows from `strings` (no self-reference).
         self.map.insert(owned.to_string(), id);
         self.strings.push(owned);
         Symbol(id)
+    }
+
+    /// Intern `s` and return a shared [`Arc<str>`] handle. Re-interning
+    /// clones the existing `Arc` (a refcount bump) instead of re-allocating
+    /// the string bytes, so every distinct string is stored exactly once.
+    pub fn intern_arc(&mut self, s: &str) -> Arc<str> {
+        let id = self.intern(s);
+        self.strings[id.0 as usize].clone()
     }
 
     /// Resolve an id back to its string. Panics on unknown id (caller bug).
@@ -123,5 +132,19 @@ mod tests {
         assert!(it.is_empty());
         // Ids restart deterministically after clear.
         assert_eq!(it.intern("x"), Symbol(0));
+    }
+
+    #[test]
+    fn intern_arc_shares_allocation() {
+        let mut it = Interner::new();
+        let a = it.intern_arc("self");
+        let b = it.intern_arc("self");
+        // Same string → same allocation (Arc pointer equality).
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
+        // Different string → different allocation.
+        let c = it.intern_arc("other");
+        assert!(!std::sync::Arc::ptr_eq(&a, &c));
+        assert_eq!(a.as_ref(), "self");
+        assert_eq!(c.as_ref(), "other");
     }
 }
