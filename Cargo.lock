@@ -4051,6 +4051,7 @@ dependencies = [
  "zz_codegen_runtime",
  "zz_native_rt",
  "zz_paths",
+ "zz_stdlib_meta",
 ]
 
 [[package]]

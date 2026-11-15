@@ -1,13 +1,12 @@
 //! Regenerate derived files from the single declarative stdlib table.
 //!
 //! Usage:
-//!   cargo run -p zz_stdlib_meta --bin regen           # write files
+//!   cargo run -p zz_stdlib_meta --bin regen            # write files
 //!   cargo run -p zz_stdlib_meta --bin regen -- --check # CI gate (exit 1 on drift)
 //!
-//! The generator is intentionally tiny: the declarative source of truth is
-//! `zz_stdlib_meta::table`, and the only derived artifact for PR 1a is the
-//! thin `zz_stdlib::funcs` shim. Later PRs extend [`DERIVED`] with the AOT
-//! `native_impl` / FFI tables generated from the same inventory.
+//! The declarative source of truth is `zz_stdlib_meta` (`table`, `c_impl`,
+//! `ffi_impl`, `inventory`). This binary only renders thin shims and the
+//! inventory report; no proc macro and no `build.rs`.
 
 use std::fs;
 use std::path::PathBuf;
@@ -55,8 +54,42 @@ pub fn stdlib_funcs_cached() -> &'static HashMap<String, FuncSig> {
 }
 "##;
 
+/// Generated `crates/zz_codegen_ffi/src/generated.rs`.
+const GENERATED_FFI_RS: &str = r##"//! GENERATED FILE - do not edit by hand.
+//!
+//! Thin shims over the single declarative source in `zz_stdlib_meta`.
+//! Regenerate with `cargo run -p zz_stdlib_meta --bin regen`.
+
+/// Map a zz native qualified name to its C runtime implementation name.
+pub fn native_impl(name: &str) -> Option<&'static str> {
+    zz_stdlib_meta::native_impl(name)
+}
+
+/// Map a zz native qualified name to its Rust-staticlib C symbol.
+pub fn ffi_impl(name: &str) -> Option<&'static str> {
+    zz_stdlib_meta::ffi_impl(name)
+}
+
+/// C declaration for a staticlib symbol.
+pub fn ffi_decl(symbol: &str) -> Option<&'static str> {
+    zz_stdlib_meta::ffi_decl(symbol)
+}
+"##;
+
 /// `(path relative to the workspace root, generated contents)`.
-const DERIVED: &[(&str, &str)] = &[("crates/zz_stdlib/src/funcs.rs", FUNCS_RS)];
+fn derived() -> Vec<(&'static str, String)> {
+    vec![
+        ("crates/zz_stdlib/src/funcs.rs", FUNCS_RS.to_string()),
+        (
+            "crates/zz_codegen_ffi/src/generated.rs",
+            GENERATED_FFI_RS.to_string(),
+        ),
+        (
+            "crates/zz_stdlib_meta/src/inventory.md",
+            zz_stdlib_meta::inventory::markdown(),
+        ),
+    ]
+}
 
 fn workspace_root() -> PathBuf {
     // CARGO_MANIFEST_DIR = <root>/crates/zz_stdlib_meta
@@ -72,20 +105,20 @@ fn main() {
     let root = workspace_root();
     let mut drift = false;
 
-    for (rel, contents) in DERIVED {
+    for (rel, contents) in derived() {
         let path = root.join(rel);
         let current = fs::read_to_string(&path).unwrap_or_default();
-        if current == *contents {
+        if current == contents {
             continue;
         }
         if check {
             eprintln!(
-                "regen: {} is out of date with zz_stdlib_meta::table",
+                "regen: {} is out of date with the zz_stdlib_meta table",
                 path.display()
             );
             drift = true;
         } else {
-            fs::write(&path, contents).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+            fs::write(&path, &contents).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
             eprintln!("regen: wrote {}", path.display());
         }
     }

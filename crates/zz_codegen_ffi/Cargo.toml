@@ -8,6 +8,7 @@ description = "Native/FFI symbol tables and staticlib link metadata for the ZZ A
 [dependencies]
 zz_native_rt = { path = "../zz_native_rt" }
 zz_paths = { path = "../zz_paths" }
+zz_stdlib_meta = { path = "../zz_stdlib_meta" }
 
 [dev-dependencies]
 zz_codegen_runtime = { path = "../zz_codegen_runtime" }
