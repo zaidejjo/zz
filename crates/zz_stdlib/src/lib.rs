@@ -15,6 +15,9 @@ pub mod funcs;
 pub mod natives;
 pub mod zz_std;
 
+#[cfg(test)]
+mod funcs_tests;
+
 pub use funcs::{stdlib_funcs, stdlib_funcs_cached};
 pub use natives::{stdlib_natives, stdlib_natives_cached};
 pub use zz_std::{
