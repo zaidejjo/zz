@@ -4407,6 +4407,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "zz_stdlib_native"
+version = "0.4.0"
+dependencies = [
+ "cc",
+ "rayon",
+ "zz_checker",
+ "zz_codegen_cc",
+ "zz_codegen_ffi",
+ "zz_codegen_runtime",
+ "zz_codegen_types",
+ "zz_frontend",
+ "zz_hir",
+ "zz_lower",
+ "zz_paths",
+ "zz_stdlib",
+]
+
+[[package]]
 name = "zz_structs"
 version = "0.4.0"
 dependencies = [

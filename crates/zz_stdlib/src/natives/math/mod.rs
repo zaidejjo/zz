@@ -319,6 +319,11 @@ fn gcd(mut a: i64, mut b: i64) -> i64 {
     a
 }
 
+// ── PNSA: factorial/gcd/lcm also precompiled to libzz_stdlib.a ───────────
+// AOT links libzz_stdlib.a (via push_link_inputs) and calls zz_math_*
+// symbols directly. VM uses the Rust bodies above. Both produce identical
+// results; the archive is the fast path for AOT.
+
 // ── Trigonometry ────────────────────────────────────────────────────────────
 
 pub(crate) fn math_sin(

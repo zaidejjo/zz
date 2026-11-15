@@ -9484,40 +9484,6 @@ zz_value zz_math_root(zz_value x, zz_value n, int *err) {
     return (zz_value){ZZ_FLOAT, {.f = pow(dx, 1.0/dn)}};
 }
 
-// math.factorial(n) → .ok(int) or .err(str)
-zz_value zz_math_factorial(zz_value n, int *err) {
-    (void)err;
-    if (n.tag != ZZ_INT)
-        return zz_variant_err(zz_str_static("factorial expects an integer"));
-    if (n.i < 0)
-        return zz_variant_err(zz_str_static("factorial: negative input"));
-    if (n.i > 20)
-        return zz_variant_err(zz_str_static("factorial: input too large (max 20)"));
-    int64_t r = 1;
-    for (int64_t i = 2; i <= n.i; i++) r *= i;
-    return zz_variant_ok((zz_value){ZZ_INT, {.i = r}});
-}
-
-// math.gcd(a, b) → int
-zz_value zz_math_gcd(zz_value a, zz_value b, int *err) {
-    (void)err;
-    int64_t x = a.tag == ZZ_INT ? a.i : 0;
-    int64_t y = b.tag == ZZ_INT ? b.i : 0;
-    while (y != 0) { int64_t t = y; y = x % y; x = t; }
-    return (zz_value){ZZ_INT, {.i = x < 0 ? -x : x}};
-}
-
-// math.lcm(a, b) → int
-zz_value zz_math_lcm(zz_value a, zz_value b, int *err) {
-    (void)err;
-    int64_t x = a.tag == ZZ_INT ? a.i : 0;
-    int64_t y = b.tag == ZZ_INT ? b.i : 0;
-    if (x == 0 || y == 0) return (zz_value){ZZ_INT, {.i = 0}};
-    int64_t g = x; int64_t t = y;
-    while (t != 0) { int64_t tmp = t; t = g % t; g = tmp; }
-    return (zz_value){ZZ_INT, {.i = (x / g) * y < 0 ? -((x / g) * y) : (x / g) * y}};
-}
-
 // math.sin(x) → float
 zz_value zz_math_sin(zz_value x, int *err) {
     (void)err;
