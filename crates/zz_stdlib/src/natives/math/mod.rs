@@ -245,79 +245,11 @@ pub(crate) fn math_isqrt(
     Ok(Value::Result(Box::new(Ok(Value::Int(x)))))
 }
 
-pub(crate) fn math_factorial(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, EvalError> {
-    let n = match args.first() {
-        Some(Value::Int(i)) => *i,
-        Some(other) => {
-            return Err(EvalError::new(
-                format!(
-                    "factorial expects an integer, found `{}`",
-                    other.type_name()
-                ),
-                span,
-            ))
-        }
-        None => return Err(EvalError::new("missing argument for factorial", span)),
-    };
-    if n < 0 {
-        return Ok(Value::Result(Box::new(Err(Value::Str(
-            "factorial: negative input".to_string().into(),
-        )))));
-    }
-    if n > 20 {
-        return Ok(Value::Result(Box::new(Err(Value::Str(
-            "factorial: input too large (max 20)".to_string().into(),
-        )))));
-    }
-    let mut result: i64 = 1;
-    for i in 2..=n {
-        result = result.saturating_mul(i);
-    }
-    Ok(Value::Result(Box::new(Ok(Value::Int(result)))))
-}
-
-pub(crate) fn math_gcd(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    _span: Span,
-) -> Result<Value, EvalError> {
-    let a = expect_float(args, 0, "gcd")? as i64;
-    let b = expect_float(args, 1, "gcd")? as i64;
-    let (mut a, mut b) = (a.abs(), b.abs());
-    while b != 0 {
-        let t = b;
-        b = a % b;
-        a = t;
-    }
-    Ok(Value::Int(a))
-}
-
-pub(crate) fn math_lcm(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    _span: Span,
-) -> Result<Value, EvalError> {
-    let a = expect_float(args, 0, "lcm")? as i64;
-    let b = expect_float(args, 1, "lcm")? as i64;
-    if a == 0 || b == 0 {
-        return Ok(Value::Int(0));
-    }
-    let (a, b) = (a.abs(), b.abs());
-    Ok(Value::Int(a / gcd(a, b) * b))
-}
-
-fn gcd(mut a: i64, mut b: i64) -> i64 {
-    while b != 0 {
-        let t = b;
-        b = a % b;
-        a = t;
-    }
-    a
-}
+// ── PNSA: factorial/gcd/lcm moved to precompiled native stdlib ─────────
+// The Rust bodies for math.factorial, math.gcd, math.lcm have been removed.
+// VM calls them via FFI wrappers in `pnsa_math.rs` (→ `zz_math_*` in
+// `libzz_stdlib.a`); AOT links `libzz_stdlib.a` directly. The C twins in
+// `core.c` and the `c_impl.rs` mappings have been removed.
 
 // ── Trigonometry ────────────────────────────────────────────────────────────
 

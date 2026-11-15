@@ -7,10 +7,10 @@ Total entries: 700
 
 | tier | entries |
 |---|---:|
-| CRuntime | 328 |
+| CRuntime | 325 |
 | Const | 6 |
 | FfiStaticlib | 154 |
-| PureZz | 211 |
+| PureZz | 214 |
 | VmOnly | 1 |
 
 | tier | name | implementation |
@@ -384,16 +384,16 @@ Total entries: 700
 | PureZz | `std.math.count` | `zz/math/mod.zz` |
 | CRuntime | `std.math.dot_product` | `zz_math_dot_product` |
 | CRuntime | `std.math.exp` | `zz_math_exp` |
-| CRuntime | `std.math.factorial` | `zz_math_factorial` |
+| PureZz | `std.math.factorial` | `zz/math/mod.zz` |
 | CRuntime | `std.math.floor` | `zz_math_floor` |
-| CRuntime | `std.math.gcd` | `zz_math_gcd` |
+| PureZz | `std.math.gcd` | `zz/math/mod.zz` |
 | CRuntime | `std.math.hypot` | `zz_math_hypot` |
 | PureZz | `std.math.is_even` | `zz/math/mod.zz` |
 | CRuntime | `std.math.is_inf` | `zz_math_is_inf` |
 | CRuntime | `std.math.is_nan` | `zz_math_is_nan` |
 | PureZz | `std.math.is_odd` | `zz/math/mod.zz` |
 | CRuntime | `std.math.isqrt` | `zz_math_isqrt` |
-| CRuntime | `std.math.lcm` | `zz_math_lcm` |
+| PureZz | `std.math.lcm` | `zz/math/mod.zz` |
 | CRuntime | `std.math.log` | `zz_math_log` |
 | CRuntime | `std.math.log10` | `zz_math_log10` |
 | CRuntime | `std.math.magnitude` | `zz_math_magnitude` |

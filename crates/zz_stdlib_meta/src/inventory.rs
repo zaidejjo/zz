@@ -69,6 +69,11 @@ pub const PURE_ZZ: &[&str] = &[
     "std.math.product_f",
     "std.math.mean_f",
     "std.math.median_f",
+    // PNSA: precompiled native stdlib (compiled from ZZ source to
+    // libzz_stdlib.a). VM calls via FFI wrappers; AOT links the archive.
+    "std.math.factorial",
+    "std.math.gcd",
+    "std.math.lcm",
     "math.sum",
     "math.product",
     "math.count",
@@ -82,6 +87,9 @@ pub const PURE_ZZ: &[&str] = &[
     "math.product_f",
     "math.mean_f",
     "math.median_f",
+    "math.factorial",
+    "math.gcd",
+    "math.lcm",
     // vec helpers
     "std.vec.fold",
     "std.vec.sum",
