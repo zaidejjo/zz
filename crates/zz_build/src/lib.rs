@@ -50,6 +50,10 @@ pub enum BuildMode {
     /// plus full LTO. Instrumented leg reuses plain `Pgo` (same profile
     /// quality, faster instrumented build).
     FullPgo,
+    /// Maximum optimization (`--optimize-max`): full LTO + PGO use +
+    /// native CPU + relaxed float. Trades build time and strict float
+    /// semantics for peak runtime speed. Native host only.
+    OptimizeMax,
 }
 
 /// Release-build knobs: cross target, provider selection, verbosity.
@@ -605,6 +609,7 @@ fn opts_for(mode: BuildMode) -> BuildOptions {
         BuildMode::PgoUse => BuildOptions::pgo_use(),
         BuildMode::Full => BuildOptions::full(),
         BuildMode::FullPgo => BuildOptions::full_pgo_use(),
+        BuildMode::OptimizeMax => BuildOptions::optimize_max(),
     }
 }
 

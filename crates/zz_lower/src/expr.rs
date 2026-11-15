@@ -211,6 +211,19 @@ impl<'a> Drop for NativeCallArgsGuard<'a> {
     }
 }
 
+/// Temporarily sets [`Lowerer::adopt_arg`] while lowering arguments of a
+/// `zz_vec_append` native call, then resets on drop. When set, f-string
+/// builders passed as arguments skip freeze+clone+release — the array
+/// adopts the mutable builder directly.
+struct AdoptArgGuard<'a> {
+    cell: &'a std::cell::Cell<bool>,
+}
+impl<'a> Drop for AdoptArgGuard<'a> {
+    fn drop(&mut self) {
+        self.cell.set(false);
+    }
+}
+
 impl Lowerer {
     /// Emit a block in value position, returning a C expression string
     /// for its tail value. Shared by value-position blocks and if-branch
@@ -335,21 +348,59 @@ impl Lowerer {
                     }
                 }
                 est = est.max(16);
-                // The builder is an owned heap value; attach a cleanup so it is
-                // released when it goes out of scope (e.g. a standalone f-string
-                // passed directly to `fs.write_chunk`/`println` with no binding).
-                out.push_str(&format!(
-                    "    zz_value {fvar} __attribute__((cleanup(zz_release))) = zz_str_new_mut({est});\n"
-                ));
+                let adopt = self.adopt_arg.get();
+                // When the builder will be adopted by `zz_vec_append`, skip
+                // the scope cleanup — the array takes ownership after the call.
+                // Otherwise attach cleanup so it is released when it goes out
+                // of scope (e.g. a standalone f-string passed directly to
+                // `fs.write_chunk`/`println` with no binding).
+                if adopt {
+                    out.push_str(&format!("    zz_value {fvar} = zz_str_new_mut({est});\n"));
+                } else {
+                    out.push_str(&format!(
+                        "    zz_value {fvar} __attribute__((cleanup(zz_release))) = zz_str_new_mut({est});\n"
+                    ));
+                }
                 for part in parts {
                     match part {
                         FmtPart::Text(t) => {
-                            let lit = self.emit_str_literal(t);
+                            if t.is_empty() {
+                                continue;
+                            }
+                            // Append literal text directly into the builder,
+                            // avoiding the per-part zz_value temp + zz_clone
+                            // + zz_release that `zz_str_append_mut_str` needs.
+                            let escaped = Self::c_escape(t);
                             out.push_str(&format!(
-                                "    {{ zz_value _t = {lit}; zz_str_append_mut_str(&{fvar}, _t); zz_release(&_t); }}\n"
+                                "    zz_str_append_mut_lit(&{fvar}, \"{escaped}\", {});\n",
+                                t.len()
                             ));
                         }
                         FmtPart::Expr(inner, spec) => {
+                            // Direct scalar formatting into the builder:
+                            // avoids the per-part zz_to_str malloc +
+                            // memcpy + release (the dominant cost in scalar-
+                            // heavy f-strings like `{"item{i}"}` in loops).
+                            // Only valid with no format spec and a pure
+                            // scalar operand (`scalar_operand_c` guarantees
+                            // side-effect-free C text).
+                            if spec.is_none() {
+                                if let (Some(t), Some(raw)) = (
+                                    scalar_operand_type(inner, names),
+                                    scalar_operand_c(inner, names),
+                                ) {
+                                    let helper = match t {
+                                        "int64_t" => "zz_str_append_int",
+                                        "double" => "zz_str_append_double",
+                                        "bool" => "zz_str_append_bool",
+                                        _ => "",
+                                    };
+                                    if !helper.is_empty() {
+                                        out.push_str(&format!("    {helper}(&{fvar}, {raw});\n"));
+                                        continue;
+                                    }
+                                }
+                            }
                             let v = self.emit_expr(inner, names, out);
                             // Unboxed structs render through their generated
                             // `debug_string` (a raw C struct is not a
@@ -378,7 +429,14 @@ impl Lowerer {
                         }
                     }
                 }
-                out.push_str(&format!("    {fvar} = zz_str_freeze({fvar});\n"));
+                // When adopted by `zz_vec_append`, keep the builder mutable
+                // (ZZ_MUTABLE_STR) so the array can adopt it without cloning.
+                // Otherwise freeze to immutable ZZ_STR for general consumers.
+                if adopt {
+                    // builder stays mutable; array adopts it directly
+                } else {
+                    out.push_str(&format!("    {fvar} = zz_str_freeze({fvar});\n"));
+                }
                 // The builder above owns one share via its scope cleanup.
                 // Consumers that *take* ownership (return, let binding,
                 // `zz_assign`, `zz_index_set`) must get their own retained
@@ -389,7 +447,7 @@ impl Lowerer {
                 // fields (`zz_object_set_field`) — instead want the bare
                 // builder: they clone internally, so an extra retain would
                 // leak. `fmt_borrow` marks those retaining positions.
-                if fmt_borrow || self.native_call_args.get() {
+                if adopt || fmt_borrow || self.native_call_args.get() {
                     fvar
                 } else {
                     format!("zz_clone({fvar})")
@@ -1192,6 +1250,10 @@ impl Lowerer {
                         Expr::Ident { name, .. } => {
                             let mut scratch = String::new();
                             let limit = self.emit_expr(right, names, &mut scratch);
+                            // Record array length for bounds-check elimination:
+                            // `while i < len(arr) { arr[i] ... }` → arr[i] is
+                            // provably in bounds because i < len(arr).
+                            Self::record_array_len_for_loop_bound(right, names, &limit);
                             (name.clone(), limit)
                         }
                         Expr::Binary {
@@ -1203,6 +1265,7 @@ impl Lowerer {
                             if let Expr::Ident { name, .. } = l.as_ref() {
                                 let mut scratch = String::new();
                                 let limit = self.emit_expr(right, names, &mut scratch);
+                                Self::record_array_len_for_loop_bound(right, names, &limit);
                                 (name.clone(), limit)
                             } else {
                                 (String::new(), String::new())
@@ -4258,6 +4321,18 @@ impl Lowerer {
         let _guard = NativeCallArgsGuard {
             cell: &self.native_call_args,
         };
+        // `zz_vec_append` adopts a `ZZ_MUTABLE_STR` builder without cloning,
+        // so f-string builders passed as arguments can skip freeze+clone+release.
+        // In void context, `zz_vec_push` is routed to `zz_vec_append` (line ~4526),
+        // so check both spellings.
+        let impl_name_for_cname = native_impl(&cname);
+        let is_zz_vec_append = is_native_call
+            && ((impl_name_for_cname == Some("zz_vec_append"))
+                || ((impl_name_for_cname == Some("zz_vec_push")) && saved_void));
+        self.adopt_arg.set(is_zz_vec_append);
+        let _guard2 = AdoptArgGuard {
+            cell: &self.adopt_arg,
+        };
         for (arg_idx, a) in ordered_args.iter().enumerate() {
             if let Some(sname) = struct_box_for_arg.get(arg_idx).and_then(|o| o.clone()) {
                 // Escape-analysis borrow (#383): when the callee provably
@@ -6544,6 +6619,26 @@ impl Lowerer {
             _ => "i",
         };
         format!("({boxed_val}).{field}")
+    }
+
+    /// Record that `arr`'s length equals `limit_expr` for bounds-check
+    /// elimination. Called when a while condition is `i < len(arr)`:
+    /// inside the loop, `arr[i]` is provably in bounds because `i < len(arr)`.
+    fn record_array_len_for_loop_bound(right: &Expr, names: &mut NameCtx, limit_expr: &str) {
+        if let Expr::Call { callee, args, .. } = right {
+            if let Expr::Ident {
+                name: callee_name, ..
+            } = callee.as_ref()
+            {
+                if callee_name == "len" && args.len() == 1 {
+                    if let Expr::Ident { name: arr_name, .. } = &args[0] {
+                        names
+                            .array_len_exprs
+                            .insert(arr_name.clone(), limit_expr.to_string());
+                    }
+                }
+            }
+        }
     }
 
     pub(crate) fn emit_str_literal(&self, s: &str) -> String {

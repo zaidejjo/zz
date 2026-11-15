@@ -649,13 +649,17 @@ pub fn clang_flags_with(
         if opts.native_cpu && target.is_none() {
             flags.push("-march=native".to_string());
         }
-        // Relaxed float semantics: `-ffast-math` folds NaN guards and
-        // reassociates floats — breaks the specified float contract, so it
-        // is off by default. Only honored on host builds (no `--target`);
-        // cross builds keep strict IEEE so results are portable and
-        // bit-identical across toolchains/CPUs.
+        // Relaxed float semantics: NaN-preserving middle ground
+        // (`-fno-math-errno` + `-fno-trapping-math`) — errno is never set
+        // on sqrt/pow domain errors and the compiler may assume no FP
+        // exception side effects, allowing reordering/speculation. NaN
+        // propagation and inf handling are preserved. Off by default so the
+        // specified float contract holds; opt-in via `ZZ_RELAXED_FLOAT=1`.
+        // `-ffast-math` is strictly NOT included here — it folds NaN guards
+        // and breaks the float contract. Cross builds (--target) keep strict
+        // IEEE for bit-identical results across toolchains/CPUs.
         if opts.relaxed_float && target.is_none() {
-            flags.push("-ffast-math".to_string());
+            flags.push("-fno-math-errno".to_string());
             flags.push("-fno-trapping-math".to_string());
         }
     } else {
@@ -674,6 +678,17 @@ pub fn clang_flags_with(
         if let Some(flag) = gc_sections_link_flag(target) {
             flags.push(flag.to_string());
         }
+    }
+    // Symbol-visibility hardening (release builds only): hide all symbols by
+    // default and tell the compiler they can't be interposed at runtime.
+    // This lets clang inline across TU boundaries more aggressively and
+    // shrinks the dynamic symbol table / binary size. Exported entry points
+    // (`main`, plugin init, FFI entrypoints) are marked `#[export_name]`
+    // / `__attribute__((visibility("default")))` in the generated C so they
+    // remain visible. Safe for host and cross builds alike.
+    if opts.optimize {
+        flags.push("-fvisibility=hidden".to_string());
+        flags.push("-fno-semantic-interposition".to_string());
     }
     match opts.pgo {
         PgoMode::Generate => {
@@ -699,6 +714,13 @@ pub fn clang_flags_with(
         if driver_target {
             flags.push(format!("--target={t}"));
             // The system linker may not understand foreign triples.
+            flags.push("-fuse-ld=lld".to_string());
+        }
+    } else {
+        // Host build: use lld when available for faster linking
+        // (especially noticeable with ThinLTO/full LTO). Falls back to the
+        // system linker if lld is not installed.
+        if !cfg!(windows) && !cfg!(target_os = "macos") {
             flags.push("-fuse-ld=lld".to_string());
         }
     }
@@ -815,6 +837,7 @@ pub fn build_with(
         .arg(format!("-DZZ_HAS_CURL={}", u8::from(opts.curl_link)))
         .arg(format!("-DZZ_HAS_SQLITE3={}", u8::from(opts.sqlite_link)));
     push_link_inputs(&mut cmd, &opts, target, clang, output_path)?;
+    let t_cc = std::time::Instant::now();
     let out = cmd.output().map_err(BuildError::Io)?;
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     if opts.float_link {
@@ -824,6 +847,9 @@ pub fn build_with(
             .collect();
         eprintln!("ZZ_DEBUG_LINK_CMD: {args:?}");
         eprintln!("ZZ_LINK_STDERR: {stderr}");
+    }
+    if opts.verbose {
+        eprintln!("zz: timing cc_link={}ms", t_cc.elapsed().as_millis());
     }
     if !out.status.success() {
         return Err(BuildError::CompileFailed { stderr });
@@ -1108,6 +1134,7 @@ pub fn build_options_fingerprint_with(
         None => 0u8.hash(&mut h),
     }
     opts.relaxed_float.hash(&mut h);
+    opts.optimize_max.hash(&mut h);
     // The build identity, not just the flags: AOT objects are this
     // compiler's output, so a rebuilt `zz` (dirty codegen, new C
     // template) must never reuse them. Same class as the sanitizer
@@ -1316,6 +1343,7 @@ pub fn compile_units_with_sink(
     // Completion counter for the progress sink: cache hits count too, so
     // `file_done` always runs 1..=total regardless of the hit ratio.
     let completed = std::sync::atomic::AtomicUsize::new(0);
+    let t_cc_compile = std::time::Instant::now();
     let results: Vec<Result<PathBuf, BuildError>> = pool.install(|| {
         use rayon::prelude::*;
         staged
@@ -1383,7 +1411,14 @@ pub fn compile_units_with_sink(
     for r in results {
         objs.push(r?);
     }
+    if opts.verbose {
+        eprintln!(
+            "zz: timing units_cc_compile={}ms",
+            t_cc_compile.elapsed().as_millis()
+        );
+    }
     sink.linking();
+    let t_link = std::time::Instant::now();
     let mut cmd = Command::new(&clang.path);
     if clang.zig {
         cmd.arg("cc");
@@ -1407,6 +1442,9 @@ pub fn compile_units_with_sink(
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         return Err(BuildError::CompileFailed { stderr });
+    }
+    if opts.verbose {
+        eprintln!("zz: timing units_link={}ms", t_link.elapsed().as_millis());
     }
     sink.linked();
     Ok(clang.clone())
@@ -1841,14 +1879,14 @@ mod tests {
     }
 
     #[test]
-    fn release_is_o3_without_lto_and_wraps() {
-        // Default release is `-O3` only: LTO costs link memory/time and is
-        // opt-in (`full`/`static_lto`), matching rustc/cargo defaults.
+    fn release_is_o3_with_thin_lto_and_wraps() {
+        // Default release is `-O3 -flto=thin`: ThinLTO is on by default in
+        // `--release` (matched by help text); `--full` uses whole-program LTO.
         let flags = clang_flags(&release_opts(), None);
         assert!(flags.contains(&"-O3".to_string()));
         assert!(
-            !flags.iter().any(|f| f.starts_with("-flto")),
-            "default release must not enable LTO: {flags:?}"
+            flags.iter().any(|f| f == "-flto=thin"),
+            "default release must enable ThinLTO: {flags:?}"
         );
         let full = clang_flags(&BuildOptions::full(), None);
         assert!(
@@ -1925,7 +1963,13 @@ mod tests {
     #[test]
     fn lld_only_cross() {
         let native = clang_flags(&release_opts(), None);
-        assert!(!native.iter().any(|f| f == "-fuse-ld=lld"));
+        // Host Linux uses lld for faster linking; macOS/Windows use their
+        // native linkers.
+        if cfg!(target_os = "linux") {
+            assert!(native.iter().any(|f| f == "-fuse-ld=lld"));
+        } else {
+            assert!(!native.iter().any(|f| f == "-fuse-ld=lld"));
+        }
         let cross = clang_flags(&release_opts(), Some("aarch64-unknown-linux-gnu"));
         assert!(cross.iter().any(|f| f == "-fuse-ld=lld"));
     }

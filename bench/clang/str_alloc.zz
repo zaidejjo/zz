@@ -1,0 +1,19 @@
+// bench: string/alloc-heavy workload. ~1M elements via concat/split/map.
+// print final length/checksum.
+import std.str
+
+func main() {
+    n := 1000000
+    parts := []
+    i := 0
+    while i < n {
+        parts.push({
+            "item{i}"
+        })
+        i = i + 1
+    }
+    joined := std.str.join(parts, ",")
+    spl := std.str.split(joined, ",")
+    println(spl.len())
+    println(joined.len())
+}

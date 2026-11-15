@@ -111,7 +111,42 @@ typedef enum {
     ZZ_BYTES,
     ZZ_WEAK,
     ZZ_MUTABLE_STR,  // mutable string: always exclusively owned, in-place append
+    ZZ_FLAT_STR_ARRAY,  // flat string array: contiguous (ptr,len) pairs,
+                        // zero-copy parts referencing an external buffer,
+                        // produced by str.split and consumed by str.join.
 } zz_tag;
+
+// Flat string array: contiguous table of (ptr, len) pairs plus an optional
+// owned data buffer. Used by str.split (zero-copy parts referencing the
+// original string buffer) and consumed by str.join (single memcpy pass,
+// no per-item tag check or zz_str pointer chase).
+typedef struct zz_flat_str_pair {
+    const char *ptr;
+    size_t len;
+} zz_flat_str_pair;
+
+typedef struct zz_flat_str_array {
+    size_t refs;     // atomic reference count (ARC)
+    size_t len;      // number of parts
+    size_t total_len; // total bytes of all parts (excluding separators), pre-computed in split
+    zz_flat_str_pair *pairs;  // array of len (ptr,len) pairs
+    char *owned;     // malloc'd data buffer we own (free on release), or NULL
+} zz_flat_str_array;
+
+// Get (ptr, len) for flat array item i. Returns NULL/0 on out-of-range.
+static inline void zz_flat_str_array_at(const zz_flat_str_array *f, size_t i,
+                                         const char **out_ptr, size_t *out_len) {
+    if (f && i < f->len && f->pairs) {
+        *out_ptr = f->pairs[i].ptr;
+        *out_len = f->pairs[i].len;
+    } else {
+        *out_ptr = NULL;
+        *out_len = 0;
+    }
+}
+
+// Release a flat string array (decrement refs, free when zero).
+void zz_release_flat_str_array(zz_flat_str_array *f);
 
 // ---- relaxed ARC: single-threaded non-atomic fast path ---------------
 // `ZZ_ARC_RELAXED=1` makes retain/release use plain (non-atomic)
@@ -246,6 +281,7 @@ struct zz_value {
         zz_vfs *vfs;         // fs provider handle (ZZ_VFS)
         zz_bytes *bytes;     // byte buffer (ZZ_BYTES)
         zz_weak *weak;       // weak reference (ZZ_WEAK)
+        zz_flat_str_array *flat_str;  // flat string array (ZZ_FLAT_STR_ARRAY)
     };
 };
 
@@ -818,6 +854,9 @@ static inline void zz_release(zz_value *v) {
     case ZZ_ARRAY:
         zz_release_array(v->arr);
         break;
+    case ZZ_FLAT_STR_ARRAY:
+        zz_release_flat_str_array(v->flat_str);
+        break;
     case ZZ_BYTES:
         zz_release_bytes(v->bytes);
         break;
@@ -969,6 +1008,13 @@ static inline zz_value zz_clone(zz_value v) {
         break;
     case ZZ_ARRAY:
         zz_retain_array(v.arr);
+        break;
+    case ZZ_FLAT_STR_ARRAY:
+        if (v.flat_str) {
+            zz_flat_str_array *f = v.flat_str;
+            if (zz_arc_relaxed_enabled()) f->refs += 1;
+            else __atomic_add_fetch(&f->refs, 1, __ATOMIC_RELAXED);
+        }
         break;
     case ZZ_BYTES:
         zz_retain_bytes(v.bytes);

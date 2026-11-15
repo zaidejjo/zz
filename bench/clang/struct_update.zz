@@ -1,0 +1,30 @@
+// bench: struct-heavy workload. array of ~100k Point structs, field
+// reads/writes, structs passed to functions. print a checksum.
+struct Point {
+    x: int,
+    y: int,
+}
+
+func add_points(_a: Point, b: Point) -> Point {
+    return Point{x: _a.x + b.x, y: _a.y + b.y}
+}
+
+func main() {
+    n := 100000
+    pts:[Point] = []
+    i := 0
+    while i < n {
+        pts.push(Point{x: i, y: i * 2})
+        i = i + 1
+    }
+    acc := Point{x: 0, y: 0}
+    i = 0
+    while i < len(pts) {
+        p := pts[i]
+        acc = add_points(acc, p)
+        pts[i] = Point{x: p.x + 1, y: p.y + 1}
+        i = i + 1
+    }
+    println(acc.x)
+    println(acc.y)
+}

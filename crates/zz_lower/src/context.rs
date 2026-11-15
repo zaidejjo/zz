@@ -678,6 +678,13 @@ pub struct Lowerer {
     /// arguments should be passed bare instead of `zz_clone`d — a clone
     /// would bump the refcount with nothing to drop it, leaking the share.
     pub(crate) native_call_args: std::cell::Cell<bool>,
+    /// Set when the current argument will be *adopted* by the callee
+    /// (`zz_vec_append` takes ownership of a `ZZ_MUTABLE_STR` builder
+    /// without cloning). When set, f-string lowering skips the
+    /// freeze+clone+release cycle and passes the mutable builder straight
+    /// to the callee — the array owns it after the call.
+    /// Consumed at `emit_expr` entry so nested expressions never see it.
+    pub(crate) adopt_arg: std::cell::Cell<bool>,
     /// Set for the next `emit_expr` when the value is consumed by a
     /// *retaining* runtime helper (`zz_vec_append`, `zz_object_set_field`)
     /// rather than taking ownership. An f-string builder is a scoped local
@@ -826,6 +833,7 @@ impl Lowerer {
             loop_depth: std::cell::Cell::new(0),
             loop_scope_depth: std::cell::Cell::new(0),
             native_call_args: std::cell::Cell::new(false),
+            adopt_arg: std::cell::Cell::new(false),
             fmt_borrow: std::cell::Cell::new(false),
             skip_flat_push_grow: std::cell::Cell::new(false),
             accumulated_names: std::cell::RefCell::new(std::collections::HashSet::new()),

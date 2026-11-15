@@ -202,6 +202,21 @@ void zz_release_array(zz_array *a) {
     }
 }
 
+void zz_release_flat_str_array(zz_flat_str_array *f) {
+    if (!f) return;
+    if (zz_arc_relaxed_enabled()) {
+        if (--f->refs == 0) {
+            free(f->pairs);
+            free(f->owned);
+            free(f);
+        }
+    } else if (__atomic_sub_fetch(&f->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+        free(f->pairs);
+        free(f->owned);
+        free(f);
+    }
+}
+
 void zz_retain_dict(zz_dict *d) {
     // Arena-allocated dicts have refs==0 sentinel — skip atomic increment so
     // a clone can never make a bulk-reset arena object look like it owns
@@ -337,6 +352,9 @@ void zz_release_arc(zz_value *v) {
     case ZZ_ARRAY:
         zz_release_array(v->arr);
         break;
+    case ZZ_FLAT_STR_ARRAY:
+        zz_release_flat_str_array(v->flat_str);
+        break;
     case ZZ_BYTES:
         zz_release_bytes(v->bytes);
         break;
@@ -385,12 +403,18 @@ void zz_release_arc(zz_value *v) {
 zz_value zz_clone_arc(zz_value v) {
     switch (v.tag) {
     case ZZ_STR:
-        if (v.s && !v.s->interned) {
+        if (v.s && !v.s->interned && v.s->refs > 0) {
             __atomic_add_fetch(&v.s->refs, 1, __ATOMIC_RELAXED);
         }
         break;
     case ZZ_ARRAY:
         zz_retain_array(v.arr);
+        break;
+    case ZZ_FLAT_STR_ARRAY:
+        if (v.flat_str) {
+            zz_flat_str_array *f = v.flat_str;
+            __atomic_add_fetch(&f->refs, 1, __ATOMIC_RELAXED);
+        }
         break;
     case ZZ_BYTES:
         zz_retain_bytes(v.bytes);
