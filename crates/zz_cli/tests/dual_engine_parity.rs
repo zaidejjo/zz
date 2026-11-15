@@ -506,12 +506,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         "concurrency_batch_test" => {
             Some("native: concurrency batch SIGSEGV under parallel send/recv")
         }
-        // HTTP middleware p2: native misses CORS header key in dict.
-        "http_middleware_p2" => Some("native: http_middleware_p2 dict key lookup misses header"),
-        // Module-scope loop vars captured by closure: wrong captured value.
-        "module_scope_loop_capture" => {
-            Some("native: module-scope loop closure captures wrong variable")
-        }
         // NOTE: `ns_collision` was listed here (native wrote the call's
         // `self` back to `env["ns_collision"]` for the module-qualified
         // call `ns_collision.helper(...)`, clobbering the global binding

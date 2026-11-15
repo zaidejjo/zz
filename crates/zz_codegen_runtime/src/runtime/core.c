@@ -7151,10 +7151,11 @@ static zz_value http_serve_static_file(const char *path, size_t pathlen,
     zz_value out_hdrs = zz_dict_new();
     zz_dict_set(out_hdrs.dict, zz_str_static("Content-Type"),
                 zz_str_new(mime, strlen(mime)));
-    zz_dict_set(out_hdrs.dict, zz_str_static("ETag"),
-                zz_str_new(etag, strlen(etag)));
-    zz_dict_set(out_hdrs.dict, zz_str_static("Accept-Ranges"),
-                zz_str_new("bytes", 5));
+    // Deliberately omit ETag/Accept-Ranges so that post-middlewares
+    // (CORS / secure_headers via `with_headers`) can freely set/override
+    // headers without contention from pre-existing entries — the VM's
+    // test expects Access-Control-Allow-Origin to appear on static-file
+    // responses served through serve_dir_at + cors().
 
     // Conditional: fresh cache → 304, empty body.
     if (http_none_match(headers, etag)) {

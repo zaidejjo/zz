@@ -2863,7 +2863,9 @@ impl Lowerer {
             // driver stays put while a fresh per-iteration copy cell shadows
             // it for the body (spawned closures dup at creation, so later
             // iterations cannot disturb them — same isolation as below).
-            let loop_cell: Option<String> = if names.capture_set.contains(v) {
+            let loop_cell: Option<String> = if names.capture_set.contains(v)
+                || vars.iter().any(|var| var.name.as_str() == v.as_str())
+            {
                 if green {
                     let (ptr2, deref2, n2) = self.green_cell(names, "int64_t", true, out, None);
                     out.push_str(&format!("    {deref2} = {cid};\n"));
