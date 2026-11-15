@@ -639,13 +639,17 @@ pub fn clang_flags_with(
         if opts.native_cpu && target.is_none() {
             flags.push("-march=native".to_string());
         }
-        // Relaxed float semantics: `-ffast-math` folds NaN guards and
-        // reassociates floats — breaks the specified float contract, so it
-        // is off by default. Only honored on host builds (no `--target`);
-        // cross builds keep strict IEEE so results are portable and
-        // bit-identical across toolchains/CPUs.
+        // Relaxed float semantics: NaN-preserving middle ground
+        // (`-fno-math-errno` + `-fno-trapping-math`) — errno is never set
+        // on sqrt/pow domain errors and the compiler may assume no FP
+        // exception side effects, allowing reordering/speculation. NaN
+        // propagation and inf handling are preserved. Off by default so the
+        // specified float contract holds; opt-in via `ZZ_RELAXED_FLOAT=1`.
+        // `-ffast-math` is strictly NOT included here — it folds NaN guards
+        // and breaks the float contract. Cross builds (--target) keep strict
+        // IEEE for bit-identical results across toolchains/CPUs.
         if opts.relaxed_float && target.is_none() {
-            flags.push("-ffast-math".to_string());
+            flags.push("-fno-math-errno".to_string());
             flags.push("-fno-trapping-math".to_string());
         }
     } else {
