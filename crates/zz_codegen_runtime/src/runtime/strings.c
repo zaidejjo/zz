@@ -3124,9 +3124,9 @@ zz_value zz_str_join(zz_value items, zz_value sep, int *err) {
         size_t sep_len = 0;
         if (sep.tag == ZZ_STR) { sep_d = zz_str_ptr(sep.s); sep_len = sep.s->len; }
         size_t n = f->len;
-        // Estimate result size: 16 bytes/item + separators.
-        size_t total_est = 16 * n + sep_len * (n > 0 ? n - 1 : 0);
-        char *buf = (char *)malloc(total_est + 1);
+        // Exact total length: pre-computed in split + separators.
+        size_t total = f->total_len + sep_len * (n > 0 ? n - 1 : 0);
+        char *buf = (char *)malloc(total + 1);
         if (!buf) return zz_str_static("");
         size_t pos = 0;
         // First item: no leading separator.
@@ -3148,13 +3148,12 @@ zz_value zz_str_join(zz_value items, zz_value sep, int *err) {
     if (sep.tag == ZZ_STR) { sep_d = zz_str_ptr(sep.s); sep_len = sep.s->len; }
     size_t n = items.arr->len;
     if (n == 0) return zz_str_static("");
-    // Estimate result size: 16 bytes/item + separators. Single pass avoids
-    // the second full scan over the (16MB+) items array. Realloc on overflow
-    // is rare for realistic inputs.
+    // Fast path: all items are ZZ_STR — single pass, no per-item overflow
+    // check. Estimate 16 bytes/item + separators is always >= actual for
+    // typical items; fallback handles mixed/longer items.
     size_t total_est = 16 * n + sep_len * (n - 1);
     char *buf = (char *)malloc(total_est + 1);
     if (!buf) return zz_str_static("");
-
     size_t pos = 0;
     // First item: no leading separator.
     if (n > 0) {
@@ -3326,6 +3325,7 @@ zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
         // store (ptr, len) in the pairs table.
         f->pairs[n].ptr = d + part_start;
         f->pairs[n].len = part_len;
+        f->total_len += part_len;
         n++;
 
         if (done) break;

@@ -128,6 +128,7 @@ typedef struct zz_flat_str_pair {
 typedef struct zz_flat_str_array {
     size_t refs;     // atomic reference count (ARC)
     size_t len;      // number of parts
+    size_t total_len; // total bytes of all parts (excluding separators), pre-computed in split
     zz_flat_str_pair *pairs;  // array of len (ptr,len) pairs
     char *owned;     // malloc'd data buffer we own (free on release), or NULL
 } zz_flat_str_array;
