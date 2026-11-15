@@ -2682,6 +2682,10 @@ fn build_optimize_max(path: &str, rel: &zz_build::ReleaseOptions) -> Result<(), 
         4,
         "Optimized build (full LTO + PGO + native CPU + relaxed float)",
     );
+    // Tell build_release where to find the merged profile data so clang
+    // uses -fprofile-use=<path> instead of -fprofile-use (which looks for
+    // default.profdata in clang's CWD).
+    std::env::set_var("ZZ_PGO_PROFILE", &profdata);
     let dest = match zz_build::build_release(p, zz_build::BuildMode::OptimizeMax, &pgo_rel) {
         Ok(dest) => {
             let meta = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
@@ -2694,12 +2698,14 @@ fn build_optimize_max(path: &str, rel: &zz_build::ReleaseOptions) -> Result<(), 
             dest
         }
         Err(e) => {
+            std::env::remove_var("ZZ_PGO_PROFILE");
             return Err(format!(
                 "{e}\nhint: {} left in place — fix and re-run to retry phase 2",
                 profdata.display()
             ));
         }
     };
+    std::env::remove_var("ZZ_PGO_PROFILE");
     let _ = std::fs::remove_file(&profdata);
     println!("built {}", dest.display());
     Ok(())
