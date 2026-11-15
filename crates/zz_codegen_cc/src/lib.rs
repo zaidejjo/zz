@@ -916,6 +916,24 @@ fn push_link_inputs(
     // Windows may hand us a verbatim (`\\?\`) path, which clang/zig reject;
     // strip it exactly like the previous `-L` spelling did.
     cmd.arg(zz_paths::pathsafe::strip_verbatim(&rt_a));
+    // Precompiled ZZ stdlib archive: stdlib functions (factorial, gcd, lcm,
+    // ...) are compiled from ZZ source to native objects and archived here.
+    // The AOT linker resolves zz_math_* symbols from this archive so calls
+    // to stdlib math functions compile to direct C calls instead of being
+    // interpreted. Built by `cargo run -p zz_stdlib_native --release`.
+    if let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") {
+        let stdlib_a = Path::new(manifest_dir)
+            .parent()
+            .unwrap_or(Path::new(""))
+            .join("zz_codegen_runtime/src/runtime/lib/libzz_stdlib.a");
+        if stdlib_a.is_file() {
+            cmd.arg(zz_paths::pathsafe::strip_verbatim(&stdlib_a));
+            // libzz_stdlib.a duplicates runtime symbols from libzz_rt.a
+            // (each stdlib module object includes RUNTIME_C). Allow multiple
+            // definitions — the first definition (libzz_rt.a) wins.
+            cmd.arg("-Wl,--allow-multiple-definition");
+        }
+    }
     // Unified Rust native runtime: link the static library providing FFI
     // natives. libstd links statically (rlib, #303), so fully-static
     // binaries work wherever the static system libs exist — no RUNPATH,

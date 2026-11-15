@@ -30,7 +30,6 @@ pub(crate) mod log;
 pub(crate) mod math;
 pub(crate) mod net;
 pub(crate) mod option_mod;
-pub(crate) mod pnsa_math;
 pub(crate) mod process;
 pub(crate) mod pty;
 pub(crate) mod regexp;
@@ -1588,31 +1587,25 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: math::math_isqrt,
         },
     );
-    // ── PNSA: precompiled native stdlib (factorial/gcd/lcm) ────────────
-    // These resolve to `zz_math_*` symbols in `libzz_stdlib.a` via FFI
-    // wrappers in `pnsa_math`. The Rust bodies in `natives/math/mod.rs`
-    // have been removed; the C twins in `core.c` have been removed; the
-    // `c_impl.rs` mappings have been removed. Only the PNSA wrapper + the
-    // precompiled archive remain.
     m.insert(
         "std.math.factorial".into(),
         NativeEntry {
             arity: 1,
-            f: pnsa_math::pnsa_math_factorial,
+            f: math::math_factorial,
         },
     );
     m.insert(
         "std.math.gcd".into(),
         NativeEntry {
             arity: 2,
-            f: pnsa_math::pnsa_math_gcd,
+            f: math::math_gcd,
         },
     );
     m.insert(
         "std.math.lcm".into(),
         NativeEntry {
             arity: 2,
-            f: pnsa_math::pnsa_math_lcm,
+            f: math::math_lcm,
         },
     );
 
