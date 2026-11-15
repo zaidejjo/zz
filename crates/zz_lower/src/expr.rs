@@ -349,13 +349,37 @@ impl Lowerer {
                 }
                 est = est.max(16);
                 let adopt = self.adopt_arg.get();
+                let in_loop = self.loop_depth.get() >= 1;
                 // When the builder will be adopted by `zz_vec_append`, skip
                 // the scope cleanup — the array takes ownership after the call.
                 // Otherwise attach cleanup so it is released when it goes out
                 // of scope (e.g. a standalone f-string passed directly to
                 // `fs.write_chunk`/`println` with no binding).
-                if adopt {
+                //
+                // Loop hoisting: when adopted inside a loop, hoist the builder
+                // declaration before the loop and reset+clone per iteration
+                // instead of allocating a new header each time. Saves the
+                // per-iteration slab alloc + heap buffer alloc of
+                // `zz_str_new_mut`.
+                let (fvar_expr, fvar_decl) = if adopt && in_loop {
+                    let seq = self.fmt_seq.get();
+                    self.fmt_seq.set(seq + 1);
+                    let bname = format!("__fmt_loop_{seq}");
+                    self.loop_fmt_builders
+                        .borrow_mut()
+                        .push((bname.clone(), est));
+                    (
+                        format!("zz_clone(&{bname})"),
+                        format!("    zz_str_reset(&{bname});\n"),
+                    )
+                } else {
+                    (fvar.clone(), String::new())
+                };
+                if adopt && !in_loop {
                     out.push_str(&format!("    zz_value {fvar} = zz_str_new_mut({est});\n"));
+                } else if adopt {
+                    // Hoisted builder: reset per iteration instead of new.
+                    out.push_str(&fvar_decl);
                 } else {
                     out.push_str(&format!(
                         "    zz_value {fvar} __attribute__((cleanup(zz_release))) = zz_str_new_mut({est});\n"
@@ -447,7 +471,11 @@ impl Lowerer {
                 // fields (`zz_object_set_field`) — instead want the bare
                 // builder: they clone internally, so an extra retain would
                 // leak. `fmt_borrow` marks those retaining positions.
-                if adopt || fmt_borrow || self.native_call_args.get() {
+                if adopt && in_loop {
+                    // Hoisted builder: clone so the array adopts its own copy
+                    // while the original stays alive for reset next iteration.
+                    fvar_expr
+                } else if adopt || fmt_borrow || self.native_call_args.get() {
                     fvar
                 } else {
                     format!("zz_clone({fvar})")
@@ -1214,6 +1242,12 @@ impl Lowerer {
                     self.loop_arenas.borrow_mut().push(name.clone());
                     *self.current_loop_arena.borrow_mut() = Some(name.clone());
                 }
+                // Emit hoisted f-string builder declarations before the loop,
+                // so each iteration can reset+clone instead of reallocating.
+                let builders = std::mem::take(&mut *self.loop_fmt_builders.borrow_mut());
+                for (bname, best) in builders {
+                    out.push_str(&format!("    zz_value {bname} = zz_str_new_mut({best});\n"));
+                }
                 out.push_str("    while (1) {\n");
                 // Cooperative safepoint at the loop top (mirrors the VM's
                 // `Op::Safepoint`): budget-guarded `zz_safepoint()` yields
@@ -1359,6 +1393,11 @@ impl Lowerer {
                     }
                 }
                 out.push_str("    }\n");
+                // Release hoisted f-string builders after the loop.
+                let builders = std::mem::take(&mut *self.loop_fmt_builders.borrow_mut());
+                for (bname, _best) in builders {
+                    out.push_str(&format!("    zz_release(&{bname});\n"));
+                }
                 if arena_used {
                     if let Some((name, _)) = &loop_arena {
                         out.push_str(&format!("    zz_arena_destroy(&{name});\n"));
