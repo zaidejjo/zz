@@ -7,7 +7,9 @@ use common::{
 use std::collections::HashMap;
 use zz_checker::type_::Type;
 use zz_checker::{check_program, check_program_typed, FuncSig, StructSig};
+use zz_checker_core::Checker;
 use zz_frontend::span::Span;
+use zz_type_check::TypeCheckOps;
 
 #[test]
 fn infers_int_from_literal() {
@@ -4218,6 +4220,77 @@ fn match_arm_binding_narrowing() {
     assert!(
         !span_types.iter().any(|t| matches!(t, Type::Error)),
         "match-arm binding `x` narrowed to int, `x + 1` must type-check, got {span_types:?}"
+    );
+}
+
+// --- flow-sensitive negation narrowing unit tests ---
+
+#[test]
+fn negate_type_union_removes_member() {
+    use zz_checker::type_::Type;
+    let _checker = Checker::new(
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let original = Type::Union(vec![Type::Int, Type::Str]);
+    let narrowed = Type::Int;
+    let result = Checker::negate_type(&original, &narrowed);
+    assert_eq!(
+        result,
+        Type::Str,
+        "negating int from Union(int, str) should give str"
+    );
+}
+
+#[test]
+fn negate_type_union_removes_all() {
+    use zz_checker::type_::Type;
+    let _checker = Checker::new(
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let original = Type::Union(vec![Type::Int]);
+    let narrowed = Type::Int;
+    let result = Checker::negate_type(&original, &narrowed);
+    assert_eq!(
+        result,
+        Type::Never,
+        "negating the only member should give Never"
+    );
+}
+
+#[test]
+fn negate_type_non_union_returns_original() {
+    use zz_checker::type_::Type;
+    let _checker = Checker::new(
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let original = Type::Array(Box::new(Type::Union(vec![Type::Int, Type::Str])));
+    let narrowed = Type::Int;
+    let result = Checker::negate_type(&original, &narrowed);
+    assert_eq!(
+        result,
+        Type::Array(Box::new(Type::Union(vec![Type::Int, Type::Str]))),
+        "non-union original should be returned unchanged"
     );
 }
 

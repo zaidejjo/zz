@@ -1415,7 +1415,6 @@ mod span_scope_tests {
             HashMap::new(),
         );
         assert!(res.errors.is_empty(), "check: {:?}", res.errors);
-        let key = Span::new(29, 33);
         assert!(types.values().any(|t| matches!(t, Type::Int)));
         assert!(types.values().any(|t| matches!(t, Type::Bool)));
     }
