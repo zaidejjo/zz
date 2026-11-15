@@ -108,6 +108,8 @@ pub const PURE_ZZ: &[&str] = &[
     "std.math.gcd",
     "std.math.lcm",
     "std.math.isqrt",
+    "std.math.is_nan",
+    "std.math.is_inf",
     // PNSA: linear algebra.
     "std.math.dot_product",
     "std.math.magnitude",

@@ -1220,8 +1220,8 @@ zz_value zz_math_sqrt(zz_value v, int *err);
 zz_value zz_math_factorial(zz_value n, int *err);
 zz_value zz_math_gcd(zz_value a, zz_value b, int *err);
 zz_value zz_math_lcm(zz_value a, zz_value b, int *err);
-zz_value zz_math_is_nan(zz_value x, int *err);
-zz_value zz_math_is_inf(zz_value x, int *err);
+// PNSA: math.is_nan / math.is_inf moved to pure-Zz (log.zz).
+// C twins removed; symbols resolved from libzz_stdlib.a in AOT.
 zz_value zz_math_pi(zz_value unused, int *err);
 zz_value zz_math_e(zz_value unused, int *err);
 zz_value zz_math_tau(zz_value unused, int *err);

@@ -36,43 +36,9 @@ fn expect_float(args: &mut Vec<Value>, i: usize, name: &str) -> Result<f64, Eval
 // PNSA: math.hypot moved to pure-Zz (log.zz).
 // Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
-pub(crate) fn math_is_nan(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, EvalError> {
-    let v = args
-        .first()
-        .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for is_nan", span))?;
-    match v {
-        Value::Float(f) => Ok(Value::Bool(f.is_nan())),
-        Value::Int(_) => Ok(Value::Bool(false)),
-        other => Err(EvalError::new(
-            format!("is_nan expects a number, found `{}`", other.type_name()),
-            span,
-        )),
-    }
-}
-
-pub(crate) fn math_is_inf(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, EvalError> {
-    let v = args
-        .first()
-        .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for is_inf", span))?;
-    match v {
-        Value::Float(f) => Ok(Value::Bool(f.is_infinite())),
-        Value::Int(_) => Ok(Value::Bool(false)),
-        other => Err(EvalError::new(
-            format!("is_inf expects a number, found `{}`", other.type_name()),
-            span,
-        )),
-    }
-}
+// PNSA: math.is_nan / math.is_inf moved to pure-Zz (log.zz).
+// is_nan(x) = x != x ; is_inf(x) = x == INF || x == -INF.
+// Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
 
 // ── Number Theory & Integer Math ────────────────────────────────────────────
 

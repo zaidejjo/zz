@@ -9422,19 +9422,9 @@ zz_value zz_math_sqrt(zz_value v, int *err) {
 static uint64_t math_rand_state = 0x9E3779B97F4A7C15ULL;
 
 
-// math.is_nan(x) → bool
-zz_value zz_math_is_nan(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : 0.0;
-    return (zz_value){ZZ_BOOL, {.b = d != d}};
-}
+// PNSA: math.is_nan / math.is_inf moved to pure-Zz (log.zz).
+// C twins removed; symbols resolved from libzz_stdlib.a in AOT.
 
-// math.is_inf(x) → bool
-zz_value zz_math_is_inf(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : 0.0;
-    return (zz_value){ZZ_BOOL, {.b = d == 1.0/0.0 || d == -1.0/0.0}};
-}
 
 // math constants
 zz_value zz_math_pi(zz_value unused, int *err) {

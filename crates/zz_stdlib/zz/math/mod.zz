@@ -587,6 +587,17 @@ func math.root(x: float, n: float) -> float {
     return math.exp(math.log(x) / n)
 }
 
+// ── NaN / Infinity ─────────────────────────────────────────────────────────
+
+func math.is_nan(x: float) -> bool {
+    // NaN is the only IEEE 754 value not equal to itself
+    return x != x
+}
+
+func math.is_inf(x: float) -> bool {
+    return x == math.INF || x == -math.INF
+}
+
 // ── Random ─────────────────────────────────────────────────────────────────
 
 func math.random() -> float {

@@ -1485,22 +1485,8 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // PNSA: math.clamp moved to pure-ZZ (generic <T: Ord> -> T).
     // PNSA: math.signum moved to pure-Zz (scalar.zz, T: Num + Ord).
     // Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
-    m.insert(
-        "std.math.is_nan".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_is_nan,
-        },
-    );
-    m.insert(
-        "std.math.is_inf".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_is_inf,
-        },
-    );
-
-    // ── std.math number theory ──
+    // PNSA: math.is_nan / math.is_inf moved to pure-Zz (log.zz).
+    // Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
     // PNSA: factorial/gcd/lcm/isqrt moved to pure-Zz (int.zz).
     // Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
     // VM uses Rust bodies during transition.
@@ -2415,7 +2401,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // table without the other will fail CI here rather than at runtime.
     assert_eq!(
         m.len(),
-        442,
+        440,
         "natives registry count drifted; update this assertion"
     );
 

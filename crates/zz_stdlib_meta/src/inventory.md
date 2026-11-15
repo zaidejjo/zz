@@ -7,10 +7,10 @@ Total entries: 700
 
 | tier | entries |
 |---|---:|
-| CRuntime | 295 |
+| CRuntime | 293 |
 | Const | 6 |
 | FfiStaticlib | 154 |
-| PureZz | 244 |
+| PureZz | 246 |
 | VmOnly | 1 |
 
 | tier | name | implementation |
@@ -389,8 +389,8 @@ Total entries: 700
 | CRuntime | `std.math.gcd` | `zz_math_gcd` |
 | PureZz | `std.math.hypot` | `zz/math/mod.zz` |
 | PureZz | `std.math.is_even` | `zz/math/mod.zz` |
-| CRuntime | `std.math.is_inf` | `zz_math_is_inf` |
-| CRuntime | `std.math.is_nan` | `zz_math_is_nan` |
+| PureZz | `std.math.is_inf` | `zz/math/mod.zz` |
+| PureZz | `std.math.is_nan` | `zz/math/mod.zz` |
 | PureZz | `std.math.is_odd` | `zz/math/mod.zz` |
 | PureZz | `std.math.isqrt` | `zz/math/mod.zz` |
 | CRuntime | `std.math.lcm` | `zz_math_lcm` |
