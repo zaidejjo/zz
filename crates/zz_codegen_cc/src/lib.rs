@@ -1814,14 +1814,14 @@ mod tests {
     }
 
     #[test]
-    fn release_is_o3_without_lto_and_wraps() {
-        // Default release is `-O3` only: LTO costs link memory/time and is
-        // opt-in (`full`/`static_lto`), matching rustc/cargo defaults.
+    fn release_is_o3_with_thin_lto_and_wraps() {
+        // Default release is `-O3 -flto=thin`: ThinLTO is on by default in
+        // `--release` (matched by help text); `--full` uses whole-program LTO.
         let flags = clang_flags(&release_opts(), None);
         assert!(flags.contains(&"-O3".to_string()));
         assert!(
-            !flags.iter().any(|f| f.starts_with("-flto")),
-            "default release must not enable LTO: {flags:?}"
+            flags.iter().any(|f| f == "-flto=thin"),
+            "default release must enable ThinLTO: {flags:?}"
         );
         let full = clang_flags(&BuildOptions::full(), None);
         assert!(
