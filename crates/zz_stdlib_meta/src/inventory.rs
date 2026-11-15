@@ -69,8 +69,9 @@ pub const PURE_ZZ: &[&str] = &[
     "std.math.product_f",
     "std.math.mean_f",
     "std.math.median_f",
-    // PNSA: precompiled native stdlib (compiled from ZZ source to
-    // libzz_stdlib.a). VM calls via FFI wrappers; AOT links the archive.
+    // PNSA: pure-ZZ scalar math (handles int, float, str — more general than Rust float-only).
+    "std.math.clamp",
+    // PNSA: precompiled native stdlib number theory.
     "std.math.factorial",
     "std.math.gcd",
     "std.math.lcm",

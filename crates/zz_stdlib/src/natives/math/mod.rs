@@ -122,16 +122,9 @@ pub(crate) fn math_trunc(
     }
 }
 
-pub(crate) fn math_clamp(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    _span: Span,
-) -> Result<Value, EvalError> {
-    let val = expect_float(args, 0, "clamp")?;
-    let min = expect_float(args, 1, "clamp")?;
-    let max = expect_float(args, 2, "clamp")?;
-    Ok(Value::Float(val.clamp(min, max)))
-}
+// ── PNSA: clamp moved to pure-ZZ (generic <T: Ord> -> T) ────────────────────
+// math.clamp is now PureZz in scalar.zz — handles int, float, str.
+// Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
 pub(crate) fn math_signum(
     _interp: &mut Interp,

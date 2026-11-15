@@ -1217,7 +1217,8 @@ zz_value zz_math_round(zz_value v, int *err);
 zz_value zz_math_trunc(zz_value v, int *err);
 zz_value zz_math_signum(zz_value v, int *err);
 zz_value zz_math_hypot(zz_value x, zz_value y, int *err);
-zz_value zz_math_clamp(zz_value val, zz_value min, zz_value max, int *err);
+// PNSA: math.clamp is now PureZz (generic <T: Ord> -> T).
+// C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 zz_value zz_math_root(zz_value x, zz_value n, int *err);
 zz_value zz_math_factorial(zz_value n, int *err);
 zz_value zz_math_gcd(zz_value a, zz_value b, int *err);

@@ -9464,16 +9464,8 @@ zz_value zz_math_hypot(zz_value x, zz_value y, int *err) {
     return (zz_value){ZZ_FLOAT, {.f = hypot(dx, dy)}};
 }
 
-// math.clamp(val, min, max) → float
-zz_value zz_math_clamp(zz_value val, zz_value min, zz_value max, int *err) {
-    (void)err;
-    double dv = val.tag == ZZ_FLOAT ? val.f : (val.tag == ZZ_INT ? (double)val.i : 0.0);
-    double dmin = min.tag == ZZ_FLOAT ? min.f : (min.tag == ZZ_INT ? (double)min.i : 0.0);
-    double dmax = max.tag == ZZ_FLOAT ? max.f : (max.tag == ZZ_INT ? (double)max.i : 0.0);
-    if (dv < dmin) dv = dmin;
-    if (dv > dmax) dv = dmax;
-    return (zz_value){ZZ_FLOAT, {.f = dv}};
-}
+// PNSA: math.clamp is now PureZz (generic <T: Ord> -> T).
+// C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 
 // math.root(x, n) → float (nth root)
 zz_value zz_math_root(zz_value x, zz_value n, int *err) {

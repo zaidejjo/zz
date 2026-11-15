@@ -131,7 +131,6 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "math.trunc" | "std.math.trunc" => Some("zz_math_trunc"),
         "math.signum" | "std.math.signum" => Some("zz_math_signum"),
         "math.hypot" | "std.math.hypot" => Some("zz_math_hypot"),
-        "math.clamp" | "std.math.clamp" => Some("zz_math_clamp"),
         "math.root" | "std.math.root" => Some("zz_math_root"),
         "math.factorial" | "std.math.factorial" => Some("zz_math_factorial"),
         "math.gcd" | "std.math.gcd" => Some("zz_math_gcd"),
