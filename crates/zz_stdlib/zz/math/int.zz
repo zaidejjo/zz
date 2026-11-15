@@ -79,3 +79,20 @@ func math.factorial(n: int) -> Result<int, str> {
     }
     return .ok(result)
 }
+
+func math.isqrt(n: int) -> Result<int, str> {
+    if n < 0 {
+        return .err("isqrt: negative input")
+    }
+    if n == 0 {
+        return .ok(0)
+    }
+    // Newton's method for integer square root
+    mut_x := n
+    mut_y := (n + 1) / 2
+    while mut_y < mut_x {
+        mut_x = mut_y
+        mut_y = (mut_x + n / mut_x) / 2
+    }
+    return .ok(mut_x)
+}

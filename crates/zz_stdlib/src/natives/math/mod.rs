@@ -205,38 +205,9 @@ pub(crate) fn math_root(
     Ok(Value::Float(x.powf(1.0 / n)))
 }
 
-pub(crate) fn math_isqrt(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, EvalError> {
-    let n = match args.first() {
-        Some(Value::Int(i)) => *i,
-        Some(other) => {
-            return Err(EvalError::new(
-                format!("isqrt expects an integer, found `{}`", other.type_name()),
-                span,
-            ))
-        }
-        None => return Err(EvalError::new("missing argument for isqrt", span)),
-    };
-    if n < 0 {
-        return Ok(Value::Result(Box::new(Err(Value::Str(
-            "isqrt: negative input".to_string().into(),
-        )))));
-    }
-    // Newton's method for integer square root
-    if n == 0 {
-        return Ok(Value::Result(Box::new(Ok(Value::Int(0)))));
-    }
-    let mut x = n;
-    let mut y = (x + 1) / 2;
-    while y < x {
-        x = y;
-        y = (x + n / x) / 2;
-    }
-    Ok(Value::Result(Box::new(Ok(Value::Int(x)))))
-}
+// ── PNSA: isqrt moved to pure-Zz (int.zz) ────────────────────────────────────
+// math.isqrt uses Newton's method in ZZ (int.zz).
+// Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
 // ── PNSA: factorial/gcd/lcm moved to pure-Zz (int.zz) ────────────────────────
 // Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.

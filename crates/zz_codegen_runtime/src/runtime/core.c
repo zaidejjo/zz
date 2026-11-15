@@ -9623,20 +9623,8 @@ zz_value zz_math_nan(zz_value unused, int *err) {
     return (zz_value){ZZ_FLOAT, {.f = 0.0/0.0}};
 }
 
-// math.isqrt(n) → .ok(int) or .err(str)
-zz_value zz_math_isqrt(zz_value n, int *err) {
-    (void)err;
-    if (n.tag != ZZ_INT)
-        return zz_variant_err(zz_str_static("isqrt expects an integer"));
-    if (n.i < 0)
-        return zz_variant_err(zz_str_static("isqrt: negative input"));
-    int64_t x = n.i, y = (x + 1) / 2;
-    while (y < x) { x = y; y = (x + n.i / x) / 2; }
-    return zz_variant_ok((zz_value){ZZ_INT, {.i = x}});
-}
-
-// PNSA: math.mean/math.median moved to pure-Zz (stats.zz).
-// C twins removed; symbols resolved from libzz_stdlib.a in AOT.
+// PNSA: math.isqrt moved to pure-Zz (int.zz).
+// C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 
 // math.rand_range(min, max) → float
 zz_value zz_math_rand_range(zz_value min, zz_value max, int *err) {

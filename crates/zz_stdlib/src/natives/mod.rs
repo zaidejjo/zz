@@ -1575,14 +1575,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
             f: math::math_root,
         },
     );
-    m.insert(
-        "std.math.isqrt".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_isqrt,
-        },
-    );
-    // PNSA: factorial/gcd/lcm moved to pure-Zz (int.zz).
+    // PNSA: factorial/gcd/lcm/isqrt moved to pure-Zz (int.zz).
     // Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
     // VM uses Rust bodies during transition.
 
@@ -2617,7 +2610,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // table without the other will fail CI here rather than at runtime.
     assert_eq!(
         m.len(),
-        472,
+        471,
         "natives registry count drifted; update this assertion"
     );
 
