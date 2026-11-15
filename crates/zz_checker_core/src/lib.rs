@@ -464,6 +464,12 @@ pub struct Checker {
     /// `Arc<str>` per checked expression. Reduces checker peak RSS on
     /// large modules (Phase 1 of the checker improvement plan).
     pub func_interner: Interner,
+    /// Flow-sensitive type narrowing: one map per scope depth, parallel to
+    /// [`env`]. Holds refined types for names narrowed by `if x is T`
+    /// (then-branch) and match-arm bindings. `lookup_opt` consults the map
+    /// for the current depth before falling back to the scope walk, so a
+    /// narrowed type is visible only inside the scope that introduced it.
+    pub narrowing: Vec<std::collections::HashMap<String, Type>>,
     /// Shadow cache: innermost binding per name → (scope depth, type).
     /// Makes variable lookup O(1) amortized instead of O(depth). Entries are
     /// inserted on `define` and evicted for the popped depth on `pop_scope`;
@@ -553,6 +559,7 @@ impl Checker {
             span_types: std::collections::HashMap::new(),
             scope: Vec::new(),
             func_interner: Interner::new(),
+            narrowing: vec![std::collections::HashMap::new()],
             scope_cache: std::collections::HashMap::new(),
             names_at_depth: vec![Vec::new()],
             link_libs: Vec::new(),

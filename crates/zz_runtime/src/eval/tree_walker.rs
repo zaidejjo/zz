@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, ImportItem, Pattern, Stmt};
+use zz_frontend::ast::{BinOp, Block, Expr, FmtPart, ImportItem, Pattern, Stmt, TyKind};
 use zz_frontend::span::Span;
 
 use crate::env::{Env, EnvLink};
@@ -1404,6 +1404,57 @@ impl Interp {
                         None => Ok(Flow::Value(Value::Unit)),
                     }
                 }
+            }
+            Expr::Is { expr, ty, span: _ } => {
+                // `expr is T` → `Bool`: compare the value's dynamic type name
+                // with the expected type-name spelling (flow-sensitive
+                // narrowing is a checker concern; the VM just evaluates).
+                let v = self.eval(expr)?.into_value()?;
+                let actual = match &v {
+                    Value::Int(_) => "int",
+                    Value::Float(_) => "float",
+                    Value::Bool(_) => "bool",
+                    Value::Str(_) => "str",
+                    Value::Unit => "unit",
+                    Value::Bytes(_) => "bytes",
+                    Value::Array(_) => "array",
+                    Value::Dict(_) => "dict",
+                    Value::Tuple(_) => "tuple",
+                    Value::Range(_) => "range",
+                    Value::Func(_) => "func",
+                    Value::Db(_) => "db",
+                    Value::Json(_) => "json",
+                    Value::Result(_) => "result",
+                    Value::Option(_) => "option",
+                    Value::Chan(_) => "chan",
+                    Value::HttpRequest(_) => "http.request",
+                    Value::HttpServer(_) => "http.server",
+                    Value::TcpStream(_) => "tcp.stream",
+                    Value::TcpListener(_) => "tcp.listener",
+                    Value::Response(_) => "http.response",
+                    Value::Object(o) => o.name.as_str(),
+                    Value::Native(_) | Value::Opaque(_) | Value::Weak(_) | Value::TaskJoin(_) => {
+                        "value"
+                    }
+                };
+                let expected = match &ty.kind {
+                    TyKind::Int => "int",
+                    TyKind::Float => "float",
+                    TyKind::Bool => "bool",
+                    TyKind::Str => "str",
+                    TyKind::Unit => "unit",
+                    TyKind::Array(_) => "array",
+                    TyKind::Dict(_, _) => "dict",
+                    TyKind::Option(_) => "option",
+                    TyKind::Result(_, _) => "result",
+                    TyKind::Func(_, _) => "func",
+                    TyKind::Tuple(_) => "tuple",
+                    TyKind::Named(name, _) => name.as_str(),
+                    TyKind::Union(_) => "value",
+                    TyKind::Ptr { .. } => "ptr",
+                    TyKind::Void => "void",
+                };
+                Ok(Flow::Value(Value::Bool(actual == expected)))
             }
             Expr::While { cond, body, span } => {
                 let mut result = Value::Unit;

@@ -69,6 +69,7 @@ pub(crate) fn scan_expr_captured(
         }
         Expr::Paren { expr, .. } => scan_expr_captured(expr, defined, free, nested),
         Expr::Unary { expr, .. } => scan_expr_captured(expr, defined, free, nested),
+        Expr::Is { expr, .. } => scan_expr_captured(expr, defined, free, nested),
         Expr::Binary { left, right, .. } => {
             scan_expr_captured(left, defined, free, nested);
             scan_expr_captured(right, defined, free, nested);

@@ -4052,6 +4052,7 @@ dependencies = [
  "zz_codegen_runtime",
  "zz_native_rt",
  "zz_paths",
+ "zz_stdlib_meta",
 ]
 
 [[package]]
@@ -4396,6 +4397,14 @@ dependencies = [
  "zz_hir",
  "zz_native_rt",
  "zz_runtime",
+ "zz_stdlib_meta",
+]
+
+[[package]]
+name = "zz_stdlib_meta"
+version = "0.4.0"
+dependencies = [
+ "zz_checker",
 ]
 
 [[package]]

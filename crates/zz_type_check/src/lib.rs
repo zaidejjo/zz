@@ -1255,13 +1255,38 @@ impl TypeCheckOps for Checker {
                 els,
                 span,
             } => {
+                // Flow-sensitive narrowing: `if x is T` narrows `x` (when it
+                // is a variable) to `T` in the then-branch. The narrowed type
+                // is recorded in the current scope's narrowing map before
+                // checking the branch and removed afterward so it cannot leak
+                // past the `if`.
+                let narrowed: Option<(String, Type)> = match cond.as_ref() {
+                    Expr::Is { expr, ty, .. } => {
+                        if let Expr::Ident { name, .. } = expr.as_ref() {
+                            Some((name.clone(), self.ast_to_type(ty, &[])))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
                 let ct = self.check_expr(cond);
                 let glob_hint = match cond.as_ref() {
                     Expr::Str { value, .. } if Self::looks_like_glob(value) => Some(value.as_str()),
                     _ => None,
                 };
                 self.ensure_bool(ct, cond.span(), glob_hint);
+                if let Some((name, narrowed_ty)) = &narrowed {
+                    self.narrow(name.clone(), narrowed_ty.clone());
+                }
                 let tt = self.check_block(then);
+                if let Some((name, _)) = narrowed {
+                    let depth = self.env.len().saturating_sub(1);
+                    self.narrowing
+                        .get_mut(depth)
+                        .expect("narrowing map is kept parallel to env")
+                        .remove(&name);
+                }
                 match els {
                     Some(e) => {
                         let et = self.check_expr(e);
@@ -1411,6 +1436,15 @@ impl TypeCheckOps for Checker {
                         Type::Unit
                     }
                 }
+            }
+            Expr::Is { expr, ty, span: _ } => {
+                // Type test `expr is T` → `bool`. The written target type is
+                // resolved (errors reported inline) but we do not reject the
+                // test statically — `is` is a runtime check, so a concrete
+                // mismatch just means the then-branch is unreachable.
+                let _ = self.check_expr(expr);
+                let _ = self.ast_to_type(ty, &[]);
+                Type::Bool
             }
             Expr::Try { expr, span } => self.check_try(expr, *span),
             Expr::Block(b) => self.check_block(b),
@@ -2906,6 +2940,11 @@ impl TypeCheckOps for Checker {
             Pattern::Wildcard { .. } => {}
             Pattern::Binding { name } => {
                 self.define_at(&name.name, ty.clone(), name.span);
+                // Record the binding in the flow-sensitive narrowing map so
+                // lookups inside this scope (match-arm / if-let body) resolve
+                // to the bound type even if an outer same-named binding exists
+                // (match-arm binding narrowing).
+                self.narrow(name.name.clone(), ty.clone());
                 // Record the binding-site span type: destructured (and
                 // match-arm) names otherwise leave no span entry, so
                 // lowering resolves their method calls untyped and

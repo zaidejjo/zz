@@ -525,6 +525,7 @@ fn collect_expr_tokens(
             }
         }
         Expr::Paren { expr, .. } => collect_expr_tokens(expr, source, known, out),
+        Expr::Is { expr: inner, .. } => collect_expr_tokens(inner, source, known, out),
         Expr::Tuple { items, .. } => {
             for e in items {
                 collect_expr_tokens(e, source, known, out);
