@@ -669,6 +669,17 @@ pub fn clang_flags_with(
             flags.push(flag.to_string());
         }
     }
+    // Symbol-visibility hardening (release builds only): hide all symbols by
+    // default and tell the compiler they can't be interposed at runtime.
+    // This lets clang inline across TU boundaries more aggressively and
+    // shrinks the dynamic symbol table / binary size. Exported entry points
+    // (`main`, plugin init, FFI entrypoints) are marked `#[export_name]`
+    // / `__attribute__((visibility("default")))` in the generated C so they
+    // remain visible. Safe for host and cross builds alike.
+    if opts.optimize {
+        flags.push("-fvisibility=hidden".to_string());
+        flags.push("-fno-semantic-interposition".to_string());
+    }
     match opts.pgo {
         PgoMode::Generate => {
             flags.push("-fprofile-generate".to_string());
