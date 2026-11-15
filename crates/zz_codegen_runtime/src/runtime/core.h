@@ -1216,9 +1216,6 @@ zz_value zz_black_box(zz_value v, int *err);
 // C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 // PNSA: math.clamp is now PureZz (generic <T: Ord> -> T).
 // C twin removed; symbol resolved from libzz_stdlib.a in AOT.
-zz_value zz_math_factorial(zz_value n, int *err);
-zz_value zz_math_gcd(zz_value a, zz_value b, int *err);
-zz_value zz_math_lcm(zz_value a, zz_value b, int *err);
 // PNSA: math.is_nan / math.is_inf moved to pure-Zz (log.zz).
 // C twins removed; symbols resolved from libzz_stdlib.a in AOT.
 zz_value zz_math_pi(zz_value unused, int *err);
@@ -1228,7 +1225,6 @@ zz_value zz_math_inf(zz_value unused, int *err);
 zz_value zz_math_nan(zz_value unused, int *err);
 // PNSA: math.isqrt/math.mean/math.median/math.dot_product/math.magnitude/math.matrix_mul moved to pure-Zz.
 // C twins removed; symbols resolved from libzz_stdlib.a in AOT.
-zz_value zz_math_rand_range(zz_value min, zz_value max, int *err);
 zz_value zz_time_sleep_ms(zz_value ms, int *err);
 
 // ---- type casts ---------------------------------------------------------
