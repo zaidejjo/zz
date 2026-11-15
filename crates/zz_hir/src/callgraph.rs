@@ -778,6 +778,7 @@ pub fn prune_program(tp: &TypedProgram, reach: &ReachableSet) -> TypedProgram {
         trait_impls: tp.trait_impls.clone(),
         try_converts: tp.try_converts.clone(),
         module_origins: tp.module_origins.clone(),
+        symbol_map: tp.symbol_map.clone(),
     }
 }
 

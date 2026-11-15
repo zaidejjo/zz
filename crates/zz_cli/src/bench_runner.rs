@@ -16,7 +16,7 @@
 //! time by `bench_attr`). `@setup`/`@teardown` run once around the
 //! iterations, not per iteration: keep benches self-contained instead.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -853,6 +853,7 @@ fn setup_bench_interp(bench: &BenchInfo) -> Result<(Interp, Value), String> {
         if let Err(e) = interp.run_typed(
             &zz_prog.program,
             Arc::new(zz_prog.types.clone()),
+            HashMap::new(),
             zz_prog.structs.clone(),
             zz_prog.enums.clone(),
         ) {
@@ -883,7 +884,13 @@ fn setup_bench_interp(bench: &BenchInfo) -> Result<(Interp, Value), String> {
     }
 
     for (i, program) in loaded.programs.iter().enumerate() {
-        if let Err(e) = interp.run_typed(program, types.clone(), structs.clone(), enums.clone()) {
+        if let Err(e) = interp.run_typed(
+            program,
+            types.clone(),
+            HashMap::new(),
+            structs.clone(),
+            enums.clone(),
+        ) {
             return Err(format!("module error: {e:?}"));
         }
         if i == bench.module_index {

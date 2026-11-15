@@ -1471,6 +1471,7 @@ fn chunk_module_for_phased(
     let chunk = zz_runtime::vm::Compiler::compile_program_typed(
         &merged,
         std::sync::Arc::new(typed.program.types),
+        typed.program.symbol_map.clone(),
         loaded.structs,
         loaded.enums,
         native_names,

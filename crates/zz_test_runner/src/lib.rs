@@ -20,7 +20,7 @@
 //! - No-arg discovery prefers `./tests/` when it holds `.zz` files
 //!   (zero-config; no `zz.toml` needed), else the current directory.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2235,6 +2235,7 @@ fn setup_test_interp(test: &TestInfo, cover: bool) -> Result<(Interp, Value, Vec
         if let Err(e) = interp.run_typed(
             &zz_prog.program,
             Arc::new(zz_prog.types.clone()),
+            HashMap::new(),
             zz_prog.structs.clone(),
             zz_prog.enums.clone(),
         ) {
@@ -2270,7 +2271,13 @@ fn setup_test_interp(test: &TestInfo, cover: bool) -> Result<(Interp, Value, Vec
                 interp.set_coverage_source(name, source);
             }
         }
-        if let Err(e) = interp.run_typed(program, types.clone(), structs.clone(), enums.clone()) {
+        if let Err(e) = interp.run_typed(
+            program,
+            types.clone(),
+            HashMap::new(),
+            structs.clone(),
+            enums.clone(),
+        ) {
             return Err(format!("module error: {e:?}"));
         }
         if i == test.module_index {

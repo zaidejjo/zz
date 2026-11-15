@@ -2716,6 +2716,7 @@ fn module_aware_compile_emits_callpath_for_function_calls() {
     let chunk = zz_runtime::vm::Compiler::compile_program_typed(
         &result.programs[0],
         std::sync::Arc::new(std::collections::HashMap::new()),
+        HashMap::new(),
         result.structs.clone(),
         result.enums.clone(),
         native_names,

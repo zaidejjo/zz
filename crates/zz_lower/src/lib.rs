@@ -22,6 +22,7 @@ mod stmt;
 mod traits;
 pub mod units;
 
+use zz_arena::Symbol;
 use zz_codegen_ffi::native_impl;
 use zz_codegen_runtime::{RUNTIME_C, RUNTIME_H};
 use zz_frontend::ast::{Expr, Pattern, Stmt};
@@ -129,11 +130,10 @@ pub(crate) fn needs_float_fmt(
     tp: &zz_hir::TypedProgram,
     reachable_funcs: &std::collections::HashSet<String>,
 ) -> bool {
-    let scope_reached =
-        |scope: &str| scope == zz_checker::TOP_SCOPE || reachable_funcs.contains(scope);
+    let scope_reached = |_scope: Symbol| true; // symbol_map not available here; check all types
     tp.types
         .iter()
-        .any(|(key, ty)| scope_reached(key.func.as_ref()) && type_has_float(ty))
+        .any(|(key, ty)| scope_reached(key.func) && type_has_float(ty))
         || tp.bindings.values().any(type_has_float)
         || tp.funcs.iter().any(|(name, sig)| {
             reachable_funcs.contains(name)

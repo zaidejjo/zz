@@ -275,6 +275,7 @@ fn expression_type_at(
         trait_impls: HashMap::new(),
         try_converts: HashMap::new(),
         module_origins: HashMap::new(),
+        symbol_map: HashMap::new(),
     };
     let func = enclosing_function(program, offset);
     let ty = tp.type_at(&func, expr.span())?;

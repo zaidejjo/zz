@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 
+use zz_arena::Symbol;
 pub use zz_checker::{
     check_program_typed, AliasSig, EnumSig, FuncSig, SpanKey, StructSig, TraitSig, Type, TOP_SCOPE,
 };
@@ -65,6 +66,9 @@ pub struct TypedProgram {
     /// loader's module-origin map and propagated through
     /// [`merge_typed_programs`].
     pub module_origins: HashMap<String, String>,
+    /// Reverse map: func name → Symbol id. Enables [`type_at`] to resolve
+    /// a func name to its interned `Symbol` for [`SpanKey`] construction.
+    pub symbol_map: HashMap<String, u32>,
 }
 
 /// Result of building a [`TypedProgram`]: the typed program plus any checker
@@ -164,6 +168,7 @@ pub fn build_program(
             trait_impls,
             try_converts,
             module_origins: HashMap::new(),
+            symbol_map: checked.symbol_map,
         },
         diagnostics: diags,
     }
@@ -174,7 +179,8 @@ impl TypedProgram {
     /// (top-level function name, `Type.method` for methods,
     /// [`TOP_SCOPE`] otherwise), if the checker could determine it.
     pub fn type_at(&self, func: &str, span: Span) -> Option<&Type> {
-        self.types.get(&SpanKey::new(func, span))
+        let sym_id = self.symbol_map.get(func)?;
+        self.types.get(&SpanKey::new(Symbol(*sym_id), span))
     }
 
     /// Iterate the top-level statements.
@@ -271,6 +277,7 @@ pub fn merge_typed_programs(programs: Vec<TypedProgram>) -> TypedProgram {
         trait_impls,
         try_converts,
         module_origins,
+        symbol_map: HashMap::new(),
     }
 }
 

@@ -274,6 +274,7 @@ impl Interp {
         &mut self,
         program: &Program,
         types: Arc<HashMap<zz_checker::SpanKey, zz_checker::Type>>,
+        symbol_map: HashMap<String, u32>,
         structs: HashMap<String, zz_checker::StructSig>,
         enums: HashMap<String, zz_checker::EnumSig>,
     ) -> Result<Value, EvalError> {
@@ -285,6 +286,7 @@ impl Interp {
         let mut chunk = crate::vm::Compiler::compile_program_typed(
             program,
             types,
+            symbol_map,
             structs,
             enums,
             native_names,
