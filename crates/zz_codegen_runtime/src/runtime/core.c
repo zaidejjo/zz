@@ -1313,14 +1313,6 @@ zz_value zz_io_input(zz_value prompt, int *err) {
     return zz_str_new(buf, len);
 }
 
-zz_value zz_math_pow(zz_value a, zz_value b, int *err) {
-    (void)err;
-    // Always return float to match VM behavior.
-    double x = a.tag == ZZ_FLOAT ? a.f : (a.tag == ZZ_INT ? (double)a.i : 0.0);
-    double y = b.tag == ZZ_FLOAT ? b.f : (b.tag == ZZ_INT ? (double)b.i : 0.0);
-    return zz_float(dpow(x, y));
-}
-
 /// `time.now_ms()` — monotonic milliseconds since an arbitrary epoch,
 /// matching the stdlib native's behavior for elapsed-time measurements.
 /// The `zz_value` arg is ignored (native has zero zz-level arguments).
@@ -9414,25 +9406,8 @@ zz_value zz_math_sqrt(zz_value v, int *err) {
 // PNSA: math.signum moved to pure-Zz (scalar.zz).
 // C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 
-// math.hypot(x, y) → float
-zz_value zz_math_hypot(zz_value x, zz_value y, int *err) {
-    (void)err;
-    double dx = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    double dy = y.tag == ZZ_FLOAT ? y.f : (y.tag == ZZ_INT ? (double)y.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = hypot(dx, dy)}};
-}
-
 // PNSA: math.clamp is now PureZz (generic <T: Ord> -> T).
 // C twin removed; symbol resolved from libzz_stdlib.a in AOT.
-
-// math.root(x, n) → float (nth root)
-zz_value zz_math_root(zz_value x, zz_value n, int *err) {
-    (void)err;
-    double dx = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    double dn = n.tag == ZZ_FLOAT ? n.f : (n.tag == ZZ_INT ? (double)n.i : 0.0);
-    if (dn == 0.0) return (zz_value){ZZ_FLOAT, {.f = 1.0}};
-    return (zz_value){ZZ_FLOAT, {.f = pow(dx, 1.0/dn)}};
-}
 
 // math.sin(x) → float
 zz_value zz_math_sin(zz_value x, int *err) {
@@ -9512,25 +9487,8 @@ zz_value zz_math_to_degrees(zz_value rad, int *err) {
 }
 
 // math.log(x) → float (natural log)
-zz_value zz_math_log(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = log(d)}};
-}
 
 // math.log10(x) → float
-zz_value zz_math_log10(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = log10(d)}};
-}
-
-// math.exp(x) → float
-zz_value zz_math_exp(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = exp(d)}};
-}
 
 // math.random() → float in [0, 1)
 // Deterministic LCG matching the Rust VM's math_random (MATH_RAND_SEED),

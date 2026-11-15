@@ -14,14 +14,6 @@ fn expect_float(args: &mut Vec<Value>, i: usize, name: &str) -> Result<f64, Eval
     }
 }
 
-fn to_float(v: &Value) -> Option<f64> {
-    match v {
-        Value::Int(i) => Some(*i as f64),
-        Value::Float(f) => Some(*f),
-        _ => None,
-    }
-}
-
 // ── Utilities & Rounding ────────────────────────────────────────────────────
 
 // PNSA: math.abs moved to pure-Zz (scalar.zz, T: Num + Ord).
@@ -41,15 +33,8 @@ fn to_float(v: &Value) -> Option<f64> {
 // PNSA: math.signum moved to pure-Zz (scalar.zz, T: Num + Ord).
 // Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
-pub(crate) fn math_hypot(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    _span: Span,
-) -> Result<Value, EvalError> {
-    let x = expect_float(args, 0, "hypot")?;
-    let y = expect_float(args, 1, "hypot")?;
-    Ok(Value::Float(x.hypot(y)))
-}
+// PNSA: math.hypot moved to pure-Zz (log.zz).
+// Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
 pub(crate) fn math_is_nan(
     _interp: &mut Interp,
@@ -91,15 +76,8 @@ pub(crate) fn math_is_inf(
 
 // ── Number Theory & Integer Math ────────────────────────────────────────────
 
-pub(crate) fn math_root(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    _span: Span,
-) -> Result<Value, EvalError> {
-    let x = expect_float(args, 0, "root")?;
-    let n = expect_float(args, 1, "root")?;
-    Ok(Value::Float(x.powf(1.0 / n)))
-}
+// PNSA: math.root moved to pure-Zz (log.zz).
+// Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
 // ── PNSA: isqrt moved to pure-Zz (int.zz) ────────────────────────────────────
 // math.isqrt uses Newton's method in ZZ (int.zz).
@@ -212,66 +190,22 @@ pub(crate) fn math_to_degrees(
 
 // ── Logarithms & Exponents ──────────────────────────────────────────────────
 
-pub(crate) fn math_log(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    _span: Span,
-) -> Result<Value, EvalError> {
-    let x = expect_float(args, 0, "log")?;
-    Ok(Value::Float(x.ln()))
-}
+// PNSA: math.log moved to pure-Zz (log.zz, Taylor series).
+// Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
-pub(crate) fn math_log10(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    _span: Span,
-) -> Result<Value, EvalError> {
-    let x = expect_float(args, 0, "log10")?;
-    Ok(Value::Float(x.log10()))
-}
+// PNSA: math.log10 moved to pure-Zz (log.zz).
+// Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
-pub(crate) fn math_exp(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    _span: Span,
-) -> Result<Value, EvalError> {
-    let x = expect_float(args, 0, "exp")?;
-    Ok(Value::Float(x.exp()))
-}
+// PNSA: math.exp moved to pure-Zz (log.zz, Taylor series).
+// Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
 // ── Square root (existing, kept for compat) ─────────────────────────────────
 
 // PNSA: math.sqrt moved to pure-Zz (log.zz, Newton's method).
 // Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
-pub(crate) fn math_pow(
-    _interp: &mut Interp,
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, EvalError> {
-    let base = args
-        .first()
-        .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for pow", span))?;
-    let exp = args
-        .get(1)
-        .cloned()
-        .ok_or_else(|| EvalError::new("missing argument for pow", span))?;
-    let (b, e) = match (to_float(&base), to_float(&exp)) {
-        (Some(b), Some(e)) => (b, e),
-        _ => {
-            return Err(EvalError::new(
-                format!(
-                    "pow expects `int` or `float` arguments, found `{}` and `{}`",
-                    base.type_name(),
-                    exp.type_name()
-                ),
-                span,
-            ))
-        }
-    };
-    Ok(Value::Float(b.powf(e)))
-}
+// PNSA: math.pow moved to pure-Zz (log.zz, exp(y*log(x))).
+// Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
 // Deterministic LCG seed so VM and AOT produce identical random sequences
 // (parity requires backend-identical output). Seeding from wall-clock time

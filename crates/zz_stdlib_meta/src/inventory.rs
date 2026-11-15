@@ -81,6 +81,13 @@ pub const PURE_ZZ: &[&str] = &[
     "std.math.trunc",
     "std.math.round",
     "std.math.sqrt",
+    // PNSA: math.pow/log/log10/exp/hypot/root moved to pure-Zz (log.zz).
+    "std.math.pow",
+    "std.math.log",
+    "std.math.log10",
+    "std.math.exp",
+    "std.math.hypot",
+    "std.math.root",
     // PNSA: precompiled native stdlib number theory.
     "std.math.factorial",
     "std.math.gcd",

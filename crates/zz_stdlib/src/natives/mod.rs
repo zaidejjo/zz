@@ -1481,13 +1481,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // PNSA: math.floor/ceil/trunc/round moved to pure-Zz (rounding.zz).
     // Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
     m.insert(
-        "std.math.pow".into(),
-        NativeEntry {
-            arity: 2,
-            f: math::math_pow,
-        },
-    );
-    m.insert(
         "std.math.random".into(),
         NativeEntry {
             arity: 0,
@@ -1499,13 +1492,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // PNSA: math.clamp moved to pure-ZZ (generic <T: Ord> -> T).
     // PNSA: math.signum moved to pure-Zz (scalar.zz, T: Num + Ord).
     // Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
-    m.insert(
-        "std.math.hypot".into(),
-        NativeEntry {
-            arity: 2,
-            f: math::math_hypot,
-        },
-    );
     m.insert(
         "std.math.is_nan".into(),
         NativeEntry {
@@ -1522,13 +1508,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     );
 
     // ── std.math number theory ──
-    m.insert(
-        "std.math.root".into(),
-        NativeEntry {
-            arity: 2,
-            f: math::math_root,
-        },
-    );
     // PNSA: factorial/gcd/lcm/isqrt moved to pure-Zz (int.zz).
     // Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
     // VM uses Rust bodies during transition.
@@ -1613,27 +1592,6 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     );
 
     // ── std.math logarithms & exponents ──
-    m.insert(
-        "std.math.log".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_log,
-        },
-    );
-    m.insert(
-        "std.math.log10".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_log10,
-        },
-    );
-    m.insert(
-        "std.math.exp".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_exp,
-        },
-    );
 
     // ── PNSA: math.dot_product moved to pure-Zz (linalg.zz).
     // Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
@@ -2548,7 +2506,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // table without the other will fail CI here rather than at runtime.
     assert_eq!(
         m.len(),
-        461,
+        455,
         "natives registry count drifted; update this assertion"
     );
 

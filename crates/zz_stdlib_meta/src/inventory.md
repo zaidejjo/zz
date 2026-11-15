@@ -7,10 +7,10 @@ Total entries: 700
 
 | tier | entries |
 |---|---:|
-| CRuntime | 314 |
+| CRuntime | 308 |
 | Const | 6 |
 | FfiStaticlib | 154 |
-| PureZz | 225 |
+| PureZz | 231 |
 | VmOnly | 1 |
 
 | tier | name | implementation |
@@ -383,19 +383,19 @@ Total entries: 700
 | CRuntime | `std.math.cos_deg` | `zz_math_cos_deg` |
 | PureZz | `std.math.count` | `zz/math/mod.zz` |
 | PureZz | `std.math.dot_product` | `zz/math/mod.zz` |
-| CRuntime | `std.math.exp` | `zz_math_exp` |
+| PureZz | `std.math.exp` | `zz/math/mod.zz` |
 | CRuntime | `std.math.factorial` | `zz_math_factorial` |
 | PureZz | `std.math.floor` | `zz/math/mod.zz` |
 | CRuntime | `std.math.gcd` | `zz_math_gcd` |
-| CRuntime | `std.math.hypot` | `zz_math_hypot` |
+| PureZz | `std.math.hypot` | `zz/math/mod.zz` |
 | PureZz | `std.math.is_even` | `zz/math/mod.zz` |
 | CRuntime | `std.math.is_inf` | `zz_math_is_inf` |
 | CRuntime | `std.math.is_nan` | `zz_math_is_nan` |
 | PureZz | `std.math.is_odd` | `zz/math/mod.zz` |
 | PureZz | `std.math.isqrt` | `zz/math/mod.zz` |
 | CRuntime | `std.math.lcm` | `zz_math_lcm` |
-| CRuntime | `std.math.log` | `zz_math_log` |
-| CRuntime | `std.math.log10` | `zz_math_log10` |
+| PureZz | `std.math.log` | `zz/math/mod.zz` |
+| PureZz | `std.math.log10` | `zz/math/mod.zz` |
 | PureZz | `std.math.magnitude` | `zz/math/mod.zz` |
 | PureZz | `std.math.matrix_mul` | `zz/math/mod.zz` |
 | PureZz | `std.math.max` | `zz/math/mod.zz` |
@@ -406,12 +406,12 @@ Total entries: 700
 | PureZz | `std.math.median_f` | `zz/math/mod.zz` |
 | PureZz | `std.math.min` | `zz/math/mod.zz` |
 | PureZz | `std.math.min_arr` | `zz/math/mod.zz` |
-| CRuntime | `std.math.pow` | `zz_math_pow` |
+| PureZz | `std.math.pow` | `zz/math/mod.zz` |
 | PureZz | `std.math.product` | `zz/math/mod.zz` |
 | PureZz | `std.math.product_f` | `zz/math/mod.zz` |
 | CRuntime | `std.math.rand_range` | `zz_math_rand_range` |
 | CRuntime | `std.math.random` | `zz_math_random` |
-| CRuntime | `std.math.root` | `zz_math_root` |
+| PureZz | `std.math.root` | `zz/math/mod.zz` |
 | PureZz | `std.math.round` | `zz/math/mod.zz` |
 | PureZz | `std.math.signum` | `zz/math/mod.zz` |
 | CRuntime | `std.math.sin` | `zz_math_sin` |

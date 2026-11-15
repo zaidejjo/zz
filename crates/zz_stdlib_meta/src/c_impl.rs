@@ -126,13 +126,10 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         // Symbol resolved from libzz_stdlib.a in AOT.
         // PNSA: math.sqrt moved to pure-Zz (log.zz).
         // Symbol resolved from libzz_stdlib.a in AOT.
-        "math.pow" | "std.math.pow" => Some("zz_math_pow"),
         // PNSA: math.floor/ceil/trunc/round moved to pure-Zz (rounding.zz).
         // Symbols resolved from libzz_stdlib.a in AOT.
         // PNSA: math.signum moved to pure-Zz (scalar.zz).
         // Symbol resolved from libzz_stdlib.a in AOT.
-        "math.hypot" | "std.math.hypot" => Some("zz_math_hypot"),
-        "math.root" | "std.math.root" => Some("zz_math_root"),
         "math.factorial" | "std.math.factorial" => Some("zz_math_factorial"),
         "math.gcd" | "std.math.gcd" => Some("zz_math_gcd"),
         "math.lcm" | "std.math.lcm" => Some("zz_math_lcm"),
@@ -147,9 +144,6 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "math.tan_deg" | "std.math.tan_deg" => Some("zz_math_tan_deg"),
         "math.to_radians" | "std.math.to_radians" => Some("zz_math_to_radians"),
         "math.to_degrees" | "std.math.to_degrees" => Some("zz_math_to_degrees"),
-        "math.log" | "std.math.log" => Some("zz_math_log"),
-        "math.log10" | "std.math.log10" => Some("zz_math_log10"),
-        "math.exp" | "std.math.exp" => Some("zz_math_exp"),
         "math.random" | "std.math.random" => Some("zz_math_random"),
         "math.is_nan" | "std.math.is_nan" => Some("zz_math_is_nan"),
         "math.is_inf" | "std.math.is_inf" => Some("zz_math_is_inf"),
