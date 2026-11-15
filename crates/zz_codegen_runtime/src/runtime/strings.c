@@ -359,6 +359,21 @@ zz_value zz_str_new_mut(size_t cap) {
     return v;
 }
 
+// Reset a mutable string builder to len=0 without freeing/reallocating,
+// so it can be reused across loop iterations. Saves the per-iteration
+// header slab alloc + heap buffer alloc that zz_str_new_mut pays each time.
+// Caller must ensure the builder is exclusively owned (refs==1, mutable==1).
+void zz_str_reset(zz_value *a) {
+    if (a->tag != ZZ_MUTABLE_STR || !a->s || a->s->refs != 1 || !a->s->mutable) return;
+    a->s->len = 0;
+    a->s->charlen = ZZ_STR_CHARLEN_UNKNOWN;
+    if (a->s->cap == 0) {
+        a->s->sso[0] = '\0';
+    } else {
+        a->s->heap[0] = '\0';
+    }
+}
+
 // In-place append of a zz_str to a mutable string. Never clones — the
 // mutable string is always exclusively owned (refs==1, mutable==1).
 void zz_str_append_mut_str(zz_value *a, zz_value b) {
