@@ -1009,6 +1009,13 @@ impl Lowerer {
         self.precompiled = v;
     }
 
+    /// Set unit mode: when true, emitted definitions/prototypes use external
+    /// linkage (no `static`) so functions can be called across translation
+    /// units. Used by `zz_stdlib_native` to build `libzz_stdlib.a`.
+    pub fn set_unit_mode(&mut self, v: bool) {
+        self.unit_mode.set(v);
+    }
+
     /// True when the program may run task threads: loop-top
     /// `zz_safepoint()` courtesy yields exist so sibling AOT task
     /// threads get scheduled on quantum expiry. Programs without
