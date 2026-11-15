@@ -5,5 +5,11 @@ edition.workspace = true
 license.workspace = true
 description = "Single declarative source of truth for ZZ stdlib signatures and AOT/FFI registration"
 
+# Explicit path: the repo-wide `.gitignore` ignores `**/bin/`, so the
+# generator must not live under `src/bin/` (Cargo's auto-discovery path).
+[[bin]]
+name = "regen"
+path = "src/regen.rs"
+
 [dependencies]
 zz_checker = { path = "../zz_checker" }
