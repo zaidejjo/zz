@@ -2658,11 +2658,11 @@ mod workspace_audit_tests {
         write(&root.join("math_utils/lib.zz"), LIB_SRC);
         write(
             &root.join("main_full.zz"),
-            "import math_utils.lib\nfunc main() {\n    println(lib.circle(1.0))\n    println(lib.pi)\n    p := lib.Point{ x: 1.0, y: 2.0 }\n    println(p.x)\n}\n",
+            "import math_utils.lib\nfunc main() {\n    println(lib.circle(1.0))\n    println(lib.pi)\n    p := lib.Point{ x: 1.0, y: 2.0 }\n    println(p.x)\n    println(p.y)\n}\n",
         );
         write(
             &root.join("main_sel.zz"),
-            "import math_utils.lib(pi, e)\nfunc main() {\n    println(pi)\n    println(e)\n}\n",
+            "import math_utils.lib(pi, e)\nfunc main() {\n    println(pi)\n    println(e)\n    p := lib.Point{ x: 1.0, y: 2.0 }\n    println(p.x)\n    println(p.y)\n}\n",
         );
         root
     }
