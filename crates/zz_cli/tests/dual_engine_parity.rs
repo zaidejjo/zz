@@ -1827,6 +1827,36 @@ parity_strict!(
     "property_gaps_test.zz"
 );
 parity_strict!(parity_stdlib_dec_gaps, "stdlib", "dec_gaps_test.zz");
+parity_strict!(
+    parity_c_runtime_b1_closures,
+    "stdlib",
+    "c_runtime_b1_closures.zz"
+);
+parity_strict!(
+    parity_c_runtime_b5_closure_cells,
+    "stdlib",
+    "c_runtime_b5_closure_cells.zz"
+);
+parity_strict!(
+    parity_c_runtime_b6_array_arena_migrate,
+    "stdlib",
+    "c_runtime_b6_array_arena_migrate.zz"
+);
+parity_strict!(
+    parity_c_runtime_b7_iter_filter,
+    "stdlib",
+    "c_runtime_b7_iter_filter.zz"
+);
+parity_strict!(
+    parity_c_runtime_b11_handoff_inline_nest,
+    "stdlib",
+    "c_runtime_b11_handoff_inline_nest.zz"
+);
+parity_strict!(
+    parity_c_runtime_b13_str_append,
+    "stdlib",
+    "c_runtime_b13_str_append.zz"
+);
 parity_strict!(parity_stdlib_map_gaps, "stdlib", "map_gaps_test.zz");
 parity_strict!(parity_stdlib_set_gaps, "stdlib", "set_gaps_test.zz");
 parity_strict!(

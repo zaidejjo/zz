@@ -184,12 +184,27 @@ static int json_parse_number(json_parser *p, zz_value *out) {
         snprintf(p->err, sizeof(p->err), "invalid number");
         return -1;
     }
+    // strtod scans until a non-digit/NUL, but the source buffer is not
+    // NUL-terminated: a number ending exactly at p->len would make strtod
+    // read past the input (B12). Copy the scanned digits to a NUL-terminated
+    // buffer first (stack for typical sizes, heap for very long numbers).
+    size_t n = p->pos - start;
+    char num[64];
+    char *numbuf = num;
+    if (n > sizeof(num) - 1) {
+        numbuf = (char *)malloc(n + 1);
+        if (!numbuf) { snprintf(p->err, sizeof(p->err), "out of memory"); return -1; }
+    }
+    memcpy(numbuf, p->s + start, n);
+    numbuf[n] = '\0';
     char *endptr;
-    double d = strtod(p->s + start, &endptr);
-    if (endptr != p->s + p->pos) {
+    double d = strtod(numbuf, &endptr);
+    if (endptr != numbuf + n) {
+        if (numbuf != num) free(numbuf);
         snprintf(p->err, sizeof(p->err), "invalid number");
         return -1;
     }
+    if (numbuf != num) free(numbuf);
     *out = (zz_value){ZZ_FLOAT, {.f = d}};
     return 0;
 }
@@ -693,7 +708,9 @@ static void json_pretty_print(SB *sb, zz_value v, int indent) {
         sb_str(sb, "\"", 1);
         break;
     case ZZ_ARRAY: {
-        if (v.arr->len == 0) { sb_str(sb, "[]", 2); break; }
+        // B15: default-constructed ZZ_ARRAY has a NULL payload; guard before
+        // dereferencing ->len (the compact json_serialize already guards).
+        if (!v.arr || v.arr->len == 0) { sb_str(sb, "[]", 2); break; }
         sb_str(sb, "[\n", 2);
         for (size_t i = 0; i < v.arr->len; i++) {
             for (int k = 0; k < indent + 2; k++) sb_str(sb, " ", 1);
@@ -706,7 +723,9 @@ static void json_pretty_print(SB *sb, zz_value v, int indent) {
         break;
     }
     case ZZ_DICT: {
-        if (v.dict->len == 0) { sb_str(sb, "{}", 2); break; }
+        // B15: default-constructed ZZ_DICT has a NULL payload; guard before
+        // dereferencing ->len (the compact json_serialize already guards).
+        if (!v.dict || v.dict->len == 0) { sb_str(sb, "{}", 2); break; }
         sb_str(sb, "{\n", 2);
         for (size_t i = 0; i < v.dict->len; i++) {
             zz_dict_entry *e = &v.dict->entries[i];

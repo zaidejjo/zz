@@ -244,9 +244,14 @@ pub fn merge_typed_programs(programs: Vec<TypedProgram>) -> TypedProgram {
     let mut try_converts: HashMap<Span, Option<String>> = HashMap::new();
     let mut module_origins: HashMap<String, String> = HashMap::new();
     let mut span: Span = Span::new(0, 0);
+    let mut symbol_map: HashMap<String, u32> = HashMap::new();
     for tp in programs {
         stmts.extend(tp.program.stmts);
         types.extend(tp.types);
+        // Merge symbol maps so `TypedProgram::type_at` can resolve function
+        // names to symbol IDs after the merge. Later programs take precedence
+        // on collisions (user program overrides stdlib).
+        symbol_map.extend(tp.symbol_map.iter().map(|(k, v)| (k.clone(), *v)));
         bindings.extend(tp.bindings);
         funcs.extend(tp.funcs);
         structs.extend(tp.structs);
@@ -277,7 +282,7 @@ pub fn merge_typed_programs(programs: Vec<TypedProgram>) -> TypedProgram {
         trait_impls,
         try_converts,
         module_origins,
-        symbol_map: HashMap::new(),
+        symbol_map,
     }
 }
 

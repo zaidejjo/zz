@@ -431,6 +431,7 @@ fn check_typed(
 ) -> (
     std::collections::HashMap<zz_checker::SpanKey, zz_checker::Type>,
     zz_frontend::ast::Program,
+    std::collections::HashMap<String, u32>, // symbol_map
 ) {
     use std::collections::HashMap;
     let parsed = zz_frontend::parse(src);
@@ -454,7 +455,7 @@ fn check_typed(
         "check errors: {:?}",
         result.errors
     );
-    (spanmap, parsed.program)
+    (spanmap, parsed.program, result.symbol_map)
 }
 
 fn int_sig(params: usize) -> zz_checker::FuncSig {
@@ -590,10 +591,11 @@ fn lower_typed_spanmap(
 ) -> zz_ir::Module {
     use std::collections::HashMap;
     use std::sync::Arc;
-    let (spanmap, program) = check_typed(src);
+    let (spanmap, program, symbol_map) = check_typed(src);
     let chunk = zz_runtime::vm::Compiler::compile_program_typed(
         &program,
         Arc::new(spanmap),
+        symbol_map,
         HashMap::new(),
         HashMap::new(),
         Arc::new(std::collections::HashSet::new()),

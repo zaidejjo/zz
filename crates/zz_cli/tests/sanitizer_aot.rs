@@ -169,6 +169,235 @@ func main() {
 // Loop-iteration snapshot (mirrors
 // tests/fixtures/regression/loop_iter_snapshot.zz): push / index-write /
 // rebind inside the body must not affect visited elements or trip count.
+// B1 regression: ZZ_NATIVE closures are refcounted; spawn/join in a loop
+// releases each closure rep exactly once (no leak, no use-after-free).
+const B1_CLOSURES: &str = r#"
+import std.task
+func main() {
+    i := 0
+    total := 0
+    while i < 400 {
+        h := task.spawn(|_| {
+            s := 0
+            for j in 0..10 {
+                s = s + j
+            }
+            s
+        })
+        total = total + task.join(h)
+        i = i + 1
+    }
+    println("b1_closures_ok={total}")
+}
+"#;
+
+// B3 regression: chan.send_batch must hand off to a registered green
+// waiter instead of stranding it (lost wakeup).
+const B3_SEND_BATCH: &str = r#"
+import std.task
+import std.chan
+func main() {
+    c := std.chan()
+    h := task.spawn(|_| {
+        v:int = std.chan.recv(c)
+        v
+    })
+    arr := [1, 2, 3, 4, 5]
+    std.chan.send_batch(c, arr)
+    val:int = task.join(h)
+    println("b3_send_batch_wakeup_ok={val}")
+}
+"#;
+
+// B5 regression: closure capture-cell allocation must never leave a NULL
+// cell that dispatch dereferences; heavy cell churn under ASan/UBSan.
+const B5_CLOSURE_CELLS: &str = r#"
+import std.task
+func main() {
+    i := 0
+    total := 0
+    while i < 400 {
+        n := i
+        h := task.spawn(|_| {
+            s := 0
+            for j in 0..n {
+                s = s + j
+            }
+            s
+        })
+        total = total + task.join(h)
+        i = i + 1
+    }
+    println("b5_closure_cells_ok={total}")
+}
+"#;
+
+// B15 regression: json_pretty_print must not dereference a NULL v.arr/v.dict
+// (default-constructed array/dict have NULL payloads).
+const B15_JSON_PRETTY_NULL: &str = r#"
+import std.json
+func main() {
+    ok := 1
+    a := json.pretty([]) ?? ""
+    d := json.pretty({}) ?? ""
+    n := json.pretty(42) ?? ""
+    s := json.pretty("hi") ?? ""
+    m := json.pretty({"x": [1, 2], "y": "z"}) ?? ""
+    if a == "" { ok = 0 }
+    if d == "" { ok = 0 }
+    if n == "" { ok = 0 }
+    if s == "" { ok = 0 }
+    if m == "" { ok = 0 }
+    if ok != 1 { println("b15_json_pretty_null=FAIL") }
+    else { println("b15_json_pretty_null_ok") }
+}
+"#;
+
+// B13 regression: zz_str_append_str/zz_str_append_lit release the old
+// buffer with the right ref discipline; shared accumulator exercises the
+// fresh-alloc + atomic-release path every iteration.
+const B13_STR_APPEND: &str = r#"
+func main() {
+    i := 0
+    s := ""
+    while i < 2000 {
+        t := s
+        s = s + "x"
+        i = i + 1
+    }
+    println("b13_str_append_mutable_ok={len(s)}")
+}
+"#;
+
+// B12 regression: json_parse_number must not let strtod read past the
+// input buffer; numbers ending exactly at EOF plus a long digit run.
+const B12_JSON_NUMBER_EDGE: &str = r#"
+import std.json
+func main() {
+    ok := 1
+    a := json.parse("123") ?? json.null()
+    b := json.parse("1.5e10") ?? json.null()
+    c := json.parse("-0.25") ?? json.null()
+    d := json.parse("12345678901234567890") ?? json.null()
+    if a == json.null() { ok = 0 }
+    if b == json.null() { ok = 0 }
+    if c == json.null() { ok = 0 }
+    if d == json.null() { ok = 0 }
+    if json.as_int(a) != 123 { ok = 0 }
+    if ok != 1 { println("b12_json_number_edge=FAIL") }
+    else { println("b12_json_number_edge_ok") }
+}
+"#;
+
+// B11 regression: zz_handoff_run_inline must restore the suspend verdict
+// only when inline nesting is balanced; two chained inline handoffs (depth 2).
+const B11_HANDOFF_INLINE_NEST: &str = r#"
+import std.task
+import std.chan
+func main() {
+    i := 0
+    total := 0
+    while i < 100 {
+        c1 := std.chan()
+        c2 := std.chan()
+        w2 := task.spawn(|_| {
+            v:int = std.chan.recv(c2)
+            v
+        })
+        w1 := task.spawn(|_| {
+            v:int = std.chan.recv(c1)
+            std.chan.send(c2, v + 1)
+        })
+        std.chan.send(c1, 5)
+        r:int = std.chan.recv(c2)
+        task.join(w1)
+        task.join(w2)
+        total = total + r
+        i = i + 1
+    }
+    println("b11_handoff_inline_nest_ok={total}")
+}
+"#;
+
+// B9 regression: zz_object_detach must decrement the struct refcount
+// atomically; concurrent field writes on a shared struct detach the header.
+const B9_OBJECT_DETACH: &str = r#"
+import std.task
+struct Shared { val: int }
+func main() {
+    i := 0
+    while i < 200 {
+        p := Shared{val: 0}
+        h1 := task.spawn(|_| { p.val = p.val + 1 })
+        h2 := task.spawn(|_| { p.val = p.val + 2 })
+        task.join(h1)
+        task.join(h2)
+        i = i + 1
+    }
+    println("b9_object_detach_race_ok")
+}
+"#;
+
+// B7 regression: zz_iter_filter must release the predicate's return value;
+// heap returns leak without it. Predicate returns heap arrays each call.
+const B7_ITER_FILTER: &str = r#"
+func main() {
+    i := 0
+    n := 0
+    while i < 400 {
+        a := ["alpha", "beta", "gamma", "delta"]
+        r := filter(a, |_| { true })
+        n = n + r.len()
+        i = i + 1
+    }
+    println("b7_iter_filter_ok={n}")
+}
+"#;
+
+// B6 regression: arena arrays migrated to heap (refs reset to 0) must be
+// freed with free(), not free()d as arena memory. Array migrate + drop churn.
+const B6_ARRAY_ARENA_MIGRATE: &str = r#"
+func main() {
+    i := 0
+    s := 0
+    while i < 300 {
+        a := []
+        j := 0
+        while j < 8 {
+            a = vec.push(a, j)
+            j = j + 1
+        }
+        s = s + a.len()
+        i = i + 1
+    }
+    println("b6_array_arena_migrate_ok={s}")
+}
+"#;
+
+// B4 regression: chan.recv_batch must not steal from a registered green
+// waiter; recv_batch lock-free path exercised each iteration.
+const B4_RECV_BATCH: &str = r#"
+import std.task
+import std.chan
+func main() {
+    c := std.chan()
+    ok := 1
+    i := 0
+    while i < 60 {
+        hw := task.spawn(|_| {
+            v:int = std.chan.recv(c)
+            v
+        })
+        std.chan.send(c, 3 + i)
+        v:int = task.join(hw)
+        if v != 3 + i { ok = 0 }
+        b := std.chan.recv_batch(c, 2)
+        i = i + 1
+    }
+    println("b4_recv_batch_waiter_ok={ok}")
+}
+"#;
+
 const LOOP_MUTATE: &str = r#"
 func main() {
     a := [10, 20, 30]
@@ -241,9 +470,25 @@ const CASES: &[(&str, &str)] = &[
 ];
 
 /// Cases only the instrumented HIR leg can run: the chunk backend has no
-/// `MakeVariant` yet (#508), so variant construction fails coverage there.
-/// HIR is the backend that owns the payload boxes (`zz_vbox`).
-const HIR_ONLY_CASES: &[(&str, &str)] = &[("variant_arc", VARIANT_ARC)];
+/// `MakeVariant` yet (#508), so variant construction fails coverage there,
+/// and no `spawnclosure` (closure spawn). HIR is the backend that owns the
+/// payload boxes (`zz_vbox`) and the M:N executor tasks, so these c_runtime
+/// regression cases run under HIR + sanitizers, which still exercises the
+/// shared embedded C runtime under ASan/UBSan.
+const HIR_ONLY_CASES: &[(&str, &str)] = &[
+    ("variant_arc", VARIANT_ARC),
+    ("b1_closures", B1_CLOSURES),
+    ("b3_send_batch", B3_SEND_BATCH),
+    ("b4_recv_batch", B4_RECV_BATCH),
+    ("b5_closure_cells", B5_CLOSURE_CELLS),
+    ("b6_array_arena_migrate", B6_ARRAY_ARENA_MIGRATE),
+    ("b7_iter_filter", B7_ITER_FILTER),
+    ("b9_object_detach", B9_OBJECT_DETACH),
+    ("b11_handoff_inline_nest", B11_HANDOFF_INLINE_NEST),
+    ("b12_json_number_edge", B12_JSON_NUMBER_EDGE),
+    ("b13_str_append", B13_STR_APPEND),
+    ("b15_json_pretty_null", B15_JSON_PRETTY_NULL),
+];
 
 // Variant payload boxes are reference counted (#507): one Option value
 // stored in several container slots owns several box references and must

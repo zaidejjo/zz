@@ -1,0 +1,15 @@
+// features: arrays, closures, for-loop, func-call, int-arith, locals, print
+// E2E: B7 — zz_iter_filter must release the predicate's return value `r`;
+// without B7 every heap return from the predicate leaks on every filter
+// invocation. Predicate returns heap arrays; run under ASan leak detection.
+func main() {
+    i := 0
+    n := 0
+    while i < 400 {
+        a := ["alpha", "beta", "gamma", "delta"]
+        r := filter(a, |_| { true })
+        n = n + r.len()
+        i = i + 1
+    }
+    println("b7_iter_filter_ok={n}")
+}

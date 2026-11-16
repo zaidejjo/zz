@@ -50,6 +50,7 @@ pub(super) fn run(src: &str) -> Result<Value, String> {
             if let Err(e) = interp.run_typed(
                 &zz_prog.program,
                 Arc::new(zz_prog.types.clone()),
+                HashMap::new(),
                 zz_prog.structs.clone(),
                 zz_prog.enums.clone(),
             ) {

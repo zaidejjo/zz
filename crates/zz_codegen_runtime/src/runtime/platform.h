@@ -174,6 +174,9 @@ ZZ_INLINE DWORD WINAPI zz_thrd_tramp(LPVOID p) {
     fn(arg);
     return 0;
 }
+// Verified: B14 no-op. `s` is freed on CreateThread failure; on success the
+// trampoline frees `s` after fn(arg) returns, and process exit reclaims it if
+// the thread never runs. No leak.
 ZZ_INLINE int zz_thrd_create(zz_thrd_t *t, void *(*fn)(void *), void *arg) {
     zz_thrd_start_t *s = (zz_thrd_start_t *)malloc(sizeof *s);
     if (!s) return -1;
