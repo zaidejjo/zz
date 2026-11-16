@@ -899,10 +899,10 @@ static inline void zz_release(zz_value *v) {
         break;
     case ZZ_TUPLE:
         // B8: release the inner array and free the malloc'd payload slot.
-        if (v.payload) {
-            zz_release(v.payload);
-            free(v.payload);
-            v.payload = NULL;
+        if (v->payload) {
+            zz_release(v->payload);
+            free(v->payload);
+            v->payload = NULL;
         }
         break;
     case ZZ_OBJECT:

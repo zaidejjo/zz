@@ -9,7 +9,7 @@ import std.task
 struct Shared { val: int }
 
 func main() {
-    var i := 0
+    i := 0
     while i < 200 {
         p := Shared{val: 0}
         // Two tasks share p's header; each field write detaches it.

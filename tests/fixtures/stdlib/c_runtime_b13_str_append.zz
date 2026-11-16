@@ -5,8 +5,8 @@
 // skipped. Re-share the accumulator each iteration so the fresh-alloc +
 // atomic-release path runs under ASan (no double-free/use-after-free).
 func main() {
-    var i := 0
-    var s := ""
+    i := 0
+    s := ""
     while i < 2000 {
         t := s          // share s (refs=2)
         s = s + "x"     // shared -> fresh alloc + atomic release of s's share

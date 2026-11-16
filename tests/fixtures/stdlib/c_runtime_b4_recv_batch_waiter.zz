@@ -9,8 +9,8 @@ import std.chan
 
 func main() {
     c := std.chan()
-    var ok := 1
-    var i := 0
+    ok := 1
+    i := 0
     while i < 100 {
         // Green recv waiter registered first on the empty channel.
         hw := task.spawn(|_| {

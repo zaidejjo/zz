@@ -5,8 +5,8 @@
 import std.iter
 
 func main() {
-    var i := 0
-    var n := 0
+    i := 0
+    n := 0
     while i < 400 {
         a := ["alpha", "beta", "gamma", "delta"]
         var r := std.iter.filter(a, |_| { [1] })

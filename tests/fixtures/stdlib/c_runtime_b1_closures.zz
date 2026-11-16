@@ -5,8 +5,8 @@
 import std.task
 
 func main() {
-    var i := 0
-    var total := 0
+    i := 0
+    total := 0
     while i < 500 {
         h := task.spawn(|_| {
             s := 0

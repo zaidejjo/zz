@@ -7,8 +7,8 @@
 import std.task
 
 func main() {
-    var i := 0
-    var total := 0
+    i := 0
+    total := 0
     while i < 200 {
         outer := task.spawn(|_| {
             inner := task.spawn(|_| {

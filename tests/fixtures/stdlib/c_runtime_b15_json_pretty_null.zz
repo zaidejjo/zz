@@ -6,12 +6,12 @@
 import std.json
 
 func main() {
-    var ok := 1
-    var a := json.pretty([]) ?? ""
-    var d := json.pretty({}) ?? ""
-    var n := json.pretty(42) ?? ""
-    var s := json.pretty("hi") ?? ""
-    var m := json.pretty({"x": [1, 2], "y": "z"}) ?? ""
+    ok := 1
+    a := json.pretty([]) ?? ""
+    d := json.pretty({}) ?? ""
+    n := json.pretty(42) ?? ""
+    s := json.pretty("hi") ?? ""
+    m := json.pretty({"x": [1, 2], "y": "z"}) ?? ""
     if a == "" { ok = 0 }
     if d == "" { ok = 0 }
     if n == "" { ok = 0 }

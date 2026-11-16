@@ -3,8 +3,8 @@
 // zz_vec_append) must be freed with free(), never free()d as arena memory.
 // Build, push (migrate), and drop arrays in a loop under ASan/UBSan.
 func main() {
-    var i := 0
-    var s := 0
+    i := 0
+    s := 0
     while i < 300 {
         a := []
         var j := 0

@@ -6,7 +6,7 @@
 import std.json
 
 func main() {
-    var ok := 1
+    ok := 1
     a := json.parse("123") ?? json.null()
     b := json.parse("1.5e10") ?? json.null()
     c := json.parse("-0.25") ?? json.null()
