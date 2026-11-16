@@ -1365,6 +1365,10 @@ e2e_error_test!(e2e_err_tuple_index_oob, "tuple_index_oob.zz");
 e2e_error_test!(e2e_err_tuple_index_dynamic, "tuple_index_dynamic.zz");
 e2e_error_test!(e2e_err_compound_type_mismatch, "compound_type_mismatch.zz");
 e2e_error_test!(e2e_err_compound_const, "compound_const.zz");
+e2e_error_test!(
+    e2e_err_array_literal_type_mismatch,
+    "array_literal_type_mismatch.zz"
+);
 e2e_error_test!(e2e_err_compound_chain, "compound_chain.zz");
 e2e_error_test!(
     e2e_err_generic_struct_mismatch,

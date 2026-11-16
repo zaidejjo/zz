@@ -1386,9 +1386,49 @@ fn array_type_mismatch_errors() {
 }
 
 #[test]
-fn array_union_member_accepted() {
+fn array_union_member_rejected() {
+    // A heterogeneous literal against a concrete element annotation must
+    // error, even though unification's "any union member matches" rule would
+    // otherwise let the concrete member slip through.
+    errors_contain("v: [int] = [1, \"a\"]", "type mismatch");
     let r = check_src("v: [int] = [1, \"a\"]");
+    assert!(
+        r.errors.iter().any(|e| e
+            .notes
+            .iter()
+            .any(|n| n.contains("does not fit expected element type `int`"))),
+        "expected element-fit note, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn array_heterogeneous_reassignment_rejected() {
+    let r = check_src("v: [int] = [1]\nv = [1, \"a\"]");
+    assert!(
+        r.errors.iter().any(|e| e.message.contains("type mismatch")),
+        "errors: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors.iter().any(|e| e
+            .notes
+            .iter()
+            .any(|n| n.contains("does not fit expected element type `int`"))),
+        "expected element-fit note, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn array_union_annotation_accepted() {
+    // A union annotation admits a heterogeneous literal.
+    let r = check_src("v: [int | str] = [1, \"a\"]");
     assert!(!has_errors(&r), "errors: {:?}", r.errors);
+    assert_eq!(
+        r.bindings["v"],
+        Type::Array(Box::new(Type::Union(vec![Type::Int, Type::Str])))
+    );
 }
 
 #[test]

@@ -1701,6 +1701,10 @@ parity_strict!(
     "concurrent_http_test.zz"
 );
 parity_strict_error!(parity_err_type_mismatch, "type_mismatch.zz");
+parity_strict_error!(
+    parity_err_array_literal_type_mismatch,
+    "array_literal_type_mismatch.zz"
+);
 parity_strict_error!(parity_err_alias_cycle, "alias_cycle.zz");
 parity_strict_error!(parity_err_alias_dup, "alias_dup.zz");
 parity_strict_error!(parity_err_alias_arity, "alias_arity.zz");
