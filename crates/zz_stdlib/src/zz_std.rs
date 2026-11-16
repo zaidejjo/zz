@@ -427,15 +427,7 @@ mod tests {
             math_prog.funcs.contains_key("math.max_arr"),
             "math.max_arr should be defined"
         );
-        // Float aggregation
-        assert!(
-            math_prog.funcs.contains_key("math.sum_f"),
-            "math.sum_f should be defined"
-        );
-        assert!(
-            math_prog.funcs.contains_key("math.product_f"),
-            "math.product_f should be defined"
-        );
+        // Float aggregation (generic sum/product now cover floats)
         assert!(
             math_prog.funcs.contains_key("math.mean_f"),
             "math.mean_f should be defined"

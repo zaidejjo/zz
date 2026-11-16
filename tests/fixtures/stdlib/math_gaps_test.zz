@@ -4,8 +4,14 @@ import std.math
 
 func main() {
     // ── Int aggregation ──
-    println("sum([1,2,3,4]): {math.sum([1, 2, 3, 4])}")
-    println("product([1,2,3,4]): {math.product([1, 2, 3, 4])}")
+    match math.sum([1, 2, 3, 4]) {
+        .some(v) => println("sum([1,2,3,4]): {v}")
+        .none => println("sum([1,2,3,4]): none")
+    }
+    match math.product([1, 2, 3, 4]) {
+        .some(v) => println("product([1,2,3,4]): {v}")
+        .none => println("product([1,2,3,4]): none")
+    }
     println("count([1,2,3,2,1], 2): {math.count([1, 2, 3, 2, 1], 2)}")
     // ── Scalar predicates ──
     println("is_even(4): {math.is_even(4)}")
@@ -26,9 +32,15 @@ func main() {
         .some(v) => println("max_arr([3,1,2]): {v}")
         .none => println("max_arr([3,1,2]): none")
     }
-    // ── Float aggregation ──
-    println("sum_f([1.5, 2.5, 3.0]): {math.sum_f([1.5, 2.5, 3.0])}")
-    println("product_f([1.5, 2.0]): {math.product_f([1.5, 2.0])}")
+    // ── Float aggregation (generic sum/product cover floats) ──
+    match math.sum([1.5, 2.5, 3.0]) {
+        .some(v) => println("sum_f([1.5, 2.5, 3.0]): {v}")
+        .none => println("sum_f([1.5, 2.5, 3.0]): none")
+    }
+    match math.product([1.5, 2.0]) {
+        .some(v) => println("product_f([1.5, 2.0]): {v}")
+        .none => println("product_f([1.5, 2.0]): none")
+    }
     match math.mean_f([1.0, 2.0, 3.0, 4.0, 5.0]) {
         .ok(v) => println("mean_f([1..5]): {v}")
         .err(e) => println("mean_f err: {e}")

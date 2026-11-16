@@ -79,23 +79,35 @@ func math.clamp<T: Ord>(v: T, lo: T, hi: T) -> T {
 
 // ── Int aggregation ──────────────────────────────────────────────────────────
 
-func math.sum(arr: [int]) -> int {
-    total := 0
-    for x in arr {
-        total = total + x
+func math.sum<T: Num>(arr: [T]) -> Option<T> {
+    if vec.len(arr) == 0 {
+        return .none
     }
-    return total
+    total := arr[0]
+    i := 1
+    n := vec.len(arr)
+    while i < n {
+        total = total + arr[i]
+        i = i + 1
+    }
+    return .some(total)
 }
 
-func math.product(arr: [int]) -> int {
-    total := 1
-    for x in arr {
-        total = total * x
+func math.product<T: Num>(arr: [T]) -> Option<T> {
+    if vec.len(arr) == 0 {
+        return .none
     }
-    return total
+    total := arr[0]
+    i := 1
+    n := vec.len(arr)
+    while i < n {
+        total = total * arr[i]
+        i = i + 1
+    }
+    return .some(total)
 }
 
-func math.count(arr: [int], target: int) -> int {
+func math.count<T: Eq>(arr: [T], target: T) -> int {
     n := 0
     for x in arr {
         if x == target {
@@ -175,29 +187,6 @@ func math.isqrt(n: int) -> Result<int, str> {
 // Module: std.math
 // File: stats.zz (part of std.math split, see crates/zz_stdlib/zz/math/)
 
-// ── Float aggregation (Kahan compensated summation) ──────────────────────────
-
-func math.sum_f(arr: [float]) -> float {
-    // Kahan summation: tracks compensation term to recover lost low-order bits.
-    sum := 0.0
-    comp := 0.0
-    for x in arr {
-        y := x - comp
-        t := sum + y
-        comp = (t - sum) - y
-        sum = t
-    }
-    return sum
-}
-
-func math.product_f(arr: [float]) -> float {
-    total := 1.0
-    for x in arr {
-        total = total * x
-    }
-    return total
-}
-
 // ── Generic array min / max (return Option for empty safety) ─────────────────
 
 func math.min_arr<T: Ord>(arr: [T]) -> Option<T> {
@@ -232,8 +221,10 @@ func math.mean_f(arr: [float]) -> Result<float, str> {
     if vec.len(arr) == 0 {
         return .err("mean: empty list")
     }
-    s := math.sum_f(arr)
-    return .ok(s / float(vec.len(arr)))
+    match math.sum(arr) {
+        .some(s) => return .ok(s / float(vec.len(arr)))
+        .none => return .err("mean: empty list")
+    }
 }
 
 func math.median_f(arr: [float]) -> Result<float, str> {
