@@ -1,4 +1,4 @@
-// features: arrays, closures, for-loop, func-call, int-arith, locals, print, std-iter
+// features: arrays, closures, for-loop, func-call, int-arith, locals, print
 // E2E: B7 — zz_iter_filter must release the predicate's return value `r`;
 // without B7 every heap return from the predicate leaks on every filter
 // invocation. Predicate returns heap arrays; run under ASan leak detection.

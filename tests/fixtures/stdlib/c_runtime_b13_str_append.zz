@@ -1,4 +1,4 @@
-// features: strings, for-loop, func-call, print, string-literal
+// features: string-ops, for-loop, func-call, print, string-literal
 // E2E: B13 — zz_str_append_str/zz_str_append_lit release the old buffer
 // with the right ref discipline: mutable direct-free (matches
 // zz_release_arc), shared immutable atomic last-owner, arena/interned

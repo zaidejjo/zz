@@ -1,4 +1,4 @@
-// features: func-call, print, std-json, arrays, dicts, strings, numbers
+// features: func-call, print, std-json, arrays, dicts, string-literal, int-arith
 // E2E: B15 — json_pretty_print must not dereference a NULL v.arr/v.dict
 // (default-constructed array/dict have NULL payloads). Pretty-print empty
 // and populated containers plus scalars; run under ASan to catch the NULL
