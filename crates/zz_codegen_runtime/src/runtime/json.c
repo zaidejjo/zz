@@ -184,12 +184,27 @@ static int json_parse_number(json_parser *p, zz_value *out) {
         snprintf(p->err, sizeof(p->err), "invalid number");
         return -1;
     }
+    // strtod scans until a non-digit/NUL, but the source buffer is not
+    // NUL-terminated: a number ending exactly at p->len would make strtod
+    // read past the input (B12). Copy the scanned digits to a NUL-terminated
+    // buffer first (stack for typical sizes, heap for very long numbers).
+    size_t n = p->pos - start;
+    char num[64];
+    char *numbuf = num;
+    if (n > sizeof(num) - 1) {
+        numbuf = (char *)malloc(n + 1);
+        if (!numbuf) { snprintf(p->err, sizeof(p->err), "out of memory"); return -1; }
+    }
+    memcpy(numbuf, p->s + start, n);
+    numbuf[n] = '\0';
     char *endptr;
-    double d = strtod(p->s + start, &endptr);
-    if (endptr != p->s + p->pos) {
+    double d = strtod(numbuf, &endptr);
+    if (endptr != numbuf + n) {
+        if (numbuf != num) free(numbuf);
         snprintf(p->err, sizeof(p->err), "invalid number");
         return -1;
     }
+    if (numbuf != num) free(numbuf);
     *out = (zz_value){ZZ_FLOAT, {.f = d}};
     return 0;
 }

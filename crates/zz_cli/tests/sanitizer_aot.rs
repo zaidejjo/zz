@@ -229,6 +229,26 @@ func main() {
 }
 "#;
 
+// B12 regression: json_parse_number must not let strtod read past the
+// input buffer; numbers ending exactly at EOF plus a long digit run.
+const B12_JSON_NUMBER_EDGE: &str = r#"
+import std.json
+func main() {
+    var ok := 1
+    a := json.parse("123") ?? json.null()
+    b := json.parse("1.5e10") ?? json.null()
+    c := json.parse("-0.25") ?? json.null()
+    d := json.parse("12345678901234567890") ?? json.null()
+    if a == json.null() { ok = 0 }
+    if b == json.null() { ok = 0 }
+    if c == json.null() { ok = 0 }
+    if d == json.null() { ok = 0 }
+    if json.as_int(a) != 123 { ok = 0 }
+    if ok != 1 { println("b12_json_number_edge=FAIL") }
+    else { println("b12_json_number_edge_ok") }
+}
+"#;
+
 // B11 regression: zz_handoff_run_inline must restore the suspend verdict
 // only when inline nesting is balanced; two chained inline handoffs (depth 2).
 const B11_HANDOFF_INLINE_NEST: &str = r#"
@@ -436,6 +456,7 @@ const CASES: &[(&str, &str)] = &[
     ("b9_object_detach", B9_OBJECT_DETACH),
     ("b10_closure_dup_storm", B10_CLOSURE_DUP_STORM),
     ("b11_handoff_inline_nest", B11_HANDOFF_INLINE_NEST),
+    ("b12_json_number_edge", B12_JSON_NUMBER_EDGE),
 ];
 
 /// Cases only the instrumented HIR leg can run: the chunk backend has no
