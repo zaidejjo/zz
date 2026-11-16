@@ -660,9 +660,18 @@ zz_value zz_closure_make_ex_typed(
                 rep->env[i] = cells[i];
             } else {
                 rep->env[i] = malloc(sizeof(zz_value));
-                if (rep->env[i]) {
-                    *(zz_value *)rep->env[i] = zz_unit();
+                if (!rep->env[i]) {
+                    // B5: fail closed. Free the replacement cells already
+                    // allocated for earlier NULL sources, drop the rep, and
+                    // return the null-payload OOM closure (same convention
+                    // as zz_closure_make). Never leave rep with a NULL cell
+                    // that dispatch would dereference.
+                    for (size_t j = 0; j < i; j++)
+                        if (!cells[j]) free(rep->env[j]);
+                    free(rep);
+                    return zz_unit();
                 }
+                *(zz_value *)rep->env[i] = zz_unit();
             }
         }
     } else {

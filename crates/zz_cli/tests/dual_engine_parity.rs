@@ -1832,6 +1832,11 @@ parity_strict!(
     "stdlib",
     "c_runtime_b1_closures.zz"
 );
+parity_strict!(
+    parity_c_runtime_b5_closure_cells,
+    "stdlib",
+    "c_runtime_b5_closure_cells.zz"
+);
 parity_strict!(parity_stdlib_map_gaps, "stdlib", "map_gaps_test.zz");
 parity_strict!(parity_stdlib_set_gaps, "stdlib", "set_gaps_test.zz");
 parity_strict!(

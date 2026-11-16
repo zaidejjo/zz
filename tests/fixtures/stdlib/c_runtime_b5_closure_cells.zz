@@ -1,0 +1,23 @@
+// features: closures, for-loop, func-call, int-arith, locals, print, std-task
+// E2E: B5 — closure capture-cell allocation must never leave a NULL cell
+// that dispatch dereferences. Heavy closure/capture churn; run under ASan
+// and UBSan to catch the NULL-cell segfault and any cell teardown defect.
+import std.task
+
+func main() {
+    var i := 0
+    var total := 0
+    while i < 400 {
+        n := i
+        h := task.spawn(|_| {
+            s := 0
+            for j in 0..n {
+                s = s + j
+            }
+            s
+        })
+        total = total + task.join(h)
+        i = i + 1
+    }
+    println("b5_closure_cells_ok={total}")
+}

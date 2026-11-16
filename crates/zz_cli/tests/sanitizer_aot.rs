@@ -206,6 +206,29 @@ func main() {
 }
 "#;
 
+// B5 regression: closure capture-cell allocation must never leave a NULL
+// cell that dispatch dereferences; heavy cell churn under ASan/UBSan.
+const B5_CLOSURE_CELLS: &str = r#"
+import std.task
+func main() {
+    var i := 0
+    var total := 0
+    while i < 400 {
+        n := i
+        h := task.spawn(|_| {
+            s := 0
+            for j in 0..n {
+                s = s + j
+            }
+            s
+        })
+        total = total + task.join(h)
+        i = i + 1
+    }
+    println("b5_closure_cells_ok={total}")
+}
+"#;
+
 // B4 regression: chan.recv_batch must not steal from a registered green
 // waiter; recv_batch lock-free path exercised each iteration.
 const B4_RECV_BATCH: &str = r#"
@@ -299,6 +322,7 @@ const CASES: &[(&str, &str)] = &[
     ("b1_closures", B1_CLOSURES),
     ("b3_send_batch", B3_SEND_BATCH),
     ("b4_recv_batch", B4_RECV_BATCH),
+    ("b5_closure_cells", B5_CLOSURE_CELLS),
 ];
 
 /// Cases only the instrumented HIR leg can run: the chunk backend has no
