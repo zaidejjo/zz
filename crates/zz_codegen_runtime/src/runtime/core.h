@@ -812,6 +812,11 @@ static inline void zz_retain(zz_value *v) {
             else __atomic_add_fetch(&v->range->refs, 1, __ATOMIC_RELAXED);
         }
         break;
+    case ZZ_TUPLE:
+        // B8: tuple payload is a malloc'd slot — retain the inner array so
+        // the copy shares ownership of the payload contents.
+        if (v->payload) zz_retain(v->payload);
+        break;
     case ZZ_OBJECT:
         zz_retain_object(v->obj);
         break;
@@ -890,6 +895,14 @@ static inline void zz_release(zz_value *v) {
                 ? (--v->range->refs == 0)
                 : (__atomic_sub_fetch(&v->range->refs, 1, __ATOMIC_ACQ_REL) == 0);
             if (last) free(v->range);
+        }
+        break;
+    case ZZ_TUPLE:
+        // B8: release the inner array and free the malloc'd payload slot.
+        if (v.payload) {
+            zz_release(v.payload);
+            free(v.payload);
+            v.payload = NULL;
         }
         break;
     case ZZ_OBJECT:
@@ -1056,6 +1069,17 @@ static inline zz_value zz_clone(zz_value v) {
             else __atomic_add_fetch(&v.range->refs, 1, __ATOMIC_RELAXED);
         }
         break;
+    case ZZ_TUPLE: {
+        // B8: deep-clone the malloc'd payload slot so the copy does not
+        // share it with the source (which would leak on release). On OOM
+        // fall through and return v unchanged (shared, previous behavior).
+        zz_value *slot = (zz_value *)malloc(sizeof(zz_value));
+        if (slot) {
+            *slot = zz_clone(*v.payload);
+            v.payload = slot;
+        }
+        break;
+    }
     case ZZ_OPTION_SOME:
     case ZZ_RESULT_OK:
     case ZZ_RESULT_ERR:
