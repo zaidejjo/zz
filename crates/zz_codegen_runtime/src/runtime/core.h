@@ -1225,6 +1225,8 @@ zz_value zz_math_inf(zz_value unused, int *err);
 zz_value zz_math_nan(zz_value unused, int *err);
 // PNSA: math.isqrt/math.mean/math.median/math.dot_product/math.magnitude/math.matrix_mul moved to pure-Zz.
 // C twins removed; symbols resolved from libzz_stdlib.a in AOT.
+zz_value zz_math_rand_range(zz_value min, zz_value max, int *err);
+zz_value zz_time_now_ms(zz_value unused, int *err);
 zz_value zz_time_sleep_ms(zz_value ms, int *err);
 
 // ---- type casts ---------------------------------------------------------
