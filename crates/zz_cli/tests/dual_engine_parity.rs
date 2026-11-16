@@ -1852,6 +1852,11 @@ parity_strict!(
     "stdlib",
     "c_runtime_b10_closure_dup_storm.zz"
 );
+parity_strict!(
+    parity_c_runtime_b11_handoff_inline_nest,
+    "stdlib",
+    "c_runtime_b11_handoff_inline_nest.zz"
+);
 parity_strict!(parity_stdlib_map_gaps, "stdlib", "map_gaps_test.zz");
 parity_strict!(parity_stdlib_set_gaps, "stdlib", "set_gaps_test.zz");
 parity_strict!(

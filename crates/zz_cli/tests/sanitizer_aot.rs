@@ -229,6 +229,33 @@ func main() {
 }
 "#;
 
+// B11 regression: zz_handoff_run_inline must restore the suspend verdict
+// only when inline nesting is balanced; two chained inline handoffs (depth 2).
+const B11_HANDOFF_INLINE_NEST: &str = r#"
+import std.task
+import std.chan
+func main() {
+    var i := 0
+    var total := 0
+    while i < 100 {
+        c1 := std.chan()
+        c2 := std.chan()
+        w2 := task.spawn(|_| { std.chan.recv(c2) })
+        w1 := task.spawn(|_| {
+            var v := std.chan.recv(c1)
+            std.chan.send(c2, v + 1)
+        })
+        std.chan.send(c1, 5)
+        var r := std.chan.recv(c2)
+        task.join(w1)
+        task.join(w2)
+        total = total + r
+        i = i + 1
+    }
+    println("b11_handoff_inline_nest_ok={total}")
+}
+"#;
+
 // B10 regression: zz_value_dup must not memoize a null-payload OOM
 // closure; nested spawn dups closures at multiple levels.
 const B10_CLOSURE_DUP_STORM: &str = r#"
@@ -408,6 +435,7 @@ const CASES: &[(&str, &str)] = &[
     ("b7_iter_filter", B7_ITER_FILTER),
     ("b9_object_detach", B9_OBJECT_DETACH),
     ("b10_closure_dup_storm", B10_CLOSURE_DUP_STORM),
+    ("b11_handoff_inline_nest", B11_HANDOFF_INLINE_NEST),
 ];
 
 /// Cases only the instrumented HIR leg can run: the chunk backend has no

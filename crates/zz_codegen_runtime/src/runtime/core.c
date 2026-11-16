@@ -2994,10 +2994,20 @@ static int zz_handoff_run_inline(zz_task_t task) {
     // suspended to the trampoline, which would drop its completion (lost
     // join result + leaked frame/rep). The sender's own verdict is
     // meaningless mid-`send` — only the trampoline reads it.
+    int saved_depth = zz_handoff_depth;
     int saved_verdict = zz_suspend_verdict;
+    zz_handoff_depth++;
     zz_run_task(task);
-    zz_suspend_verdict = saved_verdict;
     zz_handoff_depth--;
+    // Restore the verdict only if the nesting is balanced: a nested inline
+    // run between the save and this restore clobbers the thread-local
+    // verdict, and an unconditional restore here would reinstall a stale
+    // verdict=1, making the trampoline drop the sender's completion (lost
+    // join result + leaked frame/rep). Stack-disciplined restore guards
+    // that (B11).
+    if (zz_handoff_depth == saved_depth) {
+        zz_suspend_verdict = saved_verdict;
+    }
     return 1;
 }
 
