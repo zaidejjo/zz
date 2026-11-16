@@ -1827,6 +1827,11 @@ parity_strict!(
     "property_gaps_test.zz"
 );
 parity_strict!(parity_stdlib_dec_gaps, "stdlib", "dec_gaps_test.zz");
+parity_strict!(
+    parity_c_runtime_b1_closures,
+    "stdlib",
+    "c_runtime_b1_closures.zz"
+);
 parity_strict!(parity_stdlib_map_gaps, "stdlib", "map_gaps_test.zz");
 parity_strict!(parity_stdlib_set_gaps, "stdlib", "set_gaps_test.zz");
 parity_strict!(

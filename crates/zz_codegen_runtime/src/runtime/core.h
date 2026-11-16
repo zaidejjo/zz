@@ -781,6 +781,10 @@ static inline void zz_vbox_retain(zz_value *payload) {
 // backend-agnostic and close the connection on the last release.
 void zz_db_retain_handle(void *db);
 void zz_db_release_handle(void *db);
+// B1: closure rep refcounting (defined in core.c). `zz_closure_release`
+// nulls the slot on last drop so callers never keep a dangling payload.
+void zz_closure_retain(zz_value v);
+void zz_closure_release(zz_value *v);
 
 static inline void zz_retain(zz_value *v) {
     switch (v->tag) {
@@ -819,6 +823,10 @@ static inline void zz_retain(zz_value *v) {
         break;
     case ZZ_DB:
         if (v->db) zz_db_retain_handle(v->db);
+        break;
+    case ZZ_NATIVE:
+        // B1: closures are refcounted reps — bump on retain.
+        if (v->payload) zz_closure_retain(*v);
         break;
     default:
         break;
@@ -904,6 +912,11 @@ static inline void zz_release(zz_value *v) {
         // `struct zz_file` is incomplete in this header.
         zz_release_file_handle(v);
         break;
+    case ZZ_NATIVE:
+        // B1: closures are refcounted reps — drop; teardown+free at 0,
+        // slot nulled so no dangling payload remains.
+        zz_closure_release(v);
+        break;
     case ZZ_WEAK:
         if (v->weak) {
             int last = zz_arc_relaxed_enabled()
@@ -951,6 +964,7 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
         dst->tag == ZZ_ARRAY || dst->tag == ZZ_BYTES ||
         dst->tag == ZZ_DICT || dst->tag == ZZ_FUNC || dst->tag == ZZ_OBJECT ||
         dst->tag == ZZ_RANGE || dst->tag == ZZ_DB || dst->tag == ZZ_FILE ||
+        dst->tag == ZZ_NATIVE ||
         dst->tag == ZZ_OPTION_SOME || dst->tag == ZZ_RESULT_OK ||
         dst->tag == ZZ_RESULT_ERR || dst->tag == ZZ_JSON ||
         dst->tag == ZZ_WEAK) {
@@ -981,6 +995,7 @@ static inline void zz_assign(zz_value *dst, zz_value src) {
     // refs==0 skipped by zz_retain) are no-ops under zz_retain.
     if (!healed && (src.tag == ZZ_ARRAY || src.tag == ZZ_BYTES || src.tag == ZZ_DICT || src.tag == ZZ_FUNC ||
         src.tag == ZZ_OBJECT || src.tag == ZZ_RANGE || src.tag == ZZ_DB ||
+        src.tag == ZZ_NATIVE ||
         src.tag == ZZ_OPTION_SOME || src.tag == ZZ_RESULT_OK ||
         src.tag == ZZ_RESULT_ERR || src.tag == ZZ_JSON ||
         src.tag == ZZ_WEAK || src.tag == ZZ_STR)) {
@@ -1055,6 +1070,10 @@ static inline zz_value zz_clone(zz_value v) {
             if (zz_arc_relaxed_enabled()) v.weak->weak += 1;
             else __atomic_add_fetch(&v.weak->weak, 1, __ATOMIC_RELAXED);
         }
+        break;
+    case ZZ_NATIVE:
+        // B1: closures are refcounted reps — bump on clone (shared owner).
+        if (v.payload) zz_closure_retain(v);
         break;
     default:
         break;

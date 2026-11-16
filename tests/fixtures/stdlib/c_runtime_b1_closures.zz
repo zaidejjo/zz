@@ -1,0 +1,22 @@
+// features: closures, for-loop, func-call, int-arith, locals, print, std-task
+// E2E: B1 — ZZ_NATIVE closures are refcounted. Spawn + join many tasks in a
+// loop; each task's closure rep must be released exactly once (no leak, no
+// use-after-free). Without B1 every closure rep leaked on task drop.
+import std.task
+
+func main() {
+    var i := 0
+    var total := 0
+    while i < 500 {
+        h := task.spawn(|_| {
+            s := 0
+            for j in 0..10 {
+                s = s + j
+            }
+            s
+        })
+        total = total + task.join(h)
+        i = i + 1
+    }
+    println("b1_closures_ok={total}")
+}

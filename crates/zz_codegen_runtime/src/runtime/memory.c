@@ -364,6 +364,10 @@ void zz_release_arc(zz_value *v) {
     case ZZ_FUNC:
         zz_release_func(v->fn);
         break;
+    case ZZ_NATIVE:
+        // B1: closures are refcounted reps — drop; teardown+free at 0.
+        zz_closure_release(v);
+        break;
     case ZZ_RANGE:
         if (v->range) {
             if (__atomic_sub_fetch(&v->range->refs, 1, __ATOMIC_ACQ_REL) == 0) {
@@ -424,6 +428,10 @@ zz_value zz_clone_arc(zz_value v) {
         break;
     case ZZ_FUNC:
         zz_retain_func(v.fn);
+        break;
+    case ZZ_NATIVE:
+        // B1: closures are refcounted reps — bump on clone.
+        if (v.payload) zz_closure_retain(v);
         break;
     case ZZ_RANGE:
         if (v.range) {

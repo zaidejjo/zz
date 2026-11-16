@@ -169,6 +169,28 @@ func main() {
 // Loop-iteration snapshot (mirrors
 // tests/fixtures/regression/loop_iter_snapshot.zz): push / index-write /
 // rebind inside the body must not affect visited elements or trip count.
+// B1 regression: ZZ_NATIVE closures are refcounted; spawn/join in a loop
+// releases each closure rep exactly once (no leak, no use-after-free).
+const B1_CLOSURES: &str = r#"
+import std.task
+func main() {
+    var i := 0
+    var total := 0
+    while i < 400 {
+        h := task.spawn(|_| {
+            s := 0
+            for j in 0..10 {
+                s = s + j
+            }
+            s
+        })
+        total = total + task.join(h)
+        i = i + 1
+    }
+    println("b1_closures_ok={total}")
+}
+"#;
+
 const LOOP_MUTATE: &str = r#"
 func main() {
     a := [10, 20, 30]
@@ -238,6 +260,7 @@ const CASES: &[(&str, &str)] = &[
     ("str_concat", STR_CONCAT),
     ("tak", TAK),
     ("loop_mutate", LOOP_MUTATE),
+    ("b1_closures", B1_CLOSURES),
 ];
 
 /// Cases only the instrumented HIR leg can run: the chunk backend has no

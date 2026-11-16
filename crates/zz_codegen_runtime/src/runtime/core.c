@@ -474,6 +474,7 @@ void zz_green_resumed(void) {
 typedef struct {
     zz_dispatch_fn fn;
     size_t nenv;
+    size_t refs;          // B1: closure refcount; creation = one owner share
     // Per-cell kind (`ZZ_CELL_VALUE`/`ZZ_CELL_RAW`) and byte size for RAW
     // cells. NULL when nenv == 0. Owned by the rep (copied at creation).
     unsigned char *cell_kind;
@@ -543,6 +544,7 @@ zz_value zz_closure_make(zz_dispatch_fn f) {
     if (!rep) return zz_unit();
     rep->fn = f;
     rep->nenv = 0;
+    rep->refs = 1;
     rep->cell_kind = NULL;
     rep->cell_size = NULL;
     rep->is_green = 0;
@@ -628,6 +630,7 @@ zz_value zz_closure_make_ex_typed(
     if (!rep) return zz_unit();
     rep->fn = f;
     rep->nenv = nenv;
+    rep->refs = 1;
     rep->is_green = 0;
     rep->embedded = 1;
     rep->inline_vals = 0;
@@ -713,9 +716,10 @@ zz_value zz_closure_make_ex_typed_green(
 // Pooled inline blocks rejoin the rep-block pool instead of freeing
 // (forward: pool block lives below with the dup path).
 static void zz_rep_block_checkin(void *block, size_t size);
-static void zz_closure_release_rep(zz_value v) {
-    if (v.tag != ZZ_NATIVE || !v.payload) return;
-    zz_closure_rep *rep = (zz_closure_rep *)(void *)v.payload;
+// B1: release the rep's cells and the block itself. Caller must have
+// already established this is the last owner (refs reached 0). Nulls nothing
+// — value-param callers (executor) do not use the value after release.
+static void zz_closure_rep_teardown(zz_closure_rep *rep) {
     for (size_t i = 0; i < rep->nenv; i++) {
         if (!rep->env[i]) continue;
         unsigned char kind = ZZ_CELL_VALUE;
@@ -740,6 +744,36 @@ static void zz_closure_release_rep(zz_value v) {
         }
         free(rep);
     }
+}
+
+// B1: drop one owner share of a closure rep; teardown + free at refs==0.
+// NULL payload (OOM closure) is a no-op. Used by the executor's direct
+// release sites (each task owns exactly one share, dropped once).
+static void zz_closure_release_rep(zz_value v) {
+    if (v.tag != ZZ_NATIVE || !v.payload) return;
+    zz_closure_rep *rep = (zz_closure_rep *)(void *)v.payload;
+    if (__atomic_sub_fetch(&rep->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
+    zz_closure_rep_teardown(rep);
+}
+
+// B1: pointer-taking release that also nulls the slot, for use by the
+// refcount switches (core.h) and anywhere the caller must not keep a
+// dangling payload after the last share is dropped.
+void zz_closure_release(zz_value *v) {
+    if (v->tag != ZZ_NATIVE || !v->payload) return;
+    zz_closure_rep *rep = (zz_closure_rep *)(void *)v->payload;
+    // Only the last owner teardowns; non-last owners keep their valid share.
+    if (__atomic_sub_fetch(&rep->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
+    zz_closure_rep_teardown(rep);
+    v->payload = NULL;
+}
+
+// B1: bump the rep refcount (acquire one owner share). NULL payload is a
+// no-op.
+void zz_closure_retain(zz_value v) {
+    if (v.tag != ZZ_NATIVE || !v.payload) return;
+    zz_closure_rep *rep = (zz_closure_rep *)(void *)v.payload;
+    __atomic_add_fetch(&rep->refs, 1, __ATOMIC_RELAXED);
 }
 
 void **zz_closure_env(zz_value v, size_t *nenv) {
