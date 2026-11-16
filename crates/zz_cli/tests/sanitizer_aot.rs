@@ -229,6 +229,31 @@ func main() {
 }
 "#;
 
+// B10 regression: zz_value_dup must not memoize a null-payload OOM
+// closure; nested spawn dups closures at multiple levels.
+const B10_CLOSURE_DUP_STORM: &str = r#"
+import std.task
+func main() {
+    var i := 0
+    var total := 0
+    while i < 200 {
+        outer := task.spawn(|_| {
+            inner := task.spawn(|_| {
+                s := 0
+                for j in 0..5 {
+                    s = s + j
+                }
+                s
+            })
+            task.join(inner)
+        })
+        total = total + task.join(outer)
+        i = i + 1
+    }
+    println("b10_closure_dup_storm_ok={total}")
+}
+"#;
+
 // B9 regression: zz_object_detach must decrement the struct refcount
 // atomically; concurrent field writes on a shared struct detach the header.
 const B9_OBJECT_DETACH: &str = r#"
@@ -382,6 +407,7 @@ const CASES: &[(&str, &str)] = &[
     ("b6_array_arena_migrate", B6_ARRAY_ARENA_MIGRATE),
     ("b7_iter_filter", B7_ITER_FILTER),
     ("b9_object_detach", B9_OBJECT_DETACH),
+    ("b10_closure_dup_storm", B10_CLOSURE_DUP_STORM),
 ];
 
 /// Cases only the instrumented HIR leg can run: the chunk backend has no

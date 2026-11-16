@@ -1814,9 +1814,10 @@ static zz_value zz_value_dup_inner(zz_value v, int *err, zz_dup_memo *m) {
         }
         zz_value out = zz_closure_dup_build(fn, env, sk, ss, nenv,
                                             is_green, err, m);
-        // `zz_closure_dup_build` degrades to the shared source on OOM;
-        // only memoize real copies (the source never aliases a copy).
-        if (out.payload != v.payload) {
+        // `zz_closure_dup_build` degrades to a null-payload closure on OOM;
+        // only memoize real, non-null copies so a later dup of the source is
+        // not handed the broken memoized copy (silent data loss).
+        if (out.payload != NULL && out.payload != v.payload) {
             if (v.payload) zz_dup_memo_put(m, v.payload, out);
         }
         return out;

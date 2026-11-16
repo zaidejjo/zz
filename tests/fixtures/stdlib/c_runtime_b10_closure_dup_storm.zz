@@ -1,0 +1,27 @@
+// features: closures, for-loop, func-call, int-arith, locals, print, std-task
+// E2E: B10 — zz_value_dup must not memoize a null-payload OOM closure; a
+// later dup of the source would be handed the broken copy (silent data
+// loss). Nested spawn dups closures at multiple levels; run under ASan/UBSan
+// to catch any dup/teardown crash. OOM itself is not injectable from .zz,
+// so this is a crash/no-regression smoke fixture.
+import std.task
+
+func main() {
+    var i := 0
+    var total := 0
+    while i < 200 {
+        outer := task.spawn(|_| {
+            inner := task.spawn(|_| {
+                s := 0
+                for j in 0..5 {
+                    s = s + j
+                }
+                s
+            })
+            task.join(inner)
+        })
+        total = total + task.join(outer)
+        i = i + 1
+    }
+    println("b10_closure_dup_storm_ok={total}")
+}
