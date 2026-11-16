@@ -177,7 +177,10 @@ pub(crate) fn check_filled_slots(
                     None
                 };
                 let at = checker.check_closure(params, ret_ty.as_ref(), body, *span, ep);
-                if let Err(e) = checker.unifier.unify(&at, &ps[i]) {
+                if let Err(mut e) = checker.unifier.unify(&at, &ps[i]) {
+                    if let Some(name) = param_names.get(i) {
+                        e.context = Some(name.clone());
+                    }
                     checker.report_mismatch_with_notes(
                         e,
                         arg.span(),
@@ -205,7 +208,10 @@ pub(crate) fn check_filled_slots(
                     }
                     _ => at,
                 };
-                if let Err(e) = checker.unifier.unify(&at, &expected) {
+                if let Err(mut e) = checker.unifier.unify(&at, &expected) {
+                    if let Some(name) = param_names.get(i) {
+                        e.context = Some(name.clone());
+                    }
                     checker.report_mismatch_with_notes(
                         e,
                         arg.span(),

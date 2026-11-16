@@ -24,6 +24,11 @@ pub struct UnifyError {
     pub left: String,
     pub right: String,
     pub message: String,
+    /// Optional description of what the expected type is for — parameter
+    /// name, field name, return type, etc. When set, diagnostics render
+    /// "expected `{right}` for `{context}`, found `{left}`" instead of the
+    /// generic "expected `{right}`, found `{left}`".
+    pub context: Option<String>,
     /// Span where the expected (left) type was declared/inferred, if known.
     pub left_span: Option<Span>,
     /// Span where the found (right) type was declared/inferred, if known.
@@ -286,6 +291,7 @@ impl Unifier {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn unify_inner(
         &mut self,
         a: &Type,
@@ -301,6 +307,7 @@ impl Unifier {
                         left: format!("var{x}"),
                         right: b.to_string(),
                         message: "infinite type".into(),
+                        context: None,
                         left_span: None,
                         right_span: None,
                         left_ty: Box::new(a.clone()),
@@ -316,6 +323,7 @@ impl Unifier {
                         left: a.to_string(),
                         right: format!("var{y}"),
                         message: "infinite type".into(),
+                        context: None,
                         left_span: None,
                         right_span: None,
                         left_ty: Box::new(a.clone()),
@@ -356,6 +364,7 @@ impl Unifier {
                         left: format!("var{x}"),
                         right: t.to_string(),
                         message: "infinite type".into(),
+                        context: None,
                         left_span: None,
                         right_span: None,
                         left_ty: Box::new(a.clone()),
@@ -388,6 +397,7 @@ impl Unifier {
                         left: a.to_string(),
                         right: b.to_string(),
                         message: "type argument arity mismatch".into(),
+                        context: None,
                         left_span: None,
                         right_span: None,
                         left_ty: Box::new(Type::Enum(a.clone(), aa.clone())),
@@ -405,6 +415,7 @@ impl Unifier {
                         left: a.to_string(),
                         right: b.to_string(),
                         message: "type argument arity mismatch".into(),
+                        context: None,
                         left_span: None,
                         right_span: None,
                         left_ty: Box::new(Type::Struct(a.clone(), aa.clone())),
@@ -447,6 +458,7 @@ impl Unifier {
                                 .join(", ")
                         ),
                         message: "tuple arity mismatch".into(),
+                        context: None,
                         left_span: None,
                         right_span: None,
                         left_ty: Box::new(a.clone()),
@@ -481,6 +493,7 @@ impl Unifier {
                                 .join(", ")
                         ),
                         message: "function arity mismatch".into(),
+                        context: None,
                         left_span: None,
                         right_span: None,
                         left_ty: Box::new(a.clone()),
@@ -508,6 +521,7 @@ impl Unifier {
                         left: a.to_string(),
                         right: b.to_string(),
                         message: "pointer mutability mismatch (`*const` vs `*mut`)".into(),
+                        context: None,
                         left_span: None,
                         right_span: None,
                         left_ty: Box::new(a.clone()),
@@ -538,6 +552,7 @@ impl Unifier {
                 left: a.to_string(),
                 right: b.to_string(),
                 message: "type mismatch".into(),
+                context: None,
                 left_span: None,
                 right_span: None,
                 left_ty: Box::new(a.clone()),
@@ -548,6 +563,7 @@ impl Unifier {
 
     /// Unify `a` and `b`, returning an error if they cannot be unified.
     /// Uses a throwaway journal — bindings are not journaled for rollback.
+    #[allow(clippy::result_large_err)]
     pub fn unify(&mut self, a: &Type, b: &Type) -> Result<(), UnifyError> {
         let mut journal: Vec<(u32, Option<Type>)> = Vec::new();
         self.unify_inner(a, b, &mut journal)
@@ -555,6 +571,7 @@ impl Unifier {
 
     /// Unify `a` and `b`, recording bindings in `journal` so they can be
     /// rolled back if a later unification fails.
+    #[allow(clippy::result_large_err)]
     pub fn unify_with_journal(
         &mut self,
         a: &Type,
@@ -567,6 +584,7 @@ impl Unifier {
     /// Unify `t` against a union's members, committing the first success.
     /// Failed member attempts roll back to the entry mark, so only the
     /// winning attempt's bindings survive.
+    #[allow(clippy::result_large_err)]
     fn unify_against_union(
         &mut self,
         t: &Type,
@@ -592,6 +610,7 @@ impl Unifier {
                 .collect::<Vec<_>>()
                 .join(" | "),
             message: "type mismatch".into(),
+            context: None,
             left_span: None,
             right_span: None,
             left_ty: Box::new(t.clone()),

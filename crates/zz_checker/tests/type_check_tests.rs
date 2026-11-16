@@ -5420,6 +5420,49 @@ fn pub_struct_field_silent() {
     );
 }
 
+/// Structured expected/found context in diagnostics (#5).
+#[test]
+fn mismatch_includes_parameter_context() {
+    // A type mismatch at a call site should name the parameter in the
+    // main message, not just in a note.
+    let r = check_src("func f(x: int) -> int { return x }\nx := f(\"hi\")\n");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("expected `int` for `x`")),
+        "expected parameter context in mismatch message, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn mismatch_includes_variable_context() {
+    // A type mismatch in a variable declaration should name the variable
+    // in the main message.
+    let r = check_src("x: int = \"hi\"\n");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("expected `int` for `variable `")),
+        "expected variable context in mismatch message, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn mismatch_without_context_still_works() {
+    // A mismatch with no context still renders the generic message.
+    let r = check_src("x := 1 + \"hi\"\n");
+    assert!(
+        r.errors.iter().any(|e| e
+            .message
+            .contains("type mismatch: expected `int`, found `str`")
+            || e.message.contains("cannot apply `+` to `int` and `str`")),
+        "expected generic mismatch message, got: {:?}",
+        r.errors
+    );
+}
+
 /// Partial results on broken code: type errors don't prevent the checker
 /// from producing typed AST info for valid parts (span_types), and parse
 /// errors are combined with type errors in CheckResult.errors.

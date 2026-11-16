@@ -99,7 +99,7 @@ fn check_stmt_decl(
     if let Some(ann) = ty {
         let gens = checker.current_generics.clone();
         let at = checker.ast_to_type(ann, &gens);
-        if let Err(e) = checker.unifier.unify(&vt, &at) {
+        if let Err(mut e) = checker.unifier.unify(&vt, &at) {
             // Sherlock: point at the fix direction. Skip the
             // note while the value type is still uninferred
             // (`?0` helps nobody).
@@ -110,14 +110,14 @@ fn check_stmt_decl(
                     "to fix: change the annotation to `{vt_r}` or convert the value"
                 ));
             }
+            e.context = Some(format!("variable `{}`", name.name));
             checker.report_mismatch_with_notes(e, ann.span, notes);
         }
     }
-    let rt = checker.unifier.resolve_deep(&vt);
-    // Variant types (Option/Result/Enum) may carry unconstrained payload vars
-    // that get resolved by later usage (e.g. `.unwrap_or(7)` on `.none`).
-    // Defer those to span type resolution; other unconstrained vars still
-    // error here (e.g. closure param types in `f := |x| x`).
+    let rt = checker.unifier.resolve_deep(&vt); // Variant types (Option/Result/Enum) may carry unconstrained payload vars
+                                                // that get resolved by later usage (e.g. `.unwrap_or(7)` on `.none`).
+                                                // Defer those to span type resolution; other unconstrained vars still
+                                                // error here (e.g. closure param types in `f := |x| x`).
     if matches!(rt, Type::Option(_) | Type::Result(_, _) | Type::Enum(_, _)) {
         checker.define_var_at(&name.name, rt.clone(), name.span, is_const);
         if checker.env.len() == 1 {

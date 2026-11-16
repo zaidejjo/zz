@@ -687,17 +687,34 @@ impl Checker {
         self.report_mismatch_with_notes(err, span, Vec::new());
     }
 
+    /// Like `report_mismatch` but with a context string describing what the
+    /// expected type is for (e.g. parameter name, field name, return type).
+    /// Renders as "expected `{right}` for `{context}`, found `{left}`".
+    pub fn report_mismatch_with_context(
+        &mut self,
+        mut err: UnifyError,
+        span: Span,
+        context: String,
+    ) {
+        err.context = Some(context);
+        self.report_mismatch_with_notes(err, span, Vec::new());
+    }
+
     /// `report_mismatch` plus caller-supplied Sherlock notes. Call sites
     /// that know the expected shape (parameter names, annotations) use
     /// this so hints stay typed — never string-parsed.
     pub fn report_mismatch_with_notes(&mut self, err: UnifyError, span: Span, notes: Vec<String>) {
         let msg = match err.message.as_str() {
-            "type mismatch" => {
-                format!(
+            "type mismatch" => match &err.context {
+                Some(c) => format!(
+                    "type mismatch: expected `{}` for `{c}`, found `{}`",
+                    err.right, err.left
+                ),
+                None => format!(
                     "type mismatch: expected `{}`, found `{}`",
                     err.right, err.left
-                )
-            }
+                ),
+            },
             "function arity mismatch" => "function arity mismatch".to_string(),
             "tuple arity mismatch" => "tuple arity mismatch".to_string(),
             other => other.to_string(),
