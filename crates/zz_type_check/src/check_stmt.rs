@@ -124,7 +124,7 @@ fn check_stmt_decl(
                 let at_r = checker.unifier.resolve_deep(&at);
                 let mut notes = Vec::new();
                 notes.push(format!(
-                    "array element `{member}` does not fit expected element type `{expected}`"
+                    "element `{member}` does not fit expected type `{expected}`"
                 ));
                 notes.push(format!(
                     "to fix: change the annotation to `{vt_r}` or convert the value"
@@ -473,7 +473,7 @@ fn check_stmt_assign(checker: &mut Checker, target: &Expr, value: &Expr, span: S
                 let tt_r = checker.unifier.resolve_deep(&tt);
                 let mut notes = Vec::new();
                 notes.push(format!(
-                    "array element `{member}` does not fit expected element type `{expected}`"
+                    "element `{member}` does not fit expected type `{expected}`"
                 ));
                 let e = UnifyError {
                     message: "type mismatch".into(),
