@@ -361,6 +361,8 @@ impl InferOps for Checker {
                         // Type aliases erase: uses resolve to the target type.
                         // Unconverted program-local aliases convert on demand
                         // inside `expand_alias` (order-independent).
+                        // Mark the alias as used for dead-alias detection.
+                        self.used_aliases.insert(name.clone());
                         let cname = self.canonical_alias_name(name);
                         // A bare name resolved through a selective import
                         // counts as using that import (mirrors value
@@ -591,6 +593,16 @@ impl InferOps for Checker {
         if let Some(qualified) = self.import_aliases.get(name) {
             if self.enums.contains_key(qualified) {
                 return qualified.clone();
+            }
+        }
+        if self.enums.contains_key(name) {
+            return name.to_string();
+        }
+        // Module-qualified enum: bare "E" in module "test_dead" has key
+        // "test_dead.E". Search enum keys for a last-segment match.
+        for key in self.enums.keys() {
+            if key.split('.').next_back() == Some(name) {
+                return key.clone();
             }
         }
         name.to_string()

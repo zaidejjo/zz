@@ -950,6 +950,11 @@ impl TypeCheckOps for Checker {
                         if canonical_head.contains('.') {
                             self.used_names.insert(canonical_head.clone());
                         }
+                        // Mark the variant as used for dead-variant detection.
+                        if !variant.is_empty() {
+                            self.used_enum_variants
+                                .insert((canonical_head.clone(), variant.clone()));
+                        }
                         // Generic parameters stay inference variables
                         // (defaulted like `Option` when never constrained).
                         let (gen_vars, _) = self.fresh_enum_vars(&canonical_head);
@@ -3238,6 +3243,9 @@ impl TypeCheckOps for Checker {
     ) -> Option<(Pattern, Type)> {
         match self.enum_variant_payload(ename, vname, span) {
             Some(Some(pty)) => {
+                // Mark variant as used for dead-variant detection.
+                self.used_enum_variants
+                    .insert((ename.to_string(), vname.to_string()));
                 // Substitute the scrutinee's arguments for
                 // the enum's parameters (`Box<int>` + `T`
                 // → `int`), exactly like generic struct
@@ -3257,6 +3265,9 @@ impl TypeCheckOps for Checker {
                 }
             }
             Some(None) => {
+                // Mark variant as used for dead-variant detection.
+                self.used_enum_variants
+                    .insert((ename.to_string(), vname.to_string()));
                 if arg.is_some() {
                     self.errors.push(error_at(
                         format!(

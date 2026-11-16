@@ -4955,7 +4955,7 @@ fn missing_field_chain_does_not_cascade() {
     let all_field: Vec<&str> = r
         .errors
         .iter()
-        .filter(|e| e.message.contains("field"))
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Error && e.message.contains("field"))
         .map(|e| e.message.as_str())
         .collect();
     assert_eq!(
@@ -5256,6 +5256,166 @@ fn unused_private_function_used_as_value_silent() {
             .iter()
             .any(|e| e.message.contains("unused private function `cb`")),
         "function used as value should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+/// Unused type / variant / field detection (#4 of the checker improvement plan).
+#[test]
+fn unused_type_alias_warns() {
+    // An unused type alias is dead code.
+    let r = check_src("type Foo = int\nx := 1\n");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unused type alias `Foo`")),
+        "expected unused alias warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn used_type_alias_silent() {
+    // A referenced alias is not dead code.
+    let r = check_src("type Foo = int\nx: Foo = 1\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused type alias")),
+        "used alias should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn pub_type_alias_silent() {
+    // A pub alias may be used externally.
+    let r = check_src("pub type Foo = int\nx := 1\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused type alias `Foo`")),
+        "pub alias should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn underscore_type_alias_silent() {
+    // A `_`-prefixed alias is silenced.
+    let r = check_src("type _Foo = int\nx := 1\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused type alias `_Foo`")),
+        "underscore alias should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_enum_variant_warns() {
+    // An unused variant is dead code.
+    let r = check_src("enum E { A, B }\nx := E.A\n");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unused enum variant `E.B`")),
+        "expected unused variant warning, got: {:?}",
+        r.errors
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused enum variant `E.A`")),
+        "used variant should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn used_enum_variant_pattern_silent() {
+    // A variant matched in a pattern is used.
+    let r = check_src("enum E { A, B }\nmatch E.A { .A => 1, .B => 2 }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused enum variant")),
+        "used variants should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn underscore_enum_variant_silent() {
+    // A `_`-prefixed variant is silenced.
+    let r = check_src("enum E { A, _B }\nx := E.A\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused enum variant `_B`")),
+        "underscore variant should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_struct_field_warns() {
+    // An unused field is dead code.
+    let r = check_src(
+        "struct S { x: int, y: int }\ns := S{ x: 1, y: 2 }\nif s.x == 1 { 1 } else { 0 }\n",
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unused struct field `S.y`")),
+        "expected unused field warning, got: {:?}",
+        r.errors
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused struct field `S.x`")),
+        "used field should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn used_struct_field_silent() {
+    // A read field is not dead code.
+    let r = check_src("struct S { x: int }\ns := S{ x: 1 }\nif s.x == 1 { 1 } else { 0 }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused struct field")),
+        "used field should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn underscore_struct_field_silent() {
+    // A `_`-prefixed field is silenced.
+    let r = check_src("struct S { x: int, _y: int }\ns := S{ x: 1 }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused struct field `S._y`")),
+        "underscore field should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn pub_struct_field_silent() {
+    // A pub struct's fields may be used externally.
+    let r = check_src("pub struct S { x: int }\ns := S{ x: 1 }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused struct field `S.x`")),
+        "pub struct field should not warn, got: {:?}",
         r.errors
     );
 }

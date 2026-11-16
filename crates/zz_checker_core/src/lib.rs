@@ -471,6 +471,15 @@ pub struct Checker {
     /// for the current depth before falling back to the scope walk, so a
     /// narrowed type is visible only inside the scope that introduced it.
     pub narrowing: Vec<std::collections::HashMap<String, Type>>,
+    /// Used enum variants: `(enum_name, variant_name)` pairs that are
+    /// constructed or pattern-matched. Used to detect dead variants.
+    pub used_enum_variants: std::collections::HashSet<(String, String)>,
+    /// Used struct fields: `(struct_name, field_name)` pairs that are
+    /// read via field access. Used to detect dead fields.
+    pub used_struct_fields: std::collections::HashSet<(String, String)>,
+    /// Used type aliases: names resolved in type positions. Used to
+    /// detect dead aliases.
+    pub used_aliases: std::collections::HashSet<String>,
     /// Shadow cache: innermost binding per name → (scope depth, type).
     /// Makes variable lookup O(1) amortized instead of O(depth). Entries are
     /// inserted on `define` and evicted for the popped depth on `pop_scope`;
@@ -564,6 +573,9 @@ impl Checker {
             func_interner: Interner::new(),
             narrowing: vec![std::collections::HashMap::new()],
             symbol_map: std::collections::HashMap::new(),
+            used_enum_variants: std::collections::HashSet::new(),
+            used_struct_fields: std::collections::HashSet::new(),
+            used_aliases: std::collections::HashSet::new(),
             scope_cache: std::collections::HashMap::new(),
             names_at_depth: vec![Vec::new()],
             link_libs: Vec::new(),

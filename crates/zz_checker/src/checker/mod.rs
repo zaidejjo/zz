@@ -1014,6 +1014,78 @@ fn check_program_impl(
         );
     }
 
+    // Emit unused type alias warnings. A type alias that is never referenced
+    // is dead code. Only check aliases defined in the current program —
+    // stdlib-seeded aliases may legitimately not appear in `used_names`.
+    // Skip pub aliases (cross-module users) and `_`-prefixed names.
+    for name in checker.aliases.keys() {
+        if checker.pub_names.contains(name.as_str())
+            || name.starts_with('_')
+            || checker.used_aliases.contains(name.as_str())
+        {
+            continue;
+        }
+        checker.errors.push(
+            zz_diag_core::warning(format!(
+                "unused type alias `{name}`, consider prefixing with `_{name}` or removing it"
+            ))
+            .with_note("type alias is never referenced"),
+        );
+    }
+
+    // Emit unused enum variant warnings. A variant that is never
+    // constructed or pattern-matched is dead code. Only check enums
+    // defined in the current program — pub enums may be used externally.
+    // Skip `_`-prefixed variant names.
+    for (ename, esig) in &checker.enums {
+        if checker.pub_names.contains(ename.as_str()) {
+            continue;
+        }
+        for (vname, _) in &esig.variants {
+            if vname.starts_with('_')
+                || checker
+                    .used_enum_variants
+                    .contains(&(ename.to_string(), vname.to_string()))
+            {
+                continue;
+            }
+            checker.errors.push(
+                zz_diag_core::warning(
+                    format!(
+                        "unused enum variant `{ename}.{vname}`, consider prefixing with `_{vname}` or removing it"
+                    ),
+                )
+                .with_note("variant is never constructed or pattern-matched"),
+            );
+        }
+    }
+
+    // Emit unused struct field warnings. A field that is never read is
+    // dead code. Only check structs defined in the current program — pub
+    // structs may be used externally. Skip `_`-prefixed field names.
+    for (sname, ssig) in &checker.structs {
+        if checker.pub_names.contains(sname.as_str()) {
+            continue;
+        }
+        for (fname, _) in &ssig.fields {
+            if fname.starts_with('_')
+                || checker
+                    .used_struct_fields
+                    .contains(&(sname.to_string(), fname.to_string()))
+            {
+                continue;
+            }
+            checker.errors.push(
+                zz_diag_core::warning(
+                    format!(
+                        "unused struct field `{sname}.{fname}`, consider prefixing with `_{fname}` or removing it"
+                    ),
+                )
+                .with_note("field is never read"),
+            );
+        }
+    }
+
     // Build pub-only maps for cross-module export. Signature types are
     // deep-resolved so inferred returns (e.g. `ping()` with no annotation
     // unifies its ret var to `unit` during body checking) export as
