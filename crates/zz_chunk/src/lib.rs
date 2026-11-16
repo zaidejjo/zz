@@ -112,11 +112,13 @@ pub fn supported(op: &Op) -> bool {
             | Op::IndexOp
             | Op::StoreIndexOp
             | Op::StoreIndexTake { .. }
+            | Op::VecPushMethod { .. }
             | Op::MakeRange
             | Op::MakeFunc { .. }
             | Op::Call { .. }
             | Op::CallPath { .. }
             | Op::CallNative { .. }
+            | Op::Concat(_)
     )
 }
 
@@ -4114,6 +4116,12 @@ impl<'a> Emitter<'a> {
                         "    st[sp++] = zz_object_new({}, NULL, 0);\n",
                         c_str(&joined)
                     ));
+                } else if let Some(c_lit) = zz_lower::math_const_c_literal(&joined) {
+                    // `std.math.*` constants (e.g. `math.INF`, `math.PI`) that
+                    // appear as `LoadPath` in the unified IR but have no
+                    // env/global binding in the chunk module. Emitted as a
+                    // `zz_float(...)` literal, mirroring the HIR backend.
+                    out.push_str(&format!("    st[sp++] = {c_lit};\n"));
                 } else {
                     return Err(ChunkError::op(&format!("dotted path read `{joined}`")));
                 }
@@ -4308,6 +4316,22 @@ impl<'a> Emitter<'a> {
                 } else {
                     out.push_str(&format!(
                         "    {{ zz_value _b = st[--sp]; zz_value _a = st[--sp]; st[sp++] = zz_binop({c}, _a, _b); zz_release(&_a); zz_release(&_b); }}\n"
+                    ));
+                }
+            }
+            Op::Concat(n) => {
+                // Pop `n` values, concatenate their Display forms
+                // (option-unwrapping, matching the VM's `to_display_string`),
+                // push the resulting string. Values are popped last-first;
+                // build right-to-left so the result is first-first. Each
+                // input is released after it is stringified (`zz_str_cast`
+                // reads but does not release its argument).
+                if *n == 0 {
+                    out.push_str("    st[sp++] = zz_str_new(\"\", 0);\n");
+                } else {
+                    out.push_str(&format!(
+                        "    {{ zz_value _cv = st[--sp]; zz_value _cacc = zz_str_cast(_cv, &(int){{0}}); zz_release(&_cv); for (int _ci = 1; _ci < {}; _ci++) {{ zz_value _cv2 = st[--sp]; zz_value _cs = zz_str_cast(_cv2, &(int){{0}}); zz_release(&_cv2); _cacc = zz_binop_cat(_cs, _cacc); }} st[sp++] = _cacc; }}\n",
+                        n
                     ));
                 }
             }
@@ -4747,6 +4771,39 @@ impl<'a> Emitter<'a> {
                     ctrap("index out of bounds")
                 ));
                 out.push_str("    }\n");
+            }
+            Op::VecPushMethod {
+                home_slot,
+                home_var,
+                ..
+            } => {
+                // Fused `home.push(elem)` statement: pop `elem`, take the home
+                // (frame slot or env/global cell), append in place when uniquely
+                // owned (`zz_vec_push_take`, copy-on-write fallback otherwise),
+                // write back. `method` names the method (`push`); arrays take
+                // the fast path.
+                let base = match (home_slot, home_var) {
+                    (Some(s), None) => format!("st[{s}]"),
+                    (None, Some(id)) => {
+                        let name = self.str(*id).to_string();
+                        let cid = self
+                            .env_cell(&name)
+                            .cloned()
+                            .or_else(|| self.globals.get(&name).cloned());
+                        match cid {
+                            Some(cid) => cid,
+                            None => {
+                                return Err(ChunkError::op(&format!(
+                                    "vecpushmethod to a runtime binding `{name}`"
+                                )))
+                            }
+                        }
+                    }
+                    _ => return Err(ChunkError::op("vecpushmethod without a home")),
+                };
+                out.push_str(&format!(
+                    "    {{ zz_value _e = st[--sp]; zz_value _t = {base}; {base} = zz_unit(); int _pe = 0; _t = zz_vec_push_take(_t, _e, &_pe); if (_pe) {{}}; {base} = _t; }}\n"
+                ));
             }
             Op::MakeRange => {
                 // Stack holds [start, end]; step is always 1 here.
