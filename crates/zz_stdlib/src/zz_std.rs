@@ -14,7 +14,13 @@ use zz_hir::TypedProgram;
 
 /// Embedded pure-ZZ stdlib source files.
 const STR_MOD_ZZ: &str = include_str!("../zz/str/mod.zz");
-const MATH_MOD_ZZ: &str = include_str!("../zz/math/mod.zz");
+const MATH_SCALAR_ZZ: &str = include_str!("../zz/math/scalar.zz");
+const MATH_INT_ZZ: &str = include_str!("../zz/math/int.zz");
+const MATH_STATS_ZZ: &str = include_str!("../zz/math/stats.zz");
+const MATH_LINALG_ZZ: &str = include_str!("../zz/math/linalg.zz");
+const MATH_ROUNDING_ZZ: &str = include_str!("../zz/math/rounding.zz");
+const MATH_LOG_ZZ: &str = include_str!("../zz/math/log.zz");
+const MATH_TRIG_ZZ: &str = include_str!("../zz/math/trig.zz");
 const VEC_ZZ: &str = include_str!("../zz/collections/vec.zz");
 const JSON_MOD_ZZ: &str = include_str!("../zz/json/mod.zz");
 const REGEXP_MOD_ZZ: &str = include_str!("../zz/regexp/mod.zz");
@@ -38,7 +44,13 @@ const PROPERTY_MOD_ZZ: &str = include_str!("../zz/property/mod.zz");
 /// discovers the same set from disk so the precompiled archive stays in sync.
 pub const ZZ_SOURCES: &[(&str, &str)] = &[
     ("std:str.mod.zz", STR_MOD_ZZ),
-    ("std:math.mod.zz", MATH_MOD_ZZ),
+    ("std:math.scalar.zz", MATH_SCALAR_ZZ),
+    ("std:math.int.zz", MATH_INT_ZZ),
+    ("std:math.stats.zz", MATH_STATS_ZZ),
+    ("std:math.linalg.zz", MATH_LINALG_ZZ),
+    ("std:math.rounding.zz", MATH_ROUNDING_ZZ),
+    ("std:math.log.zz", MATH_LOG_ZZ),
+    ("std:math.trig.zz", MATH_TRIG_ZZ),
     ("std:collections.vec.zz", VEC_ZZ),
     ("std:json.mod.zz", JSON_MOD_ZZ),
     ("std:regexp.mod.zz", REGEXP_MOD_ZZ),
@@ -59,39 +71,17 @@ pub const ZZ_SOURCES: &[(&str, &str)] = &[
 static COMPILED: OnceLock<Vec<Result<TypedProgram, String>>> = OnceLock::new();
 
 /// Per-program lazy slots: scoped runs compile only the programs in the
-/// import closure instead of all fifteen (each `compile_one` is
+/// import closure instead of all modules (each `compile_one` is
 /// independent — same global seeds, no cross-program state). Full-access
 /// paths (`zz_stdlib_programs`, codegen) still compile everything once.
 ///
 /// Each slot holds a `Result` so a compile error in one embedded
 /// stdlib module is reported as a diagnostic instead of panicking the
 /// process.
-const fn new_slot() -> OnceLock<Result<TypedProgram, String>> {
-    OnceLock::new()
-}
-static SLOTS: [OnceLock<Result<TypedProgram, String>>; 16] = [
-    new_slot(),
-    new_slot(),
-    new_slot(),
-    new_slot(),
-    new_slot(),
-    new_slot(),
-    new_slot(),
-    new_slot(),
-    new_slot(),
-    new_slot(),
-    new_slot(),
-    new_slot(),
-    new_slot(),
-    new_slot(),
-    new_slot(),
-    new_slot(),
-];
-
-const _: () = assert!(
-    ZZ_SOURCES.len() == 16,
-    "SLOTS must cover every embedded stdlib source"
-);
+///
+/// The vector is lazily sized to `ZZ_SOURCES.len()` so the number of
+/// embedded modules can change without editing this declaration.
+static SLOTS: OnceLock<Vec<OnceLock<Result<TypedProgram, String>>>> = OnceLock::new();
 
 /// Compile (once) and borrow one embedded program by `ZZ_SOURCES` index.
 ///
@@ -99,7 +89,12 @@ const _: () = assert!(
 /// surfaced as a diagnostic instead of panicking the process.
 fn program_at(idx: usize) -> &'static Result<TypedProgram, String> {
     let (name, source) = ZZ_SOURCES[idx];
-    SLOTS[idx].get_or_init(|| {
+    let slots = SLOTS.get_or_init(|| {
+        (0..ZZ_SOURCES.len())
+            .map(|_| OnceLock::new())
+            .collect::<Vec<_>>()
+    });
+    slots[idx].get_or_init(|| {
         compile_one(
             name,
             source,
@@ -204,21 +199,27 @@ pub fn zz_stdlib_program_count() -> usize {
 /// table misses (over-inclusion is safe, under-inclusion breaks scoped runs).
 const PROGRAM_DEPS: &[&[usize]] = &[
     &[],  // 0 str/mod.zz
-    &[],  // 1 math/mod.zz
-    &[],  // 2 collections/vec.zz
-    &[],  // 3 json/mod.zz
-    &[],  // 4 regexp/mod.zz
-    &[],  // 5 time/mod.zz
-    &[],  // 6 args/mod.zz
-    &[],  // 7 colors/mod.zz
-    &[],  // 8 path/mod.zz
-    &[],  // 9 http/mod.zz
-    &[],  // 10 collections/map.zz
-    &[],  // 11 collections/set.zz
-    &[],  // 12 dec/mod.zz
-    &[],  // 13 bytes/mod.zz
-    &[3], // 14 csv/mod.zz (csv.to_json via json.parse_or_null)
-    &[],  // 15 property/mod.zz (natives + builtins only)
+    &[],  // 1 math/scalar.zz
+    &[],  // 2 math/int.zz
+    &[2], // 3 math/stats.zz (mean_f calls math.sum in int.zz)
+    &[6], // 4 math/linalg.zz (magnitude calls math.sqrt in log.zz)
+    &[],  // 5 math/rounding.zz
+    &[],  // 6 math/log.zz
+    &[6], // 7 math/trig.zz (asin calls math.sqrt in log.zz)
+    &[],  // 8 collections/vec.zz
+    &[],  // 9 json/mod.zz
+    &[],  // 10 regexp/mod.zz
+    &[],  // 11 time/mod.zz
+    &[],  // 12 args/mod.zz
+    &[],  // 13 colors/mod.zz
+    &[],  // 14 path/mod.zz
+    &[],  // 15 http/mod.zz
+    &[],  // 16 collections/map.zz
+    &[],  // 17 collections/set.zz
+    &[],  // 18 dec/mod.zz
+    &[],  // 19 bytes/mod.zz
+    &[9], // 20 csv/mod.zz (csv.to_json via json.parse_or_null)
+    &[],  // 21 property/mod.zz (natives + builtins only)
 ];
 
 /// Loader modules each program serves, by `ZZ_SOURCES` index. Used by
@@ -230,21 +231,27 @@ const PROGRAM_DEPS: &[&[usize]] = &[
 /// namespace is served and every served name is a real loader module.
 const PROGRAM_MODULES: &[&[&str]] = &[
     &["str"],          // 0 str/mod.zz
-    &["math"],         // 1 math/mod.zz
-    &["vec"],          // 2 collections/vec.zz
-    &["json"],         // 3 json/mod.zz
-    &["regexp"],       // 4 regexp/mod.zz
-    &["time"],         // 5 time/mod.zz
-    &["args"],         // 6 args/mod.zz
-    &["colors"],       // 7 colors/mod.zz
-    &["path"],         // 8 path/mod.zz
-    &["http"],         // 9 http/mod.zz
-    &["map"],          // 10 collections/map.zz
-    &["set"],          // 11 collections/set.zz
-    &["dec"],          // 12 dec/mod.zz
-    &["bytes", "str"], // 13 bytes/mod.zz (also defines str builders)
-    &["csv"],          // 14 csv/mod.zz
-    &["property"],     // 15 property/mod.zz
+    &["math"],         // 1 math/scalar.zz
+    &["math"],         // 2 math/int.zz
+    &["math"],         // 3 math/stats.zz
+    &["math"],         // 4 math/linalg.zz
+    &["math"],         // 5 math/rounding.zz
+    &["math"],         // 6 math/log.zz
+    &["math"],         // 7 math/trig.zz
+    &["vec"],          // 8 collections/vec.zz
+    &["json"],         // 9 json/mod.zz
+    &["regexp"],       // 10 regexp/mod.zz
+    &["time"],         // 11 time/mod.zz
+    &["args"],         // 12 args/mod.zz
+    &["colors"],       // 13 colors/mod.zz
+    &["path"],         // 14 path/mod.zz
+    &["http"],         // 15 http/mod.zz
+    &["map"],          // 16 collections/map.zz
+    &["set"],          // 17 collections/set.zz
+    &["dec"],          // 18 dec/mod.zz
+    &["bytes", "str"], // 19 bytes/mod.zz (also defines str builders)
+    &["csv"],          // 20 csv/mod.zz
+    &["property"],     // 21 property/mod.zz
 ];
 
 /// Dotted short names one program declares (`ns.name`), test oracle for
@@ -345,7 +352,12 @@ mod tests {
         // json, regexp, time, args, colors, path, http, map, set, dec,
         // bytes, csv, property). TOML lives as an external package (~/Projects/toml),
         // not in the stdlib.
-        assert_eq!(programs.len(), 16, "expected 16 pure-ZZ stdlib modules");
+        assert_eq!(
+            programs.len(),
+            ZZ_SOURCES.len(),
+            "expected {} pure-ZZ stdlib modules",
+            ZZ_SOURCES.len()
+        );
         // Each module should compile and have a non-empty types map.
         for (i, tp) in programs.iter().enumerate() {
             let tp = tp.as_ref().unwrap_or_else(|e| {
@@ -393,86 +405,138 @@ mod tests {
     #[test]
     fn pure_zz_math_has_expected_functions() {
         let programs = zz_stdlib_programs();
-        let math_prog = programs[1].as_ref().unwrap_or_else(|e| {
-            panic!("math module failed to compile: {e}");
-        }); // math/mod.zz
+        // math is split across 7 programs: scalar/int/stats/linalg/rounding/log/trig.
+        let math_progs: Vec<&TypedProgram> = (1..=7)
+            .map(|i| {
+                programs[i].as_ref().unwrap_or_else(|e| {
+                    panic!("math module {i} failed to compile: {e}");
+                })
+            })
+            .collect();
+        let has = |prog: &TypedProgram, name: &str| prog.funcs.contains_key(name);
+
+        // scalar.zz (index 1)
+        let scalar = math_progs[0];
+        assert!(has(scalar, "math.abs"), "math.abs should be defined");
+        assert!(has(scalar, "math.signum"), "math.signum should be defined");
         assert!(
-            math_prog.funcs.contains_key("math.sum"),
-            "math.sum should be defined"
-        );
-        assert!(
-            math_prog.funcs.contains_key("math.product"),
-            "math.product should be defined"
-        );
-        assert!(
-            math_prog.funcs.contains_key("math.count"),
-            "math.count should be defined"
-        );
-        assert!(
-            math_prog.funcs.contains_key("math.min"),
-            "math.min should be defined"
-        );
-        assert!(
-            math_prog.funcs.contains_key("math.max"),
-            "math.max should be defined"
-        );
-        assert!(
-            math_prog.funcs.contains_key("math.is_even"),
+            has(scalar, "math.is_even"),
             "math.is_even should be defined"
         );
+        assert!(has(scalar, "math.is_odd"), "math.is_odd should be defined");
+        assert!(has(scalar, "math.min"), "math.min should be defined");
+        assert!(has(scalar, "math.max"), "math.max should be defined");
+        assert!(has(scalar, "math.clamp"), "math.clamp should be defined");
+
+        // int.zz (index 2)
+        let int_prog = math_progs[1];
+        assert!(has(int_prog, "math.sum"), "math.sum should be defined");
         assert!(
-            math_prog.funcs.contains_key("math.is_odd"),
-            "math.is_odd should be defined"
+            has(int_prog, "math.product"),
+            "math.product should be defined"
         );
+        assert!(has(int_prog, "math.count"), "math.count should be defined");
+        assert!(has(int_prog, "math.gcd"), "math.gcd should be defined");
+        assert!(has(int_prog, "math.lcm"), "math.lcm should be defined");
         assert!(
-            math_prog.funcs.contains_key("math.min_arr"),
-            "math.min_arr should be defined"
+            has(int_prog, "math.factorial"),
+            "math.factorial should be defined"
         );
+        assert!(has(int_prog, "math.isqrt"), "math.isqrt should be defined");
+
+        // stats.zz (index 3)
+        let stats = math_progs[2];
+        assert!(has(stats, "math.min_arr"), "math.min_arr should be defined");
+        assert!(has(stats, "math.max_arr"), "math.max_arr should be defined");
+        assert!(has(stats, "math.mean_f"), "math.mean_f should be defined");
         assert!(
-            math_prog.funcs.contains_key("math.max_arr"),
-            "math.max_arr should be defined"
-        );
-        // Float aggregation (generic sum/product now cover floats)
-        assert!(
-            math_prog.funcs.contains_key("math.mean_f"),
-            "math.mean_f should be defined"
-        );
-        assert!(
-            math_prog.funcs.contains_key("math.median_f"),
+            has(stats, "math.median_f"),
             "math.median_f should be defined"
         );
-        // These are implemented in pure ZZ but have the same names as native
-        // functions; the native versions are used at runtime.
+        assert!(has(stats, "math.mean"), "math.mean should be defined");
+        assert!(has(stats, "math.median"), "math.median should be defined");
+
+        // linalg.zz (index 4)
+        let linalg = math_progs[3];
         assert!(
-            math_prog.funcs.contains_key("math.abs"),
-            "math.abs should be defined (pure ZZ impl, native runtime)"
+            has(linalg, "math.dot_product"),
+            "math.dot_product should be defined"
         );
         assert!(
-            math_prog.funcs.contains_key("math.gcd"),
-            "math.gcd should be defined (pure ZZ impl, native runtime)"
+            has(linalg, "math.magnitude"),
+            "math.magnitude should be defined"
         );
         assert!(
-            math_prog.funcs.contains_key("math.lcm"),
-            "math.lcm should be defined (pure ZZ impl, native runtime)"
+            has(linalg, "math.matrix_mul"),
+            "math.matrix_mul should be defined"
+        );
+
+        // rounding.zz (index 5)
+        let rounding = math_progs[4];
+        assert!(has(rounding, "math.floor"), "math.floor should be defined");
+        assert!(has(rounding, "math.ceil"), "math.ceil should be defined");
+        assert!(has(rounding, "math.trunc"), "math.trunc should be defined");
+        assert!(has(rounding, "math.round"), "math.round should be defined");
+
+        // log.zz (index 6)
+        let log_prog = math_progs[5];
+        assert!(has(log_prog, "math.sqrt"), "math.sqrt should be defined");
+        assert!(has(log_prog, "math.log"), "math.log should be defined");
+        assert!(has(log_prog, "math.log10"), "math.log10 should be defined");
+        assert!(has(log_prog, "math.exp"), "math.exp should be defined");
+        assert!(has(log_prog, "math.pow"), "math.pow should be defined");
+        assert!(has(log_prog, "math.hypot"), "math.hypot should be defined");
+        assert!(has(log_prog, "math.root"), "math.root should be defined");
+        assert!(
+            has(log_prog, "math.is_nan"),
+            "math.is_nan should be defined"
         );
         assert!(
-            math_prog.funcs.contains_key("math.factorial"),
-            "math.factorial should be defined (pure ZZ impl, native runtime)"
+            has(log_prog, "math.is_inf"),
+            "math.is_inf should be defined"
         );
         assert!(
-            math_prog.funcs.contains_key("math.clamp"),
-            "math.clamp should be defined (pure ZZ impl, native runtime)"
+            has(log_prog, "math.random"),
+            "math.random should be defined"
         );
         assert!(
-            math_prog.funcs.contains_key("math.signum"),
-            "math.signum should be defined (pure ZZ impl, native runtime)"
+            has(log_prog, "math.rand_range"),
+            "math.rand_range should be defined"
         );
+        assert!(
+            has(log_prog, "math.random_seed"),
+            "math.random_seed should be defined"
+        );
+        assert!(
+            has(log_prog, "math.random_seed_range"),
+            "math.random_seed_range should be defined"
+        );
+
+        // trig.zz (index 7)
+        let trig = math_progs[6];
+        assert!(has(trig, "math.sin"), "math.sin should be defined");
+        assert!(has(trig, "math.cos"), "math.cos should be defined");
+        assert!(has(trig, "math.tan"), "math.tan should be defined");
+        assert!(has(trig, "math.asin"), "math.asin should be defined");
+        assert!(has(trig, "math.acos"), "math.acos should be defined");
+        assert!(has(trig, "math.atan"), "math.atan should be defined");
+        assert!(
+            has(trig, "math.to_radians"),
+            "math.to_radians should be defined"
+        );
+        assert!(
+            has(trig, "math.to_degrees"),
+            "math.to_degrees should be defined"
+        );
+        assert!(has(trig, "math.sin_deg"), "math.sin_deg should be defined");
+        assert!(has(trig, "math.cos_deg"), "math.cos_deg should be defined");
+        assert!(has(trig, "math.tan_deg"), "math.tan_deg should be defined");
     }
 
     #[test]
     fn pure_zz_vec_has_expected_functions() {
         let programs = zz_stdlib_programs();
-        let vec_prog = programs[2]
+        let vec_prog = programs[8]
             .as_ref()
             .expect("collections/vec module should compile"); // collections/vec.zz
         assert!(
@@ -529,7 +593,7 @@ mod tests {
     #[test]
     fn pure_zz_regexp_has_expected_functions() {
         let programs = zz_stdlib_programs();
-        let regexp_prog = programs[4]
+        let regexp_prog = programs[10]
             .as_ref()
             .unwrap_or_else(|e| panic!("regexp module failed to compile: {e}")); // regexp/mod.zz
         assert!(
@@ -545,7 +609,7 @@ mod tests {
     #[test]
     fn pure_zz_time_has_duration() {
         let programs = zz_stdlib_programs();
-        let time_prog = programs[5]
+        let time_prog = programs[11]
             .as_ref()
             .unwrap_or_else(|e| panic!("time module failed to compile: {e}")); // time/mod.zz
         for name in [
@@ -568,7 +632,7 @@ mod tests {
     #[test]
     fn pure_zz_path_has_helpers() {
         let programs = zz_stdlib_programs();
-        let path_prog = programs[8]
+        let path_prog = programs[14]
             .as_ref()
             .unwrap_or_else(|e| panic!("path module failed to compile: {e}")); // path/mod.zz
         for name in [
@@ -590,7 +654,7 @@ mod tests {
     #[test]
     fn pure_zz_http_has_helpers() {
         let programs = zz_stdlib_programs();
-        let http_prog = programs[9]
+        let http_prog = programs[15]
             .as_ref()
             .unwrap_or_else(|e| panic!("http module failed to compile: {e}")); // http/mod.zz
         for name in [
@@ -616,7 +680,7 @@ mod tests {
     #[test]
     fn pure_zz_args_has_parser() {
         let programs = zz_stdlib_programs();
-        let args_prog = programs[6]
+        let args_prog = programs[12]
             .as_ref()
             .unwrap_or_else(|e| panic!("args module failed to compile: {e}")); // args/mod.zz
         assert!(
@@ -629,7 +693,7 @@ mod tests {
     fn pure_zz_new_modules_have_expected_functions() {
         let programs = zz_stdlib_programs();
         // map (collections/map.zz, index 10)
-        let map_prog = programs[10]
+        let map_prog = programs[16]
             .as_ref()
             .expect("collections/map module should compile");
         for name in [
@@ -646,7 +710,7 @@ mod tests {
             );
         }
         // set (collections/set.zz, index 11)
-        let set_prog = programs[11]
+        let set_prog = programs[17]
             .as_ref()
             .expect("collections/set module should compile");
         for name in [
@@ -662,7 +726,7 @@ mod tests {
             );
         }
         // dec (dec/mod.zz, index 12)
-        let dec_prog = programs[12]
+        let dec_prog = programs[18]
             .as_ref()
             .unwrap_or_else(|e| panic!("dec module failed to compile: {e}"));
         for name in ["dec.add", "dec.cmp", "dec.format", "dec.is_valid"] {
@@ -672,7 +736,7 @@ mod tests {
             );
         }
         // bytes builders (bytes/mod.zz, index 13)
-        let bytes_prog = programs[13]
+        let bytes_prog = programs[19]
             .as_ref()
             .unwrap_or_else(|e| panic!("bytes module failed to compile: {e}"));
         for name in [
@@ -687,7 +751,7 @@ mod tests {
             );
         }
         // csv (csv/mod.zz, index 14)
-        let csv_prog = programs[14]
+        let csv_prog = programs[20]
             .as_ref()
             .unwrap_or_else(|e| panic!("csv module failed to compile: {e}"));
         for name in ["csv.parse", "csv.stringify", "csv.to_json", "csv.header"] {
@@ -697,7 +761,7 @@ mod tests {
             );
         }
         // property (property/mod.zz, index 15)
-        let prop_prog = programs[15]
+        let prop_prog = programs[21]
             .as_ref()
             .expect("property module should compile");
         for name in [
@@ -720,7 +784,7 @@ mod tests {
     #[test]
     fn pure_zz_colors_has_palette() {
         let programs = zz_stdlib_programs();
-        let colors_prog = programs[7]
+        let colors_prog = programs[13]
             .as_ref()
             .unwrap_or_else(|e| panic!("colors module failed to compile: {e}")); // colors/mod.zz
         for name in [
@@ -866,7 +930,7 @@ mod tests {
     fn stdlib_program_closure_shape() {
         let only_str = super::stdlib_program_closure(&["str".to_string()]);
         // str helpers live in str/mod.zz (0) and bytes/mod.zz (13).
-        assert_eq!(only_str, vec![0, 13], "str closure, got {only_str:?}");
+        assert_eq!(only_str, vec![0, 19], "str closure, got {only_str:?}");
         let none = super::stdlib_program_closure(&["sqlz".to_string()]);
         assert!(none.is_empty(), "native-only modules need no programs");
         let empty = super::stdlib_program_closure(&[]);

@@ -1,0 +1,81 @@
+// Pure-ZZ float aggregation & array statistics.
+// Module: std.math
+// File: stats.zz (part of std.math split, see crates/zz_stdlib/zz/math/)
+
+// ── Generic array min / max (return Option for empty safety) ─────────────────
+
+func math.min_arr<T: Ord>(arr: [T]) -> Option<T> {
+    if vec.len(arr) == 0 {
+        return .none
+    }
+    best := arr[0]
+    for x in arr {
+        if x < best {
+            best = x
+        }
+    }
+    return .some(best)
+}
+
+func math.max_arr<T: Ord>(arr: [T]) -> Option<T> {
+    if vec.len(arr) == 0 {
+        return .none
+    }
+    best := arr[0]
+    for x in arr {
+        if x > best {
+            best = x
+        }
+    }
+    return .some(best)
+}
+
+// ── Safe float array stats (return Result for empty/invalid input) ───────────
+
+func math.mean_f(arr: [float]) -> Result<float, str> {
+    if vec.len(arr) == 0 {
+        return .err("mean: empty list")
+    }
+    match math.sum(arr) {
+        .some(s) => return .ok(s / float(vec.len(arr)))
+        .none => return .err("mean: empty list")
+    }
+}
+
+func math.median_f(arr: [float]) -> Result<float, str> {
+    n := vec.len(arr)
+    if n == 0 {
+        return .err("median: empty list")
+    }
+    // Copy and sort (bubble sort — acceptable for pure ZZ median use cases).
+    sorted := arr
+    i := 0
+    while i < n {
+        j := i + 1
+        while j < n {
+            if sorted[j] < sorted[i] {
+                tmp := sorted[i]
+                sorted[i] = sorted[j]
+                sorted[j] = tmp
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    mid := n / 2
+    return if n % 2 == 0 {
+        .ok((sorted[mid - 1] + sorted[mid]) / 2.0)
+    } else {
+        .ok(sorted[mid])
+    }
+}
+
+// ── Mean / Median (delegate to _f variants) ──────────────────────────────────
+
+func math.mean(list: [float]) -> Result<float, str> {
+    return math.mean_f(list)
+}
+
+func math.median(list: [float]) -> Result<float, str> {
+    return math.median_f(list)
+}

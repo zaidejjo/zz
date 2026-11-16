@@ -18,7 +18,13 @@
 // std:dec.mod.zz
 // std:http.mod.zz
 // std:json.mod.zz
-// std:math.mod.zz
+// std:math.int.zz
+// std:math.linalg.zz
+// std:math.log.zz
+// std:math.rounding.zz
+// std:math.scalar.zz
+// std:math.stats.zz
+// std:math.trig.zz
 // std:path.mod.zz
 // std:property.mod.zz
 // std:regexp.mod.zz
