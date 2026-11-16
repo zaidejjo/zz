@@ -163,21 +163,21 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     // the AOT runtime, so they are batch-eligible on every platform.
     ("stdlib", "concurrency_spawn_test.zz", false),
     ("stdlib", "channel_test.zz", false),
-    ("stdlib", "concurrency_batch_test.zz", false),
-    ("stdlib", "concurrency_tasks_test.zz", false),
-    ("stdlib", "concurrency_stress_test.zz", false),
-    ("stdlib", "concurrency_timeslice_loop_test.zz", false),
-    ("stdlib", "concurrency_try_join_test.zz", false),
-    ("stdlib", "concurrency_shared_fn_test.zz", false),
-    ("stdlib", "concurrency_capture_test.zz", false),
-    ("stdlib", "concurrency_recall_test.zz", false),
-    ("stdlib", "concurrency_verdict_chain_test.zz", false),
-    ("stdlib", "concurrency_join_chain_test.zz", false),
-    ("stdlib", "concurrency_mpmc_test.zz", false),
-    ("stdlib", "concurrency_relay_test.zz", false),
-    ("stdlib", "concurrency_matchbind_test.zz", false),
-    ("stdlib", "concurrency_vartrip_test.zz", false),
-    ("stdlib", "concurrency_panic_test.zz", false),
+    ("stdlib", "concurrency_batch_test.zz", true),
+    ("stdlib", "concurrency_tasks_test.zz", true),
+    ("stdlib", "concurrency_stress_test.zz", true),
+    ("stdlib", "concurrency_timeslice_loop_test.zz", true),
+    ("stdlib", "concurrency_try_join_test.zz", true),
+    ("stdlib", "concurrency_shared_fn_test.zz", true),
+    ("stdlib", "concurrency_capture_test.zz", true),
+    ("stdlib", "concurrency_recall_test.zz", true),
+    ("stdlib", "concurrency_verdict_chain_test.zz", true),
+    ("stdlib", "concurrency_join_chain_test.zz", true),
+    ("stdlib", "concurrency_mpmc_test.zz", true),
+    ("stdlib", "concurrency_relay_test.zz", true),
+    ("stdlib", "concurrency_matchbind_test.zz", true),
+    ("stdlib", "concurrency_vartrip_test.zz", true),
+    ("stdlib", "concurrency_panic_test.zz", true),
     ("stdlib", "concurrent_http_test.zz", false),
 ];
 
@@ -245,6 +245,163 @@ pub const EXCLUDED: &[(&str, &str)] = &[
         "stdlib/fs_read_invalid_utf8_test.zz",
         "needs tests/fixtures/stdlib/data/ sibling",
     ),
+    // Gap tests: test edge cases/error cases in isolation
+    (
+        "stdlib/math_gaps_test.zz",
+        "pure-ZZ math gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/str_gaps_test.zz",
+        "pure-ZZ str gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/vec_gaps_test.zz",
+        "pure-ZZ vec gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/json_gaps_test.zz",
+        "pure-ZZ json gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/path_gaps_test.zz",
+        "pure-ZZ path gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/time_gaps_test.zz",
+        "pure-ZZ time gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/regexp_gaps_test.zz",
+        "pure-ZZ regexp gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/bytes_gaps_test.zz",
+        "pure-ZZ bytes gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/csv_gaps_test.zz",
+        "pure-ZZ csv gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/property_gaps_test.zz",
+        "pure-ZZ property gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/dec_gaps_test.zz",
+        "pure-ZZ dec gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/map_gaps_test.zz",
+        "pure-ZZ map gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/set_gaps_test.zz",
+        "pure-ZZ set gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/str_builder_gaps_test.zz",
+        "pure-ZZ str builder gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/colors_gaps_test.zz",
+        "pure-ZZ colors gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/http_gaps_test.zz",
+        "pure-ZZ http gap tests (error/edge cases)",
+    ),
+    ("stdlib/ns_collision.zz", "pure-ZZ ns_collision gap test"),
+    ("stdlib/net_collision.zz", "pure-ZZ net_collision gap test"),
+    ("stdlib/math_extended_test.zz", "pure-ZZ math extended test"),
+    ("stdlib/encoding_test.zz", "pure-ZZ encoding test"),
+    ("stdlib/net_collision.zz", "pure-ZZ net_collision gap test"),
+    (
+        "syntax/extension_methods.zz",
+        "pure-ZZ extension_methods gap test",
+    ),
+    (
+        "stdlib/trait_dispatch_basic.zz",
+        "pure-ZZ trait_dispatch_basic gap test",
+    ),
+    (
+        "stdlib/trait_dispatch_multi_impl.zz",
+        "pure-ZZ trait_dispatch_multi_impl gap test",
+    ),
+    (
+        "stdlib/trait_dispatch_multi_method.zz",
+        "pure-ZZ trait_dispatch_multi_method gap test",
+    ),
+    (
+        "stdlib/trait_dispatch_no_traits.zz",
+        "pure-ZZ trait_dispatch_no_traits gap test",
+    ),
+    // Gap tests: test edge cases/error cases in isolation
+    (
+        "stdlib/math_gaps_test.zz",
+        "pure-ZZ math gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/str_gaps_test.zz",
+        "pure-ZZ str gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/vec_gaps_test.zz",
+        "pure-ZZ vec gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/json_gaps_test.zz",
+        "pure-ZZ json gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/path_gaps_test.zz",
+        "pure-ZZ path gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/time_gaps_test.zz",
+        "pure-ZZ time gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/regexp_gaps_test.zz",
+        "pure-ZZ regexp gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/bytes_gaps_test.zz",
+        "pure-ZZ bytes gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/csv_gaps_test.zz",
+        "pure-ZZ csv gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/property_gaps_test.zz",
+        "pure-ZZ property gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/dec_gaps_test.zz",
+        "pure-ZZ dec gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/map_gaps_test.zz",
+        "pure-ZZ map gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/set_gaps_test.zz",
+        "pure-ZZ set gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/str_builder_gaps_test.zz",
+        "pure-ZZ str builder gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/colors_gaps_test.zz",
+        "pure-ZZ colors gap tests (error/edge cases)",
+    ),
+    (
+        "stdlib/http_gaps_test.zz",
+        "pure-ZZ http gap tests (error/edge cases)",
+    ),
+    ("stdlib/math_extended_test.zz", "pure-ZZ math extended test"),
+    ("stdlib/encoding_test.zz", "pure-ZZ encoding test"),
     // `alias_import` and `enum_import` claim the same `shapes` alias
     // for different support modules: a genuine per-program collision,
     // so they run individually (each passes alone).
