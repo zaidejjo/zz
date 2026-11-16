@@ -229,6 +229,25 @@ func main() {
 }
 "#;
 
+// B9 regression: zz_object_detach must decrement the struct refcount
+// atomically; concurrent field writes on a shared struct detach the header.
+const B9_OBJECT_DETACH: &str = r#"
+import std.task
+struct Shared { val: int }
+func main() {
+    var i := 0
+    while i < 200 {
+        p := Shared{val: 0}
+        h1 := task.spawn(|_| { p.val = p.val + 1 })
+        h2 := task.spawn(|_| { p.val = p.val + 2 })
+        task.join(h1)
+        task.join(h2)
+        i = i + 1
+    }
+    println("b9_object_detach_race_ok")
+}
+"#;
+
 // B7 regression: zz_iter_filter must release the predicate's return value;
 // heap returns leak without it. Predicate returns heap arrays each call.
 const B7_ITER_FILTER: &str = r#"
@@ -362,6 +381,7 @@ const CASES: &[(&str, &str)] = &[
     ("b5_closure_cells", B5_CLOSURE_CELLS),
     ("b6_array_arena_migrate", B6_ARRAY_ARENA_MIGRATE),
     ("b7_iter_filter", B7_ITER_FILTER),
+    ("b9_object_detach", B9_OBJECT_DETACH),
 ];
 
 /// Cases only the instrumented HIR leg can run: the chunk backend has no

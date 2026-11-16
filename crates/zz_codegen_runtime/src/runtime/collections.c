@@ -1072,7 +1072,15 @@ static void zz_object_detach(zz_value *obj) {
             break;
         }
     }
-    o->refs--;
+    // B9: atomic decrement so co-owners across threads can't race. When this
+    // was the last owner of the old header, release its fields and free it;
+    // otherwise co-owners keep their intact view of `o`.
+    if (__atomic_sub_fetch(&o->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+        for (size_t i = 0; i < o->len * 2; i++) {
+            zz_release(&o->fields[i]);
+        }
+        free(o);
+    }
     obj->obj = fresh;
 }
 

@@ -1,0 +1,23 @@
+// features: structs, closures, for-loop, func-call, int-arith, locals, print, std-task
+// E2E: B9 — zz_object_detach must decrement the struct refcount atomically;
+// sharing a struct across spawned tasks and writing its field detaches the
+// shared header concurrently (was a plain non-atomic --, a data race). Run
+// under TSan to confirm no race; under ASan/UBSan to confirm no
+// use-after-free from a premature header free.
+import std.task
+
+struct Shared { val: int }
+
+func main() {
+    var i := 0
+    while i < 200 {
+        p := Shared{val: 0}
+        // Two tasks share p's header; each field write detaches it.
+        h1 := task.spawn(|_| { p.val = p.val + 1 })
+        h2 := task.spawn(|_| { p.val = p.val + 2 })
+        task.join(h1)
+        task.join(h2)
+        i = i + 1
+    }
+    println("b9_object_detach_race_ok")
+}
