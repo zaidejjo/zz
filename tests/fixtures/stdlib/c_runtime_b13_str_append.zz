@@ -1,0 +1,16 @@
+// features: strings, for-loop, func-call, print, string-literal
+// E2E: B13 — zz_str_append_str/zz_str_append_lit release the old buffer
+// with the right ref discipline: mutable direct-free (matches
+// zz_release_arc), shared immutable atomic last-owner, arena/interned
+// skipped. Re-share the accumulator each iteration so the fresh-alloc +
+// atomic-release path runs under ASan (no double-free/use-after-free).
+func main() {
+    var i := 0
+    var s := ""
+    while i < 2000 {
+        t := s          // share s (refs=2)
+        s = s + "x"     // shared -> fresh alloc + atomic release of s's share
+        i = i + 1
+    }
+    println("b13_str_append_mutable_ok={len(s)}")
+}

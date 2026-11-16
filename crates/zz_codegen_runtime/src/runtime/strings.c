@@ -1677,7 +1677,15 @@ void zz_str_append_str(zz_value *a, zz_value b) {
     zz_str *fresh = str_alloc(need);
     memcpy(zz_str_ptr(fresh), zz_str_ptr(a->s), la);
     memcpy(zz_str_ptr(fresh) + la, zz_str_ptr(b.s), lb);
-    if (!a->s->interned && a->s->refs != 0
+    // B13: mirror zz_release_arc — mutable strings are exclusively owned,
+    // free directly without atomics; shared immutable strings use the
+    // atomic last-owner path; arena (refs==0) and interned strings are
+    // skipped. (Mutable strings take the in-place early-return above, so
+    // the mutable arm is defensive consistency for any future path.)
+    if (a->s->mutable) {
+        if (a->s->cap > 0) free(a->s->heap);
+        zz_str_header_free(a->s);
+    } else if (!a->s->interned && a->s->refs != 0
         && __atomic_sub_fetch(&a->s->refs, 1, __ATOMIC_ACQ_REL) == 0) {
         if (a->s->cap > 0) free(a->s->heap);
         zz_str_header_free(a->s);
@@ -1705,8 +1713,15 @@ void zz_str_append_lit(zz_value *a, const char *lit, size_t lit_len) {
     zz_str *fresh = str_alloc(need);
     memcpy(zz_str_ptr(fresh), zz_str_ptr(a->s), la);
     memcpy(zz_str_ptr(fresh) + la, lit, lit_len);
-    // Arena-owned source (refs==0 sentinel): abandon, never release.
-    if (!a->s->interned && a->s->refs != 0
+    // B13: mirror zz_release_arc — mutable strings are exclusively owned,
+    // free directly without atomics; shared immutable strings use the
+    // atomic last-owner path; arena (refs==0) and interned strings are
+    // skipped. (Mutable strings take the in-place early-return above, so
+    // the mutable arm is defensive consistency for any future path.)
+    if (a->s->mutable) {
+        if (a->s->cap > 0) free(a->s->heap);
+        zz_str_header_free(a->s);
+    } else if (!a->s->interned && a->s->refs != 0
         && __atomic_sub_fetch(&a->s->refs, 1, __ATOMIC_ACQ_REL) == 0) {
         if (a->s->cap > 0) free(a->s->heap);
         zz_str_header_free(a->s);

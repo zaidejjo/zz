@@ -229,6 +229,22 @@ func main() {
 }
 "#;
 
+// B13 regression: zz_str_append_str/zz_str_append_lit release the old
+// buffer with the right ref discipline; shared accumulator exercises the
+// fresh-alloc + atomic-release path every iteration.
+const B13_STR_APPEND: &str = r#"
+func main() {
+    var i := 0
+    var s := ""
+    while i < 2000 {
+        t := s
+        s = s + "x"
+        i = i + 1
+    }
+    println("b13_str_append_mutable_ok={len(s)}")
+}
+"#;
+
 // B12 regression: json_parse_number must not let strtod read past the
 // input buffer; numbers ending exactly at EOF plus a long digit run.
 const B12_JSON_NUMBER_EDGE: &str = r#"
@@ -457,6 +473,7 @@ const CASES: &[(&str, &str)] = &[
     ("b10_closure_dup_storm", B10_CLOSURE_DUP_STORM),
     ("b11_handoff_inline_nest", B11_HANDOFF_INLINE_NEST),
     ("b12_json_number_edge", B12_JSON_NUMBER_EDGE),
+    ("b13_str_append", B13_STR_APPEND),
 ];
 
 /// Cases only the instrumented HIR leg can run: the chunk backend has no
