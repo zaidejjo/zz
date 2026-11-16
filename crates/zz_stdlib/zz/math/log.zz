@@ -28,11 +28,20 @@ func math.sqrt(v: float) -> float {
 func math.log(x: float) -> float {
     if x <= 0.0 {
         return 0.0 / 0.0 // NaN
-        
     }
     // log(x) = 2 * (z + z^3/3 + z^5/5 + ...), z = (x-1)/(x+1)
-    // Converges for all x > 0
-    z := (x - 1.0) / (x + 1.0)
+    // Range-reduce x to [1, 2): log(x) = log(x/2^k) + k*log(2)
+    k := 0
+    reduced := x
+    while reduced >= 2.0 {
+        reduced = reduced / 2.0
+        k = k + 1
+    }
+    while reduced < 1.0 {
+        reduced = reduced * 2.0
+        k = k - 1
+    }
+    z := (reduced - 1.0) / (reduced + 1.0)
     z2 := z * z
     term := z
     sum := z
@@ -42,7 +51,7 @@ func math.log(x: float) -> float {
         sum = sum + term / float(2 * i + 1)
         i = i + 1
     }
-    return 2.0 * sum
+    return 2.0 * sum + float(k) * 0.6931471805599453
 }
 
 // ── Base-10 logarithm ──────────────────────────────────────────────────────
