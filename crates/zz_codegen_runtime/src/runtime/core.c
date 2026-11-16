@@ -2207,7 +2207,29 @@ zz_value zz_chan_send_batch(zz_value chan, zz_value arr, int *err) {
     if (enqueued == a->len
         && __atomic_load_n(&ch->green_waiters, __ATOMIC_ACQUIRE) == 0
         && __atomic_load_n(&ch->sleepers, __ATOMIC_ACQUIRE) == 0) {
-        // All enqueued lock-free, no waiter can be racing.
+        // All enqueued lock-free. Still serve any green waiter that
+        // registered between the last enqueue and this check (B3): without
+        // the handoff the waiter is stranded with values sitting in the
+        // ring that no future send hands off (lost wakeup). Mirror the
+        // mutex path below and `zz_chan_send`.
+        zz_mtx_lock(&ch->lock);
+        {
+            zz_task_t wt;
+            int wis_task = 0;
+            if (zz_chan_handoff_locked(ch, zz_unit(), &wt, &wis_task)) {
+                int gparked = __atomic_load_n(&ch->gparked, __ATOMIC_ACQUIRE) > 0;
+                zz_mtx_unlock(&ch->lock);
+                if (wis_task && !zz_handoff_run_inline(wt)) zz_enqueue_task(wt);
+                if (gparked) {
+                    zz_mtx_lock(&ch->lock);
+                    zz_cnd_broadcast(&ch->cond);
+                    zz_mtx_unlock(&ch->lock);
+                }
+                *err = 0;
+                return zz_unit();
+            }
+        }
+        zz_mtx_unlock(&ch->lock);
         *err = 0;
         return zz_unit();
     }
@@ -2267,13 +2289,18 @@ zz_value zz_chan_recv_batch(zz_value chan, zz_value n, int *err) {
     if (want == 0) { *err = 0; return zz_array_new(); }
     zz_value out = zz_array_new();
     if (out.tag != ZZ_ARRAY || !out.arr) { *err = 1; return zz_unit(); }
-    // Lock-free fast path: pop up to `want` from the ring.
-    while (out.arr->len < want) {
-        zz_value v;
-        if (!zz_ring_try_dequeue(ch, &v)) break;
-        zz_array_push(out.arr, v);
+    // Lock-free fast path: pop up to `want` from the ring. Gated on zero
+    // green waiters (B4): a registered waiter must observe every value, so
+    // lock-free takes stop while one exists — otherwise recv_batch can
+    // dequeue a value a waiter should receive and strand it (lost wakeup).
+    if (__atomic_load_n(&ch->green_waiters, __ATOMIC_ACQUIRE) == 0) {
+        while (out.arr->len < want) {
+            zz_value v;
+            if (!zz_ring_try_dequeue(ch, &v)) break;
+            zz_array_push(out.arr, v);
+        }
+        if (out.arr->len == want) { *err = 0; return out; }
     }
-    if (out.arr->len == want) { *err = 0; return out; }
     // Slow path: drain spill (older), then ring, under one mutex.
     zz_mtx_lock(&ch->lock);
     while (out.arr->len < want && ch->len > 0) {

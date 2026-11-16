@@ -191,6 +191,42 @@ func main() {
 }
 "#;
 
+// B3 regression: chan.send_batch must hand off to a registered green
+// waiter instead of stranding it (lost wakeup).
+const B3_SEND_BATCH: &str = r#"
+import std.task
+import std.chan
+func main() {
+    c := std.chan()
+    h := task.spawn(|_| { std.chan.recv(c) })
+    arr := [1, 2, 3, 4, 5]
+    std.chan.send_batch(c, arr)
+    val := task.join(h)
+    println("b3_send_batch_wakeup_ok={val}")
+}
+"#;
+
+// B4 regression: chan.recv_batch must not steal from a registered green
+// waiter; recv_batch lock-free path exercised each iteration.
+const B4_RECV_BATCH: &str = r#"
+import std.task
+import std.chan
+func main() {
+    c := std.chan()
+    var ok := 1
+    var i := 0
+    while i < 60 {
+        hw := task.spawn(|_| { std.chan.recv(c) })
+        std.chan.send(c, 3 + i)
+        var v := task.join(hw)
+        if v != 3 + i { ok = 0 }
+        var b := std.chan.recv_batch(c, 2)
+        i = i + 1
+    }
+    println("b4_recv_batch_waiter_ok={ok}")
+}
+"#;
+
 const LOOP_MUTATE: &str = r#"
 func main() {
     a := [10, 20, 30]
@@ -261,6 +297,8 @@ const CASES: &[(&str, &str)] = &[
     ("tak", TAK),
     ("loop_mutate", LOOP_MUTATE),
     ("b1_closures", B1_CLOSURES),
+    ("b3_send_batch", B3_SEND_BATCH),
+    ("b4_recv_batch", B4_RECV_BATCH),
 ];
 
 /// Cases only the instrumented HIR leg can run: the chunk backend has no

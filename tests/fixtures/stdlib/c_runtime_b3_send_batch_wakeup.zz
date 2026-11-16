@@ -1,0 +1,20 @@
+// features: closures, arrays, for-loop, func-call, int-arith, locals, print, std-chan, std-task
+// E2E: B3 — chan.send_batch lock-free fast path must hand off to a
+// registered green waiter instead of stranding it with values already in
+// the ring (lost wakeup). Without B3 the receiver never wakes and task.join
+// blocks forever.
+import std.task
+import std.chan
+
+func main() {
+    c := std.chan()
+    // Green receiver registered first; it suspends waiting on c.
+    h := task.spawn(|_| {
+        std.chan.recv(c)
+    })
+    // Batch-send values that fill the ring; the waiter must be handed off.
+    arr := [1, 2, 3, 4, 5]
+    std.chan.send_batch(c, arr)
+    val := task.join(h)
+    println("b3_send_batch_wakeup_ok={val}")
+}
