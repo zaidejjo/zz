@@ -3,7 +3,6 @@
 //! merges these programs by reference (never by AST), so a regression
 //! here breaks chunk coverage for every caller of that helper.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 fn standalone_verify(idx: usize, name: &str) {
@@ -15,7 +14,7 @@ fn standalone_verify(idx: usize, name: &str) {
     let chunk = zz_runtime::vm::Compiler::compile_program_typed(
         &prog.program,
         Arc::new(prog.types.clone()),
-        HashMap::new(),
+        prog.symbol_map.clone(),
         prog.structs.clone(),
         prog.enums.clone(),
         Arc::new(natives),
