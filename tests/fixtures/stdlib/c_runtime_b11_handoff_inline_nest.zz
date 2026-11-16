@@ -16,15 +16,16 @@ func main() {
         c2 := std.chan()
         // Waiter 2 registered first on c2; waiter 1 on c1.
         w2 := task.spawn(|_| {
-            std.chan.recv(c2)
+            v:int = std.chan.recv(c2)
+            v
         })
         w1 := task.spawn(|_| {
-            var v := std.chan.recv(c1)
+            v:int = std.chan.recv(c1)
             std.chan.send(c2, v + 1)
         })
         std.chan.send(c1, 5)      // hands off to w1 (depth 1)
         // w1 sends on c2, handing off to w2 (depth 2).
-        var r := std.chan.recv(c2)
+        r:int = std.chan.recv(c2)
         task.join(w1)
         task.join(w2)
         total = total + r

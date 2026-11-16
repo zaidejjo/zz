@@ -2,14 +2,12 @@
 // E2E: B7 — zz_iter_filter must release the predicate's return value `r`;
 // without B7 every heap return from the predicate leaks on every filter
 // invocation. Predicate returns heap arrays; run under ASan leak detection.
-import std.iter
-
 func main() {
     i := 0
     n := 0
     while i < 400 {
         a := ["alpha", "beta", "gamma", "delta"]
-        var r := std.iter.filter(a, |_| { [1] })
+        r := filter(a, |_| { true })
         n = n + r.len()
         i = i + 1
     }

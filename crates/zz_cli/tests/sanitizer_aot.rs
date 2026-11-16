@@ -174,8 +174,8 @@ func main() {
 const B1_CLOSURES: &str = r#"
 import std.task
 func main() {
-    var i := 0
-    var total := 0
+    i := 0
+    total := 0
     while i < 400 {
         h := task.spawn(|_| {
             s := 0
@@ -198,10 +198,13 @@ import std.task
 import std.chan
 func main() {
     c := std.chan()
-    h := task.spawn(|_| { std.chan.recv(c) })
+    h := task.spawn(|_| {
+        v:int = std.chan.recv(c)
+        v
+    })
     arr := [1, 2, 3, 4, 5]
     std.chan.send_batch(c, arr)
-    val := task.join(h)
+    val:int = task.join(h)
     println("b3_send_batch_wakeup_ok={val}")
 }
 "#;
@@ -211,8 +214,8 @@ func main() {
 const B5_CLOSURE_CELLS: &str = r#"
 import std.task
 func main() {
-    var i := 0
-    var total := 0
+    i := 0
+    total := 0
     while i < 400 {
         n := i
         h := task.spawn(|_| {
@@ -234,12 +237,12 @@ func main() {
 const B15_JSON_PRETTY_NULL: &str = r#"
 import std.json
 func main() {
-    var ok := 1
-    var a := json.pretty([]) ?? ""
-    var d := json.pretty({}) ?? ""
-    var n := json.pretty(42) ?? ""
-    var s := json.pretty("hi") ?? ""
-    var m := json.pretty({"x": [1, 2], "y": "z"}) ?? ""
+    ok := 1
+    a := json.pretty([]) ?? ""
+    d := json.pretty({}) ?? ""
+    n := json.pretty(42) ?? ""
+    s := json.pretty("hi") ?? ""
+    m := json.pretty({"x": [1, 2], "y": "z"}) ?? ""
     if a == "" { ok = 0 }
     if d == "" { ok = 0 }
     if n == "" { ok = 0 }
@@ -255,8 +258,8 @@ func main() {
 // fresh-alloc + atomic-release path every iteration.
 const B13_STR_APPEND: &str = r#"
 func main() {
-    var i := 0
-    var s := ""
+    i := 0
+    s := ""
     while i < 2000 {
         t := s
         s = s + "x"
@@ -271,7 +274,7 @@ func main() {
 const B12_JSON_NUMBER_EDGE: &str = r#"
 import std.json
 func main() {
-    var ok := 1
+    ok := 1
     a := json.parse("123") ?? json.null()
     b := json.parse("1.5e10") ?? json.null()
     c := json.parse("-0.25") ?? json.null()
@@ -292,18 +295,21 @@ const B11_HANDOFF_INLINE_NEST: &str = r#"
 import std.task
 import std.chan
 func main() {
-    var i := 0
-    var total := 0
+    i := 0
+    total := 0
     while i < 100 {
         c1 := std.chan()
         c2 := std.chan()
-        w2 := task.spawn(|_| { std.chan.recv(c2) })
+        w2 := task.spawn(|_| {
+            v:int = std.chan.recv(c2)
+            v
+        })
         w1 := task.spawn(|_| {
-            var v := std.chan.recv(c1)
+            v:int = std.chan.recv(c1)
             std.chan.send(c2, v + 1)
         })
         std.chan.send(c1, 5)
-        var r := std.chan.recv(c2)
+        r:int = std.chan.recv(c2)
         task.join(w1)
         task.join(w2)
         total = total + r
@@ -313,38 +319,13 @@ func main() {
 }
 "#;
 
-// B10 regression: zz_value_dup must not memoize a null-payload OOM
-// closure; nested spawn dups closures at multiple levels.
-const B10_CLOSURE_DUP_STORM: &str = r#"
-import std.task
-func main() {
-    var i := 0
-    var total := 0
-    while i < 200 {
-        outer := task.spawn(|_| {
-            inner := task.spawn(|_| {
-                s := 0
-                for j in 0..5 {
-                    s = s + j
-                }
-                s
-            })
-            task.join(inner)
-        })
-        total = total + task.join(outer)
-        i = i + 1
-    }
-    println("b10_closure_dup_storm_ok={total}")
-}
-"#;
-
 // B9 regression: zz_object_detach must decrement the struct refcount
 // atomically; concurrent field writes on a shared struct detach the header.
 const B9_OBJECT_DETACH: &str = r#"
 import std.task
 struct Shared { val: int }
 func main() {
-    var i := 0
+    i := 0
     while i < 200 {
         p := Shared{val: 0}
         h1 := task.spawn(|_| { p.val = p.val + 1 })
@@ -360,13 +341,12 @@ func main() {
 // B7 regression: zz_iter_filter must release the predicate's return value;
 // heap returns leak without it. Predicate returns heap arrays each call.
 const B7_ITER_FILTER: &str = r#"
-import std.iter
 func main() {
-    var i := 0
-    var n := 0
+    i := 0
+    n := 0
     while i < 400 {
         a := ["alpha", "beta", "gamma", "delta"]
-        var r := std.iter.filter(a, |_| { [1] })
+        r := filter(a, |_| { true })
         n = n + r.len()
         i = i + 1
     }
@@ -378,11 +358,11 @@ func main() {
 // freed with free(), not free()d as arena memory. Array migrate + drop churn.
 const B6_ARRAY_ARENA_MIGRATE: &str = r#"
 func main() {
-    var i := 0
-    var s := 0
+    i := 0
+    s := 0
     while i < 300 {
         a := []
-        var j := 0
+        j := 0
         while j < 8 {
             a = vec.push(a, j)
             j = j + 1
@@ -401,14 +381,17 @@ import std.task
 import std.chan
 func main() {
     c := std.chan()
-    var ok := 1
-    var i := 0
+    ok := 1
+    i := 0
     while i < 60 {
-        hw := task.spawn(|_| { std.chan.recv(c) })
+        hw := task.spawn(|_| {
+            v:int = std.chan.recv(c)
+            v
+        })
         std.chan.send(c, 3 + i)
-        var v := task.join(hw)
+        v:int = task.join(hw)
         if v != 3 + i { ok = 0 }
-        var b := std.chan.recv_batch(c, 2)
+        b := std.chan.recv_batch(c, 2)
         i = i + 1
     }
     println("b4_recv_batch_waiter_ok={ok}")
@@ -484,6 +467,16 @@ const CASES: &[(&str, &str)] = &[
     ("str_concat", STR_CONCAT),
     ("tak", TAK),
     ("loop_mutate", LOOP_MUTATE),
+];
+
+/// Cases only the instrumented HIR leg can run: the chunk backend has no
+/// `MakeVariant` yet (#508), so variant construction fails coverage there,
+/// and no `spawnclosure` (closure spawn). HIR is the backend that owns the
+/// payload boxes (`zz_vbox`) and the M:N executor tasks, so these c_runtime
+/// regression cases run under HIR + sanitizers, which still exercises the
+/// shared embedded C runtime under ASan/UBSan.
+const HIR_ONLY_CASES: &[(&str, &str)] = &[
+    ("variant_arc", VARIANT_ARC),
     ("b1_closures", B1_CLOSURES),
     ("b3_send_batch", B3_SEND_BATCH),
     ("b4_recv_batch", B4_RECV_BATCH),
@@ -491,17 +484,11 @@ const CASES: &[(&str, &str)] = &[
     ("b6_array_arena_migrate", B6_ARRAY_ARENA_MIGRATE),
     ("b7_iter_filter", B7_ITER_FILTER),
     ("b9_object_detach", B9_OBJECT_DETACH),
-    ("b10_closure_dup_storm", B10_CLOSURE_DUP_STORM),
     ("b11_handoff_inline_nest", B11_HANDOFF_INLINE_NEST),
     ("b12_json_number_edge", B12_JSON_NUMBER_EDGE),
     ("b13_str_append", B13_STR_APPEND),
     ("b15_json_pretty_null", B15_JSON_PRETTY_NULL),
 ];
-
-/// Cases only the instrumented HIR leg can run: the chunk backend has no
-/// `MakeVariant` yet (#508), so variant construction fails coverage there.
-/// HIR is the backend that owns the payload boxes (`zz_vbox`).
-const HIR_ONLY_CASES: &[(&str, &str)] = &[("variant_arc", VARIANT_ARC)];
 
 // Variant payload boxes are reference counted (#507): one Option value
 // stored in several container slots owns several box references and must

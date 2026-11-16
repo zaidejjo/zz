@@ -12,15 +12,14 @@ func main() {
     ok := 1
     i := 0
     while i < 100 {
-        // Green recv waiter registered first on the empty channel.
         hw := task.spawn(|_| {
-            std.chan.recv(c)
+            v:int = std.chan.recv(c)
+            v
         })
         std.chan.send(c, 3 + i)
-        var v := task.join(hw)
+        v:int = task.join(hw)
         if v != 3 + i { ok = 0 }
-        // Exercise recv_batch lock-free path (channel empty here).
-        var b := std.chan.recv_batch(c, 2)
+        b := std.chan.recv_batch(c, 2)
         i = i + 1
     }
     println("b4_recv_batch_waiter_ok={ok}")

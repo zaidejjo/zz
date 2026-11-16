@@ -7,7 +7,7 @@ func main() {
     s := 0
     while i < 300 {
         a := []
-        var j := 0
+        j := 0
         while j < 8 {
             a = vec.push(a, j)
             j = j + 1

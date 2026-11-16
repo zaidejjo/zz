@@ -8,13 +8,12 @@ import std.chan
 
 func main() {
     c := std.chan()
-    // Green receiver registered first; it suspends waiting on c.
     h := task.spawn(|_| {
-        std.chan.recv(c)
+        v:int = std.chan.recv(c)
+        v
     })
-    // Batch-send values that fill the ring; the waiter must be handed off.
     arr := [1, 2, 3, 4, 5]
     std.chan.send_batch(c, arr)
-    val := task.join(h)
+    val:int = task.join(h)
     println("b3_send_batch_wakeup_ok={val}")
 }
