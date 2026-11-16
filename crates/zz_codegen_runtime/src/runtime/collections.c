@@ -832,6 +832,11 @@ zz_value zz_iter_filter(zz_value items, zz_value f, int *err) {
         if (zz_truthy(r)) {
             zz_array_push(out.arr, zz_clone(arr.arr->items[i]));
         }
+        // B7: the closure's return value `r` carries a reference; release it
+        // so a heap return (str/array/dict/...) is not leaked on every
+        // filter invocation. `zz_iter_map` adopts `r` via push; filter only
+        // adopts the passing item, so `r` itself must be dropped here.
+        zz_release(&r);
     }
     zz_green_frame_set(saved_fr);
     zz_release(&arr);

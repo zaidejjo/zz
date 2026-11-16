@@ -229,6 +229,23 @@ func main() {
 }
 "#;
 
+// B7 regression: zz_iter_filter must release the predicate's return value;
+// heap returns leak without it. Predicate returns heap arrays each call.
+const B7_ITER_FILTER: &str = r#"
+import std.iter
+func main() {
+    var i := 0
+    var n := 0
+    while i < 400 {
+        a := ["alpha", "beta", "gamma", "delta"]
+        var r := std.iter.filter(a, |_| { [1] })
+        n = n + r.len()
+        i = i + 1
+    }
+    println("b7_iter_filter_ok={n}")
+}
+"#;
+
 // B6 regression: arena arrays migrated to heap (refs reset to 0) must be
 // freed with free(), not free()d as arena memory. Array migrate + drop churn.
 const B6_ARRAY_ARENA_MIGRATE: &str = r#"
@@ -344,6 +361,7 @@ const CASES: &[(&str, &str)] = &[
     ("b4_recv_batch", B4_RECV_BATCH),
     ("b5_closure_cells", B5_CLOSURE_CELLS),
     ("b6_array_arena_migrate", B6_ARRAY_ARENA_MIGRATE),
+    ("b7_iter_filter", B7_ITER_FILTER),
 ];
 
 /// Cases only the instrumented HIR leg can run: the chunk backend has no
