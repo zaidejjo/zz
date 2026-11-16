@@ -403,7 +403,7 @@ func math.round(v: float) -> float {
 
 func math.sqrt(v: float) -> float {
     if v < 0.0 {
-        return 0.0
+        return 0.0 / 0.0 // NaN
     }
     if v == 0.0 {
         return 0.0
@@ -599,6 +599,7 @@ func math.is_inf(x: float) -> bool {
 }
 
 // ── Random ─────────────────────────────────────────────────────────────────
+// ── Random ─────────────────────────────────────────────────────────────────
 
 func math.random() -> float {
     // Deterministic pseudo-random value in [0, 1)
@@ -607,6 +608,19 @@ func math.random() -> float {
 
 func math.rand_range(min: float, max: float) -> float {
     return min + math.random() * (max - min)
+}
+
+func math.random_seed(seed: int) -> float {
+    state := seed * 1103515245 + 12345
+    unit := float(state >> 33) / float(1 << 31)
+    if unit < 0.0 {
+        return -unit
+    }
+    return unit
+}
+
+func math.random_seed_range(seed: int, min: float, max: float) -> float {
+    return min + math.random_seed(seed) * (max - min)
 }
 // Pure-ZZ trigonometry helpers.
 // Module: std.math
