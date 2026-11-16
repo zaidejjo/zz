@@ -229,6 +229,27 @@ func main() {
 }
 "#;
 
+// B15 regression: json_pretty_print must not dereference a NULL v.arr/v.dict
+// (default-constructed array/dict have NULL payloads).
+const B15_JSON_PRETTY_NULL: &str = r#"
+import std.json
+func main() {
+    var ok := 1
+    var a := json.pretty([]) ?? ""
+    var d := json.pretty({}) ?? ""
+    var n := json.pretty(42) ?? ""
+    var s := json.pretty("hi") ?? ""
+    var m := json.pretty({"x": [1, 2], "y": "z"}) ?? ""
+    if a == "" { ok = 0 }
+    if d == "" { ok = 0 }
+    if n == "" { ok = 0 }
+    if s == "" { ok = 0 }
+    if m == "" { ok = 0 }
+    if ok != 1 { println("b15_json_pretty_null=FAIL") }
+    else { println("b15_json_pretty_null_ok") }
+}
+"#;
+
 // B13 regression: zz_str_append_str/zz_str_append_lit release the old
 // buffer with the right ref discipline; shared accumulator exercises the
 // fresh-alloc + atomic-release path every iteration.
@@ -474,6 +495,7 @@ const CASES: &[(&str, &str)] = &[
     ("b11_handoff_inline_nest", B11_HANDOFF_INLINE_NEST),
     ("b12_json_number_edge", B12_JSON_NUMBER_EDGE),
     ("b13_str_append", B13_STR_APPEND),
+    ("b15_json_pretty_null", B15_JSON_PRETTY_NULL),
 ];
 
 /// Cases only the instrumented HIR leg can run: the chunk backend has no

@@ -1,0 +1,22 @@
+// features: func-call, print, std-json, arrays, dicts, strings, numbers
+// E2E: B15 — json_pretty_print must not dereference a NULL v.arr/v.dict
+// (default-constructed array/dict have NULL payloads). Pretty-print empty
+// and populated containers plus scalars; run under ASan to catch the NULL
+// dereference.
+import std.json
+
+func main() {
+    var ok := 1
+    var a := json.pretty([]) ?? ""
+    var d := json.pretty({}) ?? ""
+    var n := json.pretty(42) ?? ""
+    var s := json.pretty("hi") ?? ""
+    var m := json.pretty({"x": [1, 2], "y": "z"}) ?? ""
+    if a == "" { ok = 0 }
+    if d == "" { ok = 0 }
+    if n == "" { ok = 0 }
+    if s == "" { ok = 0 }
+    if m == "" { ok = 0 }
+    if ok != 1 { println("b15_json_pretty_null=FAIL") }
+    else { println("b15_json_pretty_null_ok") }
+}

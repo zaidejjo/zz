@@ -708,7 +708,9 @@ static void json_pretty_print(SB *sb, zz_value v, int indent) {
         sb_str(sb, "\"", 1);
         break;
     case ZZ_ARRAY: {
-        if (v.arr->len == 0) { sb_str(sb, "[]", 2); break; }
+        // B15: default-constructed ZZ_ARRAY has a NULL payload; guard before
+        // dereferencing ->len (the compact json_serialize already guards).
+        if (!v.arr || v.arr->len == 0) { sb_str(sb, "[]", 2); break; }
         sb_str(sb, "[\n", 2);
         for (size_t i = 0; i < v.arr->len; i++) {
             for (int k = 0; k < indent + 2; k++) sb_str(sb, " ", 1);
@@ -721,7 +723,9 @@ static void json_pretty_print(SB *sb, zz_value v, int indent) {
         break;
     }
     case ZZ_DICT: {
-        if (v.dict->len == 0) { sb_str(sb, "{}", 2); break; }
+        // B15: default-constructed ZZ_DICT has a NULL payload; guard before
+        // dereferencing ->len (the compact json_serialize already guards).
+        if (!v.dict || v.dict->len == 0) { sb_str(sb, "{}", 2); break; }
         sb_str(sb, "{\n", 2);
         for (size_t i = 0; i < v.dict->len; i++) {
             zz_dict_entry *e = &v.dict->entries[i];
