@@ -22,7 +22,17 @@ impl Lowerer {
         // (literals, `self`, fields) must become runtime objects before
         // crossing a `zz_value` return slot. `ty_at` misses expressions
         // whose span has no recorded type and would leak a raw C struct.
-        self.emit_tail_value(v, names, out)
+        let val = self.emit_tail_value(v, names, out);
+        // `return match ...` routes through `emit_match_expr`, which creates
+        // a `_mresult` temporary carrying `cleanup(zz_release)`. When a match
+        // arm's value isn't already refcount-bumped (e.g. a binop like
+        // `"x" + "y"`), cleanup frees the only share and the returned value
+        // dangles. Clone here so the return value owns its own share.
+        if matches!(v, Expr::Match { .. }) {
+            format!("zz_clone({val})")
+        } else {
+            val
+        }
     }
 
     /// Root binding of a store target chain (`m` in `m[i][j]`, `s` in
@@ -602,7 +612,13 @@ impl Lowerer {
                 let val_is_unboxed = crate::context::emitted_is_raw_scalar(&val, names, ident);
                 let final_val = match ctype.as_str() {
                     "int64_t" if !val_is_unboxed => format!("({val}).i"),
-                    "double" if !val_is_unboxed => format!("({val}).f"),
+                    "double" if !val_is_unboxed => {
+                        // Unbox a boxed `zz_value` to a C double, coercing an
+                        // int argument to float (matching the VM's `to_float`)
+                        // so `math.log(1)` (int arg, float param) reads a valid
+                        // value instead of uninitialized `.f` memory.
+                        format!("zz_val_to_double({val})")
+                    }
                     "bool" if !val_is_unboxed => format!("({val}).b"),
                     _ => val,
                 };
@@ -1750,7 +1766,20 @@ impl Lowerer {
                     if void_if {
                         *self.void_context.borrow_mut() = true;
                     }
-                    let _ = self.emit_expr(e, names, out);
+                    let expr_tmp = self.emit_expr(e, names, out);
+                    // Statement-position `match` discards its result temp,
+                    // but `_mresult` holds a `zz_clone` of the arm value that
+                    // keeps the matched container non-unique across loop
+                    // iterations. Release it now so subsequent in-place
+                    // mutations (e.g. `row.push(v)` after `match ... {
+                    // .ok(v) => { row.push(v); row } }`) take the fast path.
+                    // Without this, `zz_vec_append` sees refs > 1 and skips
+                    // the push, dropping elements (matrix_mul native SIGABRT).
+                    if matches!(e, Expr::Match { .. }) {
+                        out.push_str(&format!(
+                            "    zz_release(&{expr_tmp});\n    {expr_tmp} = zz_unit();\n"
+                        ));
+                    }
                     if void_if {
                         *self.void_context.borrow_mut() = saved_void;
                     }

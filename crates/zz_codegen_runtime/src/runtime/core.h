@@ -752,6 +752,10 @@ static inline zz_vbox *zz_vbox_of(zz_value *payload) {
     return (zz_vbox *)((char *)payload - offsetof(zz_vbox, inner));
 }
 
+// Forward declaration: zz_clone is defined below; needed by zz_vbox_new to
+// clone the inner value so the box owns an independent reference.
+static inline zz_value zz_clone(zz_value v);
+
 // Allocate a box owning one reference to `inner`; returns the payload
 // pointer to store in the wrapper (NULL if the allocation failed).
 static inline zz_value *zz_vbox_new(zz_value inner) {
@@ -1245,6 +1249,13 @@ zz_value zz_clone_deep(zz_value v, int *err);
 zz_value zz_int_cast(zz_value v, int *err);
 zz_value zz_float_cast(zz_value v, int *err);
 zz_value zz_bool_cast(zz_value v, int *err);
+
+// Coerce a boxed zz_value to a raw C double, matching the VM's `to_float`:
+// Int → (double)i, Float → f, anything else → 0.0. Used when unboxing a
+// function argument or local to a `float` local so a call like
+// `math.log(1)` (int arg, float param) reads a valid value instead of
+// uninitialized `.f` memory.
+double zz_val_to_double(zz_value v);
 
 // ---- weak references ----------------------------------------------------
 zz_value zz_value_weak(zz_value v, int *err);

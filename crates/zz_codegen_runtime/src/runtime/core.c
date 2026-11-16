@@ -7143,7 +7143,9 @@ static zz_value http_serve_static_file(const char *path, size_t pathlen,
     zz_value out_hdrs = zz_dict_new();
     zz_dict_set(out_hdrs.dict, zz_str_static("Content-Type"),
                 zz_str_new(mime, strlen(mime)));
-    // Deliberately omit ETag/Accept-Ranges so that post-middlewares
+    zz_dict_set(out_hdrs.dict, zz_str_static("ETag"),
+                zz_str_static(etag));
+    // Deliberately omit Accept-Ranges so that post-middlewares
     // (CORS / secure_headers via `with_headers`) can freely set/override
     // headers without contention from pre-existing entries — the VM's
     // test expects Access-Control-Allow-Origin to appear on static-file
@@ -9372,6 +9374,17 @@ zz_value zz_float_cast(zz_value v, int *err) {
             return (zz_value){ZZ_FLOAT, {.f = n}};
         }
         default: return (zz_value){ZZ_FLOAT, {.f = 0.0}};
+    }
+}
+
+// Coerce a boxed zz_value to a raw C double, mirroring the VM's `to_float`:
+// Int → (double)i, Float → f, anything else → 0.0.
+double zz_val_to_double(zz_value v) {
+    switch (v.tag) {
+    case ZZ_INT:   return (double)v.i;
+    case ZZ_FLOAT: return v.f;
+    case ZZ_BOOL:  return v.b ? 1.0 : 0.0;
+    default:       return 0.0;
     }
 }
 

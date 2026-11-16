@@ -7407,7 +7407,17 @@ impl Lowerer {
             deref
         } else {
             let result_tmp = names.fresh("_mresult");
-            out.push_str(&format!("    zz_value {result_tmp} = zz_unit();\n"));
+            // Arms assign to result_tmp (often via `zz_clone`, bumping
+            // refcounts of refcounted payloads). Attach a cleanup attribute
+            // so the temporary is released on every exit path — fall-through,
+            // arm `break`/`continue`, early `return`/`?`, and loop iteration
+            // end. Without this, a statement-position match inside a loop
+            // leaks the clone refcount, making the matched container appear
+            // non-uniquely-owned on subsequent iterations and causing
+            // `zz_vec_append` to skip in-place pushes (#692).
+            out.push_str(&format!(
+                "    zz_value {result_tmp} __attribute__((cleanup(zz_release))) = zz_unit();\n"
+            ));
             result_tmp
         };
 
