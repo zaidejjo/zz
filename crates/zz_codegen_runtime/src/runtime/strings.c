@@ -821,6 +821,18 @@ static void zz_print_value_depth(FILE *out, const zz_value *v, int depth) {
             free(j);
         }
         break;
+    case ZZ_FLAT_STR_ARRAY: {
+        fputs("[", out);
+        if (v->flat_str) {
+            zz_flat_str_array *f = v->flat_str;
+            for (size_t i = 0; i < f->len; i++) {
+                if (i > 0) fputs(", ", out);
+                fwrite(f->pairs[i].ptr, 1, f->pairs[i].len, out);
+            }
+        }
+        fputs("]", out);
+        break;
+    }
     default:
         fputs("<value>", out);
         break;
@@ -975,6 +987,18 @@ static void zz_print_value_display_depth(FILE *out, const zz_value *v, int depth
             free(j);
         }
         break;
+    case ZZ_FLAT_STR_ARRAY: {
+        fputs("[", out);
+        if (v->flat_str) {
+            zz_flat_str_array *f = v->flat_str;
+            for (size_t i = 0; i < f->len; i++) {
+                if (i > 0) fputs(", ", out);
+                fwrite(f->pairs[i].ptr, 1, f->pairs[i].len, out);
+            }
+        }
+        fputs("]", out);
+        break;
+    }
     default:
         fputs("<value>", out);
         break;
@@ -1776,8 +1800,6 @@ static const struct case_fold latin1_supplement[32] = {
     {0x00DA, 0x00FA, 2, 0x00DA, 2}, {0x00DB, 0x00FB, 2, 0x00DB, 2},
     {0x00DC, 0x00FC, 2, 0x00DC, 2}, {0x00DD, 0x00FD, 2, 0x00DD, 2},
     {0x00DE, 0x00FE, 2, 0x00DE, 2}, {0x00DF, 0x0053, 2, 0x00DF, 2}, // ß → SS (upper: 2 chars)
-    {0x00E0, 0x00E0, 2, 0x00C0, 2}, {0x00E1, 0x00E1, 2, 0x00C1, 2},
-    {0x00E2, 0x00E2, 2, 0x00C2, 2}, {0x00E3, 0x00E3, 2, 0x00E3, 2},
 };
 
 // Latin Extended-A selected case pairs (U+0100-U+017F).
@@ -3251,6 +3273,10 @@ zz_value zz_str_split(zz_value s, zz_value sep, int *err) {
             approx_count++;
             p += slen;
         }
+    } else {
+        // Empty separator: leading "" + one item per scalar + trailing "".
+        // At most one scalar per byte, so `len + 2` is a safe upper bound.
+        approx_count = len + 2;
     }
     zz_flat_str_array *f = (zz_flat_str_array *)calloc(1, sizeof(zz_flat_str_array));
     if (!f) return zz_array_new();

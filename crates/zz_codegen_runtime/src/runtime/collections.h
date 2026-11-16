@@ -292,6 +292,22 @@ static inline zz_value zz_index_get(zz_value obj, zz_value idx, int *err) {
         return zz_str_get(obj.s, idx, err);
     case ZZ_DICT:
         return zz_dict_get(obj.dict, idx, err);
+    case ZZ_FLAT_STR_ARRAY: {
+        // Flat string array from `str.split` (AOT-only optimization): index
+        // into the contiguous (ptr,len) pairs, mirroring the VM's regular
+        // array of strings. Without this case, any `str.split(...)[i]` read
+        // traps with a bogus "index out of bounds" and breaks VM/native
+        // parity for every pure-ZZ stdlib that splits then indexes.
+        zz_flat_str_array *f = obj.flat_str;
+        *err = 0;
+        if (idx.tag != ZZ_INT || !f) { *err = 1; return zz_unit(); }
+        int64_t i = idx.i;
+        int64_t n = (int64_t)f->len;
+        if (i < 0) i += n;
+        if (i < 0 || i >= n) { *err = 1; return zz_unit(); }
+        zz_flat_str_pair *p = &f->pairs[(size_t)i];
+        return (zz_value){ZZ_STR, {.s = zz_str_new(p->ptr, p->len).s}};
+    }
     default:
         *err = 1;
         return zz_unit();
@@ -447,16 +463,7 @@ static inline zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
             zz_value *new_items = (zz_value *)malloc(new_cap * sizeof(zz_value));
             for (size_t i = 0; i < a->len; i++)
                 new_items[i] = a->items[i];
-            // Stack/lit/arena items live on the stack or an arena — they must
-            // NOT be freed (free() on stack/arena memory corrupts the heap).
-            // They're reclaimed when the frame/arena resets. On later grows
-            // `a->refs` is 0/1 so we take the realloc branch above.
             a->items = new_items;
-            // Mark migration to heap so `zz_release_array` frees the items
-            // buffer when this array is released (refs==0 path). Applies to
-            // every sentinel type whose items buffer just moved to heap
-            // malloc; without this, `zz_release_array` returns early for
-            // LIT_MAGIC/STACK_MAGIC/ARENA_MAGIC and leaks the items buffer.
             if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_STACK_MAGIC
                 || a->refs == ZZ_ARRAY_ARENA_MAGIC) {
                 a->refs = 0;

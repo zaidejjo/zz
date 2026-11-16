@@ -7,10 +7,10 @@ Total entries: 700
 
 | tier | entries |
 |---|---:|
-| CRuntime | 328 |
+| CRuntime | 290 |
 | Const | 6 |
 | FfiStaticlib | 154 |
-| PureZz | 211 |
+| PureZz | 249 |
 | VmOnly | 1 |
 
 | tier | name | implementation |
@@ -373,57 +373,57 @@ Total entries: 700
 | Const | `std.math.SQRT_1_2` | `stdlib_consts` |
 | Const | `std.math.SQRT_2` | `stdlib_consts` |
 | CRuntime | `std.math.TAU` | `zz_math_tau` |
-| CRuntime | `std.math.abs` | `zz_math_abs` |
-| CRuntime | `std.math.acos` | `zz_math_acos` |
-| CRuntime | `std.math.asin` | `zz_math_asin` |
-| CRuntime | `std.math.atan` | `zz_math_atan` |
-| CRuntime | `std.math.ceil` | `zz_math_ceil` |
-| CRuntime | `std.math.clamp` | `zz_math_clamp` |
-| CRuntime | `std.math.cos` | `zz_math_cos` |
-| CRuntime | `std.math.cos_deg` | `zz_math_cos_deg` |
+| PureZz | `std.math.abs` | `zz/math/mod.zz` |
+| PureZz | `std.math.acos` | `zz/math/mod.zz` |
+| PureZz | `std.math.asin` | `zz/math/mod.zz` |
+| PureZz | `std.math.atan` | `zz/math/mod.zz` |
+| PureZz | `std.math.ceil` | `zz/math/mod.zz` |
+| PureZz | `std.math.clamp` | `zz/math/mod.zz` |
+| PureZz | `std.math.cos` | `zz/math/mod.zz` |
+| PureZz | `std.math.cos_deg` | `zz/math/mod.zz` |
 | PureZz | `std.math.count` | `zz/math/mod.zz` |
-| CRuntime | `std.math.dot_product` | `zz_math_dot_product` |
-| CRuntime | `std.math.exp` | `zz_math_exp` |
-| CRuntime | `std.math.factorial` | `zz_math_factorial` |
-| CRuntime | `std.math.floor` | `zz_math_floor` |
-| CRuntime | `std.math.gcd` | `zz_math_gcd` |
-| CRuntime | `std.math.hypot` | `zz_math_hypot` |
+| PureZz | `std.math.dot_product` | `zz/math/mod.zz` |
+| PureZz | `std.math.exp` | `zz/math/mod.zz` |
+| PureZz | `std.math.factorial` | `zz/math/mod.zz` |
+| PureZz | `std.math.floor` | `zz/math/mod.zz` |
+| PureZz | `std.math.gcd` | `zz/math/mod.zz` |
+| PureZz | `std.math.hypot` | `zz/math/mod.zz` |
 | PureZz | `std.math.is_even` | `zz/math/mod.zz` |
-| CRuntime | `std.math.is_inf` | `zz_math_is_inf` |
-| CRuntime | `std.math.is_nan` | `zz_math_is_nan` |
+| PureZz | `std.math.is_inf` | `zz/math/mod.zz` |
+| PureZz | `std.math.is_nan` | `zz/math/mod.zz` |
 | PureZz | `std.math.is_odd` | `zz/math/mod.zz` |
-| CRuntime | `std.math.isqrt` | `zz_math_isqrt` |
-| CRuntime | `std.math.lcm` | `zz_math_lcm` |
-| CRuntime | `std.math.log` | `zz_math_log` |
-| CRuntime | `std.math.log10` | `zz_math_log10` |
-| CRuntime | `std.math.magnitude` | `zz_math_magnitude` |
-| CRuntime | `std.math.matrix_mul` | `zz_math_matrix_mul` |
+| PureZz | `std.math.isqrt` | `zz/math/mod.zz` |
+| PureZz | `std.math.lcm` | `zz/math/mod.zz` |
+| PureZz | `std.math.log` | `zz/math/mod.zz` |
+| PureZz | `std.math.log10` | `zz/math/mod.zz` |
+| PureZz | `std.math.magnitude` | `zz/math/mod.zz` |
+| PureZz | `std.math.matrix_mul` | `zz/math/mod.zz` |
 | PureZz | `std.math.max` | `zz/math/mod.zz` |
 | PureZz | `std.math.max_arr` | `zz/math/mod.zz` |
-| CRuntime | `std.math.mean` | `zz_math_mean` |
+| PureZz | `std.math.mean` | `zz/math/mod.zz` |
 | PureZz | `std.math.mean_f` | `zz/math/mod.zz` |
-| CRuntime | `std.math.median` | `zz_math_median` |
+| PureZz | `std.math.median` | `zz/math/mod.zz` |
 | PureZz | `std.math.median_f` | `zz/math/mod.zz` |
 | PureZz | `std.math.min` | `zz/math/mod.zz` |
 | PureZz | `std.math.min_arr` | `zz/math/mod.zz` |
-| CRuntime | `std.math.pow` | `zz_math_pow` |
+| PureZz | `std.math.pow` | `zz/math/mod.zz` |
 | PureZz | `std.math.product` | `zz/math/mod.zz` |
 | PureZz | `std.math.product_f` | `zz/math/mod.zz` |
-| CRuntime | `std.math.rand_range` | `zz_math_rand_range` |
-| CRuntime | `std.math.random` | `zz_math_random` |
-| CRuntime | `std.math.root` | `zz_math_root` |
-| CRuntime | `std.math.round` | `zz_math_round` |
-| CRuntime | `std.math.signum` | `zz_math_signum` |
-| CRuntime | `std.math.sin` | `zz_math_sin` |
-| CRuntime | `std.math.sin_deg` | `zz_math_sin_deg` |
-| CRuntime | `std.math.sqrt` | `zz_math_sqrt` |
+| PureZz | `std.math.rand_range` | `zz/math/mod.zz` |
+| PureZz | `std.math.random` | `zz/math/mod.zz` |
+| PureZz | `std.math.root` | `zz/math/mod.zz` |
+| PureZz | `std.math.round` | `zz/math/mod.zz` |
+| PureZz | `std.math.signum` | `zz/math/mod.zz` |
+| PureZz | `std.math.sin` | `zz/math/mod.zz` |
+| PureZz | `std.math.sin_deg` | `zz/math/mod.zz` |
+| PureZz | `std.math.sqrt` | `zz/math/mod.zz` |
 | PureZz | `std.math.sum` | `zz/math/mod.zz` |
 | PureZz | `std.math.sum_f` | `zz/math/mod.zz` |
-| CRuntime | `std.math.tan` | `zz_math_tan` |
-| CRuntime | `std.math.tan_deg` | `zz_math_tan_deg` |
-| CRuntime | `std.math.to_degrees` | `zz_math_to_degrees` |
-| CRuntime | `std.math.to_radians` | `zz_math_to_radians` |
-| CRuntime | `std.math.trunc` | `zz_math_trunc` |
+| PureZz | `std.math.tan` | `zz/math/mod.zz` |
+| PureZz | `std.math.tan_deg` | `zz/math/mod.zz` |
+| PureZz | `std.math.to_degrees` | `zz/math/mod.zz` |
+| PureZz | `std.math.to_radians` | `zz/math/mod.zz` |
+| PureZz | `std.math.trunc` | `zz/math/mod.zz` |
 | CRuntime | `std.net.accept` | `zz_tcp_accept` |
 | CRuntime | `std.net.close` | `zz_tcp_shutdown` |
 | CRuntime | `std.net.local_addr` | `zz_tcp_local_addr` |

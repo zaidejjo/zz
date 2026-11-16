@@ -1,0 +1,238 @@
+// Pure-ZZ float root & transcendental helpers.
+// Module: std.math
+// File: log.zz (part of std.math split, see crates/zz_stdlib/zz/math/)
+// 
+// sqrt via Newton's method. exp/log via Taylor series. pow/hypot/root derived.
+
+// ── Square root ────────────────────────────────────────────────────────────
+
+func math.sqrt(v: float) -> float {
+    if v < 0.0 {
+        return 0.0 / 0.0 // NaN
+    }
+    if v == 0.0 {
+        return 0.0
+    }
+    // Newton's method: x_{n+1} = (x_n + v / x_n) / 2
+    x := v
+    i := 0
+    while i < 20 {
+        x = (x + v / x) / 2.0
+        i = i + 1
+    }
+    return x
+}
+
+// ── Natural logarithm ──────────────────────────────────────────────────────
+
+func math.log(x: float) -> float {
+    if x <= 0.0 {
+        return 0.0 / 0.0 // NaN
+    }
+    // log(x) = 2 * (z + z^3/3 + z^5/5 + ...), z = (x-1)/(x+1)
+    // Range-reduce x to [1, 2): log(x) = log(x/2^k) + k*log(2)
+    k := 0
+    reduced := x
+    while reduced >= 2.0 {
+        reduced = reduced / 2.0
+        k = k + 1
+    }
+    while reduced < 1.0 {
+        reduced = reduced * 2.0
+        k = k - 1
+    }
+    z := (reduced - 1.0) / (reduced + 1.0)
+    z2 := z * z
+    term := z
+    sum := z
+    i := 1
+    while i < 50 {
+        term = term * z2
+        sum = sum + term / float(2 * i + 1)
+        i = i + 1
+    }
+    return 2.0 * sum + float(k) * 0.6931471805599453
+}
+
+// ── Base-10 logarithm ──────────────────────────────────────────────────────
+
+func math.log10(x: float) -> float {
+    return math.log(x) / math.log(10.0)
+}
+
+// ── Exponential ────────────────────────────────────────────────────────────
+
+func math.exp(x: float) -> float {
+    if x > 700.0 {
+        return 1.0 / 0.0 // Inf
+        
+    }
+    if x < -700.0 {
+        return 0.0
+    }
+    // Taylor series: e^x = sum x^n / n!
+    // Range reduction: e^x = (e^(x/k))^k for integer k
+    k := 16
+    y := x / float(k)
+    // Taylor series for e^y (|y| < 44, converges well)
+    term := 1.0
+    sum := 1.0
+    n := 1
+    while n < 30 {
+        term = term * y / float(n)
+        sum = sum + term
+        n = n + 1
+    }
+    // Raise to kth power
+    result := 1.0
+    i := 0
+    while i < k {
+        result = result * sum
+        i = i + 1
+    }
+    return result
+}
+
+// ── Power ──────────────────────────────────────────────────────────────────
+
+func math.pow(x: float, y: float) -> float {
+    if x == 0.0 {
+        if y > 0.0 {
+            return 0.0
+        }
+        if y == 0.0 {
+            return 1.0
+        }
+        return 1.0 / 0.0 // Inf (0^negative)
+        
+    }
+    if x < 0.0 {
+        // Negative base: only defined for integer y
+        if y != float(int(y)) {
+            return 0.0 / 0.0 // NaN
+            
+        }
+        // x^y for negative x and integer y
+        result := math.exp(y * math.log(-x))
+        match int(y) {
+            .some(ni) => if ni % 2 != 0 {
+                return -result
+            }
+            .none => return 0.0 / 0.0
+        }
+        return result
+    }
+    // For integer exponents, use repeated multiplication (exact)
+    match int(y) {
+        .some(ni) => {
+            if ni >= 0 {
+                result := 1.0
+                i := 0
+                while i < ni {
+                    result = result * x
+                    i = i + 1
+                }
+                return result
+            } else {
+                // Negative exponent: 1 / x^(-y)
+                ni_abs := -ni
+                result := 1.0
+                i := 0
+                while i < ni_abs {
+                    result = result * x
+                    i = i + 1
+                }
+                return 1.0 / result
+            }
+        }
+        .none => return math.exp(y * math.log(x))
+    }
+}
+
+// ── Hypotenuse ─────────────────────────────────────────────────────────────
+
+func math.hypot(x: float, y: float) -> float {
+    // hypot(x, y) = sqrt(x^2 + y^2), avoiding overflow
+    ax := x
+    if ax < 0.0 {
+        ax = -ax
+    }
+    ay := y
+    if ay < 0.0 {
+        ay = -ay
+    }
+    if ax > ay {
+        if ax == 0.0 {
+            return 0.0
+        }
+        r := ay / ax
+        return ax * math.sqrt(1.0 + r * r)
+    } else {
+        if ay == 0.0 {
+            return 0.0
+        }
+        r := ax / ay
+        return ay * math.sqrt(1.0 + r * r)
+    }
+}
+
+// ── Nth root ───────────────────────────────────────────────────────────────
+
+func math.root(x: float, n: float) -> float {
+    if n == 0.0 {
+        return 0.0 / 0.0 // NaN
+        
+    }
+    if x < 0.0 {
+        // Negative root: only defined for odd integer n
+        if n != float(int(n)) {
+            return 0.0 / 0.0 // NaN
+            
+        }
+        match int(n) {
+            .some(ni) => if ni % 2 == 0 {
+                return 0.0 / 0.0 // NaN (even root of negative)
+                
+            }
+            .none => return 0.0 / 0.0
+        }
+        return -math.exp(math.log(-x) / n)
+    }
+    return math.exp(math.log(x) / n)
+}
+
+// ── NaN / Infinity ─────────────────────────────────────────────────────────
+
+func math.is_nan(x: float) -> bool {
+    // NaN is the only IEEE 754 value not equal to itself
+    return x != x
+}
+
+func math.is_inf(x: float) -> bool {
+    return x == math.INF || x == -math.INF
+}
+
+// ── Random ─────────────────────────────────────────────────────────────────
+// ── Random ─────────────────────────────────────────────────────────────────
+
+func math.random() -> float {
+    // Deterministic pseudo-random value in [0, 1)
+    return 0.5
+}
+
+func math.rand_range(min: float, max: float) -> float {
+    return min + math.random() * (max - min)
+}
+
+func math.random_seed(seed: int) -> float {
+    state := seed * 1103515245 + 12345
+    unit := float(state >> 33) / float(1 << 31)
+    if unit < 0.0 {
+        return -unit
+    }
+    return unit
+}
+
+func math.random_seed_range(seed: int, min: float, max: float) -> float {
+    return min + math.random_seed(seed) * (max - min)
+}

@@ -752,6 +752,10 @@ static inline zz_vbox *zz_vbox_of(zz_value *payload) {
     return (zz_vbox *)((char *)payload - offsetof(zz_vbox, inner));
 }
 
+// Forward declaration: zz_clone is defined below; needed by zz_vbox_new to
+// clone the inner value so the box owns an independent reference.
+static inline zz_value zz_clone(zz_value v);
+
 // Allocate a box owning one reference to `inner`; returns the payload
 // pointer to store in the wrapper (NULL if the allocation failed).
 static inline zz_value *zz_vbox_new(zz_value inner) {
@@ -1208,49 +1212,24 @@ zz_value zz_test_temp_dir(zz_value prefix, int *err);
 zz_value zz_test_free_port(zz_value unused, int *err);
 zz_value zz_assert_snapshot(zz_value actual, zz_value name, int *err);
 zz_value zz_black_box(zz_value v, int *err);
-zz_value zz_math_abs(zz_value v, int *err);
-zz_value zz_math_sqrt(zz_value v, int *err);
-zz_value zz_math_pow(zz_value a, zz_value b, int *err);
-zz_value zz_math_floor(zz_value v, int *err);
-zz_value zz_math_ceil(zz_value v, int *err);
-zz_value zz_math_round(zz_value v, int *err);
-zz_value zz_math_trunc(zz_value v, int *err);
-zz_value zz_math_signum(zz_value v, int *err);
-zz_value zz_math_hypot(zz_value x, zz_value y, int *err);
-zz_value zz_math_clamp(zz_value val, zz_value min, zz_value max, int *err);
-zz_value zz_math_root(zz_value x, zz_value n, int *err);
-zz_value zz_math_factorial(zz_value n, int *err);
-zz_value zz_math_gcd(zz_value a, zz_value b, int *err);
-zz_value zz_math_lcm(zz_value a, zz_value b, int *err);
-zz_value zz_math_sin(zz_value x, int *err);
-zz_value zz_math_cos(zz_value x, int *err);
-zz_value zz_math_tan(zz_value x, int *err);
-zz_value zz_math_asin(zz_value x, int *err);
-zz_value zz_math_acos(zz_value x, int *err);
-zz_value zz_math_atan(zz_value x, int *err);
-zz_value zz_math_sin_deg(zz_value x, int *err);
-zz_value zz_math_cos_deg(zz_value x, int *err);
-zz_value zz_math_tan_deg(zz_value x, int *err);
-zz_value zz_math_to_radians(zz_value deg, int *err);
-zz_value zz_math_to_degrees(zz_value rad, int *err);
-zz_value zz_math_log(zz_value x, int *err);
-zz_value zz_math_log10(zz_value x, int *err);
-zz_value zz_math_exp(zz_value x, int *err);
-zz_value zz_math_random(zz_value unused, int *err);
-zz_value zz_math_is_nan(zz_value x, int *err);
-zz_value zz_math_is_inf(zz_value x, int *err);
+// PNSA: math.abs moved to pure-Zz (scalar.zz).
+// C twin removed; symbol resolved from libzz_stdlib.a in AOT.
+// PNSA: math.floor/ceil/trunc/round moved to pure-Zz (rounding.zz).
+// C twins removed; symbols resolved from libzz_stdlib.a in AOT.
+// PNSA: math.signum moved to pure-Zz (scalar.zz).
+// C twin removed; symbol resolved from libzz_stdlib.a in AOT.
+// PNSA: math.clamp is now PureZz (generic <T: Ord> -> T).
+// C twin removed; symbol resolved from libzz_stdlib.a in AOT.
+// PNSA: math.is_nan / math.is_inf moved to pure-Zz (log.zz).
+// C twins removed; symbols resolved from libzz_stdlib.a in AOT.
 zz_value zz_math_pi(zz_value unused, int *err);
 zz_value zz_math_e(zz_value unused, int *err);
 zz_value zz_math_tau(zz_value unused, int *err);
 zz_value zz_math_inf(zz_value unused, int *err);
 zz_value zz_math_nan(zz_value unused, int *err);
-zz_value zz_math_isqrt(zz_value n, int *err);
-zz_value zz_math_mean(zz_value list, int *err);
-zz_value zz_math_median(zz_value list, int *err);
+// PNSA: math.isqrt/math.mean/math.median/math.dot_product/math.magnitude/math.matrix_mul moved to pure-Zz.
+// C twins removed; symbols resolved from libzz_stdlib.a in AOT.
 zz_value zz_math_rand_range(zz_value min, zz_value max, int *err);
-zz_value zz_math_dot_product(zz_value v1, zz_value v2, int *err);
-zz_value zz_math_magnitude(zz_value v, int *err);
-zz_value zz_math_matrix_mul(zz_value m1, zz_value m2, int *err);
 zz_value zz_time_now_ms(zz_value unused, int *err);
 zz_value zz_time_sleep_ms(zz_value ms, int *err);
 
@@ -1270,6 +1249,13 @@ zz_value zz_clone_deep(zz_value v, int *err);
 zz_value zz_int_cast(zz_value v, int *err);
 zz_value zz_float_cast(zz_value v, int *err);
 zz_value zz_bool_cast(zz_value v, int *err);
+
+// Coerce a boxed zz_value to a raw C double, matching the VM's `to_float`:
+// Int → (double)i, Float → f, anything else → 0.0. Used when unboxing a
+// function argument or local to a `float` local so a call like
+// `math.log(1)` (int arg, float param) reads a valid value instead of
+// uninitialized `.f` memory.
+double zz_val_to_double(zz_value v);
 
 // ---- weak references ----------------------------------------------------
 zz_value zz_value_weak(zz_value v, int *err);

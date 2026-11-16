@@ -69,11 +69,51 @@ pub const PURE_ZZ: &[&str] = &[
     "std.math.product_f",
     "std.math.mean_f",
     "std.math.median_f",
-    // PNSA: precompiled native stdlib (compiled from ZZ source to
-    // libzz_stdlib.a). VM calls via FFI wrappers; AOT links the archive.
+    // PNSA: mean/median delegate to _f variants (pure-Zz).
+    "std.math.mean",
+    "std.math.median",
+    // PNSA: pure-ZZ scalar math (handles int, float via Num + Ord).
+    "std.math.abs",
+    "std.math.signum",
+    "std.math.clamp",
+    "std.math.floor",
+    "std.math.ceil",
+    "std.math.trunc",
+    "std.math.round",
+    "std.math.sqrt",
+    // PNSA: math.pow/log/log10/exp/hypot/root moved to pure-Zz (log.zz).
+    "std.math.pow",
+    "std.math.log",
+    "std.math.log10",
+    "std.math.exp",
+    "std.math.hypot",
+    "std.math.root",
+    // PNSA: math.trig moved to pure-Zz (trig.zz).
+    "std.math.sin",
+    "std.math.cos",
+    "std.math.tan",
+    "std.math.asin",
+    "std.math.acos",
+    "std.math.atan",
+    "std.math.sin_deg",
+    "std.math.cos_deg",
+    "std.math.tan_deg",
+    "std.math.to_radians",
+    "std.math.to_degrees",
+    // PNSA: math.random/rand_range moved to pure-Zz (log.zz).
+    "std.math.random",
+    "std.math.rand_range",
+    // PNSA: precompiled native stdlib number theory.
     "std.math.factorial",
     "std.math.gcd",
     "std.math.lcm",
+    "std.math.isqrt",
+    "std.math.is_nan",
+    "std.math.is_inf",
+    // PNSA: linear algebra.
+    "std.math.dot_product",
+    "std.math.magnitude",
+    "std.math.matrix_mul",
     "math.sum",
     "math.product",
     "math.count",

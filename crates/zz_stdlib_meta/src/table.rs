@@ -2710,7 +2710,7 @@ pub fn build() -> HashMap<String, FuncSig> {
         "std.math.clamp".into(),
         sig_t(
             vec![("val", t.clone()), ("min", t.clone()), ("max", t.clone())],
-            Type::Float,
+            t.clone(),
         ),
     );
     m.insert(

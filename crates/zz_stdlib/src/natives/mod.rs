@@ -1478,284 +1478,33 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     }
 
     // std.math
-    m.insert(
-        "std.math.abs".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_abs,
-        },
-    );
-    m.insert(
-        "std.math.floor".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_floor,
-        },
-    );
-    m.insert(
-        "std.math.ceil".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_ceil,
-        },
-    );
-    m.insert(
-        "std.math.sqrt".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_sqrt,
-        },
-    );
-    m.insert(
-        "std.math.pow".into(),
-        NativeEntry {
-            arity: 2,
-            f: math::math_pow,
-        },
-    );
-    m.insert(
-        "std.math.random".into(),
-        NativeEntry {
-            arity: 0,
-            f: math::math_random,
-        },
-    );
+    // PNSA: math.floor/ceil/trunc/round moved to pure-Zz (rounding.zz).
+    // Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
 
     // ── std.math utilities & rounding ──
-    m.insert(
-        "std.math.round".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_round,
-        },
-    );
-    m.insert(
-        "std.math.trunc".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_trunc,
-        },
-    );
-    m.insert(
-        "std.math.clamp".into(),
-        NativeEntry {
-            arity: 3,
-            f: math::math_clamp,
-        },
-    );
-    m.insert(
-        "std.math.signum".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_signum,
-        },
-    );
-    m.insert(
-        "std.math.hypot".into(),
-        NativeEntry {
-            arity: 2,
-            f: math::math_hypot,
-        },
-    );
-    m.insert(
-        "std.math.is_nan".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_is_nan,
-        },
-    );
-    m.insert(
-        "std.math.is_inf".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_is_inf,
-        },
-    );
-
-    // ── std.math number theory ──
-    m.insert(
-        "std.math.root".into(),
-        NativeEntry {
-            arity: 2,
-            f: math::math_root,
-        },
-    );
-    m.insert(
-        "std.math.isqrt".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_isqrt,
-        },
-    );
-    m.insert(
-        "std.math.factorial".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_factorial,
-        },
-    );
-    m.insert(
-        "std.math.gcd".into(),
-        NativeEntry {
-            arity: 2,
-            f: math::math_gcd,
-        },
-    );
-    m.insert(
-        "std.math.lcm".into(),
-        NativeEntry {
-            arity: 2,
-            f: math::math_lcm,
-        },
-    );
+    // PNSA: math.clamp moved to pure-ZZ (generic <T: Ord> -> T).
+    // PNSA: math.signum moved to pure-Zz (scalar.zz, T: Num + Ord).
+    // Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
+    // PNSA: math.is_nan / math.is_inf moved to pure-Zz (log.zz).
+    // Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
+    // PNSA: factorial/gcd/lcm/isqrt moved to pure-Zz (int.zz).
+    // Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
+    // VM uses Rust bodies during transition.
 
     // ── std.math trigonometry ──
-    m.insert(
-        "std.math.sin".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_sin,
-        },
-    );
-    m.insert(
-        "std.math.cos".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_cos,
-        },
-    );
-    m.insert(
-        "std.math.tan".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_tan,
-        },
-    );
-    m.insert(
-        "std.math.asin".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_asin,
-        },
-    );
-    m.insert(
-        "std.math.acos".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_acos,
-        },
-    );
-    m.insert(
-        "std.math.atan".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_atan,
-        },
-    );
-    m.insert(
-        "std.math.sin_deg".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_sin_deg,
-        },
-    );
-    m.insert(
-        "std.math.cos_deg".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_cos_deg,
-        },
-    );
-    m.insert(
-        "std.math.tan_deg".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_tan_deg,
-        },
-    );
-    m.insert(
-        "std.math.to_radians".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_to_radians,
-        },
-    );
-    m.insert(
-        "std.math.to_degrees".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_to_degrees,
-        },
-    );
 
     // ── std.math logarithms & exponents ──
-    m.insert(
-        "std.math.log".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_log,
-        },
-    );
-    m.insert(
-        "std.math.log10".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_log10,
-        },
-    );
-    m.insert(
-        "std.math.exp".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_exp,
-        },
-    );
 
-    // ── std.math linear algebra ──
-    m.insert(
-        "std.math.dot_product".into(),
-        NativeEntry {
-            arity: 2,
-            f: math::math_dot_product,
-        },
-    );
-    m.insert(
-        "std.math.magnitude".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_magnitude,
-        },
-    );
-    m.insert(
-        "std.math.matrix_mul".into(),
-        NativeEntry {
-            arity: 2,
-            f: math::math_matrix_mul,
-        },
-    );
+    // ── PNSA: math.dot_product moved to pure-Zz (linalg.zz).
+    // Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
+    // PNSA: math.magnitude moved to pure-Zz (linalg.zz).
+    // Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
+    // PNSA: math.matrix_mul moved to pure-Zz (linalg.zz).
+    // Rust body removed; symbol resolved from libzz_stdlib.a in AOT.
 
-    // ── std.math statistics & random ──
-    m.insert(
-        "std.math.mean".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_mean,
-        },
-    );
-    m.insert(
-        "std.math.median".into(),
-        NativeEntry {
-            arity: 1,
-            f: math::math_median,
-        },
-    );
-    m.insert(
-        "std.math.rand_range".into(),
-        NativeEntry {
-            arity: 2,
-            f: math::math_rand_range,
-        },
-    );
+    // ── PNSA: mean/median moved to pure-Zz (stats.zz) ────────────────────────
+    // math.mean/math.median delegate to mean_f/median_f (PureZz).
+    // Rust bodies removed; symbols resolved from libzz_stdlib.a in AOT.
 
     // std.time
     m.insert(
@@ -2652,7 +2401,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // table without the other will fail CI here rather than at runtime.
     assert_eq!(
         m.len(),
-        478,
+        440,
         "natives registry count drifted; update this assertion"
     );
 

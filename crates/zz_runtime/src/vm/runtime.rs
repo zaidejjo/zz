@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use zz_frontend::ast::types::{Ty, TyKind};
 use zz_frontend::ast::{BinOp, Block, Expr};
 use zz_frontend::span::Span;
 
@@ -3641,6 +3642,30 @@ impl Vm {
         interp: &mut Interp,
         self_home: Option<TakeHome>,
     ) {
+        // Coerce `int` arguments to `float` parameters, matching the native
+        // AOT entry coercion (see `zz_lower::fn_decl`). Without this a
+        // compiled function like `math.hypot(3, 4)` performs integer
+        // division (`3 / 4 == 0`) instead of float division and diverges
+        // from the native engine. Arguments already occupy the top of the
+        // stack at `stack_base`, in parameter order.
+        for (i, p) in chunk.params.iter().enumerate() {
+            if matches!(
+                &p.ty,
+                Some(Ty {
+                    kind: TyKind::Float,
+                    ..
+                })
+            ) {
+                let slot = stack_base + i;
+                let coerce = match &self.stack[slot] {
+                    Value::Int(n) => Some(*n as f64),
+                    _ => None,
+                };
+                if let Some(f) = coerce {
+                    self.stack[slot] = Value::Float(f);
+                }
+            }
+        }
         let prev_env = std::mem::replace(&mut interp.env, env);
         let saved_defers = std::mem::take(&mut self.defer_stack);
         self.frames.push(Frame {

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use zz_checker::check_program;
 use zz_frontend::parse;
@@ -6,7 +7,7 @@ use zz_runtime::{Interp, Value};
 
 use super::{
     register_module_namespace, register_wildcard_namespace, stdlib_funcs, stdlib_natives,
-    STDLIB_MODULES,
+    zz_stdlib_program_at, STDLIB_MODULES,
 };
 
 pub(super) fn run(src: &str) -> Result<Value, String> {
@@ -39,6 +40,25 @@ pub(super) fn run(src: &str) -> Result<Value, String> {
     }
 
     let mut interp = Interp::with_natives(natives);
+
+    // Load pure-ZZ stdlib programs so PureZz functions (e.g. math.abs) are
+    // available at runtime in the VM. Without this, calls to pure-ZZ stdlib
+    // functions fail with "undefined variable" because the Rust native body
+    // has been removed.
+    match zz_stdlib_program_at(1) {
+        Ok(zz_prog) => {
+            if let Err(e) = interp.run_typed(
+                &zz_prog.program,
+                Arc::new(zz_prog.types.clone()),
+                zz_prog.structs.clone(),
+                zz_prog.enums.clone(),
+            ) {
+                return Err(format!("math stdlib init error: {e:?}"));
+            }
+        }
+        Err(e) => return Err(format!("math stdlib compile error: {e}")),
+    }
+
     interp
         .run(&parsed.program)
         .map_err(|e| e.message.to_string())

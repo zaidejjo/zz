@@ -177,7 +177,11 @@ pub use zz_codegen_types::mangle;
 /// (locals/globals resolve earlier; anything else errors upstream).
 /// Dotted non-`std.math` paths (user modules) never match.
 /// Returns `None` for anything that is not a known constant spelling.
-pub(crate) fn math_const_c_literal(joined: &str) -> Option<String> {
+///
+/// Also used by the chunk backend (`zz_chunk`) to emit `std.math.*`
+/// constants (e.g. `math.INF`) that appear as `Op::LoadPath` in the
+/// unified IR but have no env/global binding in the chunk module.
+pub fn math_const_c_literal(joined: &str) -> Option<String> {
     let leaf = joined
         .strip_prefix("std.math.")
         .or_else(|| joined.strip_prefix("math."))

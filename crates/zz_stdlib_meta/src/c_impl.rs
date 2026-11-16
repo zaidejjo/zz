@@ -122,49 +122,21 @@ pub fn native_impl(name: &str) -> Option<&'static str> {
         "cell.drop" | "std.cell.drop" => Some("zz_cell_drop"),
         "bytes.finish" | "std.bytes.finish" => Some("zz_bytes_finish"),
         // math
-        "math.abs" | "std.math.abs" => Some("zz_math_abs"),
-        "math.sqrt" | "std.math.sqrt" => Some("zz_math_sqrt"),
-        "math.pow" | "std.math.pow" => Some("zz_math_pow"),
-        "math.floor" | "std.math.floor" => Some("zz_math_floor"),
-        "math.ceil" | "std.math.ceil" => Some("zz_math_ceil"),
-        "math.round" | "std.math.round" => Some("zz_math_round"),
-        "math.trunc" | "std.math.trunc" => Some("zz_math_trunc"),
-        "math.signum" | "std.math.signum" => Some("zz_math_signum"),
-        "math.hypot" | "std.math.hypot" => Some("zz_math_hypot"),
-        "math.clamp" | "std.math.clamp" => Some("zz_math_clamp"),
-        "math.root" | "std.math.root" => Some("zz_math_root"),
-        "math.factorial" | "std.math.factorial" => Some("zz_math_factorial"),
-        "math.gcd" | "std.math.gcd" => Some("zz_math_gcd"),
-        "math.lcm" | "std.math.lcm" => Some("zz_math_lcm"),
-        "math.sin" | "std.math.sin" => Some("zz_math_sin"),
-        "math.cos" | "std.math.cos" => Some("zz_math_cos"),
-        "math.tan" | "std.math.tan" => Some("zz_math_tan"),
-        "math.asin" | "std.math.asin" => Some("zz_math_asin"),
-        "math.acos" | "std.math.acos" => Some("zz_math_acos"),
-        "math.atan" | "std.math.atan" => Some("zz_math_atan"),
-        "math.sin_deg" | "std.math.sin_deg" => Some("zz_math_sin_deg"),
-        "math.cos_deg" | "std.math.cos_deg" => Some("zz_math_cos_deg"),
-        "math.tan_deg" | "std.math.tan_deg" => Some("zz_math_tan_deg"),
-        "math.to_radians" | "std.math.to_radians" => Some("zz_math_to_radians"),
-        "math.to_degrees" | "std.math.to_degrees" => Some("zz_math_to_degrees"),
-        "math.log" | "std.math.log" => Some("zz_math_log"),
-        "math.log10" | "std.math.log10" => Some("zz_math_log10"),
-        "math.exp" | "std.math.exp" => Some("zz_math_exp"),
-        "math.random" | "std.math.random" => Some("zz_math_random"),
-        "math.is_nan" | "std.math.is_nan" => Some("zz_math_is_nan"),
-        "math.is_inf" | "std.math.is_inf" => Some("zz_math_is_inf"),
+        // PNSA: math.abs moved to pure-Zz (scalar.zz).
+        // Symbol resolved from libzz_stdlib.a in AOT.
+        // PNSA: math.sqrt moved to pure-Zz (log.zz).
+        // Symbol resolved from libzz_stdlib.a in AOT.
+        // PNSA: math.floor/ceil/trunc/round moved to pure-Zz (rounding.zz).
+        // Symbols resolved from libzz_stdlib.a in AOT.
+        // PNSA: math.signum moved to pure-Zz (scalar.zz).
+        // Symbol resolved from libzz_stdlib.a in AOT.
         "math.PI" | "std.math.PI" => Some("zz_math_pi"),
         "math.E" | "std.math.E" => Some("zz_math_e"),
         "math.TAU" | "std.math.TAU" => Some("zz_math_tau"),
         "math.INF" | "std.math.INF" => Some("zz_math_inf"),
         "math.NAN" | "std.math.NAN" => Some("zz_math_nan"),
-        "math.isqrt" | "std.math.isqrt" => Some("zz_math_isqrt"),
-        "math.mean" | "std.math.mean" => Some("zz_math_mean"),
-        "math.median" | "std.math.median" => Some("zz_math_median"),
-        "math.rand_range" | "std.math.rand_range" => Some("zz_math_rand_range"),
-        "math.dot_product" | "std.math.dot_product" => Some("zz_math_dot_product"),
-        "math.magnitude" | "std.math.magnitude" => Some("zz_math_magnitude"),
-        "math.matrix_mul" | "std.math.matrix_mul" => Some("zz_math_matrix_mul"),
+        // PNSA: math.isqrt/math.mean/math.median/math.dot_product/math.magnitude/math.matrix_mul moved to pure-Zz.
+        // Symbols resolved from libzz_stdlib.a in AOT.
         // json
         "json.parse" | "std.json.parse" => Some("zz_json_parse"),
         "json.stringify" | "std.json.stringify" => Some("zz_json_stringify"),

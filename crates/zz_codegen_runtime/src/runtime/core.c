@@ -1313,14 +1313,6 @@ zz_value zz_io_input(zz_value prompt, int *err) {
     return zz_str_new(buf, len);
 }
 
-zz_value zz_math_pow(zz_value a, zz_value b, int *err) {
-    (void)err;
-    // Always return float to match VM behavior.
-    double x = a.tag == ZZ_FLOAT ? a.f : (a.tag == ZZ_INT ? (double)a.i : 0.0);
-    double y = b.tag == ZZ_FLOAT ? b.f : (b.tag == ZZ_INT ? (double)b.i : 0.0);
-    return zz_float(dpow(x, y));
-}
-
 /// `time.now_ms()` — monotonic milliseconds since an arbitrary epoch,
 /// matching the stdlib native's behavior for elapsed-time measurements.
 /// The `zz_value` arg is ignored (native has zero zz-level arguments).
@@ -7151,7 +7143,9 @@ static zz_value http_serve_static_file(const char *path, size_t pathlen,
     zz_value out_hdrs = zz_dict_new();
     zz_dict_set(out_hdrs.dict, zz_str_static("Content-Type"),
                 zz_str_new(mime, strlen(mime)));
-    // Deliberately omit ETag/Accept-Ranges so that post-middlewares
+    zz_dict_set(out_hdrs.dict, zz_str_static("ETag"),
+                zz_str_static(etag));
+    // Deliberately omit Accept-Ranges so that post-middlewares
     // (CORS / secure_headers via `with_headers`) can freely set/override
     // headers without contention from pre-existing entries — the VM's
     // test expects Access-Control-Allow-Origin to appear on static-file
@@ -9383,6 +9377,17 @@ zz_value zz_float_cast(zz_value v, int *err) {
     }
 }
 
+// Coerce a boxed zz_value to a raw C double, mirroring the VM's `to_float`:
+// Int → (double)i, Float → f, anything else → 0.0.
+double zz_val_to_double(zz_value v) {
+    switch (v.tag) {
+    case ZZ_INT:   return (double)v.i;
+    case ZZ_FLOAT: return v.f;
+    case ZZ_BOOL:  return v.b ? 1.0 : 0.0;
+    default:       return 0.0;
+    }
+}
+
 // bool(v) — cast to bool.
 zz_value zz_bool_cast(zz_value v, int *err) {
     (void)err;
@@ -9398,216 +9403,36 @@ zz_value zz_bool_cast(zz_value v, int *err) {
 }
 
 // zz_str(v) — cast to string.
-// math.abs(v)
-zz_value zz_math_abs(zz_value v, int *err) {
-    (void)err;
-    if (v.tag == ZZ_INT) return (zz_value){ZZ_INT, {.i = v.i < 0 ? -v.i : v.i}};
-    if (v.tag == ZZ_FLOAT) return (zz_value){ZZ_FLOAT, {.f = fabs(v.f)}};
-    return v;
-}
+// PNSA: math.abs moved to pure-Zz (scalar.zz).
+// C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 
 // math.sqrt(v)
-zz_value zz_math_sqrt(zz_value v, int *err) {
-    (void)err;
-    double d = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = sqrt(d)}};
-}
 
-// math.floor(v) → int
-zz_value zz_math_floor(zz_value v, int *err) {
-    (void)err;
-    double d = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
-    return (zz_value){ZZ_INT, {.i = (int64_t)floor(d)}};
-}
+// PNSA: math.floor/ceil/trunc/round moved to pure-Zz (rounding.zz).
+// C twins removed; symbols resolved from libzz_stdlib.a in AOT.
 
-// math.ceil(v) → int
-zz_value zz_math_ceil(zz_value v, int *err) {
-    (void)err;
-    double d = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
-    return (zz_value){ZZ_INT, {.i = (int64_t)ceil(d)}};
-}
+// PNSA: math.signum moved to pure-Zz (scalar.zz).
+// C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 
-// math.round(v) → preserves Int for int input, Float otherwise (matches VM).
-zz_value zz_math_round(zz_value v, int *err) {
-    (void)err;
-    if (v.tag == ZZ_INT) return v;
-    if (v.tag == ZZ_FLOAT) return (zz_value){ZZ_FLOAT, {.f = round(v.f)}};
-    return (zz_value){ZZ_INT, {.i = 0}};
-}
-
-// math.trunc(v) → float
-zz_value zz_math_trunc(zz_value v, int *err) {
-    (void)err;
-    double d = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = trunc(d)}};
-}
-
-// math.signum(v) → same type
-zz_value zz_math_signum(zz_value v, int *err) {
-    (void)err;
-    if (v.tag == ZZ_INT) {
-        int64_t s = (v.i > 0) - (v.i < 0);
-        return (zz_value){ZZ_INT, {.i = s}};
-    }
-    if (v.tag == ZZ_FLOAT) {
-        double s = (v.f > 0.0) - (v.f < 0.0);
-        return (zz_value){ZZ_FLOAT, {.f = s}};
-    }
-    return v;
-}
-
-// math.hypot(x, y) → float
-zz_value zz_math_hypot(zz_value x, zz_value y, int *err) {
-    (void)err;
-    double dx = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    double dy = y.tag == ZZ_FLOAT ? y.f : (y.tag == ZZ_INT ? (double)y.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = hypot(dx, dy)}};
-}
-
-// math.clamp(val, min, max) → float
-zz_value zz_math_clamp(zz_value val, zz_value min, zz_value max, int *err) {
-    (void)err;
-    double dv = val.tag == ZZ_FLOAT ? val.f : (val.tag == ZZ_INT ? (double)val.i : 0.0);
-    double dmin = min.tag == ZZ_FLOAT ? min.f : (min.tag == ZZ_INT ? (double)min.i : 0.0);
-    double dmax = max.tag == ZZ_FLOAT ? max.f : (max.tag == ZZ_INT ? (double)max.i : 0.0);
-    if (dv < dmin) dv = dmin;
-    if (dv > dmax) dv = dmax;
-    return (zz_value){ZZ_FLOAT, {.f = dv}};
-}
-
-// math.root(x, n) → float (nth root)
-zz_value zz_math_root(zz_value x, zz_value n, int *err) {
-    (void)err;
-    double dx = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    double dn = n.tag == ZZ_FLOAT ? n.f : (n.tag == ZZ_INT ? (double)n.i : 0.0);
-    if (dn == 0.0) return (zz_value){ZZ_FLOAT, {.f = 1.0}};
-    return (zz_value){ZZ_FLOAT, {.f = pow(dx, 1.0/dn)}};
-}
+// PNSA: math.clamp is now PureZz (generic <T: Ord> -> T).
+// C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 
 // math.sin(x) → float
-zz_value zz_math_sin(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = sin(d)}};
-}
 
-// math.cos(x) → float
-zz_value zz_math_cos(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = cos(d)}};
-}
-
-// math.tan(x) → float
-zz_value zz_math_tan(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = tan(d)}};
-}
-
-// math.asin(x) → float
-zz_value zz_math_asin(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = asin(d)}};
-}
-
-// math.acos(x) → float
-zz_value zz_math_acos(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = acos(d)}};
-}
-
-// math.atan(x) → float
-zz_value zz_math_atan(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = atan(d)}};
-}
-
-// math.sin_deg(x) → float
-zz_value zz_math_sin_deg(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = sin(d * M_PI / 180.0)}};
-}
-
-// math.cos_deg(x) → float
-zz_value zz_math_cos_deg(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = cos(d * M_PI / 180.0)}};
-}
-
-// math.tan_deg(x) → float
-zz_value zz_math_tan_deg(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = tan(d * M_PI / 180.0)}};
-}
-
-// math.to_radians(deg) → float
-zz_value zz_math_to_radians(zz_value deg, int *err) {
-    (void)err;
-    double d = deg.tag == ZZ_FLOAT ? deg.f : (deg.tag == ZZ_INT ? (double)deg.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = d * M_PI / 180.0}};
-}
-
-// math.to_degrees(rad) → float
-zz_value zz_math_to_degrees(zz_value rad, int *err) {
-    (void)err;
-    double d = rad.tag == ZZ_FLOAT ? rad.f : (rad.tag == ZZ_INT ? (double)rad.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = d * 180.0 / M_PI}};
-}
 
 // math.log(x) → float (natural log)
-zz_value zz_math_log(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = log(d)}};
-}
 
 // math.log10(x) → float
-zz_value zz_math_log10(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = log10(d)}};
-}
-
-// math.exp(x) → float
-zz_value zz_math_exp(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : (x.tag == ZZ_INT ? (double)x.i : 0.0);
-    return (zz_value){ZZ_FLOAT, {.f = exp(d)}};
-}
 
 // math.random() → float in [0, 1)
 // Deterministic LCG matching the Rust VM's math_random (MATH_RAND_SEED),
 // so VM and AOT produce identical random sequences.
 static uint64_t math_rand_state = 0x9E3779B97F4A7C15ULL;
 
-zz_value zz_math_random(zz_value unused, int *err) {
-    (void)unused; (void)err;
-    math_rand_state = math_rand_state * 6364136223846793005ULL
-        + 1442695040888963407ULL;
-    double unit = (double)((math_rand_state >> 33) & 0x7FFFFFFF) / (double)(1u << 31);
-    return (zz_value){ZZ_FLOAT, {.f = unit}};
-}
 
-// math.is_nan(x) → bool
-zz_value zz_math_is_nan(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : 0.0;
-    return (zz_value){ZZ_BOOL, {.b = d != d}};
-}
+// PNSA: math.is_nan / math.is_inf moved to pure-Zz (log.zz).
+// C twins removed; symbols resolved from libzz_stdlib.a in AOT.
 
-// math.is_inf(x) → bool
-zz_value zz_math_is_inf(zz_value x, int *err) {
-    (void)err;
-    double d = x.tag == ZZ_FLOAT ? x.f : 0.0;
-    return (zz_value){ZZ_BOOL, {.b = d == 1.0/0.0 || d == -1.0/0.0}};
-}
 
 // math constants
 zz_value zz_math_pi(zz_value unused, int *err) {
@@ -9631,231 +9456,18 @@ zz_value zz_math_nan(zz_value unused, int *err) {
     return (zz_value){ZZ_FLOAT, {.f = 0.0/0.0}};
 }
 
-// math.isqrt(n) → .ok(int) or .err(str)
-zz_value zz_math_isqrt(zz_value n, int *err) {
-    (void)err;
-    if (n.tag != ZZ_INT)
-        return zz_variant_err(zz_str_static("isqrt expects an integer"));
-    if (n.i < 0)
-        return zz_variant_err(zz_str_static("isqrt: negative input"));
-    int64_t x = n.i, y = (x + 1) / 2;
-    while (y < x) { x = y; y = (x + n.i / x) / 2; }
-    return zz_variant_ok((zz_value){ZZ_INT, {.i = x}});
-}
-
-// math.mean(list) → .ok(float) or .err(str)
-zz_value zz_math_mean(zz_value list, int *err) {
-    (void)err;
-    if (list.tag != ZZ_ARRAY || !list.arr || list.arr->len == 0)
-        return zz_variant_err(zz_str_static("mean: empty list"));
-    double sum = 0.0;
-    for (size_t i = 0; i < list.arr->len; i++) {
-        zz_value v = list.arr->items[i];
-        sum += v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
-    }
-    return zz_variant_ok((zz_value){ZZ_FLOAT, {.f = sum / (double)list.arr->len}});
-}
-
-// math.median(list) → .ok(float) or .err(str)
-zz_value zz_math_median(zz_value list, int *err) {
-    (void)err;
-    if (list.tag != ZZ_ARRAY || !list.arr || list.arr->len == 0)
-        return zz_variant_err(zz_str_static("median: empty list"));
-    // Copy to temp array, sort, find median.
-    size_t n = list.arr->len;
-    double *vals = (double *)malloc(n * sizeof(double));
-    for (size_t i = 0; i < n; i++) {
-        zz_value v = list.arr->items[i];
-        vals[i] = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
-    }
-    // Simple insertion sort (median lists are typically small).
-    for (size_t i = 1; i < n; i++) {
-        double key = vals[i];
-        size_t j = i;
-        while (j > 0 && vals[j-1] > key) { vals[j] = vals[j-1]; j--; }
-        vals[j] = key;
-    }
-    double result;
-    if (n % 2 == 1)
-        result = vals[n / 2];
-    else
-        result = (vals[n/2 - 1] + vals[n/2]) / 2.0;
-    free(vals);
-    return zz_variant_ok((zz_value){ZZ_FLOAT, {.f = result}});
-}
+// PNSA: math.isqrt moved to pure-Zz (int.zz).
+// C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 
 // math.rand_range(min, max) → float
-zz_value zz_math_rand_range(zz_value min, zz_value max, int *err) {
-    (void)err;
-    double lo = min.tag == ZZ_FLOAT ? min.f : (min.tag == ZZ_INT ? (double)min.i : 0.0);
-    double hi = max.tag == ZZ_FLOAT ? max.f : (max.tag == ZZ_INT ? (double)max.i : 0.0);
-    // Deterministic LCG matching the Rust VM: each call restarts from MATH_RAND_SEED.
-    uint64_t state = 0x9E3779B97F4A7C15ULL;
-    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-    double r = (double)((state >> 33) & 0x7FFFFFFF) / (double)(1u << 31);
-    return (zz_value){ZZ_FLOAT, {.f = lo + r * (hi - lo)}};
-}
 
-// math.dot_product(v1, v2) → .ok(float) or .err(str)
-zz_value zz_math_dot_product(zz_value v1, zz_value v2, int *err) {
-    (void)err;
-    if (v1.tag != ZZ_ARRAY || v2.tag != ZZ_ARRAY || !v1.arr || !v2.arr)
-        return zz_variant_err(zz_str_static("dot_product: expected two arrays"));
-    if (v1.arr->len != v2.arr->len)
-        return zz_variant_err(zz_str_static("dot_product: arrays must have same length"));
-    double sum = 0.0;
-    for (size_t i = 0; i < v1.arr->len; i++) {
-        double a = v1.arr->items[i].tag == ZZ_FLOAT ? v1.arr->items[i].f :
-                   (v1.arr->items[i].tag == ZZ_INT ? (double)v1.arr->items[i].i : 0.0);
-        double b = v2.arr->items[i].tag == ZZ_FLOAT ? v2.arr->items[i].f :
-                   (v2.arr->items[i].tag == ZZ_INT ? (double)v2.arr->items[i].i : 0.0);
-        sum += a * b;
-    }
-    return zz_variant_ok((zz_value){ZZ_FLOAT, {.f = sum}});
-}
+// PNSA: math.dot_product moved to pure-Zz (linalg.zz).
+// C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 
-// math.magnitude(v) → float
-zz_value zz_math_magnitude(zz_value v, int *err) {
-    (void)err;
-    if (v.tag != ZZ_ARRAY || !v.arr) return (zz_value){ZZ_FLOAT, {.f = 0.0}};
-    double sum = 0.0;
-    for (size_t i = 0; i < v.arr->len; i++) {
-        double d = v.arr->items[i].tag == ZZ_FLOAT ? v.arr->items[i].f :
-                   (v.arr->items[i].tag == ZZ_INT ? (double)v.arr->items[i].i : 0.0);
-        sum += d * d;
-    }
-    return (zz_value){ZZ_FLOAT, {.f = sqrt(sum)}};
-}
+// PNSA: math.magnitude moved to pure-Zz (linalg.zz).
+// C twin removed; symbol resolved from libzz_stdlib.a in AOT.
 
-// math.matrix_mul(m1, m2) → .ok(array) or .err(str)
-// Mirrors the VM implementation: both args are arrays of arrays of
-// numbers; result is an array of arrays of float.
-zz_value zz_math_matrix_mul(zz_value m1, zz_value m2, int *err) {
-    if (m1.tag != ZZ_ARRAY || m2.tag != ZZ_ARRAY || !m1.arr || !m2.arr)
-        return zz_variant_err(zz_str_static("matrix_mul: expected two matrices"));
-
-    size_t rows1 = m1.arr->len;
-    if (rows1 == 0) return zz_variant_err(zz_str_static("matrix_mul: empty matrix"));
-
-    // Parse m1 into a rows1 x cols1 double buffer; validate rectangular shape.
-    double **a = (double **)calloc(rows1, sizeof(double *));
-    if (!a) return zz_variant_err(zz_str_static("matrix_mul: out of memory"));
-    size_t cols1 = 0;
-    for (size_t i = 0; i < rows1; i++) {
-        zz_value row = m1.arr->items[i];
-        if (row.tag != ZZ_ARRAY || !row.arr) {
-            for (size_t j = 0; j < i; j++) free(a[j]);
-            free(a);
-            return zz_variant_err(zz_str_static("matrix_mul: expected a matrix (array of arrays)"));
-        }
-        if (i == 0) cols1 = row.arr->len;
-        else if (row.arr->len != cols1) {
-            for (size_t j = 0; j < rows1; j++) free(a[j]);
-            free(a);
-            return zz_variant_err(zz_str_static("matrix_mul: ragged matrix"));
-        }
-        a[i] = (double *)calloc(row.arr->len, sizeof(double));
-        if (!a[i]) {
-            for (size_t j = 0; j < rows1; j++) free(a[j]);
-            free(a);
-            return zz_variant_err(zz_str_static("matrix_mul: out of memory"));
-        }
-        for (size_t k = 0; k < row.arr->len; k++) {
-            zz_value v = row.arr->items[k];
-            a[i][k] = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
-        }
-    }
-
-    size_t rows2 = m2.arr->len;
-    if (rows2 == 0) {
-        for (size_t i = 0; i < rows1; i++) free(a[i]);
-        free(a);
-        return zz_variant_err(zz_str_static("matrix_mul: empty matrix"));
-    }
-    // Read m2's first row to get cols2 for the dimension-mismatch message.
-    zz_value m2_first = m2.arr->items[0];
-    size_t cols2 = 0;
-    if (m2_first.tag == ZZ_ARRAY && m2_first.arr) cols2 = m2_first.arr->len;
-    if (cols1 != rows2) {
-        for (size_t i = 0; i < rows1; i++) free(a[i]);
-        free(a);
-        // Match VM: "matrix_mul: dimension mismatch (RxC) * (RxC)"
-        char msg[128];
-        snprintf(msg, sizeof(msg), "matrix_mul: dimension mismatch (%zux%zu) * (%zux%zu)", rows1, cols1, rows2, cols2);
-        return zz_variant_err(zz_str_new(msg, strlen(msg)));
-    }
-
-    // Parse m2 into a rows2 x cols2 double buffer.
-    double **b = (double **)calloc(rows2, sizeof(double *));
-    if (!b) {
-        for (size_t i = 0; i < rows1; i++) free(a[i]);
-        free(a);
-        return zz_variant_err(zz_str_static("matrix_mul: out of memory"));
-    }
-    for (size_t i = 0; i < rows2; i++) {
-        zz_value row = m2.arr->items[i];
-        if (row.tag != ZZ_ARRAY || !row.arr) {
-            for (size_t j = 0; j < rows1; j++) free(a[j]);
-            free(a);
-            for (size_t j = 0; j < i; j++) free(b[j]);
-            free(b);
-            return zz_variant_err(zz_str_static("matrix_mul: expected a matrix (array of arrays)"));
-        }
-        if (i == 0) cols2 = row.arr->len;
-        else if (row.arr->len != cols2) {
-            for (size_t j = 0; j < rows1; j++) free(a[j]);
-            free(a);
-            for (size_t j = 0; j < rows2; j++) free(b[j]);
-            free(b);
-            return zz_variant_err(zz_str_static("matrix_mul: ragged matrix"));
-        }
-        b[i] = (double *)calloc(row.arr->len, sizeof(double));
-        if (!b[i]) {
-            for (size_t j = 0; j < rows1; j++) free(a[j]);
-            free(a);
-            for (size_t j = 0; j < rows2; j++) free(b[j]);
-            free(b);
-            return zz_variant_err(zz_str_static("matrix_mul: out of memory"));
-        }
-        for (size_t k = 0; k < row.arr->len; k++) {
-            zz_value v = row.arr->items[k];
-            b[i][k] = v.tag == ZZ_FLOAT ? v.f : (v.tag == ZZ_INT ? (double)v.i : 0.0);
-        }
-    }
-
-    // Compute result = a * b: rows1 x cols2
-    zz_value result = zz_array_new_sized(rows1);
-    if (result.tag != ZZ_ARRAY || !result.arr) {
-        for (size_t i = 0; i < rows1; i++) free(a[i]);
-        free(a);
-        for (size_t i = 0; i < rows2; i++) free(b[i]);
-        free(b);
-        return zz_variant_err(zz_str_static("matrix_mul: out of memory"));
-    }
-    for (size_t i = 0; i < rows1; i++) {
-        zz_value row = zz_array_new_sized(cols2);
-        if (row.tag != ZZ_ARRAY || !row.arr) {
-            for (size_t j = 0; j < rows1; j++) free(a[j]);
-            free(a);
-            for (size_t j = 0; j < rows2; j++) free(b[j]);
-            free(b);
-            return zz_variant_err(zz_str_static("matrix_mul: out of memory"));
-        }
-        for (size_t j = 0; j < cols2; j++) {
-            double sum = 0.0;
-            for (size_t k = 0; k < cols1; k++) sum += a[i][k] * b[k][j];
-            zz_array_push(row.arr, (zz_value){ZZ_FLOAT, {.f = sum}});
-        }
-        zz_array_push(result.arr, row);
-    }
-
-    for (size_t i = 0; i < rows1; i++) free(a[i]);
-    free(a);
-    for (size_t i = 0; i < rows2; i++) free(b[i]);
-    free(b);
-
-    return zz_variant_ok(result);
-}
+// PNSA: math.matrix_mul moved to pure-Zz (linalg.zz).
 
 // env.get(name) — returns .some(val) or .none
 zz_value zz_env_get(zz_value name, int *err) {

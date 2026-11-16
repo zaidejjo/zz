@@ -2206,13 +2206,30 @@ zz_value zz_vec_sort_key(zz_value arr, zz_value key, int *err) {
 // vec.reverse(arr) → reversed array (new array, original unchanged)
 zz_value zz_vec_reverse(zz_value arr, int *err) {
     (void)err;
-    if (arr.tag != ZZ_ARRAY || !arr.arr) return arr;
-    size_t n = arr.arr->len;
-    zz_value rev = zz_array_new();
-    for (size_t i = n; i > 0; i--) {
-        zz_array_push(rev.arr, zz_clone(arr.arr->items[i-1]));
+    if (arr.tag == ZZ_ARRAY && arr.arr) {
+        size_t n = arr.arr->len;
+        zz_value rev = zz_array_new();
+        for (size_t i = n; i > 0; i--) {
+            zz_array_push(rev.arr, zz_clone(arr.arr->items[i-1]));
+        }
+        return rev;
     }
-    return rev;
+    if (arr.tag == ZZ_FLAT_STR_ARRAY && arr.flat_str) {
+        zz_flat_str_array *f = arr.flat_str;
+        size_t n = f->len;
+        zz_flat_str_array *out = (zz_flat_str_array *)calloc(1, sizeof(zz_flat_str_array));
+        if (!out) return arr;
+        out->refs = 1;
+        out->len = n;
+        out->pairs = (zz_flat_str_pair *)calloc(n, sizeof(zz_flat_str_pair));
+        if (!out->pairs) { free(out); return arr; }
+        out->total_len = f->total_len;
+        for (size_t i = 0; i < n; i++) {
+            out->pairs[i] = f->pairs[n - 1 - i];
+        }
+        return (zz_value){ZZ_FLAT_STR_ARRAY, {.flat_str = out}};
+    }
+    return arr;
 }
 // dict.len(d)
 zz_value zz_dict_len_val(zz_value d, int *err) {
@@ -2346,6 +2363,8 @@ void zz_index_trap(zz_value obj, zz_value idx, const char *func) {
             n = (long long)obj.bytes->len;
         else if (obj.tag == ZZ_STR && obj.s)
             n = (long long)obj.s->len;
+        else if (obj.tag == ZZ_FLAT_STR_ARRAY && obj.flat_str)
+            n = (long long)obj.flat_str->len;
         if (n >= 0) {
             fprintf(stderr, "zz error: index %lld out of bounds for length %lld in %s\n",
                     i, n, func);

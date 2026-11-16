@@ -156,8 +156,25 @@ impl Lowerer {
                     } else {
                         ""
                     };
+                    // Coerce the boxed argument to the declared param type so a
+                    // call like `math.log(1)` (int arg, float param) reads a
+                    // valid `.f` instead of uninitialized memory. The VM coerces
+                    // through `to_float` on every binop/comparison; native
+                    // compiled bodies read the tagged union directly, so the
+                    // coercion must happen once at entry. `zz_float_cast` is a
+                    // no-op for an already-float arg, so only int→float costs a
+                    // store. Matches `Type::Float`; other scalar types (int)
+                    // keep the raw `.i` read and need no coercion here.
+                    let coerce = matches!(&pt, zz_checker::Type::Float);
+                    let cast = if coerce {
+                        format!(
+                            "    if ({cid}.tag == ZZ_INT) {{ {cid} = zz_float_cast({cid}, &(int){{0}}); }}\n"
+                        )
+                    } else {
+                        String::new()
+                    };
                     o.push_str(&format!(
-                        "    zz_value {cid}{db_attr} = args[{idx}];\n",
+                        "    zz_value {cid}{db_attr} = args[{idx}];\n{cast}",
                         idx = i - arg_offset
                     ));
                 }
