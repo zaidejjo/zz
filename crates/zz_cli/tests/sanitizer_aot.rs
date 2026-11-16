@@ -229,6 +229,26 @@ func main() {
 }
 "#;
 
+// B6 regression: arena arrays migrated to heap (refs reset to 0) must be
+// freed with free(), not free()d as arena memory. Array migrate + drop churn.
+const B6_ARRAY_ARENA_MIGRATE: &str = r#"
+func main() {
+    var i := 0
+    var s := 0
+    while i < 300 {
+        a := []
+        var j := 0
+        while j < 8 {
+            a = vec.push(a, j)
+            j = j + 1
+        }
+        s = s + a.len()
+        i = i + 1
+    }
+    println("b6_array_arena_migrate_ok={s}")
+}
+"#;
+
 // B4 regression: chan.recv_batch must not steal from a registered green
 // waiter; recv_batch lock-free path exercised each iteration.
 const B4_RECV_BATCH: &str = r#"
@@ -323,6 +343,7 @@ const CASES: &[(&str, &str)] = &[
     ("b3_send_batch", B3_SEND_BATCH),
     ("b4_recv_batch", B4_RECV_BATCH),
     ("b5_closure_cells", B5_CLOSURE_CELLS),
+    ("b6_array_arena_migrate", B6_ARRAY_ARENA_MIGRATE),
 ];
 
 /// Cases only the instrumented HIR leg can run: the chunk backend has no

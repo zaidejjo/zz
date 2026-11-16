@@ -190,7 +190,15 @@ void zz_release_array(zz_array *a) {
         for (size_t i = 0; i < a->len; i++) {
             zz_release(&a->items[i]);
         }
-        free(a->items);  // items buffer always uses malloc
+        // Guard against a future path that creates a refs==0 array backed by
+        // arena memory: free() on arena memory corrupts the heap. Arena arrays
+        // are reclaimed in bulk at arena reset and return at the
+        // ZZ_ARRAY_ARENA_MAGIC arm above; this arm only owns heap-migrated
+        // items (arrays reset to refs==0 by zz_vec_append after migrating to
+        // malloc). The magic check is always true here today; it exists so a
+        // reordered arena arm can never free arena memory.
+        if (a->refs != ZZ_ARRAY_ARENA_MAGIC)
+            free(a->items);
         return;
     }
     if (__atomic_sub_fetch(&a->refs, 1, __ATOMIC_ACQ_REL) == 0) {

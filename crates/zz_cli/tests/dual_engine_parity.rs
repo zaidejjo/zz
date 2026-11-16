@@ -1837,6 +1837,11 @@ parity_strict!(
     "stdlib",
     "c_runtime_b5_closure_cells.zz"
 );
+parity_strict!(
+    parity_c_runtime_b6_array_arena_migrate,
+    "stdlib",
+    "c_runtime_b6_array_arena_migrate.zz"
+);
 parity_strict!(parity_stdlib_map_gaps, "stdlib", "map_gaps_test.zz");
 parity_strict!(parity_stdlib_set_gaps, "stdlib", "set_gaps_test.zz");
 parity_strict!(
