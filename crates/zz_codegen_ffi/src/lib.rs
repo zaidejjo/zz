@@ -764,6 +764,7 @@ fn copy_shared(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<
 /// publishers of the same key race harmlessly (identical bytes, `rename`
 /// picks the winner).
 fn snapshot_staticlib(lib: &std::path::Path, strip: bool) -> Result<PathBuf, FfiError> {
+    use std::io::Read;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
     use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -782,6 +783,44 @@ fn snapshot_staticlib(lib: &std::path::Path, strip: bool) -> Result<PathBuf, Ffi
             .ok()?
             .as_nanos();
         Some((meta.len(), mtime))
+    }
+
+    // Byte-identity check: `tmp` must be a faithful copy of `lib` as it
+    // exists right now. `std::fs::write` truncates the archive in place, so
+    // an open fd observed mid-mutation can read a torn mix (e.g. writer flips
+    // a→b→a within one mtime grain, leaving len+mtime unchanged). Metadata
+    // stability alone cannot detect that; comparing bytes can.
+    fn same_content(a: &std::path::Path, b: &std::path::Path) -> bool {
+        let Ok(ma) = std::fs::metadata(a) else {
+            return false;
+        };
+        let Ok(mb) = std::fs::metadata(b) else {
+            return false;
+        };
+        if ma.len() != mb.len() {
+            return false;
+        }
+        let Ok(mut fa) = std::fs::File::open(a) else {
+            return false;
+        };
+        let Ok(mut fb) = std::fs::File::open(b) else {
+            return false;
+        };
+        let mut ba = [0u8; 8192];
+        let mut bb = [0u8; 8192];
+        loop {
+            let ra = fa.read(&mut ba).unwrap_or(0);
+            let rb = fb.read(&mut bb).unwrap_or(0);
+            if ra != rb {
+                return false;
+            }
+            if ra == 0 {
+                return true;
+            }
+            if ba[..ra] != bb[..rb] {
+                return false;
+            }
+        }
     }
 
     let Some((len, mtime)) = stamp(lib) else {
@@ -832,16 +871,21 @@ fn snapshot_staticlib(lib: &std::path::Path, strip: bool) -> Result<PathBuf, Ffi
         ));
         let copied = copy_shared(lib, &tmp).ok().and_then(|_| stamp(&tmp));
         let after = stamp(lib);
-        let stable = match (before, copied, after) {
-            (Some(b), Some(c), Some(a)) if b == a && c.0 == b.0 && c.0 > 0 => {
-                // Filesystem timestamps can be coarse enough that a fast
-                // truncate+write leaves `(len, mtime)` unchanged across a
-                // partial write. Require the source to stay put across a
-                // short settling window before trusting the copy.
+        let metadata_stable = matches!(
+            (before, copied, after),
+            (Some(b), Some(c), Some(a)) if b == a && c.0 == b.0 && c.0 > 0
+        );
+        let stable = if metadata_stable {
+            // Byte-identity: the open-fd copy may have observed a torn mix
+            // if the source was truncated+rewritten mid-copy (even changed
+            // back within one mtime grain). Reject unless tmp equals lib now.
+            same_content(lib, &tmp) && {
+                // Settling window: source must stay put across it.
                 std::thread::sleep(Duration::from_millis(2));
-                stamp(lib) == Some(b)
+                stamp(lib) == Some(before.unwrap())
             }
-            _ => false,
+        } else {
+            false
         };
         if stable {
             if strip {
