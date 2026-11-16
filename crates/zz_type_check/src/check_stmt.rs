@@ -127,7 +127,7 @@ fn check_stmt_decl(
                     "element `{member}` does not fit expected type `{expected}`"
                 ));
                 notes.push(format!(
-                    "to fix: change the annotation to `{vt_r}` or convert the value"
+                    "to fix: convert `{member}` to `{expected}`, or change the annotation to `{vt_r}`"
                 ));
                 let e = UnifyError {
                     message: "type mismatch".into(),
@@ -474,6 +474,9 @@ fn check_stmt_assign(checker: &mut Checker, target: &Expr, value: &Expr, span: S
                 let mut notes = Vec::new();
                 notes.push(format!(
                     "element `{member}` does not fit expected type `{expected}`"
+                ));
+                notes.push(format!(
+                    "to fix: convert `{member}` to `{expected}`, or change the target type to `{vt_r}`"
                 ));
                 let e = UnifyError {
                     message: "type mismatch".into(),
