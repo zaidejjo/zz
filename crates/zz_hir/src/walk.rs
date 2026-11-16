@@ -161,6 +161,7 @@ fn walk_expr_in<'a>(
             }
         }
         Expr::Unary { expr, .. } => walk_expr_in(tp, scope, expr, f),
+        Expr::Is { expr, .. } => walk_expr_in(tp, scope, expr, f),
         Expr::Binary { left, right, .. } => {
             walk_expr_in(tp, scope, left, f);
             walk_expr_in(tp, scope, right, f);

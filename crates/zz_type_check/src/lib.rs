@@ -473,6 +473,14 @@ pub trait TypeCheckOps {
 
     /// Argument pattern of a variant pattern `.V(arg)`, or wildcard if none.
     fn variant_arg(&self, pat: &Pattern) -> Pattern;
+
+    /// Compute the complement type: `original` minus `narrowed`. Used for
+    // else-branch narrowing: `if x is T` where `x: Union(int, str)` narrows
+    // `x` to `str` in the else branch. Returns `Never` when nothing remains
+    // (the else-branch is provably unreachable). For non-union types, returns
+    // `original` unchanged since we can't meaningfully subtract a type from
+    // a non-union.
+    fn negate_type(original: &Type, narrowed: &Type) -> Type;
 }
 
 impl TypeCheckOps for Checker {
@@ -904,7 +912,8 @@ impl TypeCheckOps for Checker {
         let ty = self.check_expr_impl(e);
         // Unresolved types stay as `Var`s during the walk; the typed map is
         // deep-resolved at the end (see `check_program_typed`).
-        self.span_types.insert(self.scope_key(e.span()), ty.clone());
+        let key = self.scope_key(e.span());
+        self.span_types.insert(key, ty.clone());
         ty
     }
 
@@ -940,6 +949,11 @@ impl TypeCheckOps for Checker {
                         }
                         if canonical_head.contains('.') {
                             self.used_names.insert(canonical_head.clone());
+                        }
+                        // Mark the variant as used for dead-variant detection.
+                        if !variant.is_empty() {
+                            self.used_enum_variants
+                                .insert((canonical_head.clone(), variant.clone()));
                         }
                         // Generic parameters stay inference variables
                         // (defaulted like `Option` when never constrained).
@@ -1254,33 +1268,52 @@ impl TypeCheckOps for Checker {
                 els,
                 span,
             } => {
+                // Flow-sensitive narrowing: `if x is T` narrows `x` (when it
+                // is a variable) to `T` in the then-branch, and to the
+                // complement (original type minus `T`) in the else-branch.
+                // The narrowed type is recorded in the current scope's
+                // narrowing map before checking each branch and removed
+                // afterward so it cannot leak past the `if`.
+                let narrowed: Option<(String, Type, Type)> = match cond.as_ref() {
+                    Expr::Is { expr, ty, .. } => {
+                        if let Expr::Ident { name, .. } = expr.as_ref() {
+                            let narrowed_ty = self.ast_to_type(ty, &[]);
+                            // Capture the original type before narrowing so
+                            // the else-branch complement can be computed.
+                            let original_ty = self.lookup_opt(name).unwrap_or(Type::Never);
+                            Some((name.clone(), narrowed_ty, original_ty))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
                 let ct = self.check_expr(cond);
                 let glob_hint = match cond.as_ref() {
                     Expr::Str { value, .. } if Self::looks_like_glob(value) => Some(value.as_str()),
                     _ => None,
                 };
                 self.ensure_bool(ct, cond.span(), glob_hint);
+                if let Some((name, narrowed_ty, _)) = &narrowed {
+                    self.narrow(name.clone(), narrowed_ty.clone());
+                }
                 let tt = self.check_block(then);
-                match els {
-                    Some(e) => {
-                        let et = self.check_expr(e);
-                        // Join: a divergent arm vanishes (join(Never, T)
-                        // = T) — only arms that can yield values constrain
-                        // each other.
-                        let tt_r = self.unifier.resolve(&tt);
-                        let et_r = self.unifier.resolve(&et);
-                        match (tt_r, et_r) {
-                            (Type::Never, Type::Never) => Type::Never,
-                            (Type::Never, _) => et,
-                            (_, Type::Never) => tt,
-                            _ => {
-                                if let Err(err) = self.unifier.unify(&et, &tt) {
-                                    self.report_mismatch(err, e.span());
-                                }
-                                tt
-                            }
-                        }
-                    }
+                // Remove then-branch narrowing.
+                if let Some((name, _, _)) = &narrowed {
+                    let depth = self.env.len().saturating_sub(1);
+                    self.narrowing
+                        .get_mut(depth)
+                        .expect("narrowing map is kept parallel to env")
+                        .remove(name);
+                }
+                // Else-branch complement narrowing: `x` keeps its original
+                // type minus the narrowed type.
+                if let Some((name, narrowed_ty, original_ty)) = &narrowed {
+                    let negated = Self::negate_type(original_ty, narrowed_ty);
+                    self.narrow(name.clone(), negated);
+                }
+                let et = match els {
+                    Some(e) => self.check_expr(e),
                     None => {
                         // If the then-block contains a `return`, its type
                         // may be `Never` (e.g. `if x { return 5 }`), but
@@ -1322,6 +1355,29 @@ impl TypeCheckOps for Checker {
                             }
                         }
                         Type::Unit
+                    }
+                };
+                if let Some((name, _, _)) = &narrowed {
+                    let depth = self.env.len().saturating_sub(1);
+                    self.narrowing
+                        .get_mut(depth)
+                        .expect("narrowing map is kept parallel to env")
+                        .remove(name);
+                }
+                // Join: a divergent arm vanishes (join(Never, T)
+                // = T) — only arms that can yield values constrain
+                // each other.
+                let tt_r = self.unifier.resolve(&tt);
+                let et_r = self.unifier.resolve(&et);
+                match (tt_r, et_r) {
+                    (Type::Never, Type::Never) => Type::Never,
+                    (Type::Never, _) => et,
+                    (_, Type::Never) => tt,
+                    _ => {
+                        if let Err(err) = self.unifier.unify(&et, &tt) {
+                            self.report_mismatch(err, e.span());
+                        }
+                        tt
                     }
                 }
             }
@@ -1410,6 +1466,15 @@ impl TypeCheckOps for Checker {
                         Type::Unit
                     }
                 }
+            }
+            Expr::Is { expr, ty, span: _ } => {
+                // Type test `expr is T` → `bool`. The written target type is
+                // resolved (errors reported inline) but we do not reject the
+                // test statically — `is` is a runtime check, so a concrete
+                // mismatch just means the then-branch is unreachable.
+                let _ = self.check_expr(expr);
+                let _ = self.ast_to_type(ty, &[]);
+                Type::Bool
             }
             Expr::Try { expr, span } => self.check_try(expr, *span),
             Expr::Block(b) => self.check_block(b),
@@ -2905,12 +2970,17 @@ impl TypeCheckOps for Checker {
             Pattern::Wildcard { .. } => {}
             Pattern::Binding { name } => {
                 self.define_at(&name.name, ty.clone(), name.span);
+                // Record the binding in the flow-sensitive narrowing map so
+                // lookups inside this scope (match-arm / if-let body) resolve
+                // to the bound type even if an outer same-named binding exists
+                // (match-arm binding narrowing).
+                self.narrow(name.name.clone(), ty.clone());
                 // Record the binding-site span type: destructured (and
                 // match-arm) names otherwise leave no span entry, so
                 // lowering resolves their method calls untyped and
                 // multi-namespace methods misresolve (#417).
-                self.span_types
-                    .insert(self.scope_key(name.span), ty.clone());
+                let key = self.scope_key(name.span);
+                self.span_types.insert(key, ty.clone());
                 // Top-level destructured names are module globals (like
                 // top-level `Decl`): record them for `tp.bindings` so
                 // downstream passes (native globals collection) can type
@@ -3173,6 +3243,9 @@ impl TypeCheckOps for Checker {
     ) -> Option<(Pattern, Type)> {
         match self.enum_variant_payload(ename, vname, span) {
             Some(Some(pty)) => {
+                // Mark variant as used for dead-variant detection.
+                self.used_enum_variants
+                    .insert((ename.to_string(), vname.to_string()));
                 // Substitute the scrutinee's arguments for
                 // the enum's parameters (`Box<int>` + `T`
                 // → `int`), exactly like generic struct
@@ -3192,6 +3265,9 @@ impl TypeCheckOps for Checker {
                 }
             }
             Some(None) => {
+                // Mark variant as used for dead-variant detection.
+                self.used_enum_variants
+                    .insert((ename.to_string(), vname.to_string()));
                 if arg.is_some() {
                     self.errors.push(error_at(
                         format!(
@@ -3598,6 +3674,21 @@ impl TypeCheckOps for Checker {
             _ => Pattern::Wildcard {
                 span: Span::new(0, 0),
             },
+        }
+    }
+
+    fn negate_type(original: &Type, narrowed: &Type) -> Type {
+        match original {
+            Type::Union(members) => {
+                let remaining: Vec<Type> =
+                    members.iter().filter(|m| *m != narrowed).cloned().collect();
+                match remaining.len() {
+                    0 => Type::Never,
+                    1 => remaining.into_iter().next().unwrap(),
+                    _ => Type::Union(remaining),
+                }
+            }
+            _ => original.clone(),
         }
     }
 

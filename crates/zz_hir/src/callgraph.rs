@@ -433,6 +433,7 @@ fn walk_expr_for_graph(tp: &TypedProgram, e: &Expr, caller: &str, cg: &mut CallG
             }
         }
         Expr::Paren { expr, .. } => walk_expr_for_graph(tp, expr, caller, cg),
+        Expr::Is { expr, .. } => walk_expr_for_graph(tp, expr, caller, cg),
         Expr::Tuple { items, .. } => {
             for it in items {
                 walk_expr_for_graph(tp, it, caller, cg);
@@ -777,6 +778,7 @@ pub fn prune_program(tp: &TypedProgram, reach: &ReachableSet) -> TypedProgram {
         trait_impls: tp.trait_impls.clone(),
         try_converts: tp.try_converts.clone(),
         module_origins: tp.module_origins.clone(),
+        symbol_map: tp.symbol_map.clone(),
     }
 }
 

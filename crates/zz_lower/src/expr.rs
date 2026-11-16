@@ -54,6 +54,7 @@ pub(crate) fn mentions_ident(e: &Expr, name: &str) -> bool {
             FmtPart::Expr(inner, _) => mentions_ident(inner, name),
         }),
         Expr::Paren { expr, .. } => mentions_ident(expr, name),
+        Expr::Is { expr, .. } => mentions_ident(expr, name),
         Expr::Tuple { items, .. } => items.iter().any(|i| mentions_ident(i, name)),
         Expr::Unary { expr, .. } => mentions_ident(expr, name),
         Expr::Binary { left, right, .. } => {
@@ -695,6 +696,11 @@ impl Lowerer {
                 }
             }
             Expr::Paren { expr, .. } => self.emit_expr(expr, names, out),
+            Expr::Is { .. } => {
+                // Flow-sensitive `is` narrowing is a checker concern; the
+                // native/C backend does not yet lower runtime `is` tests.
+                unimplemented!("`expr is T` is not yet lowered to C")
+            }
             Expr::Unary { op, expr, .. } => {
                 let v = self.emit_expr(expr, names, out);
                 match op {

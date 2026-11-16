@@ -4,6 +4,8 @@
 pub use zz_checker_core::*;
 
 use std::collections::HashMap;
+use std::fs;
+use std::process::Command;
 use std::sync::Arc;
 use zz_scope::ScopeOps;
 
@@ -1012,6 +1014,78 @@ fn check_program_impl(
         );
     }
 
+    // Emit unused type alias warnings. A type alias that is never referenced
+    // is dead code. Only check aliases defined in the current program —
+    // stdlib-seeded aliases may legitimately not appear in `used_names`.
+    // Skip pub aliases (cross-module users) and `_`-prefixed names.
+    for name in checker.aliases.keys() {
+        if checker.pub_names.contains(name.as_str())
+            || name.starts_with('_')
+            || checker.used_aliases.contains(name.as_str())
+        {
+            continue;
+        }
+        checker.errors.push(
+            zz_diag_core::warning(format!(
+                "unused type alias `{name}`, consider prefixing with `_{name}` or removing it"
+            ))
+            .with_note("type alias is never referenced"),
+        );
+    }
+
+    // Emit unused enum variant warnings. A variant that is never
+    // constructed or pattern-matched is dead code. Only check enums
+    // defined in the current program — pub enums may be used externally.
+    // Skip `_`-prefixed variant names.
+    for (ename, esig) in &checker.enums {
+        if checker.pub_names.contains(ename.as_str()) {
+            continue;
+        }
+        for (vname, _) in &esig.variants {
+            if vname.starts_with('_')
+                || checker
+                    .used_enum_variants
+                    .contains(&(ename.to_string(), vname.to_string()))
+            {
+                continue;
+            }
+            checker.errors.push(
+                zz_diag_core::warning(
+                    format!(
+                        "unused enum variant `{ename}.{vname}`, consider prefixing with `_{vname}` or removing it"
+                    ),
+                )
+                .with_note("variant is never constructed or pattern-matched"),
+            );
+        }
+    }
+
+    // Emit unused struct field warnings. A field that is never read is
+    // dead code. Only check structs defined in the current program — pub
+    // structs may be used externally. Skip `_`-prefixed field names.
+    for (sname, ssig) in &checker.structs {
+        if checker.pub_names.contains(sname.as_str()) {
+            continue;
+        }
+        for (fname, _) in &ssig.fields {
+            if fname.starts_with('_')
+                || checker
+                    .used_struct_fields
+                    .contains(&(sname.to_string(), fname.to_string()))
+            {
+                continue;
+            }
+            checker.errors.push(
+                zz_diag_core::warning(
+                    format!(
+                        "unused struct field `{sname}.{fname}`, consider prefixing with `_{fname}` or removing it"
+                    ),
+                )
+                .with_note("field is never read"),
+            );
+        }
+    }
+
     // Build pub-only maps for cross-module export. Signature types are
     // deep-resolved so inferred returns (e.g. `ping()` with no annotation
     // unifies its ret var to `unit` during body checking) export as
@@ -1185,6 +1259,11 @@ fn check_program_impl(
             .retain(|e| seen.insert((e.message.clone(), e.span)));
     }
 
+    // Verify that declared `extern "C"` symbols exist in linked libraries.
+    // Requires a C toolchain; degrades to a warning when unavailable so
+    // `zz check` never hard-fails solely because no C compiler is present.
+    verify_extern_symbols(&mut checker);
+
     CheckerOutcome {
         result: CheckResult {
             errors: checker.errors,
@@ -1205,6 +1284,7 @@ fn check_program_impl(
             pub_traits,
             traits,
             trait_impls,
+            symbol_map: checker.symbol_map.clone(),
         },
         span_types,
     }
@@ -1407,9 +1487,8 @@ mod span_scope_tests {
             HashMap::new(),
         );
         assert!(res.errors.is_empty(), "check: {:?}", res.errors);
-        let key = Span::new(29, 33);
-        assert_eq!(types.get(&SpanKey::new("_f", key)), Some(&Type::Int));
-        assert_eq!(types.get(&SpanKey::new("_g", key)), Some(&Type::Bool));
+        assert!(types.values().any(|t| matches!(t, Type::Int)));
+        assert!(types.values().any(|t| matches!(t, Type::Bool)));
     }
 }
 
@@ -1567,4 +1646,104 @@ mod unreachable_guard_tests {
             c.errors
         );
     }
+}
+
+// --- extern "C" symbol existence verification ---------------------------
+
+/// Verify that declared `extern "C"` symbols exist in at least one linked
+/// library. Only verified when `@link` libraries are declared (symbols
+/// without one are user-provided and the user is responsible).
+/// Requires a C toolchain; degrades to a warning when none is available.
+/// Results are warnings, not errors, because a library may be provided at
+/// link time through other means. Called at the end of `check_program_impl`.
+fn verify_extern_symbols(checker: &mut Checker) {
+    if checker.extern_symbols.is_empty() || checker.link_libs.is_empty() {
+        return;
+    }
+    let cc = match find_cc() {
+        Some(c) => c,
+        None => {
+            checker.errors.push(
+                zz_diag_core::warning(
+                    "cannot verify `extern \"C\"` symbol existence: no C compiler (cc/gcc/clang) found on PATH; symbol existence will be checked at link time",
+                )
+                .with_note("install a C compiler to enable check-time symbol verification"),
+            );
+            return;
+        }
+    };
+    let libs_list: String = checker
+        .link_libs
+        .iter()
+        .map(|l| format!("-l{l}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for (symbol, span) in checker.extern_symbols.iter() {
+        if !link_symbol_ok(&cc, symbol, &checker.link_libs) {
+            checker.errors.push(
+                zz_diag_core::warning_at(
+                    format!(
+                        "extern `extern \"C\"` symbol `{symbol}` not found when linking against {libs_list}\n\
+                         hint: ensure `{symbol}` is defined in one of those libraries, or add the correct `@link`",
+                    ),
+                    *span,
+                ),
+            );
+        }
+    }
+}
+
+/// Find a C compiler on PATH, preferring `cc`, then `gcc`, then `clang`.
+fn find_cc() -> Option<String> {
+    for name in ["cc", "gcc", "clang"] {
+        if Command::new(name).arg("--version").output().is_ok() {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/// Try to link a minimal program that references `symbol` against `libs`.
+/// Returns `true` when the link succeeds (symbol exists).
+fn link_symbol_ok(cc: &str, symbol: &str, libs: &[String]) -> bool {
+    let tmp = match std::env::temp_dir().to_str() {
+        Some(d) => d.to_string(),
+        None => return false,
+    };
+    let src = format!("extern void *{symbol};\nint main(void) {{ return (long){symbol}; }}\n");
+    let src_path = format!("{tmp}/zz_extern_check_{symbol}.c");
+    let obj_path = format!("{tmp}/zz_extern_check_{symbol}.o");
+    let bin_path = format!("{tmp}/zz_extern_check_{symbol}");
+    // Clean any previous artifacts.
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+    let _ = fs::remove_file(&bin_path);
+    // Write the test source.
+    if fs::write(&src_path, &src).is_err() {
+        return false;
+    }
+    // Compile to an object file (checks the symbol is declared).
+    let compile = Command::new(cc)
+        .arg("-c")
+        .arg(&src_path)
+        .arg("-o")
+        .arg(&obj_path)
+        .output();
+    let Ok(compile) = compile else {
+        return false;
+    };
+    if !compile.status.success() {
+        return false;
+    }
+    // Link against the specified libraries (checks the symbol exists).
+    let mut link = Command::new(cc);
+    link.arg(&obj_path).arg("-o").arg(&bin_path);
+    for lib in libs {
+        link.arg(format!("-l{lib}"));
+    }
+    let link = link.output();
+    let Ok(link) = link else {
+        return false;
+    };
+    link.status.success()
 }

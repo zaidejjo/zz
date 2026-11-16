@@ -7,7 +7,9 @@ use common::{
 use std::collections::HashMap;
 use zz_checker::type_::Type;
 use zz_checker::{check_program, check_program_typed, FuncSig, StructSig};
+use zz_checker_core::Checker;
 use zz_frontend::span::Span;
+use zz_type_check::TypeCheckOps;
 
 #[test]
 fn infers_int_from_literal() {
@@ -4161,6 +4163,137 @@ fn bare_variant_constructor_keeps_outer_type_in_span_map() {
     );
 }
 
+// --- flow-sensitive type narrowing (`if x is T` + match-arm bindings) ------
+
+/// Check `src` and return all resolved span types (values only).
+fn span_types_of(src: &str) -> Vec<Type> {
+    let parsed = zz_frontend::parse(src);
+    assert!(
+        parsed.errors.is_empty(),
+        "parse errors: {:?}",
+        parsed.errors
+    );
+    let (_checked, span_types) = zz_checker::check_program_typed(
+        &parsed.program,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    span_types.into_values().collect()
+}
+
+#[test]
+fn if_is_narrows_variable_in_then_branch() {
+    // `x` is `Array<Union<int, str>>`; `x + 1` would error without narrowing.
+    // `if x is int` narrows `x` to `int` in the then-branch, so `y := x + 1`
+    // type-checks there (narrowing overrides the env binding for lookups).
+    let span_types =
+        span_types_of("func main() {\n    x := [1, \"hi\"]\n    if x is int { y := x + 1 }\n}\n");
+    assert!(
+        !span_types.iter().any(|t| matches!(t, Type::Error)),
+        "narrowed `x` must type `y := x + 1` as int without error, got {span_types:?}"
+    );
+}
+
+#[test]
+fn if_is_does_not_leak_narrowing_past_branch() {
+    // Narrowing is scoped to the then-branch. Outside, `x` keeps its
+    // original type (`Array<Union<int, str>>`), so `x + 1` must error here.
+    let span_types =
+        span_types_of("func main() {\n    x := [1, \"hi\"]\n    if x is int { }\n    x + 1\n}\n");
+    assert!(
+        span_types.iter().any(|t| matches!(t, Type::Error)),
+        "using `x` as `int` past the branch must error (`x` is `Array<Union<int, str>>`), got {span_types:?}"
+    );
+}
+
+#[test]
+fn match_arm_binding_narrowing() {
+    // Match-arm bindings narrow the bound name inside the arm body.
+    let span_types = span_types_of(
+        "enum Box<T> { V(T), E }\nfunc main() {\n    b := Box.V(1)\n    match b { .V(x) => x + 1, _ => 0 }\n}\n",
+    );
+    assert!(
+        !span_types.iter().any(|t| matches!(t, Type::Error)),
+        "match-arm binding `x` narrowed to int, `x + 1` must type-check, got {span_types:?}"
+    );
+}
+
+// --- flow-sensitive negation narrowing unit tests ---
+
+#[test]
+fn negate_type_union_removes_member() {
+    use zz_checker::type_::Type;
+    let _checker = Checker::new(
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let original = Type::Union(vec![Type::Int, Type::Str]);
+    let narrowed = Type::Int;
+    let result = Checker::negate_type(&original, &narrowed);
+    assert_eq!(
+        result,
+        Type::Str,
+        "negating int from Union(int, str) should give str"
+    );
+}
+
+#[test]
+fn negate_type_union_removes_all() {
+    use zz_checker::type_::Type;
+    let _checker = Checker::new(
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let original = Type::Union(vec![Type::Int]);
+    let narrowed = Type::Int;
+    let result = Checker::negate_type(&original, &narrowed);
+    assert_eq!(
+        result,
+        Type::Never,
+        "negating the only member should give Never"
+    );
+}
+
+#[test]
+fn negate_type_non_union_returns_original() {
+    use zz_checker::type_::Type;
+    let _checker = Checker::new(
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let original = Type::Array(Box::new(Type::Union(vec![Type::Int, Type::Str])));
+    let narrowed = Type::Int;
+    let result = Checker::negate_type(&original, &narrowed);
+    assert_eq!(
+        result,
+        Type::Array(Box::new(Type::Union(vec![Type::Int, Type::Str]))),
+        "non-union original should be returned unchanged"
+    );
+}
+
 // --- explicit return for named functions ----------------------------------
 
 #[test]
@@ -4822,7 +4955,7 @@ fn missing_field_chain_does_not_cascade() {
     let all_field: Vec<&str> = r
         .errors
         .iter()
-        .filter(|e| e.message.contains("field"))
+        .filter(|e| e.severity == zz_frontend::diag::Severity::Error && e.message.contains("field"))
         .map(|e| e.message.as_str())
         .collect();
     assert_eq!(
@@ -5123,6 +5256,209 @@ fn unused_private_function_used_as_value_silent() {
             .iter()
             .any(|e| e.message.contains("unused private function `cb`")),
         "function used as value should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+/// Unused type / variant / field detection (#4 of the checker improvement plan).
+#[test]
+fn unused_type_alias_warns() {
+    // An unused type alias is dead code.
+    let r = check_src("type Foo = int\nx := 1\n");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unused type alias `Foo`")),
+        "expected unused alias warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn used_type_alias_silent() {
+    // A referenced alias is not dead code.
+    let r = check_src("type Foo = int\nx: Foo = 1\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused type alias")),
+        "used alias should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn pub_type_alias_silent() {
+    // A pub alias may be used externally.
+    let r = check_src("pub type Foo = int\nx := 1\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused type alias `Foo`")),
+        "pub alias should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn underscore_type_alias_silent() {
+    // A `_`-prefixed alias is silenced.
+    let r = check_src("type _Foo = int\nx := 1\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused type alias `_Foo`")),
+        "underscore alias should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_enum_variant_warns() {
+    // An unused variant is dead code.
+    let r = check_src("enum E { A, B }\nx := E.A\n");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unused enum variant `E.B`")),
+        "expected unused variant warning, got: {:?}",
+        r.errors
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused enum variant `E.A`")),
+        "used variant should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn used_enum_variant_pattern_silent() {
+    // A variant matched in a pattern is used.
+    let r = check_src("enum E { A, B }\nmatch E.A { .A => 1, .B => 2 }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused enum variant")),
+        "used variants should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn underscore_enum_variant_silent() {
+    // A `_`-prefixed variant is silenced.
+    let r = check_src("enum E { A, _B }\nx := E.A\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused enum variant `_B`")),
+        "underscore variant should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_struct_field_warns() {
+    // An unused field is dead code.
+    let r = check_src(
+        "struct S { x: int, y: int }\ns := S{ x: 1, y: 2 }\nif s.x == 1 { 1 } else { 0 }\n",
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unused struct field `S.y`")),
+        "expected unused field warning, got: {:?}",
+        r.errors
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused struct field `S.x`")),
+        "used field should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn used_struct_field_silent() {
+    // A read field is not dead code.
+    let r = check_src("struct S { x: int }\ns := S{ x: 1 }\nif s.x == 1 { 1 } else { 0 }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused struct field")),
+        "used field should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn underscore_struct_field_silent() {
+    // A `_`-prefixed field is silenced.
+    let r = check_src("struct S { x: int, _y: int }\ns := S{ x: 1 }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused struct field `S._y`")),
+        "underscore field should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn pub_struct_field_silent() {
+    // A pub struct's fields may be used externally.
+    let r = check_src("pub struct S { x: int }\ns := S{ x: 1 }\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused struct field `S.x`")),
+        "pub struct field should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+/// Structured expected/found context in diagnostics (#5).
+#[test]
+fn mismatch_includes_parameter_context() {
+    // A type mismatch at a call site should name the parameter in the
+    // main message, not just in a note.
+    let r = check_src("func f(x: int) -> int { return x }\nx := f(\"hi\")\n");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("expected `int` for `x`")),
+        "expected parameter context in mismatch message, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn mismatch_includes_variable_context() {
+    // A type mismatch in a variable declaration should name the variable
+    // in the main message.
+    let r = check_src("x: int = \"hi\"\n");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("expected `int` for `variable `")),
+        "expected variable context in mismatch message, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn mismatch_without_context_still_works() {
+    // A mismatch with no context still renders the generic message.
+    let r = check_src("x := 1 + \"hi\"\n");
+    assert!(
+        r.errors.iter().any(|e| e
+            .message
+            .contains("type mismatch: expected `int`, found `str`")
+            || e.message.contains("cannot apply `+` to `int` and `str`")),
+        "expected generic mismatch message, got: {:?}",
         r.errors
     );
 }

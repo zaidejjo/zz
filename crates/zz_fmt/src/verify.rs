@@ -575,6 +575,13 @@ fn fp_expr(e: &Expr, out: &mut String) {
                 out.push('.');
             }
         }
+        Expr::Is { expr, ty, .. } => {
+            out.push_str("Is(");
+            fp_expr(expr, out);
+            out.push(',');
+            fp_ty(ty, out);
+            out.push(')');
+        }
         Expr::Fmt { parts, .. } => {
             out.push_str("Fmt[");
             for p in parts {

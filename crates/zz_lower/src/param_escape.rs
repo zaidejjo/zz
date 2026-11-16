@@ -200,6 +200,7 @@ impl<'a> Walker<'a> {
             Expr::Ident { name, .. } => self.resolve(name).0,
             Expr::Path { parts, .. } => parts.first().is_some_and(|h| self.resolve(h).0),
             Expr::Paren { expr, .. } | Expr::Unary { expr, .. } => self.mentions_tainted(expr),
+            Expr::Is { expr, .. } => self.mentions_tainted(expr),
             Expr::Binary { left, right, .. } => {
                 self.mentions_tainted(left) || self.mentions_tainted(right)
             }
@@ -352,6 +353,7 @@ impl<'a> Walker<'a> {
             Expr::Paren { expr, .. } | Expr::Unary { expr, .. } => {
                 self.mentions_tainted_closure_fallback(expr, shadowed)
             }
+            Expr::Is { expr, .. } => self.mentions_tainted_closure_fallback(expr, shadowed),
             Expr::Binary { left, right, .. } => {
                 self.mentions_tainted_closure_fallback(left, shadowed)
                     || self.mentions_tainted_closure_fallback(right, shadowed)
@@ -585,6 +587,7 @@ impl<'a> Walker<'a> {
                 out
             }
             Expr::Paren { expr, .. } | Expr::Unary { expr, .. } => self.flow_expr(expr),
+            Expr::Is { expr, .. } => self.flow_expr(expr),
             Expr::Binary { left, right, .. } => self.flow_expr(left).or(self.flow_expr(right)),
             Expr::Call {
                 callee,
@@ -1962,6 +1965,7 @@ impl<'a> FlatUseScan<'a> {
             | Expr::Variant {
                 arg: Some(expr), ..
             } => self.expr(expr),
+            Expr::Is { expr, .. } => self.expr(expr),
             Expr::Binary { left, right, .. } => {
                 self.expr(left);
                 self.expr(right);

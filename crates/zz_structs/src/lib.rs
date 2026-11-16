@@ -337,7 +337,12 @@ impl StructOps for Checker {
     fn struct_field_access(&mut self, sname: &str, args: &[Type], name: &str, span: Span) -> Type {
         match self.structs.get(sname).cloned() {
             Some(_) => match self.direct_field_type(sname, args, name) {
-                Some(ft) => ft,
+                Some(ft) => {
+                    // Mark field as used for dead-field detection.
+                    self.used_struct_fields
+                        .insert((sname.to_string(), name.to_string()));
+                    ft
+                }
                 None => match self.resolve_struct_field_generic(sname, args, name) {
                     // Promoted through an embedded struct.
                     Some((_, ft)) => ft,

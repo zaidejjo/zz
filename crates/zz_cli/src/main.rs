@@ -7,6 +7,7 @@
 //! - `zz check <file>` → parse and type-check a `.zz` file without running it
 //! - `zz --help`     → usage
 
+use std::collections::HashMap;
 use std::process::ExitCode;
 
 mod bench_runner;
@@ -1170,6 +1171,7 @@ fn setup_interp(
                 if let Err(e) = interp.run_typed(
                     &zz_prog.program,
                     std::sync::Arc::new(zz_prog.types.clone()),
+                    HashMap::new(),
                     zz_prog.structs.clone(),
                     zz_prog.enums.clone(),
                 ) {
@@ -1368,6 +1370,7 @@ fn compile_prep(prep: &PreparedRun) -> Option<Vec<Vec<u8>>> {
         let chunk = zz_runtime::vm::Compiler::compile_program_typed(
             program,
             prep.types.clone(),
+            HashMap::new(),
             prep.structs.clone(),
             prep.enums.clone(),
             native_names.clone(),
@@ -1565,6 +1568,7 @@ fn run_bytecode_zz(
         let chunk = std::sync::Arc::new(zz_runtime::vm::Compiler::compile_program_typed(
             program,
             prep.types.clone(),
+            HashMap::new(),
             prep.structs.clone(),
             prep.enums.clone(),
             native_names,
@@ -1686,6 +1690,7 @@ fn dis_file(path: Option<&String>, vm: bool, summary: bool) -> Result<(), String
         let chunk = zz_runtime::vm::Compiler::compile_program_typed(
             program,
             prep.types.clone(),
+            HashMap::new(),
             prep.structs.clone(),
             prep.enums.clone(),
             native_names,
@@ -1774,6 +1779,7 @@ fn emit_ir_cmd(args: &[String]) -> Result<(), String> {
     let chunk = zz_runtime::vm::Compiler::compile_program_typed(
         &prep.programs[0],
         prep.types.clone(),
+        HashMap::new(),
         prep.structs.clone(),
         prep.enums.clone(),
         native_names,
@@ -1916,6 +1922,7 @@ fn run_file(
             match prep.interp.run_typed(
                 program,
                 prep.types.clone(),
+                HashMap::new(),
                 prep.structs.clone(),
                 prep.enums.clone(),
             ) {
@@ -1973,6 +1980,7 @@ fn run_file(
         match prep.interp.run_typed(
             program,
             prep.types.clone(),
+            HashMap::new(),
             prep.structs.clone(),
             prep.enums.clone(),
         ) {

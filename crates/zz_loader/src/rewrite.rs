@@ -350,6 +350,7 @@ impl<'a> Rewriter<'a> {
             }
             Expr::Paren { expr: inner, .. } => self.rewrite_expr(inner),
             Expr::Unary { expr: inner, .. } => self.rewrite_expr(inner),
+            Expr::Is { expr: inner, .. } => self.rewrite_expr(inner),
             Expr::Binary { left, right, .. } => {
                 self.rewrite_expr(left);
                 self.rewrite_expr(right);
@@ -821,6 +822,7 @@ fn rewrite_call_expr(
         Expr::Paren { expr: inner, .. } | Expr::Unary { expr: inner, .. } => {
             rewrite_call_expr(inner, map, bound)
         }
+        Expr::Is { expr: inner, .. } => rewrite_call_expr(inner, map, bound),
         Expr::Binary { left, right, .. } => {
             rewrite_call_expr(left, map, bound);
             rewrite_call_expr(right, map, bound);

@@ -116,6 +116,9 @@ pub struct Compiler {
     /// When present, the compiler can make type-driven decisions (e.g.
     /// integer-specific bytecode, direct field access).
     types: Option<Arc<HashMap<zz_checker::SpanKey, zz_checker::Type>>>,
+    /// Reverse map: func name → Symbol id. Used to resolve `type_scope`
+    /// to a `Symbol` for [`SpanKey`] construction in typed lookups.
+    symbol_map: HashMap<String, u32>,
     /// Enclosing item for typed lookups (function name, `Type.method`,
     /// or `<top>`): spans repeat across modules.
     type_scope: String,
@@ -194,6 +197,7 @@ impl Compiler {
             promoted_slots: std::collections::HashMap::new(),
             func_info: std::collections::HashMap::new(),
             types: None,
+            symbol_map: HashMap::new(),
             structs: None,
             native_names: None,
             enums: None,
@@ -386,6 +390,7 @@ impl Compiler {
     pub fn compile_program_typed(
         program: &Program,
         types: Arc<HashMap<zz_checker::SpanKey, zz_checker::Type>>,
+        symbol_map: HashMap<String, u32>,
         structs: HashMap<String, zz_checker::StructSig>,
         enums: HashMap<String, zz_checker::EnumSig>,
         native_names: Arc<std::collections::HashSet<String>>,
@@ -393,6 +398,7 @@ impl Compiler {
         let mut c = Compiler::new();
         c.is_main = true;
         c.types = Some(types);
+        c.symbol_map = symbol_map;
         c.structs = Some(structs);
         c.enums = Some(enums);
         c.native_names = Some(native_names);
@@ -715,9 +721,10 @@ impl Compiler {
     /// Returns `None` when type info is unavailable (no HIR, or expression
     /// was not resolved by the checker).
     fn type_of(&self, span: Span) -> Option<&zz_checker::Type> {
+        let sym_id = self.symbol_map.get(&self.type_scope)?;
         self.types
             .as_ref()
-            .and_then(|t| t.get(&zz_checker::SpanKey::new(self.type_scope.as_str(), span)))
+            .and_then(|t| t.get(&zz_checker::SpanKey::new(zz_arena::Symbol(*sym_id), span)))
     }
 
     /// Variant methods with a canonical `<ns>.<method>` native *and* an
@@ -3243,7 +3250,15 @@ impl Compiler {
                         if let Some(types) = self.types.as_mut() {
                             let table = std::sync::Arc::make_mut(types);
                             table.insert(
-                                zz_checker::SpanKey::new(self.type_scope.as_str(), *span),
+                                zz_checker::SpanKey::new(
+                                    zz_arena::Symbol(
+                                        *self
+                                            .symbol_map
+                                            .get(&self.type_scope)
+                                            .expect("type_scope should be in symbol_map"),
+                                    ),
+                                    *span,
+                                ),
                                 ty,
                             );
                         }
@@ -3689,6 +3704,7 @@ impl Compiler {
     fn compile_func_body(&mut self, scope: &str, block: &Block, params: &[Param]) -> Arc<Chunk> {
         let mut sub = Compiler::new();
         sub.type_scope = scope.to_string();
+        sub.symbol_map = self.symbol_map.clone();
         sub.top_globals = self.top_globals.clone();
         sub.types = self.types.clone();
         sub.structs = self.structs.clone();
@@ -4963,6 +4979,11 @@ impl Compiler {
                 self.patch_jump(j2);
             }
             Expr::Block(b) => self.compile_block(b),
+            Expr::Is { .. } => {
+                // Flow-sensitive `is` narrowing is a checker concern; the
+                // bytecode VM does not yet lower runtime `is` tests.
+                unimplemented!("`expr is T` is not yet lowered to bytecode");
+            }
             Expr::Fmt { parts, .. } => {
                 // sqlz context: when this Fmt is the SQL arg of
                 // `sqlz.query`/`sqlz.exec`, emit DbQuery

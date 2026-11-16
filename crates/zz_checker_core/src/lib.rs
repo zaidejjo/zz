@@ -10,6 +10,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use zz_arena::Interner;
 use zz_diag_core::{error_at, RawDiag, SecondaryLabel};
 use zz_span_ast::ast::{Stmt, Ty};
 use zz_span_ast::span::Span;
@@ -30,52 +31,45 @@ pub const TOP_SCOPE: &str = "<top>";
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SpanKey {
     /// Enclosing top-level function (`Type.method` for methods,
-    /// [`TOP_SCOPE`] otherwise). Shared (`Arc`, not `String`): one key is
-    /// built per checked expression, and (atomic) refcounting kills an allocation
-    /// per node with zero hashing cost change.
-    pub func: Arc<str>,
+    /// [`TOP_SCOPE`] otherwise). Stored as an interned `Symbol` (u32)
+    /// rather than `Arc<str>` so all keys for the same function share one
+    /// allocation — reduces per-key size from 24 bytes to 8 bytes and
+    /// kills millions of small heap allocations on large modules.
+    pub func: zz_arena::Symbol,
     pub span: Span,
 }
 
 impl SpanKey {
-    pub fn new(func: impl Into<Arc<str>>, span: Span) -> Self {
-        SpanKey {
-            func: func.into(),
-            span,
-        }
+    pub fn new(func: zz_arena::Symbol, span: Span) -> Self {
+        SpanKey { func, span }
     }
 }
 
-/// Manual serde for SpanKey: `Arc<str>` is not serde-serializable, so we
-/// round-trip through a `String` key (`func@start..end`). A string (not a
-/// tuple) is required so `HashMap<SpanKey, Type>` serializes as a JSON
-/// object in `CachedModule` (map keys must be strings).
+/// Manual serde for SpanKey: `Symbol` is not serde-serializable by itself,
+/// so we round-trip through a `String` key (`id@start..end`). The symbol
+/// table is carried separately in [`CachedModule`] so Symbol ids can be
+/// reconstructed on deserialize. The `id` is the raw u32 from
+/// [`zz_arena::Symbol`].
 impl serde::Serialize for SpanKey {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        format!(
-            "{}@{}..{}",
-            self.func.as_ref(),
-            self.span.start,
-            self.span.end
-        )
-        .serialize(serializer)
+        format!("{}@{}..{}", self.func.id(), self.span.start, self.span.end).serialize(serializer)
     }
 }
 
 impl<'de> serde::Deserialize<'de> for SpanKey {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        // Format: "func@start..end" — func is a ZZ identifier (no `@`).
-        let (func, rest) = s
+        let (id_str, rest) = s
             .split_once('@')
             .ok_or_else(|| serde::de::Error::custom("invalid SpanKey: missing @"))?;
         let (start_str, end_str) = rest
             .split_once("..")
             .ok_or_else(|| serde::de::Error::custom("invalid SpanKey: missing .."))?;
+        let id: u32 = id_str.parse().map_err(serde::de::Error::custom)?;
         let start: u32 = start_str.parse().map_err(serde::de::Error::custom)?;
         let end: u32 = end_str.parse().map_err(serde::de::Error::custom)?;
         Ok(SpanKey {
-            func: func.into(),
+            func: zz_arena::Symbol(id),
             span: Span::new(start, end),
         })
     }
@@ -260,6 +254,10 @@ pub struct CheckResult {
     pub pub_enums: HashMap<String, EnumSig>,
     /// Only `pub` trait declarations (for cross-module export).
     pub pub_traits: HashMap<String, TraitSig>,
+    /// Reverse map: func name → Symbol id. Enables external consumers
+    /// (HIR, runtime) to resolve a func name to its interned `Symbol` for
+    /// [`SpanKey`] construction.
+    pub symbol_map: HashMap<String, u32>,
 }
 
 /// One binding recorded for unused-variable warnings.
@@ -458,6 +456,30 @@ pub struct Checker {
     /// top-level function (or `Type.method`) whose body is being checked;
     /// empty at top level (keys then use [`TOP_SCOPE`]).
     pub scope: Vec<Arc<str>>,
+    /// Interns the `func` string of every [`SpanKey`] so all keys for the
+    /// same enclosing function share one heap allocation instead of one
+    /// `Arc<str>` per checked expression. Reduces checker peak RSS on
+    /// large modules (Phase 1 of the checker improvement plan).
+    pub func_interner: Interner,
+    /// Reverse map: func name → Symbol id. Populated by [`scope_key`] so
+    /// external consumers (HIR, runtime) can resolve a func name to its
+    /// interned `Symbol` for [`SpanKey`] construction.
+    pub symbol_map: std::collections::HashMap<String, u32>,
+    /// Flow-sensitive type narrowing: one map per scope depth, parallel to
+    /// [`env`]. Holds refined types for names narrowed by `if x is T`
+    /// (then-branch) and match-arm bindings. `lookup_opt` consults the map
+    /// for the current depth before falling back to the scope walk, so a
+    /// narrowed type is visible only inside the scope that introduced it.
+    pub narrowing: Vec<std::collections::HashMap<String, Type>>,
+    /// Used enum variants: `(enum_name, variant_name)` pairs that are
+    /// constructed or pattern-matched. Used to detect dead variants.
+    pub used_enum_variants: std::collections::HashSet<(String, String)>,
+    /// Used struct fields: `(struct_name, field_name)` pairs that are
+    /// read via field access. Used to detect dead fields.
+    pub used_struct_fields: std::collections::HashSet<(String, String)>,
+    /// Used type aliases: names resolved in type positions. Used to
+    /// detect dead aliases.
+    pub used_aliases: std::collections::HashSet<String>,
     /// Shadow cache: innermost binding per name → (scope depth, type).
     /// Makes variable lookup O(1) amortized instead of O(depth). Entries are
     /// inserted on `define` and evicted for the popped depth on `pop_scope`;
@@ -489,15 +511,13 @@ impl Checker {
     }
 
     /// Scope-qualified key for an expression span under the item currently
-    /// being checked.
-    pub fn scope_key(&self, span: Span) -> SpanKey {
-        SpanKey::new(
-            self.scope
-                .last()
-                .cloned()
-                .unwrap_or_else(|| Arc::from(TOP_SCOPE)),
-            span,
-        )
+    /// being checked. Interns the enclosing function name so all keys in
+    /// the same function share one `Symbol` allocation.
+    pub fn scope_key(&mut self, span: Span) -> SpanKey {
+        let func = self.scope.last().map(|s| s.as_ref()).unwrap_or(TOP_SCOPE);
+        let sym = self.func_interner.intern(func);
+        self.symbol_map.insert(func.to_string(), sym.id());
+        SpanKey::new(sym, span)
     }
     /// Create a checker seeded with prior state. `initial_traits`/`initial_trait_impls`
     /// carry cross-module pub traits and impls for bound checking.
@@ -550,6 +570,12 @@ impl Checker {
             module_aliases: HashMap::new(),
             span_types: std::collections::HashMap::new(),
             scope: Vec::new(),
+            func_interner: Interner::new(),
+            narrowing: vec![std::collections::HashMap::new()],
+            symbol_map: std::collections::HashMap::new(),
+            used_enum_variants: std::collections::HashSet::new(),
+            used_struct_fields: std::collections::HashSet::new(),
+            used_aliases: std::collections::HashSet::new(),
             scope_cache: std::collections::HashMap::new(),
             names_at_depth: vec![Vec::new()],
             link_libs: Vec::new(),
@@ -661,17 +687,34 @@ impl Checker {
         self.report_mismatch_with_notes(err, span, Vec::new());
     }
 
+    /// Like `report_mismatch` but with a context string describing what the
+    /// expected type is for (e.g. parameter name, field name, return type).
+    /// Renders as "expected `{right}` for `{context}`, found `{left}`".
+    pub fn report_mismatch_with_context(
+        &mut self,
+        mut err: UnifyError,
+        span: Span,
+        context: String,
+    ) {
+        err.context = Some(context);
+        self.report_mismatch_with_notes(err, span, Vec::new());
+    }
+
     /// `report_mismatch` plus caller-supplied Sherlock notes. Call sites
     /// that know the expected shape (parameter names, annotations) use
     /// this so hints stay typed — never string-parsed.
     pub fn report_mismatch_with_notes(&mut self, err: UnifyError, span: Span, notes: Vec<String>) {
         let msg = match err.message.as_str() {
-            "type mismatch" => {
-                format!(
+            "type mismatch" => match &err.context {
+                Some(c) => format!(
+                    "type mismatch: expected `{}` for `{c}`, found `{}`",
+                    err.right, err.left
+                ),
+                None => format!(
                     "type mismatch: expected `{}`, found `{}`",
                     err.right, err.left
-                )
-            }
+                ),
+            },
             "function arity mismatch" => "function arity mismatch".to_string(),
             "tuple arity mismatch" => "tuple arity mismatch".to_string(),
             other => other.to_string(),

@@ -979,7 +979,7 @@ fn struct_method_call_resolves_at_compile_time() {
             "parse errors: {:?}",
             parsed.errors
         );
-        let (_res, types) = zz_checker::check_program_typed(
+        let (checked, types) = zz_checker::check_program_typed(
             &parsed.program,
             HashMap::new(),
             HashMap::new(),
@@ -989,9 +989,11 @@ fn struct_method_call_resolves_at_compile_time() {
             HashMap::new(),
             HashMap::new(),
         );
+        let symbol_map = checked.symbol_map;
         Compiler::compile_program_typed(
             &parsed.program,
             Arc::new(types),
+            symbol_map,
             structs,
             HashMap::new(),
             Arc::new(HashSet::new()),
@@ -1090,7 +1092,7 @@ fn vm_compound_assign_fuses_like_plain_assign() {
             "parse errors: {:?}",
             parsed.errors
         );
-        let (_res, types) = zz_checker::check_program_typed(
+        let (checked, types) = zz_checker::check_program_typed(
             &parsed.program,
             HashMap::new(),
             HashMap::new(),
@@ -1100,9 +1102,11 @@ fn vm_compound_assign_fuses_like_plain_assign() {
             HashMap::new(),
             HashMap::new(),
         );
+        let symbol_map = checked.symbol_map;
         let chunk = super::Compiler::compile_program_typed(
             &parsed.program,
             Arc::new(types),
+            symbol_map,
             HashMap::new(),
             HashMap::new(),
             Arc::new(HashSet::new()),
@@ -1167,7 +1171,7 @@ fn compile_ops(src: &str) -> Vec<Op> {
         "parse errors: {:?}",
         parsed.errors
     );
-    let (_res, types) = zz_checker::check_program_typed(
+    let (checked, types) = zz_checker::check_program_typed(
         &parsed.program,
         HashMap::new(),
         HashMap::new(),
@@ -1177,9 +1181,11 @@ fn compile_ops(src: &str) -> Vec<Op> {
         HashMap::new(),
         HashMap::new(),
     );
+    let symbol_map = checked.symbol_map;
     let chunk = Compiler::compile_program_typed(
         &parsed.program,
         Arc::new(types),
+        symbol_map,
         HashMap::new(),
         HashMap::new(),
         Arc::new(HashSet::new()),
@@ -1269,7 +1275,7 @@ fn vm_typed_int_comparisons_emit_fast_ops() {
             "parse errors: {:?}",
             parsed.errors
         );
-        let (_res, types) = zz_checker::check_program_typed(
+        let (checked, types) = zz_checker::check_program_typed(
             &parsed.program,
             HashMap::new(),
             HashMap::new(),
@@ -1279,9 +1285,11 @@ fn vm_typed_int_comparisons_emit_fast_ops() {
             HashMap::new(),
             HashMap::new(),
         );
+        let symbol_map = checked.symbol_map;
         let chunk = super::Compiler::compile_program_typed(
             &parsed.program,
             Arc::new(types),
+            symbol_map,
             HashMap::new(),
             HashMap::new(),
             Arc::new(HashSet::new()),
@@ -1389,7 +1397,7 @@ fn vm_generic_struct_erases_like_monomorphic() {
             "parse errors: {:?}",
             parsed.errors
         );
-        let (_res, types) = zz_checker::check_program_typed(
+        let (checked, types) = zz_checker::check_program_typed(
             &parsed.program,
             HashMap::new(),
             HashMap::new(),
@@ -1399,9 +1407,11 @@ fn vm_generic_struct_erases_like_monomorphic() {
             HashMap::new(),
             HashMap::new(),
         );
+        let symbol_map = checked.symbol_map;
         let chunk = super::Compiler::compile_program_typed(
             &parsed.program,
             Arc::new(types),
+            symbol_map,
             HashMap::new(),
             HashMap::new(),
             Arc::new(HashSet::new()),
@@ -1465,7 +1475,7 @@ fn vm_guarded_match_arm_miss_reloads_scrutinee() {
         "parse errors: {:?}",
         parsed.errors
     );
-    let (_res, types) = zz_checker::check_program_typed(
+    let (checked, types) = zz_checker::check_program_typed(
         &parsed.program,
         HashMap::new(),
         HashMap::new(),
@@ -1475,9 +1485,11 @@ fn vm_guarded_match_arm_miss_reloads_scrutinee() {
         HashMap::new(),
         HashMap::new(),
     );
+    let symbol_map = checked.symbol_map;
     let chunk = super::Compiler::compile_program_typed(
         &parsed.program,
         Arc::new(types),
+        symbol_map,
         HashMap::new(),
         HashMap::new(),
         Arc::new(HashSet::new()),
@@ -1560,6 +1572,7 @@ fn vm_if_let_result_does_not_alias_later_slots() {
         .run_typed(
             &parsed.program,
             Arc::new(span_types),
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
         )
@@ -2307,7 +2320,7 @@ fn vm_variant_method_op_shape() {
         if !typed {
             return Compiler::compile_program(&parsed.program).code;
         }
-        let (_res, types) = zz_checker::check_program_typed(
+        let (checked, types) = zz_checker::check_program_typed(
             &parsed.program,
             HashMap::new(),
             HashMap::new(),
@@ -2317,6 +2330,7 @@ fn vm_variant_method_op_shape() {
             HashMap::new(),
             HashMap::new(),
         );
+        let symbol_map = checked.symbol_map;
         let natives: HashSet<String> = [
             "option.unwrap_or",
             "option.unwrap",
@@ -2331,6 +2345,7 @@ fn vm_variant_method_op_shape() {
         Compiler::compile_program_typed(
             &parsed.program,
             Arc::new(types),
+            symbol_map,
             HashMap::new(),
             HashMap::new(),
             Arc::new(natives),
@@ -2404,7 +2419,7 @@ fn vm_statement_if_in_loop_emits_no_value_dance() {
     let src = "func f(n: int) -> int {\n    s := 0\n    for i in 0..n {\n        if i < 5 {\n            s = s + 1\n        }\n    }\n    return s\n}\nf(3)";
     let parsed = parse(src);
     assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
-    let (_res, types) = zz_checker::check_program_typed(
+    let (checked, types) = zz_checker::check_program_typed(
         &parsed.program,
         HashMap::new(),
         HashMap::new(),
@@ -2414,9 +2429,11 @@ fn vm_statement_if_in_loop_emits_no_value_dance() {
         HashMap::new(),
         HashMap::new(),
     );
+    let symbol_map = checked.symbol_map;
     let chunk = Compiler::compile_program_typed(
         &parsed.program,
         Arc::new(types),
+        symbol_map,
         HashMap::new(),
         HashMap::new(),
         Arc::new(HashSet::new()),
@@ -2635,7 +2652,7 @@ fn while_sum_hot_shape_is_test_body_and_backedge() {
         "parse errors: {:?}",
         parsed.errors
     );
-    let (_res, types) = zz_checker::check_program_typed(
+    let (checked, types) = zz_checker::check_program_typed(
         &parsed.program,
         HashMap::new(),
         HashMap::new(),
@@ -2645,9 +2662,11 @@ fn while_sum_hot_shape_is_test_body_and_backedge() {
         HashMap::new(),
         HashMap::new(),
     );
+    let symbol_map = checked.symbol_map;
     let chunk = super::Compiler::compile_program_typed(
         &parsed.program,
         Arc::new(types),
+        symbol_map,
         HashMap::new(),
         HashMap::new(),
         Arc::new(HashSet::new()),
@@ -3116,7 +3135,7 @@ fn vm_push_slot_int_imm_fuses_value_position_arith() {
         "parse errors: {:?}",
         parsed.errors
     );
-    let (_res, types) = zz_checker::check_program_typed(
+    let (checked, types) = zz_checker::check_program_typed(
         &parsed.program,
         HashMap::new(),
         HashMap::new(),
@@ -3126,9 +3145,11 @@ fn vm_push_slot_int_imm_fuses_value_position_arith() {
         HashMap::new(),
         HashMap::new(),
     );
+    let symbol_map = checked.symbol_map;
     let chunk = Compiler::compile_program_typed(
         &parsed.program,
         Arc::new(types),
+        symbol_map,
         HashMap::new(),
         HashMap::new(),
         Arc::new(HashSet::new()),
@@ -3194,7 +3215,7 @@ fn vm_jump_if_false_slot_cmp_fuses_if_guards() {
         "parse errors: {:?}",
         parsed.errors
     );
-    let (_res, types) = zz_checker::check_program_typed(
+    let (checked, types) = zz_checker::check_program_typed(
         &parsed.program,
         HashMap::new(),
         HashMap::new(),
@@ -3204,9 +3225,11 @@ fn vm_jump_if_false_slot_cmp_fuses_if_guards() {
         HashMap::new(),
         HashMap::new(),
     );
+    let symbol_map = checked.symbol_map;
     let chunk = Compiler::compile_program_typed(
         &parsed.program,
         Arc::new(types),
+        symbol_map,
         HashMap::new(),
         HashMap::new(),
         Arc::new(HashSet::new()),

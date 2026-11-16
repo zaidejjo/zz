@@ -13,3 +13,4 @@ zz_checker = { path = "../zz_checker" }
 zz_frontend = { path = "../zz_frontend" }
 zz_hir = { path = "../zz_hir" }
 zz_stdlib = { path = "../zz_stdlib" }
+zz_arena = { path = "../zz_arena" }

@@ -648,6 +648,11 @@ impl<'a> FmtCtx<'a> {
                 self.write_str(unop_str(*op));
                 self.fmt_expr(expr, source);
             }
+            Expr::Is { expr, ty, .. } => {
+                self.fmt_expr(expr, source);
+                self.write_str(" is ");
+                self.fmt_ty(ty, source);
+            }
             Expr::Binary {
                 op, left, right, ..
             } => {

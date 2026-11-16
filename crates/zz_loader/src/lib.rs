@@ -3399,6 +3399,7 @@ impl Loader {
                                     pub_aliases: cached.pub_aliases.into_owned(),
                                     pub_enums: cached.pub_enums.into_owned(),
                                     pub_traits: cached.pub_traits.clone().into_owned(),
+                                    symbol_map: HashMap::new(),
                                 },
                                 None,
                                 Some(cached.types.into_owned()),
@@ -3550,6 +3551,7 @@ impl Loader {
                         pub_traits: checked.pub_traits.clone(),
                         traits: checked.traits.clone(),
                         trait_impls: checked.trait_impls.clone(),
+                        symbol_map: checked.symbol_map.clone(),
                     },
                     span_types.unwrap_or_default(),
                 ));

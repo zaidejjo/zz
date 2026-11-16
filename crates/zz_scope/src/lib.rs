@@ -88,6 +88,11 @@ pub trait ScopeOps {
     /// a stdlib entry must not count as shadowing.
     fn local_lookup_opt(&mut self, name: &str) -> Option<Type>;
 
+    /// Record a flow-sensitive narrowing of `name` to `ty` in the current
+    /// scope (e.g. `if x is T` then-branch). Visible only until the scope
+    /// is popped; `lookup_opt` consults it before the env binding.
+    fn narrow(&mut self, name: String, ty: Type);
+
     /// Resolve a dotted path: first as a single qualified name (module
     /// bindings/functions), then as a struct-field walk from the first part.
     fn lookup_path(&mut self, parts: &[String], span: Span) -> Type;
@@ -101,6 +106,7 @@ impl ScopeOps for Checker {
         self.defined_names.push(std::collections::HashMap::new());
         self.const_env.push(std::collections::HashMap::new());
         self.names_at_depth.push(Vec::new());
+        self.narrowing.push(std::collections::HashMap::new());
     }
 
     /// Strip the module prefix from a name for display.
@@ -181,6 +187,7 @@ impl ScopeOps for Checker {
         }
         self.env.pop();
         self.const_env.pop();
+        self.narrowing.pop();
     }
 
     /// Emit `unused variable` warnings for one scope's recorded bindings,
@@ -536,6 +543,24 @@ impl ScopeOps for Checker {
     /// Like [`Checker::lookup`] but without the error: returns `None` when
     /// the name is not bound anywhere.
     fn lookup_opt(&mut self, name: &str) -> Option<Type> {
+        let depth = self.env.len().saturating_sub(1);
+        // Flow-sensitive narrowing: a refined type recorded for the current
+        // scope (e.g. `if x is T` then-branch, match-arm binding) overrides
+        // the env binding. Walk narrowing depths downward (inner first) like
+        // the env walk so a narrowing set in an enclosing branch scope is
+        // visible to nested blocks, and is discarded when that scope pops.
+        for d in (0..=depth).rev() {
+            if let Some(t) = self.narrowing.get(d).and_then(|m| m.get(name)) {
+                self.used_names.insert(name.to_string());
+                self.used_bindings.insert((d, name.to_string()));
+                for probe in self.shadow_probes.iter_mut() {
+                    if probe.name == name && d < probe.depth {
+                        probe.referenced = true;
+                    }
+                }
+                return Some(t.clone());
+            }
+        }
         // O(1) shadow-cache lookup: innermost binding per name.
         if let Some((depth, ty)) = self.scope_cache.get(name).cloned() {
             self.used_names.insert(name.to_string());
@@ -604,6 +629,17 @@ impl ScopeOps for Checker {
             }
         }
         None
+    }
+
+    /// Record a flow-sensitive narrowing of `name` to `ty` in the current
+    /// scope (e.g. `if x is T` then-branch). Visible only until the scope
+    /// is popped; `lookup_opt` consults it before the env binding.
+    fn narrow(&mut self, name: String, ty: Type) {
+        let depth = self.env.len().saturating_sub(1);
+        self.narrowing
+            .get_mut(depth)
+            .expect("narrowing map is kept parallel to env")
+            .insert(name, ty);
     }
 
     /// Resolve a dotted path: first as a single qualified name (module

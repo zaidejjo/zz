@@ -11,6 +11,7 @@
 //! Unattributed code (stdlib, `.zzc` loads) is excluded by construction:
 //! only chunks the CLI labels per module are recorded.
 
+use std::collections::HashMap;
 use zz_runtime::Value;
 
 /// Run `zz cover` on `args`. See module docs for scope.
@@ -135,6 +136,7 @@ pub fn cover_command(args: &[String]) -> Result<(), String> {
         match prep.interp.run_typed(
             program,
             prep.types.clone(),
+            HashMap::new(),
             prep.structs.clone(),
             prep.enums.clone(),
         ) {

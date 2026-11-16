@@ -177,6 +177,7 @@ impl<'a> Walk<'a> {
             Expr::Paren { expr: inner, .. } | Expr::Unary { expr: inner, .. } => {
                 self.expr(inner);
             }
+            Expr::Is { expr: inner, .. } => self.expr(inner),
             Expr::Binary { left, right, .. } => {
                 self.expr(left);
                 self.expr(right);

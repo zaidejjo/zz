@@ -3959,6 +3959,7 @@ name = "zz_checker_core"
 version = "0.4.0"
 dependencies = [
  "serde",
+ "zz_arena",
  "zz_diag_core",
  "zz_span_ast",
  "zz_types",
@@ -4110,6 +4111,7 @@ dependencies = [
 name = "zz_hir"
 version = "0.4.0"
 dependencies = [
+ "zz_arena",
  "zz_checker",
  "zz_frontend",
 ]
@@ -4186,6 +4188,7 @@ dependencies = [
 name = "zz_lower"
 version = "0.4.0"
 dependencies = [
+ "zz_arena",
  "zz_checker",
  "zz_codegen_ffi",
  "zz_codegen_runtime",
@@ -4326,6 +4329,7 @@ version = "0.4.0"
 dependencies = [
  "codespan-reporting",
  "loom",
+ "zz_arena",
  "zz_checker",
  "zz_frontend",
  "zz_native_rt",
