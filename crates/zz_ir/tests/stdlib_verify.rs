@@ -14,6 +14,7 @@ fn standalone_verify(idx: usize, name: &str) {
     let chunk = zz_runtime::vm::Compiler::compile_program_typed(
         &prog.program,
         Arc::new(prog.types.clone()),
+        prog.symbol_map.clone(),
         prog.structs.clone(),
         prog.enums.clone(),
         Arc::new(natives),
