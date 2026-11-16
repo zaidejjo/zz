@@ -31,7 +31,12 @@ const CSV_MOD_ZZ: &str = include_str!("../zz/csv/mod.zz");
 const PROPERTY_MOD_ZZ: &str = include_str!("../zz/property/mod.zz");
 
 /// All embedded source files, in compilation order.
-const ZZ_SOURCES: &[(&str, &str)] = &[
+///
+/// The qualified name is `std:<path relative to `crates/zz_stdlib/zz/>`,
+/// e.g. `"std:math.mod.zz"` → `crates/zz_stdlib/zz/math/mod.zz`. This is the
+/// single source of truth for which pure-ZZ modules exist; `zz_stdlib_native`
+/// discovers the same set from disk so the precompiled archive stays in sync.
+pub const ZZ_SOURCES: &[(&str, &str)] = &[
     ("std:str.mod.zz", STR_MOD_ZZ),
     ("std:math.mod.zz", MATH_MOD_ZZ),
     ("std:collections.vec.zz", VEC_ZZ),

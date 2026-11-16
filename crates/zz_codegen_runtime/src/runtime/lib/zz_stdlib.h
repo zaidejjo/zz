@@ -2,19 +2,305 @@
 #ifndef ZZ_STDLIB_H
 #define ZZ_STDLIB_H
 
-// args
+// Pure-ZZ stdlib functions, resolved from `libzz_stdlib.a` at link time.
+// The AOT lowerer emits each call as `zz_fn_<mangled(name)>(
+//   zz_value *args, size_t argc)` and the linker resolves it from
+// the archive. FFI natives (with a C twin in the runtime) are not
+// listed here.
+
+// std:args.mod.zz
+// std:bytes.mod.zz
+// std:collections.map.zz
+// std:collections.set.zz
+// std:collections.vec.zz
+// std:colors.mod.zz
+// std:csv.mod.zz
+// std:dec.mod.zz
+// std:http.mod.zz
+// std:json.mod.zz
+// std:math.mod.zz
+// std:path.mod.zz
+// std:property.mod.zz
+// std:regexp.mod.zz
+// std:str.mod.zz
+// std:time.mod.zz
+
 // bytes
-// collections
+zz_value zz_fn_bytes_builder(zz_value *args, size_t argc);
+zz_value zz_fn_bytes_extend(zz_value *args, size_t argc);
+zz_value zz_fn_bytes_from__ints(zz_value *args, size_t argc);
+zz_value zz_fn_bytes_len__of(zz_value *args, size_t argc);
+zz_value zz_fn_bytes_push__byte(zz_value *args, size_t argc);
+
 // colors
+zz_value zz_fn_colors_bg__256(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bg__black(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bg__blue(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bg__bright__black(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bg__bright__blue(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bg__bright__cyan(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bg__bright__green(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bg__bright__magenta(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bg__bright__red(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bg__bright__white(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bg__bright__yellow(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bg__cyan(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bg__green(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bg__magenta(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bg__red(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bg__rgb(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bg__white(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bg__yellow(zz_value *args, size_t argc);
+zz_value zz_fn_colors_black(zz_value *args, size_t argc);
+zz_value zz_fn_colors_blink(zz_value *args, size_t argc);
+zz_value zz_fn_colors_blue(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bold(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bright__black(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bright__blue(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bright__cyan(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bright__green(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bright__magenta(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bright__red(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bright__white(zz_value *args, size_t argc);
+zz_value zz_fn_colors_bright__yellow(zz_value *args, size_t argc);
+zz_value zz_fn_colors_clamp255(zz_value *args, size_t argc);
+zz_value zz_fn_colors_color256(zz_value *args, size_t argc);
+zz_value zz_fn_colors_cyan(zz_value *args, size_t argc);
+zz_value zz_fn_colors_dim(zz_value *args, size_t argc);
+zz_value zz_fn_colors_green(zz_value *args, size_t argc);
+zz_value zz_fn_colors_hex(zz_value *args, size_t argc);
+zz_value zz_fn_colors_hex3(zz_value *args, size_t argc);
+zz_value zz_fn_colors_hex6(zz_value *args, size_t argc);
+zz_value zz_fn_colors_hex__byte(zz_value *args, size_t argc);
+zz_value zz_fn_colors_hex__val(zz_value *args, size_t argc);
+zz_value zz_fn_colors_italic(zz_value *args, size_t argc);
+zz_value zz_fn_colors_magenta(zz_value *args, size_t argc);
+zz_value zz_fn_colors_red(zz_value *args, size_t argc);
+zz_value zz_fn_colors_reset(zz_value *args, size_t argc);
+zz_value zz_fn_colors_reverse(zz_value *args, size_t argc);
+zz_value zz_fn_colors_rgb(zz_value *args, size_t argc);
+zz_value zz_fn_colors_strikethrough(zz_value *args, size_t argc);
+zz_value zz_fn_colors_strip(zz_value *args, size_t argc);
+zz_value zz_fn_colors_underline(zz_value *args, size_t argc);
+zz_value zz_fn_colors_white(zz_value *args, size_t argc);
+zz_value zz_fn_colors_yellow(zz_value *args, size_t argc);
+
 // csv
+zz_value zz_fn_csv_delim__first(zz_value *args, size_t argc);
+zz_value zz_fn_csv_escape__cell(zz_value *args, size_t argc);
+zz_value zz_fn_csv_get__cell(zz_value *args, size_t argc);
+zz_value zz_fn_csv_header(zz_value *args, size_t argc);
+zz_value zz_fn_csv_json__escape(zz_value *args, size_t argc);
+zz_value zz_fn_csv_len(zz_value *args, size_t argc);
+zz_value zz_fn_csv_needs__quote(zz_value *args, size_t argc);
+zz_value zz_fn_csv_parse(zz_value *args, size_t argc);
+zz_value zz_fn_csv_parse__delim(zz_value *args, size_t argc);
+zz_value zz_fn_csv_records(zz_value *args, size_t argc);
+zz_value zz_fn_csv_stringify(zz_value *args, size_t argc);
+zz_value zz_fn_csv_stringify__delim(zz_value *args, size_t argc);
+zz_value zz_fn_csv_to__json(zz_value *args, size_t argc);
+zz_value zz_fn_csv_validate(zz_value *args, size_t argc);
+
 // dec
+zz_value zz_fn_dec_add(zz_value *args, size_t argc);
+zz_value zz_fn_dec_cmp(zz_value *args, size_t argc);
+zz_value zz_fn_dec_eq(zz_value *args, size_t argc);
+zz_value zz_fn_dec_format(zz_value *args, size_t argc);
+zz_value zz_fn_dec_from__scaled(zz_value *args, size_t argc);
+zz_value zz_fn_dec_gt(zz_value *args, size_t argc);
+zz_value zz_fn_dec_is__valid(zz_value *args, size_t argc);
+zz_value zz_fn_dec_lt(zz_value *args, size_t argc);
+zz_value zz_fn_dec_mul(zz_value *args, size_t argc);
+zz_value zz_fn_dec_pow10(zz_value *args, size_t argc);
+zz_value zz_fn_dec_scale__of(zz_value *args, size_t argc);
+zz_value zz_fn_dec_sub(zz_value *args, size_t argc);
+zz_value zz_fn_dec_to__scaled(zz_value *args, size_t argc);
+zz_value zz_fn_dec_trim__zeros(zz_value *args, size_t argc);
+
 // http
+zz_value zz_fn_http_cors(zz_value *args, size_t argc);
+zz_value zz_fn_http_created(zz_value *args, size_t argc);
+zz_value zz_fn_http_csrf__check(zz_value *args, size_t argc);
+zz_value zz_fn_http_csrf__token(zz_value *args, size_t argc);
+zz_value zz_fn_http_not__found(zz_value *args, size_t argc);
+zz_value zz_fn_http_ok(zz_value *args, size_t argc);
+zz_value zz_fn_http_redirect(zz_value *args, size_t argc);
+zz_value zz_fn_http_request__id(zz_value *args, size_t argc);
+zz_value zz_fn_http_secure__header__dict(zz_value *args, size_t argc);
+zz_value zz_fn_http_secure__headers(zz_value *args, size_t argc);
+zz_value zz_fn_http_use(zz_value *args, size_t argc);
+
 // json
+zz_value zz_fn_json_is__array(zz_value *args, size_t argc);
+zz_value zz_fn_json_is__bool(zz_value *args, size_t argc);
+zz_value zz_fn_json_is__empty(zz_value *args, size_t argc);
+zz_value zz_fn_json_is__null(zz_value *args, size_t argc);
+zz_value zz_fn_json_is__number(zz_value *args, size_t argc);
+zz_value zz_fn_json_is__object(zz_value *args, size_t argc);
+zz_value zz_fn_json_is__string(zz_value *args, size_t argc);
+zz_value zz_fn_json_parse__or(zz_value *args, size_t argc);
+zz_value zz_fn_json_parse__or__null(zz_value *args, size_t argc);
+zz_value zz_fn_json_path__exists(zz_value *args, size_t argc);
+zz_value zz_fn_json_path__get__or(zz_value *args, size_t argc);
+zz_value zz_fn_json_validate(zz_value *args, size_t argc);
+
+// map
+zz_value zz_fn_map_get__or(zz_value *args, size_t argc);
+zz_value zz_fn_map_get__str(zz_value *args, size_t argc);
+zz_value zz_fn_map_has(zz_value *args, size_t argc);
+zz_value zz_fn_map_is__empty(zz_value *args, size_t argc);
+zz_value zz_fn_map_keys(zz_value *args, size_t argc);
+zz_value zz_fn_map_keys__str(zz_value *args, size_t argc);
+zz_value zz_fn_map_len(zz_value *args, size_t argc);
+zz_value zz_fn_map_merge(zz_value *args, size_t argc);
+zz_value zz_fn_map_merge__str(zz_value *args, size_t argc);
+zz_value zz_fn_map_remove(zz_value *args, size_t argc);
+zz_value zz_fn_map_values(zz_value *args, size_t argc);
+zz_value zz_fn_map_values__str(zz_value *args, size_t argc);
+
 // math
+zz_value zz_fn_math_abs(zz_value *args, size_t argc);
+zz_value zz_fn_math_acos(zz_value *args, size_t argc);
+zz_value zz_fn_math_asin(zz_value *args, size_t argc);
+zz_value zz_fn_math_atan(zz_value *args, size_t argc);
+zz_value zz_fn_math_ceil(zz_value *args, size_t argc);
+zz_value zz_fn_math_clamp(zz_value *args, size_t argc);
+zz_value zz_fn_math_cos(zz_value *args, size_t argc);
+zz_value zz_fn_math_cos__deg(zz_value *args, size_t argc);
+zz_value zz_fn_math_count(zz_value *args, size_t argc);
+zz_value zz_fn_math_dot__product(zz_value *args, size_t argc);
+zz_value zz_fn_math_exp(zz_value *args, size_t argc);
+zz_value zz_fn_math_factorial(zz_value *args, size_t argc);
+zz_value zz_fn_math_floor(zz_value *args, size_t argc);
+zz_value zz_fn_math_gcd(zz_value *args, size_t argc);
+zz_value zz_fn_math_hypot(zz_value *args, size_t argc);
+zz_value zz_fn_math_is__even(zz_value *args, size_t argc);
+zz_value zz_fn_math_is__inf(zz_value *args, size_t argc);
+zz_value zz_fn_math_is__nan(zz_value *args, size_t argc);
+zz_value zz_fn_math_is__odd(zz_value *args, size_t argc);
+zz_value zz_fn_math_isqrt(zz_value *args, size_t argc);
+zz_value zz_fn_math_lcm(zz_value *args, size_t argc);
+zz_value zz_fn_math_log(zz_value *args, size_t argc);
+zz_value zz_fn_math_log10(zz_value *args, size_t argc);
+zz_value zz_fn_math_magnitude(zz_value *args, size_t argc);
+zz_value zz_fn_math_matrix__mul(zz_value *args, size_t argc);
+zz_value zz_fn_math_max(zz_value *args, size_t argc);
+zz_value zz_fn_math_max__arr(zz_value *args, size_t argc);
+zz_value zz_fn_math_mean(zz_value *args, size_t argc);
+zz_value zz_fn_math_mean__f(zz_value *args, size_t argc);
+zz_value zz_fn_math_median(zz_value *args, size_t argc);
+zz_value zz_fn_math_median__f(zz_value *args, size_t argc);
+zz_value zz_fn_math_min(zz_value *args, size_t argc);
+zz_value zz_fn_math_min__arr(zz_value *args, size_t argc);
+zz_value zz_fn_math_pow(zz_value *args, size_t argc);
+zz_value zz_fn_math_product(zz_value *args, size_t argc);
+zz_value zz_fn_math_rand__range(zz_value *args, size_t argc);
+zz_value zz_fn_math_random(zz_value *args, size_t argc);
+zz_value zz_fn_math_random__seed(zz_value *args, size_t argc);
+zz_value zz_fn_math_random__seed__range(zz_value *args, size_t argc);
+zz_value zz_fn_math_root(zz_value *args, size_t argc);
+zz_value zz_fn_math_round(zz_value *args, size_t argc);
+zz_value zz_fn_math_signum(zz_value *args, size_t argc);
+zz_value zz_fn_math_sin(zz_value *args, size_t argc);
+zz_value zz_fn_math_sin__deg(zz_value *args, size_t argc);
+zz_value zz_fn_math_sqrt(zz_value *args, size_t argc);
+zz_value zz_fn_math_sum(zz_value *args, size_t argc);
+zz_value zz_fn_math_tan(zz_value *args, size_t argc);
+zz_value zz_fn_math_tan__deg(zz_value *args, size_t argc);
+zz_value zz_fn_math_to__degrees(zz_value *args, size_t argc);
+zz_value zz_fn_math_to__radians(zz_value *args, size_t argc);
+zz_value zz_fn_math_trunc(zz_value *args, size_t argc);
+
 // path
+zz_value zz_fn_path_basename(zz_value *args, size_t argc);
+zz_value zz_fn_path_dirname(zz_value *args, size_t argc);
+zz_value zz_fn_path_extension(zz_value *args, size_t argc);
+zz_value zz_fn_path_is__absolute(zz_value *args, size_t argc);
+zz_value zz_fn_path_join(zz_value *args, size_t argc);
+zz_value zz_fn_path_join__all(zz_value *args, size_t argc);
+zz_value zz_fn_path_normalize(zz_value *args, size_t argc);
+
 // property
+zz_value zz_fn_property_alpha__char(zz_value *args, size_t argc);
+zz_value zz_fn_property_alpha__str(zz_value *args, size_t argc);
+zz_value zz_fn_property_boolean(zz_value *args, size_t argc);
+zz_value zz_fn_property_check(zz_value *args, size_t argc);
+zz_value zz_fn_property_for__all__int(zz_value *args, size_t argc);
+zz_value zz_fn_property_int__in(zz_value *args, size_t argc);
+zz_value zz_fn_property_norm__state(zz_value *args, size_t argc);
+zz_value zz_fn_property_pick(zz_value *args, size_t argc);
+zz_value zz_fn_property_seed(zz_value *args, size_t argc);
+zz_value zz_fn_property_shrink__int(zz_value *args, size_t argc);
+zz_value zz_fn_property_shrink__str(zz_value *args, size_t argc);
+zz_value zz_fn_property_shrink__value(zz_value *args, size_t argc);
+zz_value zz_fn_property_step(zz_value *args, size_t argc);
+zz_value zz_fn_property_stream(zz_value *args, size_t argc);
+
 // regexp
+zz_value zz_fn_regexp_is__email(zz_value *args, size_t argc);
+
+// set
+zz_value zz_fn_set_diff(zz_value *args, size_t argc);
+zz_value zz_fn_set_has(zz_value *args, size_t argc);
+zz_value zz_fn_set_has__int(zz_value *args, size_t argc);
+zz_value zz_fn_set_insert(zz_value *args, size_t argc);
+zz_value zz_fn_set_insert__int(zz_value *args, size_t argc);
+zz_value zz_fn_set_intersect(zz_value *args, size_t argc);
+zz_value zz_fn_set_intersect__int(zz_value *args, size_t argc);
+zz_value zz_fn_set_is__empty(zz_value *args, size_t argc);
+zz_value zz_fn_set_len(zz_value *args, size_t argc);
+zz_value zz_fn_set_remove(zz_value *args, size_t argc);
+zz_value zz_fn_set_remove__int(zz_value *args, size_t argc);
+zz_value zz_fn_set_union(zz_value *args, size_t argc);
+zz_value zz_fn_set_union__int(zz_value *args, size_t argc);
+
 // str
+zz_value zz_fn_str_builder(zz_value *args, size_t argc);
+zz_value zz_fn_str_builder__len(zz_value *args, size_t argc);
+zz_value zz_fn_str_finish(zz_value *args, size_t argc);
+zz_value zz_fn_str_is__empty(zz_value *args, size_t argc);
+zz_value zz_fn_str_join__parts(zz_value *args, size_t argc);
+zz_value zz_fn_str_pad__left(zz_value *args, size_t argc);
+zz_value zz_fn_str_pad__right(zz_value *args, size_t argc);
+zz_value zz_fn_str_push__part(zz_value *args, size_t argc);
+zz_value zz_fn_str_repeat(zz_value *args, size_t argc);
+zz_value zz_fn_str_reverse(zz_value *args, size_t argc);
+
 // time
+zz_value zz_fn_time_add__days(zz_value *args, size_t argc);
+zz_value zz_fn_time_civil__from__days(zz_value *args, size_t argc);
+zz_value zz_fn_time_date__valid(zz_value *args, size_t argc);
+zz_value zz_fn_time_days__from__civil(zz_value *args, size_t argc);
+zz_value zz_fn_time_days__in__month(zz_value *args, size_t argc);
+zz_value zz_fn_time_diff__days(zz_value *args, size_t argc);
+zz_value zz_fn_time_epoch__fallback(zz_value *args, size_t argc);
+zz_value zz_fn_time_format__rfc3339(zz_value *args, size_t argc);
+zz_value zz_fn_time_from__epoch__days(zz_value *args, size_t argc);
+zz_value zz_fn_time_is__leap(zz_value *args, size_t argc);
+zz_value zz_fn_time_make__date(zz_value *args, size_t argc);
+zz_value zz_fn_time_micros(zz_value *args, size_t argc);
+zz_value zz_fn_time_millis(zz_value *args, size_t argc);
+zz_value zz_fn_time_pad2(zz_value *args, size_t argc);
+zz_value zz_fn_time_parse__rfc3339(zz_value *args, size_t argc);
+zz_value zz_fn_time_secs(zz_value *args, size_t argc);
+zz_value zz_fn_time_sleep(zz_value *args, size_t argc);
+zz_value zz_fn_time_to__epoch__days(zz_value *args, size_t argc);
+zz_value zz_fn_time_to__micros(zz_value *args, size_t argc);
+zz_value zz_fn_time_to__millis(zz_value *args, size_t argc);
+zz_value zz_fn_time_to__nanos(zz_value *args, size_t argc);
+zz_value zz_fn_time_to__secs(zz_value *args, size_t argc);
+
+// vec
+zz_value zz_fn_vec_concat(zz_value *args, size_t argc);
+zz_value zz_fn_vec_flatten(zz_value *args, size_t argc);
+zz_value zz_fn_vec_fold(zz_value *args, size_t argc);
+zz_value zz_fn_vec_index__of(zz_value *args, size_t argc);
+zz_value zz_fn_vec_last__index__of(zz_value *args, size_t argc);
+zz_value zz_fn_vec_max__val(zz_value *args, size_t argc);
+zz_value zz_fn_vec_min__val(zz_value *args, size_t argc);
+zz_value zz_fn_vec_product(zz_value *args, size_t argc);
+zz_value zz_fn_vec_product__f(zz_value *args, size_t argc);
+zz_value zz_fn_vec_sum(zz_value *args, size_t argc);
+zz_value zz_fn_vec_sum__f(zz_value *args, size_t argc);
 
 #endif // ZZ_STDLIB_H
