@@ -1,0 +1,39 @@
+// features: imports, int-arith, locals, print, std-task, state
+// tests/fixtures/stdlib/state_counter.zz
+// Deterministic contended counter: 4 tasks x 10 increments = exactly 40.
+// Repeats 50 times to verify no flakiness under contention.
+import std.task
+
+state hits := 0
+
+func inc10() {
+    hits += 1
+    hits += 1
+    hits += 1
+    hits += 1
+    hits += 1
+    hits += 1
+    hits += 1
+    hits += 1
+    hits += 1
+    hits += 1
+}
+
+func main() -> Result<int, str> {
+    for run in 0..50 {
+        hits = 0
+        h0 := task.spawn(|_| { inc10() })
+        h1 := task.spawn(|_| { inc10() })
+        h2 := task.spawn(|_| { inc10() })
+        h3 := task.spawn(|_| { inc10() })
+        task.join(h0)
+        task.join(h1)
+        task.join(h2)
+        task.join(h3)
+        if hits != 40 {
+            return .err("counter_mismatch")
+        }
+    }
+    println("state_counter_ok")
+    return .ok(0)
+}

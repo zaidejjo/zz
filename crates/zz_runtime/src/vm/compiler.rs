@@ -717,6 +717,10 @@ impl Compiler {
 
     fn resolve(&self, name: &str) -> Resolved {
         // State bindings live in the shared registry, not in slots or env.
+        eprintln!(
+            "DEBUG resolve: name='{name}', state_names={:?}",
+            self.state_names
+        );
         if self.state_names.contains(name) {
             return Resolved::State;
         }
@@ -3308,6 +3312,10 @@ impl Compiler {
                 span,
             } => match target {
                 Expr::Ident { name, .. } if self.state_names.contains(name) => {
+                    eprintln!(
+                        "DEBUG CompoundAssign: Ident target={name}, state_names={:?}",
+                        self.state_names
+                    );
                     // D2: `state x OP= v` is a single atomic RMW under one
                     // lock acquisition. Emit `RmwState` directly instead of
                     // rewriting to `Assign` (which would be separate
@@ -3316,15 +3324,27 @@ impl Compiler {
                     self.emit(Op::RmwState(name.clone(), *op, *span));
                     StmtValue::None
                 }
-                Expr::Path { parts, span: pspan }
-                    if {
-                        let full = parts.join(".");
-                        self.state_names.contains(&full)
-                    } =>
-                {
-                    self.compile_expr(value);
-                    self.emit(Op::RmwState(parts.join("."), *op, *pspan));
-                    StmtValue::None
+                Expr::Path { parts, span: pspan } => {
+                    let full = parts.join(".");
+                    eprintln!("DEBUG CompoundAssign: target={:?}, full={:?}, state_names={:?}, contains={}", target, full, self.state_names, self.state_names.contains(&full));
+                    if self.state_names.contains(&full) {
+                        self.compile_expr(value);
+                        self.emit(Op::RmwState(parts.join("."), *op, *pspan));
+                        StmtValue::None
+                    } else {
+                        // Fall through to generic path
+                        let synthetic = Stmt::Assign {
+                            target: target.clone(),
+                            value: Expr::Binary {
+                                op: *op,
+                                left: Box::new(target.clone()),
+                                right: Box::new(value.clone()),
+                                span: *span,
+                            },
+                            span: *span,
+                        };
+                        self.compile_stmt(&synthetic, value_discarded)
+                    }
                 }
                 Expr::Ident { .. } | Expr::Path { .. } => {
                     // Side-effect-free receivers: rewrite to the plain

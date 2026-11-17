@@ -1958,6 +1958,7 @@ parity_strict!(
     "net_unix_listener_shutdown.zz"
 );
 parity_strict!(parity_stdlib_cell_test, "stdlib", "cell_test.zz");
+parity_strict!(parity_stdlib_state_counter, "stdlib", "state_counter.zz");
 parity_strict!(
     parity_stdlib_option_result_unwrap_test,
     "stdlib",
