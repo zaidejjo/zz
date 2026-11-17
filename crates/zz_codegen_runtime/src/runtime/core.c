@@ -2140,6 +2140,7 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
 #elif defined(__aarch64__)
         __asm__ volatile("yield");
 #else
+        zz_state_yield_guard();
         zz_yield();
 #endif
         }
@@ -3218,6 +3219,7 @@ static void *zz_worker_loop(void *arg) {
 #elif defined(__aarch64__)
             __asm__ volatile("yield");
 #else
+            zz_state_yield_guard();
             zz_yield();
 #endif
         }
@@ -3567,6 +3569,7 @@ void zz_safepoint(void) {
     if (zz_sp_start_ms == 0) { zz_sp_start_ms = now_ms; return; }
     if (now_ms - zz_sp_start_ms >= 1) {
         zz_sp_start_ms = now_ms;
+        zz_state_yield_guard();
         zz_yield();
     }
 }

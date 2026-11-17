@@ -650,6 +650,9 @@ fn spawn_from_parts(
     // fully detached, so no state is shared with the spawner or other
     // tasks (`Send` rests on that construction — see `GreenTask`).
     let mut new_interp = Interp::with_natives_shared_env(natives, Executor::checkout_env());
+    // Share the spawner's state registry so all tasks read/write the same
+    // `state` bindings (D9: one shared storage in every context).
+    new_interp.state_registry = interp.state_registry.clone();
     new_interp.structs = structs;
     new_interp.funcs = zz_runtime::value::shared_funcs(funcs);
     new_interp.task_mode = true;

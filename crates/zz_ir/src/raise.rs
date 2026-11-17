@@ -707,6 +707,20 @@ impl<'a> Raiser<'a> {
             Op::EnterScope => Ok(VmOp::EnterScope),
             Op::ExitScope => Ok(VmOp::ExitScope),
             Op::DeferRecord => Ok(VmOp::DeferRecord),
+            Op::LoadState { name } => Ok(VmOp::LoadState(self.str(*name)?, VmSpan::default())),
+            Op::StoreState { name } => Ok(VmOp::StoreState(self.str(*name)?, VmSpan::default())),
+            Op::RmwState { name, op } => Ok(VmOp::RmwState(
+                self.str(*name)?,
+                Self::raise_binop(*op),
+                VmSpan::default(),
+            )),
+            Op::Atomic { body } => {
+                let chunk = self.raise_func(*body, seen)?;
+                Ok(VmOp::Atomic {
+                    body: chunk,
+                    span: VmSpan::default(),
+                })
+            }
         }
     }
 

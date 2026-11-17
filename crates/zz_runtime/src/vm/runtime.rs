@@ -1030,7 +1030,14 @@ impl Vm {
                     // Acquire the state lock for the whole body (D3).
                     let _guard = reg.lock();
                     self.state_lock_depth += 1;
-                    let result = self.run_chunk(body, interp);
+                    // Run the body in a dedicated sub-Vm so it executes as an
+                    // isolated chunk: when its frame pops, run_loop returns
+                    // instead of continuing into the enclosing chunk's code.
+                    let mut sub = Vm::new();
+                    // Mirror the reentrancy depth so state ops inside the body
+                    // see depth > 0 and access the map directly (no re-lock).
+                    sub.state_lock_depth = self.state_lock_depth;
+                    let result = sub.run_chunk(body, interp);
                     self.state_lock_depth -= 1;
                     // A yield while holding the state lock is a D3 violation.
                     if matches!(result, Ok(Flow::Yield(_))) {

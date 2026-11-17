@@ -109,6 +109,10 @@ fn effect(op: &Op) -> i64 {
         Op::DbQuery { .. } => 0,
         Op::EnterScope | Op::ExitScope => 0,
         Op::DeferRecord => -1,
+        Op::LoadState { .. } => 1,
+        Op::StoreState { .. } => -1,
+        Op::RmwState { .. } => -1,
+        Op::Atomic { .. } => 0,
     }
 }
 
@@ -1789,6 +1793,18 @@ fn infer_func(
             Op::DeferRecord => {
                 pop(&mut st, pc)?;
             }
+            Op::LoadState { .. } => {
+                st.push(TV::U);
+            }
+            Op::StoreState { .. } => {
+                pop(&mut st, pc)?;
+            }
+            Op::RmwState { .. } => {
+                pop(&mut st, pc)?;
+                pop(&mut st, pc)?;
+                st.push(TV::U);
+            }
+            Op::Atomic { .. } => {}
         }
         // Successor edges (mirror the depth simulation exactly).
         // MatchError included with the non-fallthroughs: it traps, so

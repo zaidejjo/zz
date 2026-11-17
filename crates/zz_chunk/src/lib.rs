@@ -119,6 +119,10 @@ pub fn supported(op: &Op) -> bool {
             | Op::CallPath { .. }
             | Op::CallNative { .. }
             | Op::Concat(_)
+            | Op::LoadState { .. }
+            | Op::StoreState { .. }
+            | Op::RmwState { .. }
+            | Op::Atomic { .. }
     )
 }
 
@@ -214,6 +218,10 @@ fn origins(code: &[Op], resolve: &dyn Fn(StrId, usize) -> Callee) -> Vec<Vec<Cal
             Op::MakeFunc { .. } => (0, 1),
             Op::Call { argc } => (*argc as usize + 1, 1),
             Op::CallPath { argc, .. } | Op::CallNative { argc, .. } => (*argc as usize, 1),
+            Op::LoadState { .. } => (0, 1),
+            Op::StoreState { .. } => (1, 0),
+            Op::RmwState { .. } => (2, 1),
+            Op::Atomic { .. } => (0, 0),
             _ => (0, 0),
         };
         // PopN keeps its top; Swap exchanges the top two.
@@ -1984,6 +1992,23 @@ fn module_globals(module: &Module) -> HashSet<String> {
     out
 }
 
+/// Module-level `state` binding names: scan every function for `StoreState`
+/// ops (state declarations lower to `StoreState` in the entry chunk; reads
+/// and writes inside functions use `LoadState`/`StoreState` too).
+fn module_states(module: &Module) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for f in &module.funcs {
+        for op in &f.code {
+            if let Op::StoreState { name } = op {
+                if let Some(n) = module.strings.get(name.0 as usize) {
+                    out.insert(n.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn coverage(module: &Module) -> Result<(), ChunkError> {
     // Index funcs by dotted name for resolution.
     let mut func_names: HashSet<String> = HashSet::new();
@@ -2392,6 +2417,12 @@ struct Emitter<'a> {
     used_natives: Vec<(String, &'static str, bool)>,
     needs_native_rt: bool,
     needs_float_fmt: bool,
+    /// Slot offset applied to `LoadSlot`/`StoreSlot` when inside an
+    /// `atomic` body (0 = no remapping). Set while emitting body ops.
+    atomic_slot_offset: u16,
+    /// Body func id -> slot offset in this function's frame, for each
+    /// `Atomic` op. Computed in `emit_func` before op emission.
+    atomic_slot_offsets: HashMap<usize, u16>,
 }
 
 impl<'a> Emitter<'a> {
@@ -2854,7 +2885,31 @@ impl<'a> Emitter<'a> {
             .get(id.0 as usize)
             .ok_or_else(|| ChunkError::op("func id"))?;
         let sym = self.fsym(id);
-        let frame = self.frame_size(f);
+        let base_frame = self.frame_size(f);
+        // Pre-compute `Atomic` body slot offsets: reserve extra frame
+        // slots for each atomic body's locals so inlining doesn't collide
+        // with this function's slots. The offset for body `b` is the
+        // cumulative extra slots before it, added to `base_frame`.
+        self.atomic_slot_offsets.clear();
+        let mut atomic_extra = 0usize;
+        for op in &f.code {
+            if let Op::Atomic { body } = op {
+                let body_func = &self.module.funcs[body.0 as usize];
+                let mut max_slot = 0usize;
+                for bop in &body_func.code {
+                    match bop {
+                        Op::LoadSlot(s) | Op::StoreSlot(s) => {
+                            max_slot = max_slot.max(*s as usize);
+                        }
+                        _ => {}
+                    }
+                }
+                self.atomic_slot_offsets
+                    .insert(body.0 as usize, (base_frame + atomic_extra) as u16);
+                atomic_extra += max_slot + 1;
+            }
+        }
+        let frame = base_frame + atomic_extra;
         let nparams = f.params.len();
         // Twin functions compile twice: the boxed symbol below is a thin
         // unbox/call/box adapter (checker-guaranteed ints, unchecked like
@@ -4030,17 +4085,29 @@ impl<'a> Emitter<'a> {
             Op::LoadSlot(s) => {
                 // Whole-function unboxed local: read the C local directly
                 // (no guard, no box traffic — entry unbox already validated).
-                if let Some((k, cname)) = cx.stable_locals.get(s) {
-                    match k {
-                        SlotKind::Int => {
-                            out.push_str(&format!("    st[sp++] = zz_int({cname});\n"));
+                // When emitting inside an `atomic` body, remap the slot via
+                // `atomic_slot_offset` so body locals land in reserved
+                // frame slots.
+                let slot = if self.atomic_slot_offset > 0 {
+                    *s as u16 + self.atomic_slot_offset
+                } else {
+                    *s
+                };
+                if self.atomic_slot_offset == 0 {
+                    if let Some((k, cname)) = cx.stable_locals.get(s) {
+                        match k {
+                            SlotKind::Int => {
+                                out.push_str(&format!("    st[sp++] = zz_int({cname});\n"));
+                            }
+                            SlotKind::Float => {
+                                out.push_str(&format!("    st[sp++] = zz_float({cname});\n"));
+                            }
                         }
-                        SlotKind::Float => {
-                            out.push_str(&format!("    st[sp++] = zz_float({cname});\n"));
-                        }
+                    } else {
+                        out.push_str(&format!("    st[sp++] = zz_clone(st[{slot}]);\n"));
                     }
                 } else {
-                    out.push_str(&format!("    st[sp++] = zz_clone(st[{s}]);\n"));
+                    out.push_str(&format!("    st[sp++] = zz_clone(st[{slot}]);\n"));
                 }
             }
             Op::StoreSlot(s) => {
@@ -4052,22 +4119,33 @@ impl<'a> Emitter<'a> {
                 // (box-back) so fused windows / index reads that observe
                 // `st[s]` see current values, while direct loads read the
                 // C local fast. Issue #252.
-                if let Some((k, cname)) = cx.stable_locals.get(s) {
-                    match k {
-                        SlotKind::Int => {
-                            out.push_str(&format!(
-                                "    {{ zz_value _v = st[--sp]; {cname} = _v.i; zz_release(&st[{s}]); st[{s}] = zz_int({cname}); zz_release(&_v); }}\n"
-                            ));
+                let slot = if self.atomic_slot_offset > 0 {
+                    *s as u16 + self.atomic_slot_offset
+                } else {
+                    *s
+                };
+                if self.atomic_slot_offset == 0 {
+                    if let Some((k, cname)) = cx.stable_locals.get(s) {
+                        match k {
+                            SlotKind::Int => {
+                                out.push_str(&format!(
+                                    "    {{ zz_value _v = st[--sp]; {cname} = _v.i; zz_release(&st[{slot}]); st[{slot}] = zz_int({cname}); zz_release(&_v); }}\n"
+                                ));
+                            }
+                            SlotKind::Float => {
+                                out.push_str(&format!(
+                                    "    {{ zz_value _v = st[--sp]; {cname} = _v.f; zz_release(&st[{slot}]); st[{slot}] = zz_float({cname}); zz_release(&_v); }}\n"
+                                ));
+                            }
                         }
-                        SlotKind::Float => {
-                            out.push_str(&format!(
-                                "    {{ zz_value _v = st[--sp]; {cname} = _v.f; zz_release(&st[{s}]); st[{s}] = zz_float({cname}); zz_release(&_v); }}\n"
-                            ));
-                        }
+                    } else {
+                        out.push_str(&format!(
+                            "    {{ zz_value _v = st[--sp]; zz_release(&st[{slot}]); st[{slot}] = _v; }}\n"
+                        ));
                     }
                 } else {
                     out.push_str(&format!(
-                        "    {{ zz_value _v = st[--sp]; zz_release(&st[{s}]); st[{s}] = _v; }}\n"
+                        "    {{ zz_value _v = st[--sp]; zz_release(&st[{slot}]); st[{slot}] = _v; }}\n"
                     ));
                 }
             }
@@ -4940,8 +5018,106 @@ impl<'a> Emitter<'a> {
                     }
                 }
             }
+            // ---- shared mutable state (D1/D2/D3/D9) ----
+            Op::LoadState { name } => {
+                let cname = format!("zz_state_{}", mangle(self.str(*name)));
+                out.push_str(&format!(
+                    "    zz_state_lock();\n    st[sp++] = zz_clone({cname});\n    zz_state_unlock();\n"
+                ));
+            }
+            Op::StoreState { name } => {
+                let cname = format!("zz_state_{}", mangle(self.str(*name)));
+                out.push_str(&format!(
+                    "    zz_state_lock();\n    zz_cstore(&{cname}, st[--sp]);\n    zz_state_unlock();\n"
+                ));
+            }
+            Op::RmwState { name, op } => {
+                let cname = format!("zz_state_{}", mangle(self.str(*name)));
+                let zzop =
+                    binop_const(op).ok_or_else(|| ChunkError::op("rmwstate non-int binop"))?;
+                out.push_str(&format!(
+                    "    zz_state_lock();\n    {{\n        zz_value _cur = zz_clone({cname});\n        zz_value _rhs = st[--sp];\n        zz_value _new = zz_binop({zzop}, _cur, _rhs);\n        st[sp++] = zz_clone(_new);\n        zz_cstore(&{cname}, _new);\n        zz_release(&_cur);\n        zz_release(&_rhs);\n    }}\n    zz_state_unlock();\n"
+                ));
+            }
+            Op::Atomic { body } => {
+                // D3: run the body under the state lock. The body is a
+                // tabled function (lowered from the VM's sub-chunk); inline
+                // its ops into this function so that `return`/`break`/
+                // `continue`/`defer` propagate correctly. Remap the body's
+                // slots to reserved slots in this function's frame.
+                let offset = self
+                    .atomic_slot_offsets
+                    .get(&(body.0 as usize))
+                    .copied()
+                    .unwrap_or(0);
+                out.push_str("    zz_state_lock();\n");
+                self.emit_atomic_body(*body, offset, out)?;
+                out.push_str("    zz_state_unlock();\n");
+            }
             _ => return Err(ChunkError::op(op.name())),
         }
+        Ok(())
+    }
+
+    /// Emit all ops of an `atomic` body function with slot remapping.
+    /// `offset` is added to every `LoadSlot`/`StoreSlot` slot index so the
+    /// body's locals land in reserved slots of this function's frame.
+    fn emit_atomic_body(
+        &mut self,
+        body: FuncId,
+        offset: u16,
+        out: &mut String,
+    ) -> Result<(), ChunkError> {
+        let body_func = self
+            .module
+            .funcs
+            .get(body.0 as usize)
+            .ok_or_else(|| ChunkError::op("atomic body func id"))?;
+        let prev_offset = std::mem::replace(&mut self.atomic_slot_offset, offset);
+        let mut pc = 0usize;
+        while pc < body_func.code.len() {
+            let op = &body_func.code[pc];
+            // Emit the op with slot remapping: `LoadSlot(s)`/`StoreSlot(s)`
+            // become `LoadSlot(s + offset)`/`StoreSlot(s + offset)`.
+            match op {
+                Op::LoadSlot(s) => {
+                    out.push_str(&format!(
+                        "    st[sp++] = zz_clone(st[{}]);\n",
+                        *s as u16 + offset
+                    ));
+                }
+                Op::StoreSlot(s) => {
+                    out.push_str(&format!(
+                        "    {{ zz_value _v = st[--sp]; zz_release(&st[{}]); st[{}] = _v; }}\n",
+                        *s as u16 + offset,
+                        *s as u16 + offset
+                    ));
+                }
+                // All other ops are emitted generically via `emit_op` with
+                // a synthetic pc (slot remapping handled above for slot ops;
+                // jumps reference body-internal pcs which are invalid here,
+                // so `Atomic` bodies must not contain control flow that
+                // targets outside the body — the checker ensures this).
+                _ => {
+                    // Build a minimal OpCx for the body op.
+                    let cx = OpCx {
+                        callee: None,
+                        fuse_slot: None,
+                        fuse_borrow: false,
+                        ufuse: None,
+                        ffuse: None,
+                        peel: None,
+                        strapp: None,
+                        idxread: None,
+                        condfuse: None,
+                        stable_locals: &HashMap::new(),
+                    };
+                    self.emit_op(body, pc, op, &cx, out)?;
+                }
+            }
+            pc += 1;
+        }
+        self.atomic_slot_offset = prev_offset;
         Ok(())
     }
 }
@@ -5193,6 +5369,8 @@ pub fn build_module(module: &Module, entry_main: &str) -> Result<zz_lower::Lower
         used_natives: Vec::new(),
         needs_native_rt: false,
         needs_float_fmt: false,
+        atomic_slot_offset: 0,
+        atomic_slot_offsets: HashMap::new(),
     };
     for f in &module.funcs {
         let nm = module
@@ -5264,6 +5442,14 @@ pub fn build_module(module: &Module, entry_main: &str) -> Result<zz_lower::Lower
     gids.sort();
     for cid in gids {
         bodies.push_str(&format!("static zz_value {cid};\n"));
+    }
+    // Module-scope `state` bindings: zero-initialized file-scope globals,
+    // accessed under the process-global state lock (`zz_state_lock`/`unlock`).
+    let state_names = module_states(module);
+    let mut sids: Vec<&String> = state_names.iter().collect();
+    sids.sort();
+    for name in &sids {
+        bodies.push_str(&format!("static zz_value zz_state_{};\n", mangle(name)));
     }
     // Forward declarations (boxed symbols only; twins are static and
     // called after definition order — emit twins first instead).

@@ -2427,9 +2427,16 @@ impl Compiler {
     }
 
     fn compile_path_load(&mut self, parts: &[String], span: Span) {
+        // State binding: read from the state registry under the full dotted
+        // name (`test_state3.hits`). Must be checked before slot resolution
+        // because `resolve(&full)` returns `Resolved::State`, not `Resolved::Slot`.
+        let full = parts.join(".");
+        if self.state_names.contains(&full) {
+            self.emit(Op::LoadState(full.clone(), span));
+            return;
+        }
         // A top-level var promoted to a slot is declared under its full
         // dotted name (`add_to_1M.sum`); resolve the joined name first.
-        let full = parts.join(".");
         // Move-take: the single global load in `ns.x = f(ns.x, ...)`
         // takes instead of cloning (flag set by the Assign arm; the home
         // must still match, guarding against shadowed lookalikes).
@@ -2464,6 +2471,13 @@ impl Compiler {
 
     fn compile_path_store(&mut self, parts: &[String], span: Span) {
         let full = parts.join(".");
+        // State binding: store to the state registry under the full dotted
+        // name (`test_state3.hits`). Must be checked before slot resolution
+        // because `resolve(&full)` returns `Resolved::State`, not `Resolved::Slot`.
+        if self.state_names.contains(&full) {
+            self.emit(Op::StoreState(full.clone(), span));
+            return;
+        }
         // Top-level slot promoted under the full dotted name -> direct store.
         if let Resolved::Slot(slot) = self.resolve(&full) {
             self.emit(Op::StoreSlot(slot as u16));
@@ -3293,6 +3307,25 @@ impl Compiler {
                 value,
                 span,
             } => match target {
+                Expr::Ident { name, .. } if self.state_names.contains(name) => {
+                    // D2: `state x OP= v` is a single atomic RMW under one
+                    // lock acquisition. Emit `RmwState` directly instead of
+                    // rewriting to `Assign` (which would be separate
+                    // LoadState + StoreState — not atomic).
+                    self.compile_expr(value);
+                    self.emit(Op::RmwState(name.clone(), *op, *span));
+                    StmtValue::None
+                }
+                Expr::Path { parts, span: pspan }
+                    if {
+                        let full = parts.join(".");
+                        self.state_names.contains(&full)
+                    } =>
+                {
+                    self.compile_expr(value);
+                    self.emit(Op::RmwState(parts.join("."), *op, *pspan));
+                    StmtValue::None
+                }
                 Expr::Ident { .. } | Expr::Path { .. } => {
                     // Side-effect-free receivers: rewrite to the plain
                     // Assign path with a synthesized
@@ -3781,6 +3814,7 @@ impl Compiler {
         sub.type_scope = scope.to_string();
         sub.symbol_map = self.symbol_map.clone();
         sub.top_globals = self.top_globals.clone();
+        sub.state_names = self.state_names.clone();
         sub.types = self.types.clone();
         sub.structs = self.structs.clone();
         sub.native_names = self.native_names.clone();
@@ -4122,6 +4156,7 @@ impl Compiler {
         let mut sub = Compiler::new();
         sub.type_scope = self.type_scope.clone();
         sub.top_globals = self.top_globals.clone();
+        sub.state_names = self.state_names.clone();
         sub.types = self.types.clone();
         sub.structs = self.structs.clone();
         sub.native_names = self.native_names.clone();
