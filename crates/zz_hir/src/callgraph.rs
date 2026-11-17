@@ -6,6 +6,7 @@
 //! - computes the reachable closure from entry points (`main` + all
 //!   top-level statements),
 //! - and prunes the program to only the reachable items.
+#![allow(clippy::collapsible_match, clippy::single_match)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -807,4 +808,275 @@ pub fn dce(tp: &TypedProgram, entry_main: &str) -> (TypedProgram, ReachableSet) 
     let reach = reachable_from(tp, &cg, &roots);
     let pruned = prune_program(tp, &reach);
     (pruned, reach)
+}
+
+// --- D5: R2 plain globals vs tasks --------------------------------------
+
+/// A normal mutable top-level global accessed by code reachable from a
+/// `task.spawn` closure is a compile error.
+/// Runs as a whole-program post-pass on the merged `TypedProgram`.
+pub fn check_r2_globals_vs_tasks(
+    tp: &TypedProgram,
+    cg: &CallGraph,
+    errors: &mut Vec<zz_frontend::diag::RawDiag>,
+) {
+    // Find all plain mutable globals assigned somewhere in the program.
+    let mut assigned_globals: std::collections::HashSet<String> = std::collections::HashSet::new();
+    collect_assigned_globals(tp, &mut assigned_globals);
+
+    // Find all globals referenced from task.spawn closures (directly).
+    let mut spawn_globals: std::collections::HashSet<String> = std::collections::HashSet::new();
+    collect_spawn_globals(tp, &mut spawn_globals);
+
+    // Use call graph to expand reachability: functions called from spawn
+    // closures may also reference globals.
+    let mut worklist: std::collections::VecDeque<String> = spawn_globals.iter().cloned().collect();
+    let mut reachable_globals: std::collections::HashSet<String> = spawn_globals.clone();
+
+    while let Some(func) = worklist.pop_front() {
+        for callee in cg.edges.get(&func).cloned().unwrap_or_default() {
+            if tp.bindings.contains_key(&callee)
+                && assigned_globals.contains(&callee)
+                && reachable_globals.insert(callee.clone())
+            {
+                worklist.push_back(callee);
+            }
+        }
+    }
+
+    // Report errors for plain mutable globals reachable from spawn.
+    for g in &reachable_globals {
+        if assigned_globals.contains(g) && !is_state_or_const(tp, g) {
+            errors.push(zz_frontend::diag::error_at(
+                format!(
+                    "global `{g}` is reachable from a task; declare it `state`\n\
+                     hint: change `{g} := ...` to `state {g} := ...`",
+                    g = g
+                ),
+                zz_span_ast::span::Span::new(0, 0),
+            ));
+        }
+    }
+}
+
+/// Collect names of globals that are assigned somewhere in the program.
+fn collect_assigned_globals(tp: &TypedProgram, out: &mut std::collections::HashSet<String>) {
+    for stmt in &tp.program.stmts {
+        collect_assigned_in_stmt(tp, stmt, out);
+    }
+}
+
+fn collect_assigned_in_stmt(
+    tp: &TypedProgram,
+    stmt: &zz_span_ast::ast::Stmt,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match stmt {
+        zz_span_ast::ast::Stmt::Assign { target, .. } => match target {
+            zz_span_ast::ast::Expr::Ident { name, .. } => {
+                if tp.bindings.contains_key(name) {
+                    out.insert(name.clone());
+                }
+            }
+            _ => {}
+        },
+        zz_span_ast::ast::Stmt::CompoundAssign { target, .. } => match target {
+            zz_span_ast::ast::Expr::Ident { name, .. } => {
+                if tp.bindings.contains_key(name) {
+                    out.insert(name.clone());
+                }
+            }
+            _ => {}
+        },
+        zz_span_ast::ast::Stmt::Func { body, .. } => {
+            collect_assigned_in_block(tp, body, out);
+        }
+        zz_span_ast::ast::Stmt::For { body, .. } => {
+            collect_assigned_in_block(tp, body, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_assigned_in_block(
+    tp: &TypedProgram,
+    block: &zz_span_ast::ast::Block,
+    out: &mut std::collections::HashSet<String>,
+) {
+    for s in &block.stmts {
+        collect_assigned_in_stmt(tp, s, out);
+    }
+}
+
+/// Collect global names referenced directly inside `task.spawn` closures.
+fn collect_spawn_globals(tp: &TypedProgram, out: &mut std::collections::HashSet<String>) {
+    for stmt in &tp.program.stmts {
+        collect_spawn_globals_in_stmt(tp, stmt, out);
+    }
+}
+
+fn collect_spawn_globals_in_stmt(
+    tp: &TypedProgram,
+    stmt: &zz_span_ast::ast::Stmt,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match stmt {
+        zz_span_ast::ast::Stmt::Func { body, .. } => {
+            for s in &body.stmts {
+                collect_spawn_globals_in_stmt(tp, s, out);
+            }
+        }
+        zz_span_ast::ast::Stmt::For { body, .. } => {
+            for s in &body.stmts {
+                collect_spawn_globals_in_stmt(tp, s, out);
+            }
+        }
+        zz_span_ast::ast::Stmt::Expr(e) => {
+            collect_spawn_globals_in_expr(tp, e, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_spawn_globals_in_expr(
+    tp: &TypedProgram,
+    e: &zz_span_ast::ast::Expr,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match e {
+        zz_span_ast::ast::Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            // Check if this is `task.spawn(closure)`
+            if let Some(name) = callee_name(callee) {
+                if name == "task.spawn" {
+                    if let Some(last) = args.last() {
+                        collect_globals_from_expr(tp, last, out);
+                    }
+                }
+            }
+            for a in args {
+                collect_spawn_globals_in_expr(tp, a, out);
+            }
+            for (_, v) in named {
+                collect_spawn_globals_in_expr(tp, v, out);
+            }
+        }
+        zz_span_ast::ast::Expr::Closure { body, .. } => {
+            collect_globals_from_expr(tp, body, out);
+        }
+        _ => {}
+    }
+}
+
+/// Collect global variable names referenced from an expression.
+fn collect_globals_from_expr(
+    tp: &TypedProgram,
+    e: &zz_span_ast::ast::Expr,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match e {
+        zz_span_ast::ast::Expr::Ident { name, .. } => {
+            if tp.bindings.contains_key(name) {
+                out.insert(name.clone());
+            }
+        }
+        zz_span_ast::ast::Expr::Path { parts, .. } => {
+            if parts.len() == 1 && tp.bindings.contains_key(&parts[0]) {
+                out.insert(parts[0].clone());
+            }
+        }
+        zz_span_ast::ast::Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            collect_globals_from_expr(tp, callee, out);
+            for a in args {
+                collect_globals_from_expr(tp, a, out);
+            }
+            for (_, v) in named {
+                collect_globals_from_expr(tp, v, out);
+            }
+        }
+        zz_span_ast::ast::Expr::Block(b) => {
+            for s in &b.stmts {
+                collect_globals_from_stmt(tp, s, out);
+            }
+        }
+        zz_span_ast::ast::Expr::If {
+            cond, then, els, ..
+        } => {
+            collect_globals_from_expr(tp, cond, out);
+            collect_globals_from_block(tp, then, out);
+            if let Some(e) = els {
+                collect_globals_from_expr(tp, e, out);
+            }
+        }
+        zz_span_ast::ast::Expr::While { cond, body, .. } => {
+            collect_globals_from_expr(tp, cond, out);
+            collect_globals_from_block(tp, body, out);
+        }
+        zz_span_ast::ast::Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_globals_from_expr(tp, scrutinee, out);
+            for a in arms {
+                collect_globals_from_expr(tp, &a.body, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_globals_from_block(
+    tp: &TypedProgram,
+    b: &zz_span_ast::ast::Block,
+    out: &mut std::collections::HashSet<String>,
+) {
+    for s in &b.stmts {
+        collect_globals_from_stmt(tp, s, out);
+    }
+}
+
+fn collect_globals_from_stmt(
+    tp: &TypedProgram,
+    s: &zz_span_ast::ast::Stmt,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match s {
+        zz_span_ast::ast::Stmt::Expr(e) => collect_globals_from_expr(tp, e, out),
+        zz_span_ast::ast::Stmt::Assign { target, value, .. } => {
+            collect_globals_from_expr(tp, target, out);
+            collect_globals_from_expr(tp, value, out);
+        }
+        zz_span_ast::ast::Stmt::CompoundAssign { target, value, .. } => {
+            collect_globals_from_expr(tp, target, out);
+            collect_globals_from_expr(tp, value, out);
+        }
+        _ => {}
+    }
+}
+
+/// Extract callee name from a call expression.
+fn callee_name(callee: &zz_span_ast::ast::Expr) -> Option<String> {
+    match callee {
+        zz_span_ast::ast::Expr::Ident { name, .. } => Some(name.clone()),
+        zz_span_ast::ast::Expr::Path { parts, .. } => Some(parts.join(".")),
+        _ => None,
+    }
+}
+
+/// True if `name` is a state or const global (immutable).
+fn is_state_or_const(_tp: &TypedProgram, _name: &str) -> bool {
+    // In v1, we approximate: state/const globals are those that are never
+    // assigned after initialization. Since we can't easily distinguish
+    // here, we use a heuristic: if the global is in bindings and never
+    // assigned, treat it as immutable.
+    // For now, return false (conservative: report all globals).
+    false
 }

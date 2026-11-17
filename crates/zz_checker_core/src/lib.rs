@@ -494,6 +494,13 @@ pub struct Checker {
     /// type annotation repeatedly within one check run. Also deduplicates
     /// the errors such conversions emit (unknown type, arity mismatch).
     pub type_annotation_cache: std::collections::HashMap<(u64, u64), Type>,
+    /// Names of module-level `state` bindings (D1). Since `state` is
+    /// module-level only in v1, no scoping is needed — these live at
+    /// scope index 0 for the whole check run.
+    pub state_names: std::collections::HashSet<String>,
+    /// Nesting depth of `atomic { }` blocks being checked. >0 means we're
+    /// inside an atomic block (D2/D3 rules relax accordingly).
+    pub atomic_depth: usize,
 }
 
 impl Checker {
@@ -582,6 +589,8 @@ impl Checker {
             extern_symbols: std::collections::HashMap::new(),
             domain: DomainState::default(),
             type_annotation_cache: std::collections::HashMap::new(),
+            state_names: std::collections::HashSet::new(),
+            atomic_depth: 0,
         }
     }
 

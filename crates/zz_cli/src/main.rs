@@ -1326,6 +1326,16 @@ pub(crate) fn prepare_run_with_features(
         _loaded_traits.clone(),
         _loaded_trait_impls.clone(),
     );
+    // D5 R2: plain globals reachable from task.spawn must be `state`.
+    let cg = zz_hir::callgraph::build_callgraph(&typed.program);
+    let mut r2_errors: Vec<zz_frontend::diag::RawDiag> = Vec::new();
+    zz_hir::callgraph::check_r2_globals_vs_tasks(&typed.program, &cg, &mut r2_errors);
+    if !r2_errors.is_empty() {
+        return Err(format!(
+            "{} error(s) checking plain globals vs tasks",
+            r2_errors.len()
+        ));
+    }
     let interp = setup_interp(
         natives,
         &consts,

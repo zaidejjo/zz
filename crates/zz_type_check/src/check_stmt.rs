@@ -1,6 +1,7 @@
 //! Statement type-checking: free functions following the
 //! `definite_assignment.rs` pattern. `Checker`'s fields are `pub`, so
 //! free functions can read/write them directly.
+#![allow(clippy::collapsible_match, clippy::single_match)]
 
 use zz_checker_core::Checker;
 use zz_diag_core::error_at;
@@ -70,7 +71,14 @@ pub(crate) fn check_stmt(checker: &mut Checker, stmt: &Stmt) -> Type {
             value,
             span,
         } => check_stmt_compound_assign(checker, target, *op, value, *span),
-        Stmt::Atomic { .. } => Type::Unit,
+        Stmt::Atomic { body, span: _ } => {
+            // D3: entering an `atomic { }` block increments the depth
+            // counter. Blocking natives are rejected inside.
+            checker.atomic_depth += 1;
+            checker.check_block(body);
+            checker.atomic_depth -= 1;
+            Type::Unit
+        }
     }
 }
 
@@ -121,6 +129,7 @@ fn check_stmt_decl(
                 name.span,
             ));
         }
+        checker.state_names.insert(name.name.clone());
     }
     checker.warn_if_shadowed_decl(probe, value, ty.is_some(), is_const);
     // Phase 2.2: inherit `std.http` route tables across server
@@ -369,6 +378,9 @@ fn check_stmt_expr(checker: &mut Checker, e: &Expr) -> Type {
     if !checker.tail_is_value {
         checker.warn_if_discarded(e, &t);
     }
+    // D2/D3: if this expression statement touches a state variable,
+    // enforce auto-atomic safety on it.
+    check_expr_atomic_safety(checker, e, e.span());
     t
 }
 
@@ -467,6 +479,11 @@ fn check_stmt_assign(checker: &mut Checker, target: &Expr, value: &Expr, span: S
             checker.report_mismatch(e, span);
         }
     }
+    // D2/D3: if this assignment touches a state variable, enforce
+    // auto-atomic whitelist (outside atomic) or blocking-native (inside
+    // atomic) rules on all expressions in the statement.
+    check_expr_atomic_safety(checker, target, span);
+    check_expr_atomic_safety(checker, value, span);
     Type::Unit
 }
 
@@ -497,10 +514,12 @@ fn check_stmt_compound_assign(
             checker.report_mismatch(e, span);
         }
     }
+    // D2/D3: if this compound assignment touches a state variable,
+    // enforce auto-atomic safety on all expressions in the statement.
+    check_expr_atomic_safety(checker, target, span);
+    check_expr_atomic_safety(checker, value, span);
     Type::Unit
 }
-
-// --- `for` statement helpers ------------------------------------------
 
 fn check_stmt_for(
     checker: &mut Checker,
@@ -671,6 +690,745 @@ fn type_contains_func(t: zz_types::Type) -> bool {
         Type::Struct(_, args) => args.iter().any(|t| type_contains_func(t.clone())),
         Type::Enum(_, variants) => variants.iter().any(|t| type_contains_func(t.clone())),
         Type::Union(items) => items.iter().any(|t| type_contains_func(t.clone())),
+        _ => false,
+    }
+}
+
+// --- D2/D3: auto-atomic statement safety --------------------------------
+
+/// Returns true if `expr` reads or writes any module-level `state` variable
+/// by referencing its name as an `Expr::Ident`.
+fn expr_references_state(checker: &Checker, expr: &Expr) -> bool {
+    match expr {
+        Expr::Ident { name, .. } => checker.state_names.contains(name),
+        Expr::Path { parts, .. } => parts.iter().any(|p| checker.state_names.contains(p)),
+        Expr::Field { obj, name, .. } => {
+            checker.state_names.contains(name) || expr_references_state(checker, obj)
+        }
+        Expr::Index { obj, index, .. } => {
+            expr_references_state(checker, obj) || expr_references_state(checker, index)
+        }
+        Expr::Binary { left, right, .. } => {
+            expr_references_state(checker, left) || expr_references_state(checker, right)
+        }
+        Expr::Unary { expr, .. } => expr_references_state(checker, expr),
+        Expr::Try { expr, .. } => expr_references_state(checker, expr),
+        Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            expr_references_state(checker, callee)
+                || args.iter().any(|a| expr_references_state(checker, a))
+                || named.iter().any(|(_, v)| expr_references_state(checker, v))
+        }
+        Expr::Closure { body, .. } => expr_references_state(checker, body),
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            expr_references_state(checker, cond)
+                || expr_references_state_block(checker, then)
+                || els
+                    .as_ref()
+                    .is_some_and(|e| expr_references_state_expr(checker, e))
+        }
+        Expr::While { cond, body, .. } => {
+            expr_references_state(checker, cond) || expr_references_state_block(checker, body)
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            expr_references_state(checker, scrutinee)
+                || arms.iter().any(|a| {
+                    expr_references_state_pattern(checker, &a.pat)
+                        || expr_references_state_expr(checker, &a.body)
+                })
+        }
+        Expr::Block(b) => expr_references_state_block(checker, b),
+        Expr::Fmt { parts, .. } => parts.iter().any(|p| match p {
+            zz_span_ast::ast::FmtPart::Expr(e, _) => expr_references_state(checker, e),
+            _ => false,
+        }),
+        Expr::Array { elems, .. } => elems.iter().any(|e| expr_references_state(checker, e)),
+        Expr::Dict { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| expr_references_state(checker, k) || expr_references_state(checker, v)),
+        Expr::Paren { expr, .. } => expr_references_state(checker, expr),
+        Expr::Tuple { items, .. } => items.iter().any(|e| expr_references_state(checker, e)),
+        _ => false,
+    }
+}
+
+/// Returns true if `expr` references a state variable (used in match arms
+/// where the body is an `Expr`, not a `Block`).
+fn expr_references_state_expr(checker: &Checker, expr: &Expr) -> bool {
+    expr_references_state(checker, expr)
+}
+
+/// Returns true if any statement in `block` references a state variable.
+fn expr_references_state_block(checker: &Checker, block: &zz_span_ast::ast::Block) -> bool {
+    block
+        .stmts
+        .iter()
+        .any(|s| expr_references_state_stmt(checker, s))
+}
+
+/// Returns true if `stmt` references a state variable.
+fn expr_references_state_stmt(checker: &Checker, stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Decl { value, .. } => expr_references_state(checker, value),
+        Stmt::Assign { target, value, .. } => {
+            expr_references_state(checker, target) || expr_references_state(checker, value)
+        }
+        Stmt::CompoundAssign { target, value, .. } => {
+            expr_references_state(checker, target) || expr_references_state(checker, value)
+        }
+        Stmt::Expr(e) => expr_references_state(checker, e),
+        Stmt::For { iter, body, .. } => {
+            expr_references_state(checker, iter) || expr_references_state_block(checker, body)
+        }
+        Stmt::Return { value, .. } => value
+            .as_ref()
+            .is_some_and(|v| expr_references_state(checker, v)),
+        Stmt::Defer { expr, .. } => expr_references_state(checker, expr),
+        Stmt::Atomic { body, .. } => expr_references_state_block(checker, body),
+        Stmt::Destructure { value, .. } => expr_references_state(checker, value),
+        _ => false,
+    }
+}
+
+/// Returns true if the pattern binds or references a state variable name.
+fn expr_references_state_pattern(_checker: &Checker, _pat: &zz_span_ast::ast::Pattern) -> bool {
+    // Patterns don't read state; they only bind names.
+    false
+}
+
+/// Returns true if `name` is a stdlib native marked `readonly` (pure,
+/// non-blocking) — these are whitelisted for D2 auto-atomic statements.
+fn is_whitelisted_native(checker: &Checker, name: &str) -> bool {
+    zz_checker_core::lookup_std(&checker.funcs, name)
+        .map(|sig| sig.readonly)
+        .unwrap_or(false)
+}
+
+/// Returns true if `name` is a known-blocking native — forbidden inside
+/// `atomic { }` (D3).
+fn is_blocking_native(name: &str) -> bool {
+    matches!(
+        name,
+        "chan.recv"
+            | "chan.send"
+            | "chan.send_batch"
+            | "chan.recv_batch"
+            | "task.join"
+            | "task.spawn"
+            | "time.sleep_ms"
+            | "time.sleep_micros"
+            | "std.env.set_var"
+            | "print"
+            | "println"
+    ) || name.starts_with("std.fs.")
+        || name.starts_with("std.net.")
+        || name.starts_with("std.http.")
+        || name.starts_with("std.process.")
+        || name.starts_with("sqlz.")
+        || name.starts_with("io.")
+}
+
+/// Check D2/D3 rules for an expression that appears in a statement touching
+/// state. Called from assign/compound-assign/expr statement checkers.
+fn check_expr_atomic_safety(checker: &mut Checker, expr: &Expr, span: Span) {
+    if !expr_references_state(checker, expr) {
+        return; // statement doesn't touch state — nothing to enforce
+    }
+
+    if checker.atomic_depth > 0 {
+        // D3: inside `atomic { }` — reject known-blocking natives.
+        check_for_blocking_natives(checker, expr, span);
+    } else {
+        // D2: outside `atomic { }` — only whitelisted natives / pure
+        // constructs allowed.
+        check_whitelist_only(checker, expr, span);
+    }
+}
+
+/// Walk `expr` and report any call to a known-blocking native (D3).
+fn check_for_blocking_natives(checker: &mut Checker, expr: &Expr, span: Span) {
+    match expr {
+        Expr::Call {
+            callee,
+            args,
+            named,
+            span: s,
+            ..
+        } => {
+            if let Some(name) = callee_name(callee) {
+                if is_blocking_native(&name) {
+                    checker.errors.push(error_at(
+                        format!(
+                            "`{name}` is a blocking call and cannot be used inside `atomic {{ }}`\n\
+                             hint: move the blocking call outside the atomic block",
+                            name = name
+                        ),
+                        *s,
+                    ));
+                }
+            }
+            // Recurse into args — a blocking call nested in an argument
+            // still executes inside the atomic statement.
+            for a in args {
+                check_for_blocking_natives(checker, a, *s);
+            }
+            for (_, v) in named {
+                check_for_blocking_natives(checker, v, *s);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            check_for_blocking_natives(checker, left, span);
+            check_for_blocking_natives(checker, right, span);
+        }
+        Expr::Unary { expr, .. } => check_for_blocking_natives(checker, expr, span),
+        Expr::Try { expr, .. } => check_for_blocking_natives(checker, expr, span),
+        Expr::Closure { body, .. } => {
+            // User closures inside atomic are allowed (D3), but their
+            // bodies might contain blocking calls.
+            check_for_blocking_natives(checker, body, span);
+        }
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            check_for_blocking_natives(checker, cond, span);
+            check_for_blocking_natives_block(checker, then, span);
+            if let Some(e) = els {
+                check_for_blocking_natives_expr(checker, e, span);
+            }
+        }
+        Expr::While { cond, body, .. } => {
+            check_for_blocking_natives(checker, cond, span);
+            check_for_blocking_natives_block(checker, body, span);
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            check_for_blocking_natives(checker, scrutinee, span);
+            for a in arms {
+                check_for_blocking_natives_expr(checker, &a.body, span);
+            }
+        }
+        Expr::Block(b) => {
+            for s in &b.stmts {
+                check_for_blocking_natives_stmt(checker, s, span);
+            }
+        }
+        Expr::Fmt { parts, .. } => {
+            for p in parts {
+                if let zz_span_ast::ast::FmtPart::Expr(e, _) = p {
+                    check_for_blocking_natives(checker, e, span);
+                }
+            }
+        }
+        Expr::Array { elems, .. } => {
+            for e in elems {
+                check_for_blocking_natives(checker, e, span);
+            }
+        }
+        Expr::Dict { entries, .. } => {
+            for (k, v) in entries {
+                check_for_blocking_natives(checker, k, span);
+                check_for_blocking_natives(checker, v, span);
+            }
+        }
+        Expr::Paren { expr, .. } => check_for_blocking_natives(checker, expr, span),
+        Expr::Tuple { items, .. } => {
+            for e in items {
+                check_for_blocking_natives(checker, e, span);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn check_for_blocking_natives_expr(checker: &mut Checker, expr: &Expr, span: Span) {
+    check_for_blocking_natives(checker, expr, span);
+}
+
+fn check_for_blocking_natives_block(
+    checker: &mut Checker,
+    block: &zz_span_ast::ast::Block,
+    span: Span,
+) {
+    for s in &block.stmts {
+        check_for_blocking_natives_stmt(checker, s, span);
+    }
+}
+
+fn check_for_blocking_natives_stmt(checker: &mut Checker, stmt: &Stmt, span: Span) {
+    match stmt {
+        Stmt::Decl { value, .. } => check_for_blocking_natives(checker, value, span),
+        Stmt::Assign { target, value, .. } => {
+            check_for_blocking_natives(checker, target, span);
+            check_for_blocking_natives(checker, value, span);
+        }
+        Stmt::CompoundAssign { target, value, .. } => {
+            check_for_blocking_natives(checker, target, span);
+            check_for_blocking_natives(checker, value, span);
+        }
+        Stmt::Expr(e) => check_for_blocking_natives(checker, e, span),
+        Stmt::For { iter, body, .. } => {
+            check_for_blocking_natives(checker, iter, span);
+            check_for_blocking_natives_block(checker, body, span);
+        }
+        Stmt::Return { value, .. } => value
+            .as_ref()
+            .map_or((), |v| check_for_blocking_natives(checker, v, span)),
+        Stmt::Defer { expr, .. } => check_for_blocking_natives(checker, expr, span),
+        Stmt::Atomic { body, .. } => {
+            // Nested atomic: blocking check applies inside too, but
+            // depth > 0 already so check_for_blocking_natives handles it.
+            check_for_blocking_natives_block(checker, body, span);
+        }
+        Stmt::Destructure { value, .. } => check_for_blocking_natives(checker, value, span),
+        _ => {}
+    }
+}
+
+/// Extract the callee name from a call expression, if it's a direct
+/// identifier or path reference.
+fn callee_name(callee: &Expr) -> Option<String> {
+    match callee {
+        Expr::Ident { name, .. } => Some(name.clone()),
+        Expr::Path { parts, .. } => Some(parts.join(".")),
+        _ => None,
+    }
+}
+
+/// Walk `expr` and report any call that is not a whitelisted readonly
+/// stdlib native or a user-defined function/closure (D2).
+fn check_whitelist_only(checker: &mut Checker, expr: &Expr, span: Span) {
+    match expr {
+        Expr::Call {
+            callee,
+            args,
+            named,
+            span: s,
+            ..
+        } => {
+            if let Some(name) = callee_name(callee) {
+                if !is_whitelisted_native(checker, &name) {
+                    checker.errors.push(error_at(
+                        format!(
+                            "`{name}` cannot be called in a statement that touches `state`\n\
+                             hint: wrap the statement in `atomic {{ }}`",
+                            name = name
+                        ),
+                        *s,
+                    ));
+                }
+            }
+            // Recurse into arguments — they're part of the same atomic statement.
+            for a in args {
+                check_whitelist_only(checker, a, *s);
+            }
+            for (_, v) in named {
+                check_whitelist_only(checker, v, *s);
+            }
+        }
+        Expr::Closure { .. } => {
+            // A closure literal inside a state-touching statement is a
+            // user function value — not whitelisted.
+            checker.errors.push(error_at(
+                "closure literal cannot appear in a statement that touches `state`\n\
+                 hint: wrap the statement in `atomic { }`",
+                span,
+            ));
+        }
+        Expr::Binary { left, right, .. } => {
+            check_whitelist_only(checker, left, span);
+            check_whitelist_only(checker, right, span);
+        }
+        Expr::Unary { expr, .. } => check_whitelist_only(checker, expr, span),
+        Expr::Try { expr, .. } => check_whitelist_only(checker, expr, span),
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            check_whitelist_only(checker, cond, span);
+            check_whitelist_only_block(checker, then, span);
+            if let Some(e) = els {
+                check_whitelist_only_expr(checker, e, span);
+            }
+        }
+        Expr::While { cond, body, .. } => {
+            check_whitelist_only(checker, cond, span);
+            check_whitelist_only_block(checker, body, span);
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            check_whitelist_only(checker, scrutinee, span);
+            for a in arms {
+                check_whitelist_only_expr(checker, &a.body, span);
+            }
+        }
+        Expr::Block(b) => {
+            for s in &b.stmts {
+                check_whitelist_only_stmt(checker, s, span);
+            }
+        }
+        Expr::Fmt { parts, .. } => {
+            for p in parts {
+                if let zz_span_ast::ast::FmtPart::Expr(e, _) = p {
+                    check_whitelist_only(checker, e, span);
+                }
+            }
+        }
+        Expr::Array { elems, .. } => {
+            for e in elems {
+                check_whitelist_only(checker, e, span);
+            }
+        }
+        Expr::Dict { entries, .. } => {
+            for (k, v) in entries {
+                check_whitelist_only(checker, k, span);
+                check_whitelist_only(checker, v, span);
+            }
+        }
+        Expr::Paren { expr, .. } => check_whitelist_only(checker, expr, span),
+        Expr::Tuple { items, .. } => {
+            for e in items {
+                check_whitelist_only(checker, e, span);
+            }
+        }
+        // Literals, idents, field/index access: always allowed.
+        _ => {}
+    }
+}
+
+fn check_whitelist_only_expr(checker: &mut Checker, expr: &Expr, span: Span) {
+    check_whitelist_only(checker, expr, span);
+}
+
+fn check_whitelist_only_block(checker: &mut Checker, block: &zz_span_ast::ast::Block, span: Span) {
+    for s in &block.stmts {
+        check_whitelist_only_stmt(checker, s, span);
+    }
+}
+
+fn check_whitelist_only_stmt(checker: &mut Checker, stmt: &Stmt, span: Span) {
+    match stmt {
+        Stmt::Decl { value, .. } => check_whitelist_only(checker, value, span),
+        Stmt::Assign { target, value, .. } => {
+            check_whitelist_only(checker, target, span);
+            check_whitelist_only(checker, value, span);
+        }
+        Stmt::CompoundAssign { target, value, .. } => {
+            check_whitelist_only(checker, target, span);
+            check_whitelist_only(checker, value, span);
+        }
+        Stmt::Expr(e) => check_whitelist_only(checker, e, span),
+        Stmt::For { iter, body, .. } => {
+            check_whitelist_only(checker, iter, span);
+            check_whitelist_only_block(checker, body, span);
+        }
+        Stmt::Return { value, .. } => value
+            .as_ref()
+            .map_or((), |v| check_whitelist_only(checker, v, span)),
+        Stmt::Defer { expr, .. } => check_whitelist_only(checker, expr, span),
+        Stmt::Atomic { .. } => {
+            // Inside an explicit atomic block, D2 doesn't apply (the user
+            // opted in to manual locking). D3 blocking checks still apply,
+            // but those are handled by check_for_blocking_natives.
+        }
+        Stmt::Destructure { value, .. } => check_whitelist_only(checker, value, span),
+        _ => {}
+    }
+}
+
+// --- D4: R1 check-then-act ----------------------------------------------
+
+/// Within one function/closure body, outside any `atomic` block, if a `state`
+/// S is read in one statement and written in a DIFFERENT statement, report R1
+/// error. Conservative: uses statement order as reachability approximation.
+/// Runs as a post-pass on each function/closure body after type checking.
+pub(crate) fn check_r1_in_block(checker: &mut Checker, block: &zz_span_ast::ast::Block) {
+    let mut reads: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    let mut writes: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    let mut stmt_idx: usize = 0;
+    let mut in_atomic: bool = false;
+
+    collect_state_rw(
+        checker,
+        block,
+        &mut reads,
+        &mut writes,
+        &mut stmt_idx,
+        &mut in_atomic,
+    );
+
+    for (name, read_indices) in &reads {
+        if let Some(write_indices) = writes.get(name) {
+            for &ri in read_indices {
+                for &wi in write_indices {
+                    if ri < wi {
+                        checker.errors.push(error_at(
+                            format!(
+                                "check-then-act on `state` `{name}`:\n\
+                                 read at statement {ri} can reach write at statement {wi}\n\
+                                 hint: wrap both in `atomic {{ }}`",
+                                name = name,
+                                ri = ri,
+                                wi = wi,
+                            ),
+                            zz_span_ast::span::Span::new(0, 0),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Walk `block` recording state reads/writes per statement index.
+fn collect_state_rw(
+    checker: &Checker,
+    block: &zz_span_ast::ast::Block,
+    reads: &mut std::collections::HashMap<String, Vec<usize>>,
+    writes: &mut std::collections::HashMap<String, Vec<usize>>,
+    stmt_idx: &mut usize,
+    in_atomic: &mut bool,
+) {
+    for stmt in &block.stmts {
+        match stmt {
+            Stmt::Atomic { body, .. } => {
+                let prev = *in_atomic;
+                *in_atomic = true;
+                collect_state_rw(checker, body, reads, writes, stmt_idx, in_atomic);
+                *in_atomic = prev;
+                *stmt_idx += 1;
+            }
+            Stmt::Decl {
+                value, is_state, ..
+            } => {
+                if *is_state {
+                    collect_state_names_from_expr(checker, value, reads, *stmt_idx);
+                }
+                *stmt_idx += 1;
+            }
+            Stmt::Assign { target, value, .. } => {
+                if is_state_target(checker, target) {
+                    collect_state_names_from_expr(checker, target, reads, *stmt_idx);
+                    collect_state_names_from_expr(checker, target, writes, *stmt_idx);
+                }
+                collect_state_names_from_expr(checker, value, reads, *stmt_idx);
+                *stmt_idx += 1;
+            }
+            Stmt::CompoundAssign { target, value, .. } => {
+                if is_state_target(checker, target) {
+                    collect_state_names_from_expr(checker, target, reads, *stmt_idx);
+                    collect_state_names_from_expr(checker, target, writes, *stmt_idx);
+                }
+                collect_state_names_from_expr(checker, value, reads, *stmt_idx);
+                *stmt_idx += 1;
+            }
+            Stmt::Expr(e) => {
+                collect_state_names_from_expr(checker, e, reads, *stmt_idx);
+                *stmt_idx += 1;
+            }
+            Stmt::For { body, .. } => {
+                collect_state_rw(checker, body, reads, writes, stmt_idx, in_atomic);
+                *stmt_idx += 1;
+            }
+            Stmt::Return { value, .. } => {
+                if let Some(v) = value {
+                    collect_state_names_from_expr(checker, v, reads, *stmt_idx);
+                }
+                *stmt_idx += 1;
+            }
+            Stmt::Defer { expr, .. } => {
+                collect_state_names_from_expr(checker, expr, reads, *stmt_idx);
+                *stmt_idx += 1;
+            }
+            Stmt::Destructure { value, .. } => {
+                collect_state_names_from_expr(checker, value, reads, *stmt_idx);
+                *stmt_idx += 1;
+            }
+            _ => {
+                *stmt_idx += 1;
+            }
+        }
+    }
+}
+
+/// Collect state variable names referenced in `expr` into `map` at `stmt_idx`.
+fn collect_state_names_from_expr(
+    checker: &Checker,
+    expr: &Expr,
+    map: &mut std::collections::HashMap<String, Vec<usize>>,
+    stmt_idx: usize,
+) {
+    match expr {
+        Expr::Ident { name, .. } => {
+            if checker.state_names.contains(name) {
+                map.entry(name.clone()).or_default().push(stmt_idx);
+            }
+        }
+        Expr::Path { parts, .. } => {
+            for p in parts {
+                if checker.state_names.contains(p) {
+                    map.entry(p.clone()).or_default().push(stmt_idx);
+                }
+            }
+        }
+        Expr::Field { obj, name, .. } => {
+            if checker.state_names.contains(name) {
+                map.entry(name.clone()).or_default().push(stmt_idx);
+            }
+            collect_state_names_from_expr(checker, obj, map, stmt_idx);
+        }
+        Expr::Index { obj, index, .. } => {
+            collect_state_names_from_expr(checker, obj, map, stmt_idx);
+            collect_state_names_from_expr(checker, index, map, stmt_idx);
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_state_names_from_expr(checker, left, map, stmt_idx);
+            collect_state_names_from_expr(checker, right, map, stmt_idx);
+        }
+        Expr::Unary { expr, .. } => {
+            collect_state_names_from_expr(checker, expr, map, stmt_idx);
+        }
+        Expr::Try { expr, .. } => {
+            collect_state_names_from_expr(checker, expr, map, stmt_idx);
+        }
+        Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            collect_state_names_from_expr(checker, callee, map, stmt_idx);
+            for a in args {
+                collect_state_names_from_expr(checker, a, map, stmt_idx);
+            }
+            for (_, v) in named {
+                collect_state_names_from_expr(checker, v, map, stmt_idx);
+            }
+        }
+        Expr::Closure { body, .. } => {
+            collect_state_names_from_expr(checker, body, map, stmt_idx);
+        }
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            collect_state_names_from_expr(checker, cond, map, stmt_idx);
+            collect_state_names_from_block(checker, then, map, stmt_idx);
+            if let Some(e) = els {
+                collect_state_names_from_expr(checker, e, map, stmt_idx);
+            }
+        }
+        Expr::While { cond, body, .. } => {
+            collect_state_names_from_expr(checker, cond, map, stmt_idx);
+            collect_state_names_from_block(checker, body, map, stmt_idx);
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_state_names_from_expr(checker, scrutinee, map, stmt_idx);
+            for a in arms {
+                collect_state_names_from_expr(checker, &a.body, map, stmt_idx);
+            }
+        }
+        Expr::Block(b) => {
+            for s in &b.stmts {
+                collect_state_names_from_stmt(checker, s, map, stmt_idx);
+            }
+        }
+        Expr::Fmt { parts, .. } => {
+            for p in parts {
+                if let zz_span_ast::ast::FmtPart::Expr(e, _) = p {
+                    collect_state_names_from_expr(checker, e, map, stmt_idx);
+                }
+            }
+        }
+        Expr::Array { elems, .. } => {
+            for e in elems {
+                collect_state_names_from_expr(checker, e, map, stmt_idx);
+            }
+        }
+        Expr::Dict { entries, .. } => {
+            for (k, v) in entries {
+                collect_state_names_from_expr(checker, k, map, stmt_idx);
+                collect_state_names_from_expr(checker, v, map, stmt_idx);
+            }
+        }
+        Expr::Paren { expr, .. } => {
+            collect_state_names_from_expr(checker, expr, map, stmt_idx);
+        }
+        Expr::Tuple { items, .. } => {
+            for e in items {
+                collect_state_names_from_expr(checker, e, map, stmt_idx);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect state names from all statements in a block.
+fn collect_state_names_from_block(
+    checker: &Checker,
+    block: &zz_span_ast::ast::Block,
+    map: &mut std::collections::HashMap<String, Vec<usize>>,
+    stmt_idx: usize,
+) {
+    for s in &block.stmts {
+        collect_state_names_from_stmt(checker, s, map, stmt_idx);
+    }
+}
+
+/// Collect state names from a single statement (expression-level only).
+fn collect_state_names_from_stmt(
+    checker: &Checker,
+    stmt: &Stmt,
+    map: &mut std::collections::HashMap<String, Vec<usize>>,
+    stmt_idx: usize,
+) {
+    match stmt {
+        Stmt::Expr(e) => collect_state_names_from_expr(checker, e, map, stmt_idx),
+        Stmt::Assign { target, value, .. } => {
+            collect_state_names_from_expr(checker, target, map, stmt_idx);
+            collect_state_names_from_expr(checker, value, map, stmt_idx);
+        }
+        Stmt::CompoundAssign { target, value, .. } => {
+            collect_state_names_from_expr(checker, target, map, stmt_idx);
+            collect_state_names_from_expr(checker, value, map, stmt_idx);
+        }
+        Stmt::Decl { value, .. } => {
+            collect_state_names_from_expr(checker, value, map, stmt_idx);
+        }
+        Stmt::For { body, .. } => {
+            collect_state_names_from_block(checker, body, map, stmt_idx);
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(v) = value {
+                collect_state_names_from_expr(checker, v, map, stmt_idx);
+            }
+        }
+        Stmt::Defer { expr, .. } => {
+            collect_state_names_from_expr(checker, expr, map, stmt_idx);
+        }
+        Stmt::Destructure { value, .. } => {
+            collect_state_names_from_expr(checker, value, map, stmt_idx);
+        }
+        _ => {}
+    }
+}
+
+/// Check if `expr` is an identifier or path referencing a state variable.
+fn is_state_target(checker: &Checker, expr: &Expr) -> bool {
+    match expr {
+        Expr::Ident { name, .. } => checker.state_names.contains(name),
+        Expr::Path { parts, .. } => parts.iter().any(|p| checker.state_names.contains(p)),
+        Expr::Field { name, .. } => checker.state_names.contains(name),
         _ => false,
     }
 }

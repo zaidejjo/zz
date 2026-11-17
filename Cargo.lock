@@ -4113,7 +4113,9 @@ version = "0.4.0"
 dependencies = [
  "zz_arena",
  "zz_checker",
+ "zz_diag_core",
  "zz_frontend",
+ "zz_span_ast",
 ]
 
 [[package]]
