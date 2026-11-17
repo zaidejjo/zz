@@ -47,8 +47,8 @@ func main() {
 /// unsupported with `ZZ_SKIP_NATIVE=1` (Windows CI — POSIX C runtime, no FFI
 /// link). Returns false after logging so failures stay visible as skips.
 fn require_native() -> bool {
-    if std::env::var("ZZ_SKIP_NATIVE").is_ok() {
-        eprintln!("skip: native backend unsupported (ZZ_SKIP_NATIVE=1)");
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on Windows (ZZ_SKIP_NATIVE=1)");
         return false;
     }
     true

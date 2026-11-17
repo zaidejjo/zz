@@ -36,7 +36,9 @@ fn zz_bin() -> PathBuf {
 
 fn vm_only() -> bool {
     // Mirrors dual_engine_parity: native backend unsupported here.
-    std::env::var("ZZ_SKIP_NATIVE").is_ok() || std::env::var("ZZ_PARITY_VM_ONLY").is_ok()
+    cfg!(windows)
+        || std::env::var("ZZ_SKIP_NATIVE").is_ok()
+        || std::env::var("ZZ_PARITY_VM_ONLY").is_ok()
 }
 
 fn batch_full() -> bool {
@@ -46,6 +48,8 @@ fn batch_full() -> bool {
 #[path = "batch_lists.rs"]
 mod batch_lists;
 use batch_lists::{ELIGIBLE, EXCLUDED};
+
+mod support;
 
 /// Every strict fixture outside the quad's scope must be batched or
 /// explicitly excluded — coverage cannot silently drift.

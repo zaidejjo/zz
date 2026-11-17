@@ -2210,7 +2210,7 @@ fn release_vm_bin() -> PathBuf {
 
 /// True when native legs must be skipped (Windows CI: no AOT backend).
 fn quad_skip_native() -> bool {
-    std::env::var("ZZ_SKIP_NATIVE").is_ok()
+    cfg!(windows) || std::env::var("ZZ_SKIP_NATIVE").is_ok()
 }
 
 /// One matrix leg outcome: (exit, stdout, stderr).
