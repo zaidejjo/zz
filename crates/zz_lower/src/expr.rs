@@ -178,6 +178,7 @@ fn mentions_stmt(s: &Stmt, name: &str) -> bool {
         Stmt::Impl { methods, .. } => methods.iter().any(|m| mentions_stmt(m, name)),
         Stmt::For { iter, body, .. } => mentions_ident(iter, name) || mentions_block(body, name),
         Stmt::Defer { expr, .. } => mentions_ident(expr, name),
+        Stmt::Atomic { body, .. } => mentions_block(body, name),
         Stmt::Assign { target, value, .. } => {
             mentions_ident(target, name) || mentions_ident(value, name)
         }

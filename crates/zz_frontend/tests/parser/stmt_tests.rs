@@ -892,3 +892,89 @@ fn rejects_trait_method_with_body() {
         p.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
 }
+
+// --- `state` / `atomic` contextual keywords ---
+
+#[test]
+fn parses_state_decl_short() {
+    let p = parse_ok("state hits := 0");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { name, is_state, .. } => {
+            assert_eq!(name.name, "hits");
+            assert!(*is_state);
+        }
+        other => panic!("expected state decl, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_state_decl_explicit() {
+    let p = parse_ok("state hits: int = 0");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl {
+            name,
+            ty: Some(ty),
+            is_state,
+            ..
+        } => {
+            assert_eq!(name.name, "hits");
+            assert_eq!(ty.kind, zz_frontend::ast::TyKind::Int);
+            assert!(*is_state);
+        }
+        other => panic!("expected state decl, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_pub_state_decl() {
+    let p = parse_ok("pub state hits := 0");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl {
+            name,
+            pub_,
+            is_state,
+            ..
+        } => {
+            assert_eq!(name.name, "hits");
+            assert!(*pub_);
+            assert!(*is_state);
+        }
+        other => panic!("expected pub state decl, got {other:?}"),
+    }
+}
+
+#[test]
+fn state_still_works_as_identifier() {
+    // `state` is contextual: only a keyword at statement start followed by an ident.
+    let p = parse_ok("state := 1\nx := state");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { name, is_state, .. } => {
+            assert_eq!(name.name, "state");
+            assert!(!*is_state);
+        }
+        other => panic!("expected short decl, got {other:?}"),
+    }
+}
+
+#[test]
+fn atomic_block_parses() {
+    let p = parse_ok("atomic {\n    hits = hits + 1\n}");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Atomic { body, .. } => {
+            assert_eq!(body.stmts.len(), 1);
+        }
+        other => panic!("expected atomic block, got {other:?}"),
+    }
+}
+
+#[test]
+fn atomic_still_works_as_identifier() {
+    let p = parse_ok("atomic := 1\nx := atomic");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { name, is_state, .. } => {
+            assert_eq!(name.name, "atomic");
+            assert!(!*is_state);
+        }
+        other => panic!("expected short decl, got {other:?}"),
+    }
+}

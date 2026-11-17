@@ -232,6 +232,7 @@ fn count_stmt_refs(s: &Stmt, name: &str) -> usize {
         Stmt::For { iter, body, .. } => count_refs(iter, name) + count_block_refs(body, name),
         Stmt::Break { .. } | Stmt::Continue { .. } => 0,
         Stmt::Defer { expr, .. } => count_refs(expr, name),
+        Stmt::Atomic { body, .. } => count_block_refs(body, name),
         Stmt::Destructure { value, .. } => count_refs(value, name),
         Stmt::ExternBlock { .. } | Stmt::Link { .. } => 0,
     }
@@ -636,6 +637,7 @@ pub fn unqualify_expr(e: &Expr, is_global: &dyn Fn(&str) -> bool) -> Option<Expr
                         span,
                         pub_,
                         is_const,
+                        is_state,
                     } => Stmt::Decl {
                         ty: ty.clone(),
                         name: name.clone(),
@@ -643,6 +645,11 @@ pub fn unqualify_expr(e: &Expr, is_global: &dyn Fn(&str) -> bool) -> Option<Expr
                         span: *span,
                         pub_: *pub_,
                         is_const: *is_const,
+                        is_state: *is_state,
+                    },
+                    Stmt::Atomic { body, span } => Stmt::Atomic {
+                        body: rw_block(body, is_global, changed),
+                        span: *span,
                     },
                     Stmt::Assign {
                         target,

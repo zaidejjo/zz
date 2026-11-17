@@ -24,7 +24,8 @@ pub(crate) fn check_stmt(checker: &mut Checker, stmt: &Stmt) -> Type {
             span: _,
             pub_: _,
             is_const,
-        } => check_stmt_decl(checker, name, ty, value, *is_const),
+            is_state,
+        } => check_stmt_decl(checker, name, ty, value, *is_const, *is_state),
         Stmt::Import {
             path,
             alias,
@@ -69,6 +70,7 @@ pub(crate) fn check_stmt(checker: &mut Checker, stmt: &Stmt) -> Type {
             value,
             span,
         } => check_stmt_compound_assign(checker, target, *op, value, *span),
+        Stmt::Atomic { .. } => Type::Unit,
     }
 }
 
@@ -80,6 +82,7 @@ fn check_stmt_decl(
     ty: &Option<Ty>,
     value: &Expr,
     is_const: bool,
+    is_state: bool,
 ) -> Type {
     // #518: `x := x + 1` inside a nested block declares a *new*
     // `x` scoped to that block — the outer binding never advances.
@@ -92,6 +95,33 @@ fn check_stmt_decl(
         checker.define_var_at(&name.name, fv, name.span, is_const);
     }
     let vt = checker.check_expr(value);
+    // D1: `state` is module-level only in v1. At top level the env stack
+    // has exactly one entry (the module scope). Inside any function/block
+    // it's deeper.
+    if is_state && checker.env.len() != 1 {
+        checker.errors.push(error_at(
+            "`state` is only allowed at module level in v1\n\
+             hint: move the declaration to the top level of the module",
+            name.span,
+        ));
+    }
+    // D6: a `state` may not hold a closure/function value (or any type
+    // containing one), because closures capture by reference through
+    // shared heap cells and would smuggle unsynchronized shared cells
+    // across tasks.
+    if is_state {
+        let rt = checker.unifier.resolve_deep(&vt);
+        if type_contains_func(rt) {
+            checker.errors.push(error_at(
+                format!(
+                    "`state` cannot hold a closure or function value ({})\n\
+                     hint: store the data the closure needs instead of the closure itself",
+                    name.name
+                ),
+                name.span,
+            ));
+        }
+    }
     checker.warn_if_shadowed_decl(probe, value, ty.is_some(), is_const);
     // Phase 2.2: inherit `std.http` route tables across server
     // builder chains (`s2 := s.route_get(...)`, `s2 := s`).
@@ -622,5 +652,25 @@ fn check_for_pair(
             checker.loop_depth -= 1;
             checker.pop_scope();
         }
+    }
+}
+
+/// Returns true if `t` is or contains a closure/function type.
+/// Used by D6: a `state` may not hold a function value.
+fn type_contains_func(t: zz_types::Type) -> bool {
+    use zz_types::Type;
+    match t {
+        Type::Func(_, _) => true,
+        Type::Array(inner) => type_contains_func(inner.as_ref().clone()),
+        Type::Dict(_, v) => type_contains_func(v.as_ref().clone()),
+        Type::Tuple(items) => items.iter().any(|i| type_contains_func(i.clone())),
+        Type::Option(inner) => type_contains_func(inner.as_ref().clone()),
+        Type::Result(ok, err) => {
+            type_contains_func(ok.as_ref().clone()) || type_contains_func(err.as_ref().clone())
+        }
+        Type::Struct(_, args) => args.iter().any(|t| type_contains_func(t.clone())),
+        Type::Enum(_, variants) => variants.iter().any(|t| type_contains_func(t.clone())),
+        Type::Union(items) => items.iter().any(|t| type_contains_func(t.clone())),
+        _ => false,
     }
 }

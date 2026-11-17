@@ -1865,7 +1865,8 @@ impl Lowerer {
             | Stmt::Enum { .. }
             | Stmt::Impl { .. }
             | Stmt::Trait { .. }
-            | Stmt::Import { .. } => {}
+            | Stmt::Import { .. }
+            | Stmt::Atomic { .. } => {}
             // Top-level only: emitted in the preamble by `Lowerer::lower`.
             Stmt::ExternBlock { .. } | Stmt::Link { .. } => {}
         }
@@ -3522,6 +3523,9 @@ impl Lowerer {
             }
             Stmt::Defer { expr, .. } => {
                 self.collect_expr_uses(expr, index, false, last_top_level, max_nested);
+            }
+            Stmt::Atomic { body, .. } => {
+                self.collect_block_uses(body, index, last_top_level, max_nested);
             }
             Stmt::Func { body, .. } => {
                 self.collect_block_uses(body, index, last_top_level, max_nested);

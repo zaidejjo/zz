@@ -118,9 +118,13 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
             name,
             value,
             is_const,
+            is_state,
             ..
         } => {
             out.push_str("Decl[");
+            if *is_state {
+                out.push_str("state ");
+            }
             if *is_const {
                 out.push_str("const ");
             }
@@ -358,6 +362,13 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
         Stmt::Defer { expr, .. } => {
             out.push_str("Defer-kw[");
             fp_expr(expr, out);
+            out.push(']');
+        }
+        Stmt::Atomic { body, .. } => {
+            out.push_str("Atomic-kw[");
+            for s in &body.stmts {
+                fp_stmt(s, out);
+            }
             out.push(']');
         }
         Stmt::Assign { target, value, .. } => {

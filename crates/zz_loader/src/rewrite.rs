@@ -249,6 +249,9 @@ impl<'a> Rewriter<'a> {
             Stmt::Defer { expr, .. } => {
                 self.rewrite_expr(expr);
             }
+            Stmt::Atomic { body, .. } => {
+                self.rewrite_block(body);
+            }
             Stmt::Assign { target, value, .. } => {
                 self.rewrite_expr(target);
                 self.rewrite_expr(value);

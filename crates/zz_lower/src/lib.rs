@@ -416,7 +416,8 @@ impl Lowerer {
                 Stmt::Struct { .. }
                 | Stmt::TypeAlias { .. }
                 | Stmt::Enum { .. }
-                | Stmt::Import { .. } => {}
+                | Stmt::Import { .. }
+                | Stmt::Atomic { .. } => {}
                 Stmt::Decl { name, value, .. } => {
                     // Top-level `x := <rhs>` → assign into `zz_global_*`.
                     // The global is pre-declared; zz_main only initializes it.

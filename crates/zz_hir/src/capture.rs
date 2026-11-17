@@ -164,6 +164,11 @@ impl<'a> Walk<'a> {
                 }
             }
             Stmt::Defer { expr, .. } => self.expr(expr),
+            Stmt::Atomic { body, .. } => {
+                for s in &body.stmts {
+                    self.stmt(s);
+                }
+            }
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::Expr(e) => self.expr(e),
         }

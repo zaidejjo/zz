@@ -285,6 +285,11 @@ pub(crate) fn scan_stmt_captured(
         Stmt::Defer { expr, .. } => {
             scan_expr_captured(expr, defined, free, nested);
         }
+        Stmt::Atomic { body, .. } => {
+            for stmt in &body.stmts {
+                scan_stmt_captured(stmt, defined, free, nested);
+            }
+        }
         Stmt::Assign { target, value, .. } => {
             scan_expr_captured(value, defined, free, nested);
             scan_expr_captured(target, defined, free, nested);

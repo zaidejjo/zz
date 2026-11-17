@@ -715,10 +715,15 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 value,
                 pub_,
                 is_const,
+                is_state,
                 ..
             } => {
                 if *pub_ {
                     self.text("pub");
+                    self.space();
+                }
+                if *is_state {
+                    self.text("state");
                     self.space();
                 }
                 if *is_const {
@@ -1211,6 +1216,11 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 self.text("defer");
                 self.space();
                 self.emit_expr(expr);
+            }
+            Stmt::Atomic { body, .. } => {
+                self.text("atomic");
+                self.space();
+                self.emit_block_body(body.span.start, body.span.end, &body.stmts);
             }
             Stmt::Destructure { pat, value, .. } => {
                 self.emit_pattern(pat);

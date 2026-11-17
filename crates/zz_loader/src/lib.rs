@@ -3211,6 +3211,7 @@ impl Loader {
                                             span: *item_span,
                                             pub_: false,
                                             is_const: false,
+                                            is_state: false,
                                         });
                                     }
                                     ImportItem::Wildcard { span: item_span } => {
@@ -3260,6 +3261,7 @@ impl Loader {
                                                 span: *item_span,
                                                 pub_: false,
                                                 is_const: false,
+                                                is_state: false,
                                             });
                                         }
                                     }

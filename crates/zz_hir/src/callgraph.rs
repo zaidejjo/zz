@@ -279,6 +279,11 @@ fn walk_stmt_for_graph(tp: &TypedProgram, stmt: &Stmt, caller: &str, cg: &mut Ca
             }
         }
         Stmt::Defer { expr, .. } => walk_expr_for_graph(tp, expr, caller, cg),
+        Stmt::Atomic { body, .. } => {
+            for s in &body.stmts {
+                walk_stmt_for_graph(tp, s, caller, cg);
+            }
+        }
         Stmt::Assign { target, value, .. } => {
             walk_expr_for_graph(tp, target, caller, cg);
             walk_expr_for_graph(tp, value, caller, cg);
