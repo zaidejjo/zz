@@ -13,6 +13,7 @@ use std::path::Path;
 /// additions stay merge-clean. Every tag is kebab-case.
 pub const VOCABULARY: &[&str] = &[
     "aliases",
+    "array-literal",
     "arrays",
     "assert",
     "bitwise",
