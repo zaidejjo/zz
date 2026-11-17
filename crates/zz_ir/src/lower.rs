@@ -874,6 +874,11 @@ impl<'a> Lowerer<'a> {
             VmOp::EnterScope => Ok(vec![Op::EnterScope]),
             VmOp::ExitScope => Ok(vec![Op::ExitScope]),
             VmOp::DeferRecord => Ok(vec![Op::DeferRecord]),
+            // Shared mutable state: not yet supported in IR lowering (Phase 4).
+            VmOp::LoadState(..) => Err(IrError::new("state load not yet supported in IR")),
+            VmOp::StoreState(..) => Err(IrError::new("state store not yet supported in IR")),
+            VmOp::RmwState(..) => Err(IrError::new("state rmw not yet supported in IR")),
+            VmOp::Atomic { .. } => Err(IrError::new("atomic not yet supported in IR")),
         }
     }
 

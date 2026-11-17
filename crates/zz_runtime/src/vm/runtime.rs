@@ -205,6 +205,10 @@ pub struct Vm {
     /// Memoized `CallPath` resolution, indexed by `(chunk, ip)` — see
     /// [`Vm::direct_call_hit`].
     call_cache: Vec<Option<CachedDirect>>,
+    /// Nesting depth of `atomic { }` blocks on this VM thread. >0 means we
+    /// hold the state lock and state ops access the map directly (no
+    /// re-lock, no deadlock). See D3.
+    state_lock_depth: usize,
 }
 
 /// One memoized `CallPath` resolution.
@@ -258,6 +262,7 @@ impl Vm {
             slice_start: None,
             debug: None,
             call_cache: (0..CALL_CACHE_LEN).map(|_| None).collect(),
+            state_lock_depth: 0,
         }
     }
 
@@ -501,6 +506,14 @@ impl Vm {
     /// then rewind `ip` to the op it is executing and return
     /// [`Flow::Yield`] so that resuming re-executes that op from the top.
     fn safepoint_expired(&mut self) -> bool {
+        // D3: cannot yield while holding the state lock. Reset the budget
+        // and keep running — the lock is released when the `Atomic` op
+        // completes.
+        if self.state_lock_depth > 0 {
+            self.slice_budget = SAFEPOINT_BUDGET;
+            self.slice_start = Some(std::time::Instant::now());
+            return false;
+        }
         if self.slice_budget == 0 {
             self.slice_budget = SAFEPOINT_BUDGET;
             let now = std::time::Instant::now();
@@ -646,6 +659,12 @@ impl Vm {
         macro_rules! yield_check {
             () => {{
                 if crate::value::on_executor() {
+                    // D3: cannot yield while holding the state lock.
+                    if self.state_lock_depth > 0 {
+                        return Err(
+                            self.error("yield or block inside `atomic { }` block", Span::default())
+                        );
+                    }
                     if let Some(reason) = take_yield_slow() {
                         return Ok(Flow::Yield(reason));
                     }
@@ -954,6 +973,70 @@ impl Vm {
                         let v = Self::load_var_fallback(interp, name, *span)?;
                         self.stack.push(v);
                     }
+                }
+                // ---- shared mutable state (D1/D2/D3/D9) ----
+                Op::LoadState(name, span) => {
+                    let reg = interp
+                        .state_registry
+                        .as_ref()
+                        .ok_or_else(|| self.error("state registry not available", *span))?;
+                    let v = if self.state_lock_depth > 0 {
+                        // Inside `atomic { }`: we hold the lock, direct access.
+                        unsafe { reg.map_mut().get(name).cloned() }
+                    } else {
+                        reg.get(name)
+                    };
+                    self.stack.push(v.unwrap_or(Value::Unit));
+                }
+                Op::StoreState(name, span) => {
+                    let v = self.stack.pop().unwrap();
+                    let reg = interp
+                        .state_registry
+                        .as_ref()
+                        .ok_or_else(|| self.error("state registry not available", *span))?;
+                    if self.state_lock_depth > 0 {
+                        unsafe {
+                            reg.map_mut().insert(name.clone(), v);
+                        }
+                    } else {
+                        reg.set(name, v);
+                    }
+                }
+                Op::RmwState(name, op, span) => {
+                    let rhs = self.stack.pop().unwrap();
+                    let reg = interp
+                        .state_registry
+                        .as_ref()
+                        .ok_or_else(|| self.error("state registry not available", *span))?;
+                    if self.state_lock_depth > 0 {
+                        unsafe {
+                            let cur = reg.map_mut().get(name).cloned().unwrap_or(Value::Unit);
+                            let new = eval_binary(*op, cur, rhs, *span)?;
+                            reg.map_mut().insert(name.clone(), new.clone());
+                            self.stack.push(new);
+                        }
+                    } else {
+                        let cur = reg.get(name).unwrap_or(Value::Unit);
+                        let new = eval_binary(*op, cur, rhs, *span)?;
+                        reg.set(name, new.clone());
+                        self.stack.push(new);
+                    }
+                }
+                Op::Atomic { body, span } => {
+                    let reg = match interp.state_registry.as_ref() {
+                        Some(r) => Arc::clone(r),
+                        None => return Err(self.error("state registry not available", *span)),
+                    };
+                    // Acquire the state lock for the whole body (D3).
+                    let _guard = reg.lock();
+                    self.state_lock_depth += 1;
+                    let result = self.run_chunk(body, interp);
+                    self.state_lock_depth -= 1;
+                    // A yield while holding the state lock is a D3 violation.
+                    if matches!(result, Ok(Flow::Yield(_))) {
+                        return Err(self.error("yield or block inside `atomic { }` block", *span));
+                    }
+                    return result;
                 }
                 Op::VecPush { home, span } => {
                     let elem = self.stack.pop().unwrap();

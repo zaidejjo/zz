@@ -676,6 +676,11 @@ impl Compiler {
             Op::EnterScope | Op::ExitScope => 0,
             Op::PopN { n, .. } => -(*n as i64),
             Op::DeferRecord => -1,
+            // Shared mutable state (D1/D2/D3/D9).
+            Op::LoadState(..) => 1,
+            Op::StoreState(..) => -1,
+            Op::RmwState(..) => 0,
+            Op::Atomic { .. } => 0,
         }
     }
 
