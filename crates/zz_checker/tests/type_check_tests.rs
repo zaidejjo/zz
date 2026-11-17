@@ -1396,7 +1396,7 @@ fn array_union_member_rejected() {
         r.errors.iter().any(|e| e
             .notes
             .iter()
-            .any(|n| n.contains("does not fit expected type `int`"))),
+            .any(|n| n.contains("does not fit expected element type `int`"))),
         "expected element-fit note, got: {:?}",
         r.errors
     );
@@ -1414,7 +1414,7 @@ fn array_heterogeneous_reassignment_rejected() {
         r.errors.iter().any(|e| e
             .notes
             .iter()
-            .any(|n| n.contains("does not fit expected type `int`"))),
+            .any(|n| n.contains("does not fit expected element type `int`"))),
         "expected element-fit note, got: {:?}",
         r.errors
     );

@@ -124,10 +124,10 @@ fn check_stmt_decl(
                 let at_r = checker.unifier.resolve_deep(&at);
                 let mut notes = Vec::new();
                 notes.push(format!(
-                    "element `{member}` does not fit expected type `{expected}`"
+                    "array element `{member}` does not fit expected element type `{expected}`"
                 ));
                 notes.push(format!(
-                    "to fix: convert `{member}` to `{expected}`, or change the annotation to `{vt_r}`"
+                    "to fix: change the annotation to `{vt_r}` or convert the value"
                 ));
                 let e = UnifyError {
                     message: "type mismatch".into(),
@@ -333,32 +333,6 @@ fn check_stmt_return(checker: &mut Checker, value: &Option<Expr>, span: Span) ->
                 if !checker.report_result_return_hint(&vt, &ret, v.span()) {
                     checker.report_mismatch(e, v.span());
                 }
-            } else {
-                // Unification succeeded, but a heterogeneous literal may have
-                // produced a union whose members don't all fit the return type.
-                // Reject any inferred union member that does not fit.
-                if let Some((member, expected)) = find_union_violation(checker, &vt, &ret) {
-                    let vt_r = checker.unifier.resolve_deep(&vt);
-                    let ret_r = checker.unifier.resolve_deep(&ret);
-                    let mut notes = Vec::new();
-                    notes.push(format!(
-                        "returned element `{member}` does not fit expected type `{expected}`"
-                    ));
-                    notes.push(format!(
-                        "to fix: convert `{member}` to `{expected}`, or change the return type to `{vt_r}`"
-                    ));
-                    let e = UnifyError {
-                        message: "type mismatch".into(),
-                        left: vt_r.to_string(),
-                        right: ret_r.to_string(),
-                        context: None,
-                        left_span: None,
-                        right_span: None,
-                        left_ty: Box::new(vt_r),
-                        right_ty: Box::new(ret_r),
-                    };
-                    checker.report_mismatch_with_notes(e, v.span(), notes);
-                }
             }
             // A `return` diverges: it never yields a value to the
             // enclosing block. Its statement type is `Never`
@@ -499,10 +473,7 @@ fn check_stmt_assign(checker: &mut Checker, target: &Expr, value: &Expr, span: S
                 let tt_r = checker.unifier.resolve_deep(&tt);
                 let mut notes = Vec::new();
                 notes.push(format!(
-                    "element `{member}` does not fit expected type `{expected}`"
-                ));
-                notes.push(format!(
-                    "to fix: convert `{member}` to `{expected}`, or change the target type to `{vt_r}`"
+                    "array element `{member}` does not fit expected element type `{expected}`"
                 ));
                 let e = UnifyError {
                     message: "type mismatch".into(),
