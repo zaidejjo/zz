@@ -76,6 +76,8 @@ enum Resolved {
     Slot(usize),
     /// The environment chain (global, captured-from-outer, func, or native).
     Env,
+    /// A module-level `state` binding — lives in the shared state registry.
+    State,
 }
 
 /// Compiled info for a known function, used to reorder named args
@@ -143,6 +145,9 @@ pub struct Compiler {
     /// function bodies can normalize module-global references the same way
     /// the top level does.
     top_globals: std::collections::HashSet<String>,
+    /// Module-level `state` binding names. State bindings live in the
+    /// shared registry, not in frame slots or the env chain.
+    state_names: std::collections::HashSet<String>,
     /// `Type.method` names defined by an `impl` block in this compilation
     /// unit. A struct-typed receiver can then be resolved at compile time
     /// (see `resolved_method`) instead of through the dynamic call op.
@@ -204,6 +209,7 @@ impl Compiler {
             in_db_query: false,
             move_take: None,
             top_globals: std::collections::HashSet::new(),
+            state_names: std::collections::HashSet::new(),
             impl_methods: std::collections::HashSet::new(),
             type_scope: zz_checker::TOP_SCOPE.to_string(),
         }
@@ -710,6 +716,10 @@ impl Compiler {
     }
 
     fn resolve(&self, name: &str) -> Resolved {
+        // State bindings live in the shared registry, not in slots or env.
+        if self.state_names.contains(name) {
+            return Resolved::State;
+        }
         for local in self.locals.iter().rev() {
             if local.name == name {
                 return if local.in_env {
@@ -938,7 +948,7 @@ impl Compiler {
         }
         let dst = match self.resolve(target) {
             Resolved::Slot(slot) => slot as u16,
-            Resolved::Env => return None,
+            Resolved::Env | Resolved::State => return None,
         };
         let src = match (left.as_ref(), right.as_ref()) {
             (Expr::Ident { name: ln, .. }, Expr::Ident { name: rn, .. }) => {
@@ -946,12 +956,12 @@ impl Compiler {
                 if ln == target {
                     match self.resolve(rn) {
                         Resolved::Slot(slot) => slot as u16,
-                        Resolved::Env => return None,
+                        Resolved::Env | Resolved::State => return None,
                     }
                 } else if rn == target {
                     match self.resolve(ln) {
                         Resolved::Slot(slot) => slot as u16,
-                        Resolved::Env => return None,
+                        Resolved::Env | Resolved::State => return None,
                     }
                 } else {
                     return None;
@@ -1925,7 +1935,7 @@ impl Compiler {
         }
         let dst = match self.resolve(target) {
             Resolved::Slot(slot) => slot as u16,
-            Resolved::Env => return None,
+            Resolved::Env | Resolved::State => return None,
         };
         // `x = x + 1` -> SlotInc
         if *binop == zz_frontend::ast::BinOp::Add {
@@ -2089,7 +2099,7 @@ impl Compiler {
         }
         let dst = match self.resolve(target) {
             Resolved::Slot(slot) => slot as u16,
-            Resolved::Env => return None,
+            Resolved::Env | Resolved::State => return None,
         };
         // Innermost first: op 1 consumes the old target, each later op
         // consumes the value the previous one left in `dst`.
@@ -2129,13 +2139,13 @@ impl Compiler {
         match e {
             Expr::Ident { name, .. } => match self.resolve(name) {
                 Resolved::Slot(slot) => Some(slot as u16),
-                Resolved::Env => None,
+                Resolved::Env | Resolved::State => None,
             },
             // Namespaced top-level slot: `ns.var` resolves to a slot when the
             // full dotted name is a promoted local.
             Expr::Path { parts, .. } => match self.resolve(&parts.join(".")) {
                 Resolved::Slot(slot) => Some(slot as u16),
-                Resolved::Env => None,
+                Resolved::Env | Resolved::State => None,
             },
             _ => None,
         }
@@ -2161,7 +2171,7 @@ impl Compiler {
         let full = target_parts.join(".");
         let dst = match self.resolve(&full) {
             Resolved::Slot(slot) => slot as u16,
-            Resolved::Env => return None,
+            Resolved::Env | Resolved::State => return None,
         };
         // `ns.sum = ns.sum + 1` -> SlotInc
         if *binop == zz_frontend::ast::BinOp::Add {
@@ -2251,11 +2261,11 @@ impl Compiler {
         let slot_of = |e: &Expr| match e {
             Expr::Ident { name, .. } => match self.resolve(name) {
                 Resolved::Slot(slot) => Some(slot as u16),
-                Resolved::Env => None,
+                Resolved::Env | Resolved::State => None,
             },
             Expr::Path { parts, .. } => match self.resolve(&parts.join(".")) {
                 Resolved::Slot(slot) => Some(slot as u16),
-                Resolved::Env => None,
+                Resolved::Env | Resolved::State => None,
             },
             _ => None,
         };
@@ -2400,11 +2410,11 @@ impl Compiler {
         let a = match left {
             Expr::Ident { name, .. } => match self.resolve(name) {
                 Resolved::Slot(slot) => slot as u16,
-                Resolved::Env => return None,
+                Resolved::Env | Resolved::State => return None,
             },
             Expr::Path { parts, .. } => match self.resolve(&parts.join(".")) {
                 Resolved::Slot(slot) => slot as u16,
-                Resolved::Env => return None,
+                Resolved::Env | Resolved::State => return None,
             },
             _ => return None,
         };
@@ -2428,6 +2438,7 @@ impl Compiler {
                 let home = match self.resolve(&full) {
                     Resolved::Slot(slot) => TakeHome::Slot(slot as u16),
                     Resolved::Env => TakeHome::Env(full.clone()),
+                    Resolved::State => return,
                 };
                 if home == flag_home {
                     self.move_take = None;
@@ -2650,6 +2661,7 @@ impl Compiler {
             Expr::Ident { name, span } => match self.resolve(name) {
                 Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
                 Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
+                Resolved::State => self.emit(Op::StoreState(name.clone(), *span)),
             },
             Expr::Path { parts, span } => self.compile_path_store(parts, *span),
             Expr::Field { obj, name, span } => {
@@ -2736,9 +2748,30 @@ impl Compiler {
     /// `Stmt::For` arm.
     fn compile_stmt(&mut self, stmt: &Stmt, value_discarded: bool) -> StmtValue {
         match stmt {
-            Stmt::Decl { name, value, .. } => {
+            Stmt::Decl {
+                name,
+                value,
+                is_state,
+                ..
+            } => {
+                // D1: `state` bindings live in the shared registry, not in
+                // frame slots or the env chain. Register the name so loads/
+                // stores emit `LoadState`/`StoreState`.
+                if *is_state {
+                    self.state_names.insert(name.name.clone());
+                }
                 self.compile_expr(value);
-                if self.is_main && self.scope_depth == 0 {
+                if *is_state {
+                    // `state name := expr` — store the initializer into the
+                    // state registry. No slot allocation.
+                    if self.is_main && self.scope_depth == 0 {
+                        self.emit(Op::StoreState(name.name.clone(), value.span()));
+                    }
+                    // Non-module-level `state` is a compile error (caught by
+                    // the checker); here we just store the value into a slot
+                    // to keep the stack balanced.
+                    StmtValue::None
+                } else if self.is_main && self.scope_depth == 0 {
                     // Top-level: value goes into the reserved slot region.
                     if self.captured_at_top.contains(&name.name) {
                         self.emit(Op::DefineVar(name.name.clone()));
@@ -2817,7 +2850,33 @@ impl Compiler {
             // Traits erase at check time: their impl methods are ordinary
             // functions, reached through the runtime's method dispatch.
             Stmt::Trait { .. } => StmtValue::None,
-            Stmt::Atomic { .. } => StmtValue::None,
+            Stmt::Atomic { body, span } => {
+                // Compile the body as a sub-chunk. The VM executes it under
+                // the state lock (see `Op::Atomic` in runtime.rs).
+                let mut sub = Compiler::new();
+                sub.type_scope = self.type_scope.clone();
+                sub.symbol_map = self.symbol_map.clone();
+                sub.top_globals = self.top_globals.clone();
+                sub.state_names = self.state_names.clone();
+                sub.types = self.types.clone();
+                sub.structs = self.structs.clone();
+                sub.native_names = self.native_names.clone();
+                sub.func_info = self.func_info.clone();
+                sub.enums = self.enums.clone();
+                sub.impl_methods = self.impl_methods.clone();
+                for s in &body.stmts {
+                    sub.compile_stmt(s, false);
+                }
+                // Discard any leftover value.
+                if !body.stmts.is_empty() {
+                    sub.emit(Op::Pop);
+                }
+                self.emit(Op::Atomic {
+                    body: Arc::new(sub.chunk),
+                    span: *span,
+                });
+                StmtValue::None
+            }
             // Enums register their variant names so qualified
             // construction (`Token.IntLit(1)`) resolves at runtime.
             // Values are plain `Object`s — no other state needed.
@@ -3077,6 +3136,7 @@ impl Compiler {
                         match self.resolve(name) {
                             Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
                             Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
+                            Resolved::State => self.emit(Op::StoreState(name.clone(), *span)),
                         }
                         self.stmt_unit(value_discarded)
                     }
@@ -3390,6 +3450,9 @@ impl Compiler {
                                     Resolved::Env => {
                                         self.emit(Op::LoadVar(obj_name.clone(), e.span()))
                                     }
+                                    Resolved::State => {
+                                        self.emit(Op::LoadState(obj_name.clone(), e.span()))
+                                    }
                                 }
                                 for a in args {
                                     self.compile_expr(a);
@@ -3408,6 +3471,9 @@ impl Compiler {
                                     Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
                                     Resolved::Env => {
                                         self.emit(Op::StoreVar(obj_name.clone(), e.span()))
+                                    }
+                                    Resolved::State => {
+                                        self.emit(Op::StoreState(obj_name.clone(), e.span()))
                                     }
                                 }
                                 return StmtValue::None;
@@ -3472,6 +3538,9 @@ impl Compiler {
                                 match self.resolve(name) {
                                     Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
                                     Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
+                                    Resolved::State => {
+                                        self.emit(Op::StoreState(name.clone(), *span))
+                                    }
                                 }
                                 return StmtValue::None;
                             }
@@ -3819,6 +3888,7 @@ impl Compiler {
                         Resolved::Env => {
                             sub.emit(Op::LoadVar(name.clone(), span));
                         }
+                        Resolved::State => {}
                     }
                     if is_return {
                         sub.emit(Op::Return);
@@ -4105,6 +4175,7 @@ impl Compiler {
                         }
                         return Arc::new(sub.chunk);
                     }
+                    Resolved::State => {}
                 }
                 if needs_env {
                     sub.emit(Op::ExitScope);
@@ -4145,6 +4216,7 @@ impl Compiler {
                         let home = match self.resolve(name) {
                             Resolved::Slot(slot) => TakeHome::Slot(slot as u16),
                             Resolved::Env => TakeHome::Env(name.clone()),
+                            Resolved::State => return,
                         };
                         if home == flag_home {
                             self.move_take = None;
@@ -4159,6 +4231,7 @@ impl Compiler {
                 match self.resolve(name) {
                     Resolved::Slot(slot) => self.emit(Op::LoadSlot(slot as u16)),
                     Resolved::Env => self.emit(Op::LoadVar(name.clone(), *span)),
+                    Resolved::State => self.emit(Op::LoadState(name.clone(), *span)),
                 }
             }
             Expr::Path { parts, span } => self.compile_path_load(parts, *span),
@@ -4605,6 +4678,9 @@ impl Compiler {
                             match self.resolve(&parts[0]) {
                                 Resolved::Slot(slot) => self.emit(Op::LoadSlot(slot as u16)),
                                 Resolved::Env => self.emit(Op::LoadVar(parts[0].clone(), *pspan)),
+                                Resolved::State => {
+                                    self.emit(Op::LoadState(parts[0].clone(), *pspan))
+                                }
                             }
                             for part in &parts[1..parts.len() - 1] {
                                 self.emit(Op::GetField(part.clone(), *pspan));
@@ -4807,6 +4883,7 @@ impl Compiler {
                                 Expr::Ident { name, .. } => match self.resolve(name) {
                                     Resolved::Slot(slot) => Some(TakeHome::Slot(slot as u16)),
                                     Resolved::Env => Some(TakeHome::Env(name.clone())),
+                                    Resolved::State => None,
                                 },
                                 _ => None,
                             };
