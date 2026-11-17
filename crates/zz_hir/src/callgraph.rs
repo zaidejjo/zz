@@ -898,12 +898,25 @@ fn collect_assigned_in_stmt(
                     out.insert(name.clone());
                 }
             }
+            zz_span_ast::ast::Expr::Path { parts, .. } => {
+                // After namespace rewriting, a top-level global target is a
+                // namespaced path (`module.counter`). Match it against
+                // `tp.bindings` and record the bare name.
+                if let Some(bare) = binding_basename(tp, parts) {
+                    out.insert(bare);
+                }
+            }
             _ => {}
         },
         zz_span_ast::ast::Stmt::CompoundAssign { target, .. } => match target {
             zz_span_ast::ast::Expr::Ident { name, .. } => {
                 if tp.bindings.contains_key(name) {
                     out.insert(name.clone());
+                }
+            }
+            zz_span_ast::ast::Expr::Path { parts, .. } => {
+                if let Some(bare) = binding_basename(tp, parts) {
+                    out.insert(bare);
                 }
             }
             _ => {}
@@ -1006,8 +1019,8 @@ fn collect_globals_from_expr(
             }
         }
         zz_span_ast::ast::Expr::Path { parts, .. } => {
-            if parts.len() == 1 && tp.bindings.contains_key(&parts[0]) {
-                out.insert(parts[0].clone());
+            if let Some(bare) = binding_basename(tp, parts) {
+                out.insert(bare);
             }
         }
         zz_span_ast::ast::Expr::Call {
@@ -1089,6 +1102,22 @@ fn callee_name(callee: &zz_span_ast::ast::Expr) -> Option<String> {
         zz_span_ast::ast::Expr::Ident { name, .. } => Some(name.clone()),
         zz_span_ast::ast::Expr::Path { parts, .. } => Some(parts.join(".")),
         _ => None,
+    }
+}
+
+/// Join a dotted path and, if it names a binding in `tp.bindings`, return
+/// the bare (last-segment) name. After namespace rewriting, globals are
+/// stored under their full dotted key (`module.counter`) while the R2
+/// bookkeeping uses bare names.
+fn binding_basename(tp: &TypedProgram, parts: &[String]) -> Option<String> {
+    if parts.is_empty() {
+        return None;
+    }
+    let full = parts.join(".");
+    if tp.bindings.contains_key(&full) {
+        parts.last().cloned()
+    } else {
+        None
     }
 }
 
