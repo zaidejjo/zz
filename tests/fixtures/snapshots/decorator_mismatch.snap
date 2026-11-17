@@ -1,13 +1,13 @@
 first module that broke: <path> <path>
 
-error: type mismatch: expected `int`, found `str`
+error: type mismatch: expected `int` for `f`, found `str`
 
 --> <path>
 |
 7 | @bad
 | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 = parameter `f` expects `func(int) -> int`
-error: type mismatch: expected `int`, found `str`
+error: type mismatch: expected `int` for `_0`, found `str`
 
 --> <path>
 |

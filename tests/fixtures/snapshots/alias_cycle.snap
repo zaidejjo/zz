@@ -6,7 +6,7 @@ error: cyclic type alias `alias_cycle.A`: alias_cycle.A -> alias_cycle.B
 |
 3 | type A = B
 | ^
-error: type mismatch: expected `unit`, found `int`
+error: type mismatch: expected `unit` for `variable `x``, found `int`
 
 --> <path>
 |

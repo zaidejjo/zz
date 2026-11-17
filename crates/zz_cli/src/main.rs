@@ -1056,6 +1056,10 @@ pub(crate) struct PreparedRun {
     pub(crate) files: Vec<(String, String)>,
     pub(crate) types:
         std::sync::Arc<std::collections::HashMap<zz_checker::SpanKey, zz_checker::Type>>,
+    /// Function name → interned `Symbol` id, used by the VM compiler to
+    /// resolve expression span types (e.g. enum construction). Built by the
+    /// checker that produced `types`; the two maps share symbol ids.
+    pub(crate) symbol_map: std::collections::HashMap<String, u32>,
     pub(crate) structs: std::collections::HashMap<String, zz_checker::StructSig>,
     pub(crate) enums: std::collections::HashMap<String, zz_checker::EnumSig>,
     funcs: std::collections::HashMap<String, zz_checker::FuncSig>,
@@ -1171,7 +1175,7 @@ fn setup_interp(
                 if let Err(e) = interp.run_typed(
                     &zz_prog.program,
                     std::sync::Arc::new(zz_prog.types.clone()),
-                    HashMap::new(),
+                    zz_prog.symbol_map.clone(),
                     zz_prog.structs.clone(),
                     zz_prog.enums.clone(),
                 ) {
@@ -1343,6 +1347,7 @@ pub(crate) fn prepare_run_with_features(
         programs,
         files,
         types: std::sync::Arc::new(typed.program.types),
+        symbol_map: typed.program.symbol_map,
         structs: typed.program.structs,
         enums: typed.program.enums,
         funcs: typed.program.funcs,
@@ -1370,7 +1375,7 @@ fn compile_prep(prep: &PreparedRun) -> Option<Vec<Vec<u8>>> {
         let chunk = zz_runtime::vm::Compiler::compile_program_typed(
             program,
             prep.types.clone(),
-            HashMap::new(),
+            prep.symbol_map.clone(),
             prep.structs.clone(),
             prep.enums.clone(),
             native_names.clone(),
@@ -1922,7 +1927,7 @@ fn run_file(
             match prep.interp.run_typed(
                 program,
                 prep.types.clone(),
-                HashMap::new(),
+                prep.symbol_map.clone(),
                 prep.structs.clone(),
                 prep.enums.clone(),
             ) {
@@ -1980,7 +1985,7 @@ fn run_file(
         match prep.interp.run_typed(
             program,
             prep.types.clone(),
-            HashMap::new(),
+            prep.symbol_map.clone(),
             prep.structs.clone(),
             prep.enums.clone(),
         ) {

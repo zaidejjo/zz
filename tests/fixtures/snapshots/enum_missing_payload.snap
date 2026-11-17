@@ -6,4 +6,7 @@ error: variant `enum_missing_payload.Token.IntLit` holds a value: construct it a
 |
 9 | t: Token = Token.IntLit
 | ^^^^^^^^^^^^
+warning: unused enum variant `enum_missing_payload.Token.Eof`, consider prefixing with `_Eof` or removing it
+
+= variant is never constructed or pattern-matched
 zz: 1 file(s) failed type-check
