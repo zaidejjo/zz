@@ -8,7 +8,9 @@ use zz_span_ast::ast::{Expr, Ident};
 use zz_span_ast::span::Span;
 use zz_suggest::suggest_all;
 use zz_types::Type;
+use zz_unify::UnifyError;
 
+use crate::check_stmt::find_union_violation;
 use crate::TypeCheckOps as _;
 
 /// Validate that the number of provided arguments falls within the
@@ -186,6 +188,28 @@ pub(crate) fn check_filled_slots(
                         arg.span(),
                         Checker::param_mismatch_notes(param_names, ps, i),
                     );
+                } else if let Some((member, expected)) = find_union_violation(checker, &at, &ps[i])
+                {
+                    let at_r = checker.unifier.resolve_deep(&at);
+                    let pt_r = checker.unifier.resolve_deep(&ps[i]);
+                    let mut notes = Vec::new();
+                    notes.push(format!(
+                        "argument element `{member}` does not fit expected type `{expected}`"
+                    ));
+                    notes.push(format!(
+                        "to fix: convert `{member}` to `{expected}`, or change the parameter type to `{at_r}`"
+                    ));
+                    let e = UnifyError {
+                        message: "type mismatch".into(),
+                        left: at_r.to_string(),
+                        right: pt_r.to_string(),
+                        context: None,
+                        left_span: None,
+                        right_span: None,
+                        left_ty: Box::new(at_r),
+                        right_ty: Box::new(pt_r),
+                    };
+                    checker.report_mismatch_with_notes(e, arg.span(), notes);
                 }
             } else {
                 let at = checker.check_expr(arg);
@@ -217,6 +241,29 @@ pub(crate) fn check_filled_slots(
                         arg.span(),
                         Checker::param_mismatch_notes(param_names, ps, i),
                     );
+                } else if let Some((member, expected)) =
+                    find_union_violation(checker, &at, &expected)
+                {
+                    let at_r = checker.unifier.resolve_deep(&at);
+                    let pt_r = checker.unifier.resolve_deep(&expected);
+                    let mut notes = Vec::new();
+                    notes.push(format!(
+                        "argument element `{member}` does not fit expected type `{expected}`"
+                    ));
+                    notes.push(format!(
+                        "to fix: convert `{member}` to `{expected}`, or change the parameter type to `{at_r}`"
+                    ));
+                    let e = UnifyError {
+                        message: "type mismatch".into(),
+                        left: at_r.to_string(),
+                        right: pt_r.to_string(),
+                        context: None,
+                        left_span: None,
+                        right_span: None,
+                        left_ty: Box::new(at_r),
+                        right_ty: Box::new(pt_r),
+                    };
+                    checker.report_mismatch_with_notes(e, arg.span(), notes);
                 }
             }
         }

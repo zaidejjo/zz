@@ -1,6 +1,7 @@
 //! Call-expression type-checking helpers extracted from `check_call`.
 //! Free functions following the `definite_assignment.rs` pattern.
 
+use crate::check_stmt::find_union_violation;
 use crate::ScopeOps as _;
 use crate::TypeCheckOps;
 use zz_checker_core::Checker;
@@ -14,7 +15,7 @@ use zz_span_ast::span::Span;
 use zz_structs::StructOps;
 use zz_suggest::suggest_all;
 use zz_types::Type;
-use zz_unify::Unifier;
+use zz_unify::{Unifier, UnifyError};
 
 /// Check math constants are values, not functions: `math.PI()` is always an
 /// error — use bare `math.PI`.
@@ -1009,11 +1010,61 @@ fn check_call_path_sqlz_method(
                     let at = checker.check_closure(params, ret_ty.as_ref(), body, *cspan, ep);
                     if let Err(e) = checker.unifier.unify(&at, &ps[1 + i]) {
                         checker.report_mismatch(e, arg.span());
+                    } else {
+                        if let Some((member, expected)) =
+                            find_union_violation(checker, &at, &ps[1 + i])
+                        {
+                            let at_r = checker.unifier.resolve_deep(&at);
+                            let pt_r = checker.unifier.resolve_deep(&ps[1 + i]);
+                            let mut notes = Vec::new();
+                            notes.push(format!(
+                                "argument element `{member}` does not fit expected type `{expected}`"
+                            ));
+                            notes.push(format!(
+                                "to fix: convert `{member}` to `{expected}`, or change the parameter type to `{at_r}`"
+                            ));
+                            let e = UnifyError {
+                                message: "type mismatch".into(),
+                                left: at_r.to_string(),
+                                right: pt_r.to_string(),
+                                context: None,
+                                left_span: None,
+                                right_span: None,
+                                left_ty: Box::new(at_r),
+                                right_ty: Box::new(pt_r),
+                            };
+                            checker.report_mismatch_with_notes(e, arg.span(), notes);
+                        }
                     }
                 } else {
                     let at = checker.check_expr(arg);
                     if let Err(e) = checker.unifier.unify(&at, &ps[1 + i]) {
                         checker.report_mismatch(e, arg.span());
+                    } else {
+                        if let Some((member, expected)) =
+                            find_union_violation(checker, &at, &ps[1 + i])
+                        {
+                            let at_r = checker.unifier.resolve_deep(&at);
+                            let pt_r = checker.unifier.resolve_deep(&ps[1 + i]);
+                            let mut notes = Vec::new();
+                            notes.push(format!(
+                                "argument element `{member}` does not fit expected type `{expected}`"
+                            ));
+                            notes.push(format!(
+                                "to fix: convert `{member}` to `{expected}`, or change the parameter type to `{at_r}`"
+                            ));
+                            let e = UnifyError {
+                                message: "type mismatch".into(),
+                                left: at_r.to_string(),
+                                right: pt_r.to_string(),
+                                context: None,
+                                left_span: None,
+                                right_span: None,
+                                left_ty: Box::new(at_r),
+                                right_ty: Box::new(pt_r),
+                            };
+                            checker.report_mismatch_with_notes(e, arg.span(), notes);
+                        }
                     }
                 }
             }
