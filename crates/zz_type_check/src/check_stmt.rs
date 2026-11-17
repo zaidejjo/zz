@@ -4,7 +4,7 @@
 #![allow(clippy::collapsible_match, clippy::single_match)]
 
 use zz_checker_core::Checker;
-use zz_diag_core::error_at;
+use zz_diag_core::{error_at, ErrorCode};
 use zz_infer::{contains_var, default_variant_vars, InferOps};
 use zz_lints::http_lint::HttpLintOps;
 use zz_scope::ScopeOps;
@@ -107,11 +107,14 @@ fn check_stmt_decl(
     // has exactly one entry (the module scope). Inside any function/block
     // it's deeper.
     if is_state && checker.env.len() != 1 {
-        checker.errors.push(error_at(
-            "`state` is only allowed at module level in v1\n\
+        checker.errors.push(
+            error_at(
+                "`state` is only allowed at module level in v1\n\
              hint: move the declaration to the top level of the module",
-            name.span,
-        ));
+                name.span,
+            )
+            .with_code(ErrorCode(11)),
+        );
     }
     // D6: a `state` may not hold a closure/function value (or any type
     // containing one), because closures capture by reference through
@@ -120,14 +123,17 @@ fn check_stmt_decl(
     if is_state {
         let rt = checker.unifier.resolve_deep(&vt);
         if type_contains_func(rt) {
-            checker.errors.push(error_at(
-                format!(
-                    "`state` cannot hold a closure or function value ({})\n\
+            checker.errors.push(
+                error_at(
+                    format!(
+                        "`state` cannot hold a closure or function value ({})\n\
                      hint: store the data the closure needs instead of the closure itself",
-                    name.name
-                ),
-                name.span,
-            ));
+                        name.name
+                    ),
+                    name.span,
+                )
+                .with_code(ErrorCode(12)),
+            );
         }
         checker.state_names.insert(name.name.clone());
     }
@@ -865,14 +871,17 @@ fn check_for_blocking_natives(checker: &mut Checker, expr: &Expr, span: Span) {
         } => {
             if let Some(name) = callee_name(callee) {
                 if is_blocking_native(&name) {
-                    checker.errors.push(error_at(
-                        format!(
+                    checker.errors.push(
+                        error_at(
+                            format!(
                             "`{name}` is a blocking call and cannot be used inside `atomic {{ }}`\n\
                              hint: move the blocking call outside the atomic block",
                             name = name
                         ),
-                        *s,
-                    ));
+                            *s,
+                        )
+                        .with_code(ErrorCode(15)),
+                    );
                 }
             }
             // Recurse into args — a blocking call nested in an argument
@@ -1016,14 +1025,17 @@ fn check_whitelist_only(checker: &mut Checker, expr: &Expr, span: Span) {
         } => {
             if let Some(name) = callee_name(callee) {
                 if !is_whitelisted_native(checker, &name) {
-                    checker.errors.push(error_at(
-                        format!(
-                            "`{name}` cannot be called in a statement that touches `state`\n\
+                    checker.errors.push(
+                        error_at(
+                            format!(
+                                "`{name}` cannot be called in a statement that touches `state`\n\
                              hint: wrap the statement in `atomic {{ }}`",
-                            name = name
-                        ),
-                        *s,
-                    ));
+                                name = name
+                            ),
+                            *s,
+                        )
+                        .with_code(ErrorCode(14)),
+                    );
                 }
             }
             // Recurse into arguments — they're part of the same atomic statement.
@@ -1151,8 +1163,9 @@ fn check_whitelist_only_stmt(checker: &mut Checker, stmt: &Stmt, span: Span) {
 /// error. Conservative: uses statement order as reachability approximation.
 /// Runs as a post-pass on each function/closure body after type checking.
 pub(crate) fn check_r1_in_block(checker: &mut Checker, block: &zz_span_ast::ast::Block) {
-    let mut reads: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
-    let mut writes: std::collections::HashMap<String, Vec<usize>> =
+    let mut reads: std::collections::HashMap<String, Vec<(usize, Span)>> =
+        std::collections::HashMap::new();
+    let mut writes: std::collections::HashMap<String, Vec<(usize, Span)>> =
         std::collections::HashMap::new();
     let mut stmt_idx: usize = 0;
     let mut in_atomic: bool = false;
@@ -1166,22 +1179,25 @@ pub(crate) fn check_r1_in_block(checker: &mut Checker, block: &zz_span_ast::ast:
         &mut in_atomic,
     );
 
-    for (name, read_indices) in &reads {
-        if let Some(write_indices) = writes.get(name) {
-            for &ri in read_indices {
-                for &wi in write_indices {
+    for (name, read_entries) in &reads {
+        if let Some(write_entries) = writes.get(name) {
+            for &(ri, rspan) in read_entries {
+                for &(wi, _) in write_entries {
                     if ri < wi {
-                        checker.errors.push(error_at(
-                            format!(
-                                "check-then-act on `state` `{name}`:\n\
-                                 read at statement {ri} can reach write at statement {wi}\n\
-                                 hint: wrap both in `atomic {{ }}`",
-                                name = name,
-                                ri = ri,
-                                wi = wi,
-                            ),
-                            zz_span_ast::span::Span::new(0, 0),
-                        ));
+                        checker.errors.push(
+                            error_at(
+                                format!(
+                                    "check-then-act on `state` `{name}`:\n\
+                                     read at statement {ri} can reach write at statement {wi}\n\
+                                     hint: wrap both in `atomic {{ }}`",
+                                    name = name,
+                                    ri = ri,
+                                    wi = wi,
+                                ),
+                                rspan,
+                            )
+                            .with_code(ErrorCode(16)),
+                        );
                     }
                 }
             }
@@ -1189,16 +1205,17 @@ pub(crate) fn check_r1_in_block(checker: &mut Checker, block: &zz_span_ast::ast:
     }
 }
 
-/// Walk `block` recording state reads/writes per statement index.
+/// Walk `block` recording state reads/writes per statement index and span.
 fn collect_state_rw(
     checker: &Checker,
     block: &zz_span_ast::ast::Block,
-    reads: &mut std::collections::HashMap<String, Vec<usize>>,
-    writes: &mut std::collections::HashMap<String, Vec<usize>>,
+    reads: &mut std::collections::HashMap<String, Vec<(usize, Span)>>,
+    writes: &mut std::collections::HashMap<String, Vec<(usize, Span)>>,
     stmt_idx: &mut usize,
     in_atomic: &mut bool,
 ) {
     for stmt in &block.stmts {
+        let span = stmt.span();
         match stmt {
             Stmt::Atomic { body, .. } => {
                 let prev = *in_atomic;
@@ -1211,28 +1228,28 @@ fn collect_state_rw(
                 value, is_state, ..
             } => {
                 if *is_state {
-                    collect_state_names_from_expr(checker, value, reads, *stmt_idx);
+                    collect_state_names_from_expr(checker, value, reads, *stmt_idx, span);
                 }
                 *stmt_idx += 1;
             }
             Stmt::Assign { target, value, .. } => {
                 if is_state_target(checker, target) {
-                    collect_state_names_from_expr(checker, target, reads, *stmt_idx);
-                    collect_state_names_from_expr(checker, target, writes, *stmt_idx);
+                    collect_state_names_from_expr(checker, target, reads, *stmt_idx, span);
+                    collect_state_names_from_expr(checker, target, writes, *stmt_idx, span);
                 }
-                collect_state_names_from_expr(checker, value, reads, *stmt_idx);
+                collect_state_names_from_expr(checker, value, reads, *stmt_idx, span);
                 *stmt_idx += 1;
             }
             Stmt::CompoundAssign { target, value, .. } => {
                 if is_state_target(checker, target) {
-                    collect_state_names_from_expr(checker, target, reads, *stmt_idx);
-                    collect_state_names_from_expr(checker, target, writes, *stmt_idx);
+                    collect_state_names_from_expr(checker, target, reads, *stmt_idx, span);
+                    collect_state_names_from_expr(checker, target, writes, *stmt_idx, span);
                 }
-                collect_state_names_from_expr(checker, value, reads, *stmt_idx);
+                collect_state_names_from_expr(checker, value, reads, *stmt_idx, span);
                 *stmt_idx += 1;
             }
             Stmt::Expr(e) => {
-                collect_state_names_from_expr(checker, e, reads, *stmt_idx);
+                collect_state_names_from_expr(checker, e, reads, *stmt_idx, span);
                 *stmt_idx += 1;
             }
             Stmt::For { body, .. } => {
@@ -1241,16 +1258,16 @@ fn collect_state_rw(
             }
             Stmt::Return { value, .. } => {
                 if let Some(v) = value {
-                    collect_state_names_from_expr(checker, v, reads, *stmt_idx);
+                    collect_state_names_from_expr(checker, v, reads, *stmt_idx, span);
                 }
                 *stmt_idx += 1;
             }
             Stmt::Defer { expr, .. } => {
-                collect_state_names_from_expr(checker, expr, reads, *stmt_idx);
+                collect_state_names_from_expr(checker, expr, reads, *stmt_idx, span);
                 *stmt_idx += 1;
             }
             Stmt::Destructure { value, .. } => {
-                collect_state_names_from_expr(checker, value, reads, *stmt_idx);
+                collect_state_names_from_expr(checker, value, reads, *stmt_idx, span);
                 *stmt_idx += 1;
             }
             _ => {
@@ -1264,41 +1281,42 @@ fn collect_state_rw(
 fn collect_state_names_from_expr(
     checker: &Checker,
     expr: &Expr,
-    map: &mut std::collections::HashMap<String, Vec<usize>>,
+    map: &mut std::collections::HashMap<String, Vec<(usize, Span)>>,
     stmt_idx: usize,
+    span: Span,
 ) {
     match expr {
         Expr::Ident { name, .. } => {
             if checker.state_names.contains(name) {
-                map.entry(name.clone()).or_default().push(stmt_idx);
+                map.entry(name.clone()).or_default().push((stmt_idx, span));
             }
         }
         Expr::Path { parts, .. } => {
             for p in parts {
                 if checker.state_names.contains(p) {
-                    map.entry(p.clone()).or_default().push(stmt_idx);
+                    map.entry(p.clone()).or_default().push((stmt_idx, span));
                 }
             }
         }
         Expr::Field { obj, name, .. } => {
             if checker.state_names.contains(name) {
-                map.entry(name.clone()).or_default().push(stmt_idx);
+                map.entry(name.clone()).or_default().push((stmt_idx, span));
             }
-            collect_state_names_from_expr(checker, obj, map, stmt_idx);
+            collect_state_names_from_expr(checker, obj, map, stmt_idx, span);
         }
         Expr::Index { obj, index, .. } => {
-            collect_state_names_from_expr(checker, obj, map, stmt_idx);
-            collect_state_names_from_expr(checker, index, map, stmt_idx);
+            collect_state_names_from_expr(checker, obj, map, stmt_idx, span);
+            collect_state_names_from_expr(checker, index, map, stmt_idx, span);
         }
         Expr::Binary { left, right, .. } => {
-            collect_state_names_from_expr(checker, left, map, stmt_idx);
-            collect_state_names_from_expr(checker, right, map, stmt_idx);
+            collect_state_names_from_expr(checker, left, map, stmt_idx, span);
+            collect_state_names_from_expr(checker, right, map, stmt_idx, span);
         }
         Expr::Unary { expr, .. } => {
-            collect_state_names_from_expr(checker, expr, map, stmt_idx);
+            collect_state_names_from_expr(checker, expr, map, stmt_idx, span);
         }
         Expr::Try { expr, .. } => {
-            collect_state_names_from_expr(checker, expr, map, stmt_idx);
+            collect_state_names_from_expr(checker, expr, map, stmt_idx, span);
         }
         Expr::Call {
             callee,
@@ -1306,67 +1324,67 @@ fn collect_state_names_from_expr(
             named,
             ..
         } => {
-            collect_state_names_from_expr(checker, callee, map, stmt_idx);
+            collect_state_names_from_expr(checker, callee, map, stmt_idx, span);
             for a in args {
-                collect_state_names_from_expr(checker, a, map, stmt_idx);
+                collect_state_names_from_expr(checker, a, map, stmt_idx, span);
             }
             for (_, v) in named {
-                collect_state_names_from_expr(checker, v, map, stmt_idx);
+                collect_state_names_from_expr(checker, v, map, stmt_idx, span);
             }
         }
         Expr::Closure { body, .. } => {
-            collect_state_names_from_expr(checker, body, map, stmt_idx);
+            collect_state_names_from_expr(checker, body, map, stmt_idx, span);
         }
         Expr::If {
             cond, then, els, ..
         } => {
-            collect_state_names_from_expr(checker, cond, map, stmt_idx);
-            collect_state_names_from_block(checker, then, map, stmt_idx);
+            collect_state_names_from_expr(checker, cond, map, stmt_idx, span);
+            collect_state_names_from_block(checker, then, map, stmt_idx, span);
             if let Some(e) = els {
-                collect_state_names_from_expr(checker, e, map, stmt_idx);
+                collect_state_names_from_expr(checker, e, map, stmt_idx, span);
             }
         }
         Expr::While { cond, body, .. } => {
-            collect_state_names_from_expr(checker, cond, map, stmt_idx);
-            collect_state_names_from_block(checker, body, map, stmt_idx);
+            collect_state_names_from_expr(checker, cond, map, stmt_idx, span);
+            collect_state_names_from_block(checker, body, map, stmt_idx, span);
         }
         Expr::Match {
             scrutinee, arms, ..
         } => {
-            collect_state_names_from_expr(checker, scrutinee, map, stmt_idx);
+            collect_state_names_from_expr(checker, scrutinee, map, stmt_idx, span);
             for a in arms {
-                collect_state_names_from_expr(checker, &a.body, map, stmt_idx);
+                collect_state_names_from_expr(checker, &a.body, map, stmt_idx, span);
             }
         }
         Expr::Block(b) => {
             for s in &b.stmts {
-                collect_state_names_from_stmt(checker, s, map, stmt_idx);
+                collect_state_names_from_stmt(checker, s, map, stmt_idx, span);
             }
         }
         Expr::Fmt { parts, .. } => {
             for p in parts {
                 if let zz_span_ast::ast::FmtPart::Expr(e, _) = p {
-                    collect_state_names_from_expr(checker, e, map, stmt_idx);
+                    collect_state_names_from_expr(checker, e, map, stmt_idx, span);
                 }
             }
         }
         Expr::Array { elems, .. } => {
             for e in elems {
-                collect_state_names_from_expr(checker, e, map, stmt_idx);
+                collect_state_names_from_expr(checker, e, map, stmt_idx, span);
             }
         }
         Expr::Dict { entries, .. } => {
             for (k, v) in entries {
-                collect_state_names_from_expr(checker, k, map, stmt_idx);
-                collect_state_names_from_expr(checker, v, map, stmt_idx);
+                collect_state_names_from_expr(checker, k, map, stmt_idx, span);
+                collect_state_names_from_expr(checker, v, map, stmt_idx, span);
             }
         }
         Expr::Paren { expr, .. } => {
-            collect_state_names_from_expr(checker, expr, map, stmt_idx);
+            collect_state_names_from_expr(checker, expr, map, stmt_idx, span);
         }
         Expr::Tuple { items, .. } => {
             for e in items {
-                collect_state_names_from_expr(checker, e, map, stmt_idx);
+                collect_state_names_from_expr(checker, e, map, stmt_idx, span);
             }
         }
         _ => {}
@@ -1377,11 +1395,12 @@ fn collect_state_names_from_expr(
 fn collect_state_names_from_block(
     checker: &Checker,
     block: &zz_span_ast::ast::Block,
-    map: &mut std::collections::HashMap<String, Vec<usize>>,
+    map: &mut std::collections::HashMap<String, Vec<(usize, Span)>>,
     stmt_idx: usize,
+    span: Span,
 ) {
     for s in &block.stmts {
-        collect_state_names_from_stmt(checker, s, map, stmt_idx);
+        collect_state_names_from_stmt(checker, s, map, stmt_idx, span);
     }
 }
 
@@ -1389,35 +1408,36 @@ fn collect_state_names_from_block(
 fn collect_state_names_from_stmt(
     checker: &Checker,
     stmt: &Stmt,
-    map: &mut std::collections::HashMap<String, Vec<usize>>,
+    map: &mut std::collections::HashMap<String, Vec<(usize, Span)>>,
     stmt_idx: usize,
+    span: Span,
 ) {
     match stmt {
-        Stmt::Expr(e) => collect_state_names_from_expr(checker, e, map, stmt_idx),
+        Stmt::Expr(e) => collect_state_names_from_expr(checker, e, map, stmt_idx, span),
         Stmt::Assign { target, value, .. } => {
-            collect_state_names_from_expr(checker, target, map, stmt_idx);
-            collect_state_names_from_expr(checker, value, map, stmt_idx);
+            collect_state_names_from_expr(checker, target, map, stmt_idx, span);
+            collect_state_names_from_expr(checker, value, map, stmt_idx, span);
         }
         Stmt::CompoundAssign { target, value, .. } => {
-            collect_state_names_from_expr(checker, target, map, stmt_idx);
-            collect_state_names_from_expr(checker, value, map, stmt_idx);
+            collect_state_names_from_expr(checker, target, map, stmt_idx, span);
+            collect_state_names_from_expr(checker, value, map, stmt_idx, span);
         }
         Stmt::Decl { value, .. } => {
-            collect_state_names_from_expr(checker, value, map, stmt_idx);
+            collect_state_names_from_expr(checker, value, map, stmt_idx, span);
         }
         Stmt::For { body, .. } => {
-            collect_state_names_from_block(checker, body, map, stmt_idx);
+            collect_state_names_from_block(checker, body, map, stmt_idx, span);
         }
         Stmt::Return { value, .. } => {
             if let Some(v) = value {
-                collect_state_names_from_expr(checker, v, map, stmt_idx);
+                collect_state_names_from_expr(checker, v, map, stmt_idx, span);
             }
         }
         Stmt::Defer { expr, .. } => {
-            collect_state_names_from_expr(checker, expr, map, stmt_idx);
+            collect_state_names_from_expr(checker, expr, map, stmt_idx, span);
         }
         Stmt::Destructure { value, .. } => {
-            collect_state_names_from_expr(checker, value, map, stmt_idx);
+            collect_state_names_from_expr(checker, value, map, stmt_idx, span);
         }
         _ => {}
     }

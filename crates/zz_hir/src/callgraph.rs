@@ -11,7 +11,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use zz_checker::Type;
+use zz_diag_core::ErrorCode;
 use zz_frontend::ast::{Expr, Stmt};
+use zz_span_ast::span::Span;
 
 use crate::TypedProgram;
 
@@ -822,7 +824,9 @@ pub fn check_r2_globals_vs_tasks(
 ) {
     // Find all plain mutable globals assigned somewhere in the program.
     let mut assigned_globals: std::collections::HashSet<String> = std::collections::HashSet::new();
-    collect_assigned_globals(tp, &mut assigned_globals);
+    // Span of each global's declaration (for diagnostics).
+    let mut decl_spans: std::collections::HashMap<String, Span> = std::collections::HashMap::new();
+    collect_assigned_globals(tp, &mut assigned_globals, &mut decl_spans);
 
     // Find all globals referenced from task.spawn closures (directly).
     let mut spawn_globals: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -845,24 +849,36 @@ pub fn check_r2_globals_vs_tasks(
     }
 
     // Report errors for plain mutable globals reachable from spawn.
+    // Exception: a global never assigned after initialization (not in
+    // `assigned_globals`) is effectively immutable and may be read from
+    // tasks.
     for g in &reachable_globals {
-        if assigned_globals.contains(g) && !is_state_or_const(tp, g) {
-            errors.push(zz_frontend::diag::error_at(
-                format!(
-                    "global `{g}` is reachable from a task; declare it `state`\n\
-                     hint: change `{g} := ...` to `state {g} := ...`",
-                    g = g
-                ),
-                zz_span_ast::span::Span::new(0, 0),
-            ));
+        if assigned_globals.contains(g) && !is_state_or_const(tp, g, &assigned_globals) {
+            let span = decl_spans.get(g).copied().unwrap_or_default();
+            errors.push(
+                zz_frontend::diag::error_at(
+                    format!(
+                        "global `{g}` is reachable from a task; declare it `state`\n\
+                         hint: change `{g} := ...` to `state {g} := ...`",
+                        g = g
+                    ),
+                    span,
+                )
+                .with_code(ErrorCode(17)),
+            );
         }
     }
 }
 
-/// Collect names of globals that are assigned somewhere in the program.
-fn collect_assigned_globals(tp: &TypedProgram, out: &mut std::collections::HashSet<String>) {
+/// Collect names of globals that are assigned somewhere in the program,
+/// plus the span of each global's declaration.
+fn collect_assigned_globals(
+    tp: &TypedProgram,
+    out: &mut std::collections::HashSet<String>,
+    decl_spans: &mut std::collections::HashMap<String, Span>,
+) {
     for stmt in &tp.program.stmts {
-        collect_assigned_in_stmt(tp, stmt, out);
+        collect_assigned_in_stmt(tp, stmt, out, decl_spans);
     }
 }
 
@@ -870,8 +886,12 @@ fn collect_assigned_in_stmt(
     tp: &TypedProgram,
     stmt: &zz_span_ast::ast::Stmt,
     out: &mut std::collections::HashSet<String>,
+    decl_spans: &mut std::collections::HashMap<String, Span>,
 ) {
     match stmt {
+        zz_span_ast::ast::Stmt::Decl { name, span, .. } => {
+            decl_spans.insert(name.name.clone(), *span);
+        }
         zz_span_ast::ast::Stmt::Assign { target, .. } => match target {
             zz_span_ast::ast::Expr::Ident { name, .. } => {
                 if tp.bindings.contains_key(name) {
@@ -889,10 +909,10 @@ fn collect_assigned_in_stmt(
             _ => {}
         },
         zz_span_ast::ast::Stmt::Func { body, .. } => {
-            collect_assigned_in_block(tp, body, out);
+            collect_assigned_in_block(tp, body, out, decl_spans);
         }
         zz_span_ast::ast::Stmt::For { body, .. } => {
-            collect_assigned_in_block(tp, body, out);
+            collect_assigned_in_block(tp, body, out, decl_spans);
         }
         _ => {}
     }
@@ -902,9 +922,10 @@ fn collect_assigned_in_block(
     tp: &TypedProgram,
     block: &zz_span_ast::ast::Block,
     out: &mut std::collections::HashSet<String>,
+    decl_spans: &mut std::collections::HashMap<String, Span>,
 ) {
     for s in &block.stmts {
-        collect_assigned_in_stmt(tp, s, out);
+        collect_assigned_in_stmt(tp, s, out, decl_spans);
     }
 }
 
@@ -1071,12 +1092,16 @@ fn callee_name(callee: &zz_span_ast::ast::Expr) -> Option<String> {
     }
 }
 
-/// True if `name` is a state or const global (immutable).
-fn is_state_or_const(_tp: &TypedProgram, _name: &str) -> bool {
-    // In v1, we approximate: state/const globals are those that are never
-    // assigned after initialization. Since we can't easily distinguish
-    // here, we use a heuristic: if the global is in bindings and never
-    // assigned, treat it as immutable.
-    // For now, return false (conservative: report all globals).
-    false
+/// True if `name` is a state or const global (immutable): never assigned
+/// anywhere in the program after its initializer. Such globals may be read
+/// from tasks without becoming `state`.
+fn is_state_or_const(
+    _tp: &TypedProgram,
+    name: &str,
+    assigned_globals: &std::collections::HashSet<String>,
+) -> bool {
+    // A global that is never assigned after its initializer is effectively
+    // immutable, so reading it from a task is safe and does not require
+    // declaring it `state`.
+    !assigned_globals.contains(name)
 }
