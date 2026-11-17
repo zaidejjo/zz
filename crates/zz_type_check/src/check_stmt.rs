@@ -122,6 +122,7 @@ fn check_stmt_decl(
             if let Some((member, expected)) = find_union_violation(checker, &vt, &at) {
                 let vt_r = checker.unifier.resolve_deep(&vt);
                 let at_r = checker.unifier.resolve_deep(&at);
+                let binding_ty = at_r.clone();
                 let mut notes = Vec::new();
                 notes.push(format!(
                     "array element `{member}` does not fit expected element type `{expected}`"
@@ -136,10 +137,20 @@ fn check_stmt_decl(
                     context: Some(format!("variable `{}`", name.name)),
                     left_span: None,
                     right_span: None,
-                    left_ty: Box::new(vt_r.clone()),
-                    right_ty: Box::new(at_r.clone()),
+                    left_ty: Box::new(vt_r),
+                    right_ty: Box::new(at_r),
                 };
                 checker.report_mismatch_with_notes(e, ann.span, notes);
+                // Bind to the expected annotation type so downstream uses are
+                // consistent with the declaration, then return early instead of
+                // binding the inferred union type that doesn't fit.
+                checker.define_var_at(&name.name, binding_ty.clone(), name.span, is_const);
+                if checker.env.len() == 1 {
+                    checker
+                        .new_bindings
+                        .insert(name.name.clone(), binding_ty.clone());
+                }
+                return binding_ty;
             }
         }
     }
