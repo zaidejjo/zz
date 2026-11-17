@@ -601,9 +601,22 @@ func math.root(x: float, n: float) -> float {
             }
             .none => return 0.0 / 0.0
         }
-        return -math.exp(math.log(-x) / n)
+        // Negative root: solve z^n = -x, then negate. Newton-Raphson refines z.
+        neg_x := 0.0 - x
+        z := math.exp(math.log(neg_x) / n)
+        z_n := math.pow(z, n)
+        z_nm1 := math.pow(z, n - 1.0)
+        z = z - (z_n - neg_x) / (n * z_nm1)
+        return 0.0 - z
     }
-    return math.exp(math.log(x) / n)
+    result := math.exp(math.log(x) / n)
+    // Newton-Raphson refinement: solve y^n = x
+    // y_{k+1} = y_k - (y_k^n - x) / (n * y_k^(n-1))
+    y := result
+    y_n := math.pow(y, n)
+    y_nm1 := math.pow(y, n - 1.0)
+    y = y - (y_n - x) / (n * y_nm1)
+    return y
 }
 
 // ── NaN / Infinity ─────────────────────────────────────────────────────────
@@ -768,15 +781,65 @@ func math.to_degrees(rad: float) -> float {
 }
 
 // ── Degree variants ────────────────────────────────────────────────────────
+//
+// Quadrant boundaries are detected exactly via `norm / 90.0` integer
+// arithmetic (90, 180, 270, 360 are exactly representable in binary64), so
+// no π/180 rounding error occurs at quadrant angles. Non-quadrant angles
+// fall through to the standard Taylor series.
 
 func math.sin_deg(x: float) -> float {
+    norm := x % 360.0
+    if norm < 0.0 {
+        norm = norm + 360.0
+    }
+    q := norm / 90.0
+    match int(q) {
+        .some(qi) => {
+            if q == float(qi) {
+                if qi == 1 {
+                    return 1.0
+                }
+                if qi == 3 {
+                    return -1.0
+                }
+                return 0.0
+            }
+        }
+        .none => {}
+    }
     return math.sin(math.to_radians(x))
 }
 
 func math.cos_deg(x: float) -> float {
+    norm := x % 360.0
+    if norm < 0.0 {
+        norm = norm + 360.0
+    }
+    q := norm / 90.0
+    match int(q) {
+        .some(qi) => {
+            if q == float(qi) {
+                if qi == 0 {
+                    return 1.0
+                }
+                if qi == 2 {
+                    return -1.0
+                }
+                return 0.0
+            }
+        }
+        .none => {}
+    }
     return math.cos(math.to_radians(x))
 }
 
 func math.tan_deg(x: float) -> float {
-    return math.tan(math.to_radians(x))
+    double := x * 2.0
+    s := math.sin_deg(double)
+    c := math.cos_deg(double)
+    denom := 1.0 + c
+    if denom == 0.0 {
+        return 1.0 / 0.0
+    }
+    return s / denom
 }

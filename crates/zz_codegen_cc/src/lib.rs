@@ -868,20 +868,16 @@ pub fn build_with(
 /// `/INCLUDE:<sym>`, which `zig cc` rejects, so zig always gets
 /// `-Wl,-u,<sym>` instead (lld-link understands it).
 pub(crate) fn force_undef_flag(symbol: &str, target: Option<&str>, zig: bool) -> Option<String> {
-    // On macOS, runtime symbols are declared `__attribute__((weak_import))`
-    // which allows them to be undefined at link time. `-Wl,-u` forces them
-    // to be required, which conflicts with weak_import and causes "undefined
-    // symbol" linker errors. Skip `-u` on macOS; normal reference resolution
-    // pulls in the archive members when the symbols are actually needed.
-    if zz_codegen_ffi::target_os(target) == zz_codegen_ffi::TargetOs::Macos {
-        return None;
-    }
     let sym = zz_codegen_ffi::force_undef_symbol(symbol, target);
     // `zig cc` rejects the MSVC spelling outright ("unsupported linker
     // arg: /INCLUDE:<sym>") even when it links for a Windows target,
     // because its driver parses `-Wl,` itself and only maps GNU-style
     // args. lld-link accepts `-u <sym>` identically, so zig always gets
     // the GNU spelling; plain clang keeps `/INCLUDE:` for link.exe.
+    // On macOS, `zz_float_format_raw` is declared `__attribute__((weak_import))`
+    // which permits an undefined symbol at link time; `-Wl,-u` overrides this
+    // to require resolution. `libzz_native_rt.a` is always linked for native
+    // builds (float_link=true), so the symbol is always defined.
     if !zig && zz_codegen_ffi::target_os(target) == zz_codegen_ffi::TargetOs::Windows {
         Some(format!("-Wl,/INCLUDE:{sym}"))
     } else {
@@ -931,7 +927,18 @@ fn push_link_inputs(
             // libzz_stdlib.a duplicates runtime symbols from libzz_rt.a
             // (each stdlib module object includes RUNTIME_C). Allow multiple
             // definitions — the first definition (libzz_rt.a) wins.
-            cmd.arg("-Wl,--allow-multiple-definition");
+            // GNU ld: `--allow-multiple-definition`. ld64 (macOS):
+            // `-Wl,-multiply_defined,suppress`. Windows linker: handled by
+            // COMDAT folding, no flag needed.
+            match zz_codegen_ffi::target_os(target) {
+                zz_codegen_ffi::TargetOs::Macos => {
+                    let _ = cmd.arg("-Wl,-multiply_defined,suppress");
+                }
+                zz_codegen_ffi::TargetOs::Windows => {}
+                _ => {
+                    let _ = cmd.arg("-Wl,--allow-multiple-definition");
+                }
+            }
         }
     }
     // Unified Rust native runtime: link the static library providing FFI
@@ -1795,10 +1802,11 @@ mod tests {
             ),
             Some("-Wl,-u,zz_float_format_raw".to_string())
         );
-        // macOS: weak_import symbols conflict with `-u`, skip the flag.
+        // macOS: `zz_float_format_raw` is weak_import but `libzz_native_rt.a`
+        // is always linked for native builds, so `-Wl,-u` resolves it cleanly.
         assert_eq!(
             force_undef_flag("zz_float_format_raw", Some("aarch64-apple-darwin"), false),
-            None
+            Some("-Wl,-u,_zz_float_format_raw".to_string())
         );
         // lld-link / link.exe spell it `/INCLUDE:<sym>`.
         assert_eq!(
@@ -1827,7 +1835,10 @@ mod tests {
                 Some("-Wl,-u,sym".to_string())
             );
         } else if cfg!(target_os = "macos") {
-            assert_eq!(force_undef_flag("sym", None, false), None);
+            assert_eq!(
+                force_undef_flag("sym", None, false),
+                Some("-Wl,-u,_sym".to_string())
+            );
         } else {
             assert_eq!(
                 force_undef_flag("sym", None, false),
