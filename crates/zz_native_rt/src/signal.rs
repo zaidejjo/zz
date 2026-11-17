@@ -234,6 +234,7 @@ mod tests {
         assert!(!signal_pending(1));
     }
 
+    #[cfg(unix)]
     #[test]
     fn install_then_pending() {
         assert!(signal_install(10).is_ok());

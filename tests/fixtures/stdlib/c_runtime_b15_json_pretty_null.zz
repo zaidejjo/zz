@@ -7,11 +7,11 @@ import std.json
 
 func main() {
     ok := 1
-    a := json.pretty([]) ?? ""
-    d := json.pretty({}) ?? ""
-    n := json.pretty(42) ?? ""
-    s := json.pretty("hi") ?? ""
-    m := json.pretty({"x": [1, 2], "y": "z"}) ?? ""
+    a := json.pretty(json.parse("[]") ?? json.null()) ?? ""
+    d := json.pretty(json.parse("{}") ?? json.null()) ?? ""
+    n := json.pretty(json.parse("42") ?? json.null()) ?? ""
+    s := json.pretty(json.parse("\"hi\"") ?? json.null()) ?? ""
+    m := json.pretty(json.parse("{\"x\": [1, 2], \"y\": \"z\"}") ?? json.null()) ?? ""
     if a == "" { ok = 0 }
     if d == "" { ok = 0 }
     if n == "" { ok = 0 }
