@@ -3346,7 +3346,7 @@ impl Compiler {
                         self.compile_stmt(&synthetic, value_discarded)
                     }
                 }
-                Expr::Ident { .. } | Expr::Path { .. } => {
+                Expr::Ident { .. } => {
                     // Side-effect-free receivers: rewrite to the plain
                     // Assign path with a synthesized
                     // `target = target OP value`, so slot fusion, green

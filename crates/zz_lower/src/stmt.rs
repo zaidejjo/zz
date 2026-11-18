@@ -864,6 +864,18 @@ impl Lowerer {
                 let value_needs_unbox = !val_is_actually_scalar;
                 match target {
                     Expr::Ident { name, .. } => {
+                        // State variable target: assign to zz_state_* global
+                        // under the state lock. State bindings live in their
+                        // own file-scope globals, not in NameCtx, so
+                        // names.lookup() returns None for them — handle here.
+                        if self.state_set.contains(name.as_str()) {
+                            let cid = Lowerer::state_cid(name);
+                            let val = self.emit_expr(value, names, out);
+                            out.push_str(&format!(
+                                "    zz_state_lock();\n    {cid} = zz_clone({val});\n    zz_state_unlock();\n"
+                            ));
+                            return;
+                        }
                         if let Some(cid) = names.lookup(name.as_str()).map(|s| s.to_string()) {
                             // Check if the target variable is a scalar type
                             if let Some(ctype) =
@@ -947,6 +959,17 @@ impl Lowerer {
                     }
                     Expr::Path { parts, .. } => {
                         let joined = parts.join(".");
+                        // State variable target: assign to zz_state_* global
+                        // under the state lock. State bindings live in their
+                        // own file-scope globals, not in NameCtx, so
+                        // names.lookup() returns None for them — handle here.
+                        if self.state_set.contains(&joined) {
+                            let cid = Lowerer::state_cid(&joined);
+                            out.push_str(&format!(
+                                "    zz_state_lock();\n    {cid} = zz_clone({val});\n    zz_state_unlock();\n"
+                            ));
+                            return;
+                        }
                         // Handle struct field assignment: p.x = 99 or r.origin.x = 42
                         if parts.len() == 2 {
                             if let Some(base_cid) = names.lookup(&parts[0]) {
@@ -1554,6 +1577,27 @@ impl Lowerer {
                 value,
                 span,
             } => {
+                // State variable CompoundAssign: atomic RMW under a single
+                // state lock (separate lock/unlock for read+write would race
+                // under concurrent tasks).
+                let state_cid = match target {
+                    Expr::Ident { name, .. } if self.state_set.contains(name.as_str()) => {
+                        Some(Lowerer::state_cid(name.as_str()))
+                    }
+                    Expr::Path { parts, .. } if self.state_set.contains(&parts.join(".")) => {
+                        Some(Lowerer::state_cid(&parts.join(".")))
+                    }
+                    _ => None,
+                };
+                if let Some(cid) = state_cid {
+                    let val = self.emit_expr(value, names, out);
+                    let tmp = names.fresh("_old");
+                    let op_sym = crate::context::binop_runtime_op(op);
+                    out.push_str(&format!(
+                        "    zz_state_lock();\n    zz_value {tmp} = zz_clone({cid});\n    {cid} = zz_clone(zz_binop({op_sym}, {tmp}, {val}));\n    zz_state_unlock();\n"
+                    ));
+                    return;
+                }
                 // RHS first (same order as `=`).
                 match target {
                     Expr::Ident { .. } | Expr::Path { .. } => {

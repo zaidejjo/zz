@@ -337,6 +337,10 @@ impl Lowerer {
     }
 
     pub fn lower(&self) -> LoweredC {
+        eprintln!(
+            "DEBUG lib.rs: lower() called, tp.stmts()={}",
+            self.tp.stmts().len()
+        );
         let mut funcs = String::new();
         let mut body = String::new();
         // Module-level vars become C globals so every function can see them.
@@ -345,6 +349,13 @@ impl Lowerer {
         let mut globals_decl = String::new();
         for (_, cid, ctype, _) in &globals {
             globals_decl.push_str(&format!("static {ctype} {cid};\n"));
+        }
+        // Module-level `state` bindings: separate file-scope globals
+        // (`zz_state_<mangled>`) accessed under the process-global state
+        // lock. Declared here with external linkage so every TU shares the
+        // same binding; initialized in zz_main under the lock.
+        for (_, cid) in &self.state_list {
+            globals_decl.push_str(&format!("zz_value {cid};\n"));
         }
         // Module-level static arena for read-only global constants
         // (AllocClass::Static). Lives for the process lifetime; initialized
@@ -418,7 +429,17 @@ impl Lowerer {
                 | Stmt::Enum { .. }
                 | Stmt::Import { .. }
                 | Stmt::Atomic { .. } => {}
-                Stmt::Decl { name, value, .. } => {
+                Stmt::Decl {
+                    name,
+                    value,
+                    is_state,
+                    ..
+                } => {
+                    // State decls are initialized under the state lock
+                    // below (after the plain-global loop).
+                    if *is_state {
+                        continue;
+                    }
                     // Top-level `x := <rhs>` → assign into `zz_global_*`.
                     // The global is pre-declared; zz_main only initializes it.
                     let zz_name = &name.name;
@@ -539,6 +560,36 @@ impl Lowerer {
                     body.push_str(&out);
                 }
             }
+        }
+        // ---- `state` initialization under the lock ----------------------
+        // State init must run BEFORE any top-level statement that reads it,
+        // so it is prepended to body. The checker guarantees init order
+        // (imports first, entry last), but the lock guards against any
+        // concurrent access from tasks spawned at top level.
+        let mut state_init = String::new();
+        for stmt in self.tp.stmts() {
+            if let Stmt::Decl {
+                name,
+                value,
+                is_state,
+                ..
+            } = stmt
+            {
+                if !*is_state {
+                    continue;
+                }
+                let zz_name = &name.name;
+                let gid = Lowerer::state_cid(zz_name);
+                let mut out = String::new();
+                let val = self.emit_expr(value, &mut names, &mut out);
+                out.push_str(&format!(
+                    "    zz_state_lock();\n    {gid} = zz_clone({val});\n    zz_state_unlock();\n"
+                ));
+                state_init.push_str(&out);
+            }
+        }
+        if !state_init.is_empty() {
+            body.insert_str(0, &state_init);
         }
         // Selective-import bare aliases (`double` for
         // `math_utils.double`): the callgraph edges the bare name while

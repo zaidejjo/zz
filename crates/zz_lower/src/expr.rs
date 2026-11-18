@@ -490,6 +490,17 @@ impl Lowerer {
                     }
                 }
                 None => {
+                    // State variable read: if `name` is a state binding that
+                    // wasn't rewritten to a dotted path (e.g. inside a native
+                    // call argument), read it under the state lock.
+                    if self.state_set.contains(name) {
+                        let cid = Lowerer::state_cid(name);
+                        let tmp = names.fresh("_s");
+                        out.push_str(&format!(
+                            "    zz_state_lock();\n    zz_value {tmp} = zz_clone({cid});\n    zz_state_unlock();\n"
+                        ));
+                        return tmp;
+                    }
                     // First-class reference to a named function
                     // (`f := add`): box the static function when it
                     // resolves (selective-import canonical first, then
@@ -511,6 +522,19 @@ impl Lowerer {
                 }
             },
             Expr::Path { parts, span } => {
+                // State reads: lock, clone from zz_state_*, unlock.
+                // After namespace rewriting, top-level state bindings are
+                // dotted paths (e.g. `test_state_simple.x`). Match against
+                // the full joined name since state_set holds dotted names.
+                let joined = parts.join(".");
+                if self.state_set.contains(&joined) {
+                    let cid = Lowerer::state_cid(&joined);
+                    let tmp = names.fresh("_s");
+                    out.push_str(&format!(
+                        "    zz_state_lock();\n    zz_value {tmp} = zz_clone({cid});\n    zz_state_unlock();\n"
+                    ));
+                    return tmp;
+                }
                 // Unit-variant value (`Token.Eof`, no parens): precise via
                 // the HIR type when available, else by enum name (keeps
                 // typeless top-level scripts working). Both yield to

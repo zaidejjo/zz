@@ -202,7 +202,12 @@ impl Lowerer {
                     }
                 }
                 Struct { .. } | TypeAlias { .. } | Enum { .. } | Import { .. } => {}
-                Decl { name, value, .. } => {
+                Decl {
+                    name,
+                    value,
+                    is_state,
+                    ..
+                } => {
                     let ns = current_ns.clone();
                     if !is_pkg_ns(&ns) {
                         program_ns.insert(ns.clone());
@@ -210,6 +215,11 @@ impl Lowerer {
                     claim_owner(&mut owners, &name.name, &ns);
                     if !init_order.contains(&ns) {
                         init_order.push(ns.clone());
+                    }
+                    // State decls are initialized under the state lock
+                    // below (after the plain-global loop).
+                    if *is_state {
+                        continue;
                     }
                     let before = self.closure_defs.borrow().len();
                     let before_fwd = self.closure_forward_decls.borrow().len();
@@ -284,6 +294,31 @@ impl Lowerer {
                 }
             }
         }
+        // ---- `state` initialization under the lock ----------------------
+        // Collected separately so it can be prepended to zz_init__prelude()
+        // before any user code that reads state (order matters!).
+        let mut state_init = String::new();
+        for stmt in self.tp.stmts() {
+            if let Stmt::Decl {
+                name,
+                value,
+                is_state,
+                ..
+            } = stmt
+            {
+                if !*is_state {
+                    continue;
+                }
+                let zz_name = &name.name;
+                let gid = Lowerer::state_cid(zz_name);
+                let mut out = String::new();
+                let val = self.emit_expr(value, &mut names, &mut out);
+                out.push_str(&format!(
+                    "    zz_state_lock();\n    {gid} = zz_clone({val});\n    zz_state_unlock();\n"
+                ));
+                state_init.push_str(&out);
+            }
+        }
 
         // Synthetic `_len`/`_cap` globals belong to the same namespace as
         // their parent flat array, so their C definitions land in the same
@@ -336,6 +371,20 @@ impl Lowerer {
         for (zz_name, cid, ctype, _) in &self.global_list {
             let _ = zz_name;
             let line = format!("extern {ctype} {cid};\n");
+            let owner = owners
+                .get(zz_name)
+                .map(|o| o.as_str())
+                .unwrap_or(PRELUDE_NS);
+            if self.tp.module_origins.get(owner).map(|s| s.as_str()) == Some("pkg") {
+                glob_ext_dep.push_str(&line);
+            } else {
+                glob_ext.push_str(&line);
+            }
+        }
+        // `state` bindings: `extern zz_value zz_state_<mangled>;` — same
+        // ownership split as plain globals.
+        for (zz_name, cid) in &self.state_list {
+            let line = format!("extern zz_value {cid};\n");
             let owner = owners
                 .get(zz_name)
                 .map(|o| o.as_str())
@@ -540,7 +589,12 @@ impl Lowerer {
                     code.push('\n');
                 }
             }
-            let init_body = inits.get(ns).cloned().unwrap_or_default();
+            let mut init_body = inits.get(ns).cloned().unwrap_or_default();
+            // State init must run before any user code in zz_init__prelude()
+            // that reads state variables.
+            if ns == PRELUDE_NS && !state_init.is_empty() {
+                init_body.insert_str(0, &state_init);
+            }
             code.push_str(&format!(
                 "void zz_init_{mns}(void) {{\n{init_body}}}\n",
                 mns = mangle(ns)
@@ -595,8 +649,15 @@ impl Lowerer {
         };
         // with_main first: zz_call_main calls it (single-TU path splices
         // it before zz_call_main the same way).
+        // State bindings need file-scope definitions (they're declared
+        // `extern` in the header above).
+        let mut state_defs = String::new();
+        for (_zz_name, cid) in &self.state_list {
+            state_defs.push_str(&format!("zz_value {cid};\n"));
+        }
         let entry_code = format!(
-            "zz_arena _static_arena;\nzz_arena _func_arena;\n__attribute__((constructor)) static void zz_init_process_arenas(void) {{\n    zz_arena_init(&_static_arena, 65536);\n    zz_arena_init(&_func_arena, 65536);\n}}\n{with_main}{trait_defs}{entry_glue}",
+            "zz_arena _static_arena;\nzz_arena _func_arena;\n{state_defs}__attribute__((constructor)) static void zz_init_process_arenas(void) {{\n    zz_arena_init(&_static_arena, 65536);\n    zz_arena_init(&_func_arena, 65536);\n}}\n{with_main}{trait_defs}{entry_glue}",
+            state_defs = state_defs,
             with_main = with_main,
             trait_defs = trait_defs,
             entry_glue = entry_glue

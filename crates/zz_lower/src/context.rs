@@ -745,6 +745,15 @@ pub struct Lowerer {
     /// Global ZZ names as a set, computed once (was: rebuilt per function
     /// and per closure literal for capture analysis).
     pub(crate) global_set: std::collections::HashSet<String>,
+    /// Module-level `state` binding names (bare names, e.g. `hits`), computed
+    /// once in `new`. State bindings live in their own file-scope globals
+    /// (`zz_state_<mangled>`) accessed under the process-global state lock,
+    /// separate from the `zz_global_*` plain-global table.
+    pub(crate) state_set: std::collections::HashSet<String>,
+    /// Module-level `state` declarations: (ZZ name, C global id), computed
+    /// once in `new`. Used to emit `static zz_value zz_state_<mangled>;`
+    /// declarations and top-level initialization.
+    pub(crate) state_list: Vec<(String, String)>,
     /// Scalar-specialized callees as (name, C ret, arity), computed once
     /// (was: refiltered from `specialized` per emitted function).
     pub(crate) scalar_fn_list: Vec<(String, &'static str, usize)>,
@@ -823,6 +832,8 @@ impl Lowerer {
             precompiled: false,
             global_list: Vec::new(),
             global_set: std::collections::HashSet::new(),
+            state_set: std::collections::HashSet::new(),
+            state_list: Vec::new(),
             scalar_fn_list: Vec::new(),
             readonly_params,
             trait_impl_types,
@@ -842,6 +853,21 @@ impl Lowerer {
         lowerer.global_list = lowerer.collect_globals();
         lowerer.global_set = lowerer.tp.bindings.keys().cloned().collect();
         lowerer.scalar_fn_list = lowerer.compute_scalar_fn_list();
+        // Collect state decls separately: they live in zz_state_* globals,
+        // not zz_global_*.
+        let mut state_list = Vec::new();
+        let mut state_set = std::collections::HashSet::new();
+        for stmt in lowerer.tp.stmts() {
+            if let Stmt::Decl { name, is_state, .. } = stmt {
+                if *is_state {
+                    let cid = Lowerer::state_cid(&name.name);
+                    state_list.push((name.name.clone(), cid));
+                    state_set.insert(name.name.clone());
+                }
+            }
+        }
+        lowerer.state_list = state_list;
+        lowerer.state_set = state_set;
         lowerer
     }
 
@@ -1712,6 +1738,11 @@ impl Lowerer {
         format!("zz_global_{}", mangle(zz_name))
     }
 
+    /// C identifier for a module-level `state` binding: `zz_state_<mangled>`.
+    pub(crate) fn state_cid(zz_name: &str) -> String {
+        format!("zz_state_{}", mangle(zz_name))
+    }
+
     /// Names visible as C globals (module-level bindings). Closure free
     /// variables matching these need no environment cell.
     /// Names in `block` captured by a nested closure literal: bindings for
@@ -2103,10 +2134,15 @@ impl Lowerer {
             }
         }
         let mut names: Vec<String> = Vec::new();
+        let mut state_names: Vec<String> = Vec::new();
         for stmt in self.tp.stmts() {
             match stmt {
-                Stmt::Decl { name, .. } => {
-                    if !names.contains(&name.name) {
+                Stmt::Decl { name, is_state, .. } => {
+                    if *is_state {
+                        if !state_names.contains(&name.name) {
+                            state_names.push(name.name.clone());
+                        }
+                    } else if !names.contains(&name.name) {
                         names.push(name.name.clone());
                     }
                 }
