@@ -1016,9 +1016,16 @@ impl Vm {
                             self.stack.push(new);
                         }
                     } else {
-                        let cur = reg.get(name).unwrap_or(Value::Unit);
-                        let new = eval_binary(*op, cur, rhs, *span)?;
-                        reg.set(name, new.clone());
+                        // Single lock acquisition: read, compute, write under one lock
+                        // so the RMW is indivisible (D2). Mirrors AOT/chunk which hold
+                        // the lock across the whole RMW.
+                        let new = reg.with_lock(|| -> Result<Value, EvalError> {
+                            let cur =
+                                unsafe { reg.map_mut().get(name).cloned().unwrap_or(Value::Unit) };
+                            let new = eval_binary(*op, cur, rhs, *span)?;
+                            unsafe { reg.map_mut().insert(name.clone(), new.clone()) };
+                            Ok(new)
+                        })?;
                         self.stack.push(new);
                     }
                 }

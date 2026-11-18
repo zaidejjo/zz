@@ -717,10 +717,6 @@ impl Compiler {
 
     fn resolve(&self, name: &str) -> Resolved {
         // State bindings live in the shared registry, not in slots or env.
-        eprintln!(
-            "DEBUG resolve: name='{name}', state_names={:?}",
-            self.state_names
-        );
         if self.state_names.contains(name) {
             return Resolved::State;
         }
@@ -3312,10 +3308,6 @@ impl Compiler {
                 span,
             } => match target {
                 Expr::Ident { name, .. } if self.state_names.contains(name) => {
-                    eprintln!(
-                        "DEBUG CompoundAssign: Ident target={name}, state_names={:?}",
-                        self.state_names
-                    );
                     // D2: `state x OP= v` is a single atomic RMW under one
                     // lock acquisition. Emit `RmwState` directly instead of
                     // rewriting to `Assign` (which would be separate
@@ -3326,7 +3318,6 @@ impl Compiler {
                 }
                 Expr::Path { parts, span: pspan } => {
                     let full = parts.join(".");
-                    eprintln!("DEBUG CompoundAssign: target={:?}, full={:?}, state_names={:?}, contains={}", target, full, self.state_names, self.state_names.contains(&full));
                     if self.state_names.contains(&full) {
                         self.compile_expr(value);
                         self.emit(Op::RmwState(parts.join("."), *op, *pspan));

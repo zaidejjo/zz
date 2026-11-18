@@ -337,10 +337,6 @@ impl Lowerer {
     }
 
     pub fn lower(&self) -> LoweredC {
-        eprintln!(
-            "DEBUG lib.rs: lower() called, tp.stmts()={}",
-            self.tp.stmts().len()
-        );
         let mut funcs = String::new();
         let mut body = String::new();
         // Module-level vars become C globals so every function can see them.
