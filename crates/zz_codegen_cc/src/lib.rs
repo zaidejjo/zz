@@ -823,11 +823,9 @@ pub fn build_with(
     cmd.arg("-o")
         .arg(zz_paths::pathsafe::strip_verbatim(output_path))
         .arg(&src_path);
-    // Verbose on Windows (Z1: debug LNK1104 filename): forwards the linker's
-    // "cannot open file" sub-error instead of just "exit code 1104".
-    if std::env::var("ZZ_CLANG_VERBOSE").as_deref() == Ok("1")
-        && target.map_or(cfg!(windows), is_windows_target)
-    {
+    // Verbose on Windows (Z1 debug): forwards the linker's "cannot open file"
+    // sub-error instead of just "exit code 1104 (use -v to see invocation)".
+    if target.map_or(cfg!(windows), is_windows_target) {
         cmd.arg("-v");
     }
     // libm is unconditional off Windows (archive members like float
