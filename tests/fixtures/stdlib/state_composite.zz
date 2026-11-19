@@ -1,0 +1,39 @@
+// features: imports, int-arith, locals, print, std-task, state, vec-push
+// tests/fixtures/stdlib/state_composite.zz
+// Composite state (vec) under contention: 4 tasks x 10 pushes = exactly 40 entries.
+import std.task
+
+state log := []
+
+func push10(m: str) {
+    atomic {
+        log = vec.push(log, m)
+        log = vec.push(log, m)
+        log = vec.push(log, m)
+        log = vec.push(log, m)
+        log = vec.push(log, m)
+    }
+    atomic {
+        log = vec.push(log, m)
+        log = vec.push(log, m)
+        log = vec.push(log, m)
+        log = vec.push(log, m)
+        log = vec.push(log, m)
+    }
+}
+
+func main() -> Result<int, str> {
+    h0 := task.spawn(|_| { push10("a") })
+    h1 := task.spawn(|_| { push10("b") })
+    h2 := task.spawn(|_| { push10("c") })
+    h3 := task.spawn(|_| { push10("d") })
+    task.join(h0)
+    task.join(h1)
+    task.join(h2)
+    task.join(h3)
+    if len(log) != 40 {
+        return .err("composite_mismatch")
+    }
+    println("state_composite_ok")
+    return .ok(0)
+}

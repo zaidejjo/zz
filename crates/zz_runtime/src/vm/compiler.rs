@@ -2785,6 +2785,28 @@ impl Compiler {
     /// statement can then skip bookkeeping nothing reads. See the
     /// `Stmt::For` arm.
     fn compile_stmt(&mut self, stmt: &Stmt, value_discarded: bool) -> StmtValue {
+        let stmt_kind = match stmt {
+            Stmt::Decl { .. } => "Decl",
+            Stmt::Func { .. } => "Func",
+            Stmt::Atomic { .. } => "Atomic",
+            Stmt::Assign { .. } => "Assign",
+            Stmt::Expr { .. } => "Expr",
+            Stmt::Return { .. } => "Return",
+            Stmt::For { .. } => "For",
+            Stmt::Break { .. } => "Break",
+            Stmt::Continue { .. } => "Continue",
+            Stmt::Defer { .. } => "Defer",
+            Stmt::CompoundAssign { .. } => "CompoundAssign",
+            Stmt::Import { .. } => "Import",
+            Stmt::Enum { .. } => "Enum",
+            Stmt::Struct { .. } => "Struct",
+            Stmt::Trait { .. } => "Trait",
+            Stmt::Impl { .. } => "Impl",
+            Stmt::Destructure { .. } => "Destructure",
+            Stmt::ExternBlock { .. } => "ExternBlock",
+            Stmt::Link { .. } => "Link",
+            Stmt::TypeAlias { .. } => "TypeAlias",
+        };
         match stmt {
             Stmt::Decl {
                 name,
@@ -3180,9 +3202,15 @@ impl Compiler {
                     }
                 }
                 Expr::Path { parts, span } => {
+                    let full = parts.join(".");
                     // Move-take: fused push/field takes (locals and
-                    // module-global homes).
-                    if parts.len() == 2 && self.try_emit_move_path(parts, *span, value) {
+                    // module-global homes). State bindings live in the
+                    // registry, not slots, so they cannot use move-path
+                    // optimization; fall through to StoreState.
+                    if parts.len() == 2
+                        && !self.state_names.contains(&full)
+                        && self.try_emit_move_path(parts, *span, value)
+                    {
                         return self.stmt_unit(value_discarded);
                     }
                     // Move-take for `ns.x = f(ns.x, ...)`: thread the
