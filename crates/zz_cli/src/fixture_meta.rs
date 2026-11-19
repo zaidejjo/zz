@@ -67,6 +67,7 @@ pub const VOCABULARY: &[&str] = &[
     "selective-import",
     "short-circuit",
     "slicing",
+    "state",
     "std-args",
     "std-bytes",
     "std-cell",

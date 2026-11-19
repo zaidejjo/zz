@@ -828,31 +828,48 @@ pub fn check_r2_globals_vs_tasks(
     let mut decl_spans: std::collections::HashMap<String, Span> = std::collections::HashMap::new();
     collect_assigned_globals(tp, &mut assigned_globals, &mut decl_spans);
 
-    // Find all globals referenced from task.spawn closures (directly).
+    // Globals textually referenced inside spawn closures (direct task access).
     let mut spawn_globals: std::collections::HashSet<String> = std::collections::HashSet::new();
     collect_spawn_globals(tp, &mut spawn_globals);
 
-    // Use call graph to expand reachability: functions called from spawn
-    // closures may also reference globals.
-    let mut worklist: std::collections::VecDeque<String> = spawn_globals.iter().cloned().collect();
-    let mut reachable_globals: std::collections::HashSet<String> = spawn_globals.clone();
+    // Functions whose closures run in tasks: every top-level function whose
+    // body directly contains a `task.spawn(...)` call. Because closure bodies
+    // are walked with the enclosing function as `caller` when building the
+    // call graph (`Expr::Closure => walk_expr_for_graph(..., caller, cg)`),
+    // `cg.edges[enclosing]` already lists every function called inside its
+    // spawn closures. Walking `cg.edges` transitively from these roots yields
+    // every function whose code can execute inside a task.
+    let mut task_roots: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    collect_spawn_enclosing_funcs(tp, &mut task_roots);
 
-    while let Some(func) = worklist.pop_front() {
-        for callee in cg.edges.get(&func).cloned().unwrap_or_default() {
-            if tp.bindings.contains_key(&callee)
-                && assigned_globals.contains(&callee)
-                && reachable_globals.insert(callee.clone())
-            {
-                worklist.push_back(callee);
+    // `task_roots` doubles as the BFS queue: seed it with the spawn-enclosing
+    // functions, then drain it while discovering callees.
+    let mut task_funcs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    while let Some(f) = task_roots.pop_front() {
+        if !task_funcs.insert(f.clone()) {
+            continue;
+        }
+        for callee in cg.edges.get(&f).cloned().unwrap_or_default() {
+            if task_funcs.insert(callee.clone()) {
+                task_roots.push_back(callee.clone());
             }
         }
     }
 
-    // Report errors for plain mutable globals reachable from spawn.
+    // Globals accessed (read or written) by any task-reachable function,
+    // plus those textually inside spawn closures. Deep-scan includes
+    // closures/nested functions because all code in a task-reachable
+    // function runs inside the task.
+    let mut task_globals: std::collections::HashSet<String> = spawn_globals.clone();
+    for f in &task_funcs {
+        collect_globals_in_func(tp, f, &mut task_globals);
+    }
+
+    // Report errors for plain mutable globals reachable from a task.
     // Exception: a global never assigned after initialization (not in
     // `assigned_globals`) is effectively immutable and may be read from
     // tasks.
-    for g in &reachable_globals {
+    for g in &task_globals {
         if assigned_globals.contains(g) && !is_state_or_const(tp, g, &assigned_globals) {
             let span = decl_spans.get(g).copied().unwrap_or_default();
             errors.push(
@@ -867,6 +884,219 @@ pub fn check_r2_globals_vs_tasks(
                 .with_code(ErrorCode(17)),
             );
         }
+    }
+}
+
+/// Collect the dotted names of top-level functions whose body directly
+/// contains a `task.spawn(...)` call. Their closures run inside tasks, so
+/// they are the BFS roots for task-reachability. Does not descend into
+/// nested `fn` items (a nested function's spawn is that nested function's
+/// own concern and is reached via the call graph if that nested function
+/// itself is task-reachable).
+fn collect_spawn_enclosing_funcs(tp: &TypedProgram, out: &mut std::collections::VecDeque<String>) {
+    for stmt in &tp.program.stmts {
+        if let zz_span_ast::ast::Stmt::Func { name, body, .. } = stmt {
+            if block_contains_task_spawn(body) {
+                out.push_back(name.join("."));
+            }
+        }
+    }
+}
+
+/// True if `block` (or any nested block/loop/conditional/closure) directly
+/// contains a `task.spawn(...)` call. Stops at nested `fn` items.
+fn block_contains_task_spawn(block: &zz_span_ast::ast::Block) -> bool {
+    for s in &block.stmts {
+        if stmt_contains_task_spawn(s) {
+            return true;
+        }
+    }
+    false
+}
+
+fn stmt_contains_task_spawn(s: &zz_span_ast::ast::Stmt) -> bool {
+    match s {
+        zz_span_ast::ast::Stmt::Expr(e) => expr_contains_task_spawn(e),
+        zz_span_ast::ast::Stmt::For { body, .. } => block_contains_task_spawn(body),
+        zz_span_ast::ast::Stmt::Atomic { body, .. } => block_contains_task_spawn(body),
+        // Control flow (`if`/`while`/`match`/`block`) arrives here wrapped
+        // as `Stmt::Expr(Expr::If/While/Match/Block)` and is handled by the
+        // expression recursion above.
+        _ => false,
+    }
+}
+
+fn expr_contains_task_spawn(e: &zz_span_ast::ast::Expr) -> bool {
+    match e {
+        zz_span_ast::ast::Expr::Call { callee, .. } => {
+            callee_name(callee).as_deref() == Some("task.spawn")
+        }
+        zz_span_ast::ast::Expr::Block(b) => block_contains_task_spawn(b),
+        zz_span_ast::ast::Expr::If {
+            cond, then, els, ..
+        } => {
+            expr_contains_task_spawn(cond)
+                || block_contains_task_spawn(then)
+                || els.as_ref().map_or(false, |e| expr_contains_task_spawn(e))
+        }
+        zz_span_ast::ast::Expr::While { cond, body, .. } => {
+            expr_contains_task_spawn(cond) || block_contains_task_spawn(body)
+        }
+        zz_span_ast::ast::Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            expr_contains_task_spawn(scrutinee)
+                || arms.iter().any(|a| expr_contains_task_spawn(&a.body))
+        }
+        zz_span_ast::ast::Expr::Closure { body, .. } => expr_contains_task_spawn(&*body),
+        zz_span_ast::ast::Expr::Try { expr, .. } => expr_contains_task_spawn(expr),
+        _ => false,
+    }
+}
+
+/// Collect every global variable name read or written inside function
+/// `dotted_name` (a `cg.edges` / `tp.funcs` key such as `ns.func` or `func`),
+/// including code inside closures and nested functions, since all of it runs
+/// inside the task when the function is task-reachable.
+fn collect_globals_in_func(
+    tp: &TypedProgram,
+    dotted_name: &str,
+    out: &mut std::collections::HashSet<String>,
+) {
+    for stmt in &tp.program.stmts {
+        if let zz_span_ast::ast::Stmt::Func { name, body, .. } = stmt {
+            if name.join(".") == dotted_name {
+                collect_globals_from_block_deep(tp, body, out);
+                return;
+            }
+        }
+    }
+}
+
+/// Like [`collect_globals_from_block`] but also descends into closure and
+/// nested-function bodies, because all code in a task-reachable function
+/// executes inside the task.
+fn collect_globals_from_block_deep(
+    tp: &TypedProgram,
+    b: &zz_span_ast::ast::Block,
+    out: &mut std::collections::HashSet<String>,
+) {
+    for s in &b.stmts {
+        collect_globals_from_stmt_deep(tp, s, out);
+    }
+}
+
+fn collect_globals_from_stmt_deep(
+    tp: &TypedProgram,
+    s: &zz_span_ast::ast::Stmt,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match s {
+        zz_span_ast::ast::Stmt::Expr(e) => collect_globals_from_expr_deep(tp, e, out),
+        zz_span_ast::ast::Stmt::Assign { target, value, .. } => {
+            collect_globals_from_expr_deep(tp, target, out);
+            collect_globals_from_expr_deep(tp, value, out);
+        }
+        zz_span_ast::ast::Stmt::CompoundAssign { target, value, .. } => {
+            collect_globals_from_expr_deep(tp, target, out);
+            collect_globals_from_expr_deep(tp, value, out);
+        }
+        zz_span_ast::ast::Stmt::Func { body, .. } => collect_globals_from_block_deep(tp, body, out),
+        zz_span_ast::ast::Stmt::For { body, .. } => collect_globals_from_block_deep(tp, body, out),
+        zz_span_ast::ast::Stmt::Atomic { body, .. } => {
+            collect_globals_from_block_deep(tp, body, out)
+        }
+        zz_span_ast::ast::Stmt::Return { value, .. } => {
+            if let Some(v) = value {
+                collect_globals_from_expr_deep(tp, v, out);
+            }
+        }
+        zz_span_ast::ast::Stmt::Defer { expr, .. } => {
+            collect_globals_from_expr_deep(tp, expr, out);
+        }
+        zz_span_ast::ast::Stmt::Destructure { value, .. } => {
+            collect_globals_from_expr_deep(tp, value, out);
+        }
+        // Break, Continue, Decl, Import, Struct, Trait, Impl, TypeAlias,
+        // Enum, ExternBlock, Link: no global accesses.
+        _ => {}
+    }
+}
+
+fn collect_globals_from_expr_deep(
+    tp: &TypedProgram,
+    e: &zz_span_ast::ast::Expr,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match e {
+        zz_span_ast::ast::Expr::Ident { name, .. } => {
+            if tp.bindings.contains_key(name) {
+                out.insert(name.clone());
+            }
+        }
+        zz_span_ast::ast::Expr::Path { parts, .. } => {
+            if let Some(bare) = binding_basename(tp, parts) {
+                out.insert(bare);
+            }
+        }
+        zz_span_ast::ast::Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            collect_globals_from_expr_deep(tp, callee, out);
+            for a in args {
+                collect_globals_from_expr_deep(tp, a, out);
+            }
+            for (_, v) in named {
+                collect_globals_from_expr_deep(tp, v, out);
+            }
+        }
+        zz_span_ast::ast::Expr::Block(b) => collect_globals_from_block_deep(tp, b, out),
+        zz_span_ast::ast::Expr::If {
+            cond, then, els, ..
+        } => {
+            collect_globals_from_expr_deep(tp, cond, out);
+            collect_globals_from_block_deep(tp, then, out);
+            if let Some(e) = els {
+                collect_globals_from_expr_deep(tp, e, out);
+            }
+        }
+        zz_span_ast::ast::Expr::While { cond, body, .. } => {
+            collect_globals_from_expr_deep(tp, cond, out);
+            collect_globals_from_block_deep(tp, body, out);
+        }
+        zz_span_ast::ast::Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_globals_from_expr_deep(tp, scrutinee, out);
+            for a in arms {
+                collect_globals_from_expr_deep(tp, &a.body, out);
+            }
+        }
+        zz_span_ast::ast::Expr::Closure { body, .. } => {
+            collect_globals_from_expr_deep(tp, &*body, out);
+        }
+        zz_span_ast::ast::Expr::Try { expr, .. } => collect_globals_from_expr_deep(tp, expr, out),
+        zz_span_ast::ast::Expr::Array { elems, .. } => {
+            for e in elems {
+                collect_globals_from_expr_deep(tp, e, out);
+            }
+        }
+        zz_span_ast::ast::Expr::Dict { entries, .. } => {
+            for (k, v) in entries {
+                collect_globals_from_expr_deep(tp, k, out);
+                collect_globals_from_expr_deep(tp, v, out);
+            }
+        }
+        zz_span_ast::ast::Expr::Paren { expr, .. } => collect_globals_from_expr_deep(tp, expr, out),
+        zz_span_ast::ast::Expr::Tuple { items, .. } => {
+            for e in items {
+                collect_globals_from_expr_deep(tp, e, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -927,6 +1157,9 @@ fn collect_assigned_in_stmt(
         zz_span_ast::ast::Stmt::For { body, .. } => {
             collect_assigned_in_block(tp, body, out, decl_spans);
         }
+        zz_span_ast::ast::Stmt::Expr(e) => {
+            collect_assigned_in_expr(tp, e, out, decl_spans);
+        }
         _ => {}
     }
 }
@@ -939,6 +1172,70 @@ fn collect_assigned_in_block(
 ) {
     for s in &block.stmts {
         collect_assigned_in_stmt(tp, s, out, decl_spans);
+    }
+}
+
+/// Recursively collect globals assigned (written) inside an expression,
+/// descending into blocks, conditionals, loops, match arms and closures.
+/// Assignments inside closures count because that code may run in a task.
+fn collect_assigned_in_expr(
+    tp: &TypedProgram,
+    e: &zz_span_ast::ast::Expr,
+    out: &mut std::collections::HashSet<String>,
+    decl_spans: &mut std::collections::HashMap<String, Span>,
+) {
+    match e {
+        zz_span_ast::ast::Expr::Block(b) => {
+            collect_assigned_in_block(tp, b, out, decl_spans);
+        }
+        zz_span_ast::ast::Expr::If { then, els, .. } => {
+            collect_assigned_in_block(tp, then, out, decl_spans);
+            if let Some(el) = els {
+                collect_assigned_in_expr(tp, el, out, decl_spans);
+            }
+        }
+        zz_span_ast::ast::Expr::While { body, .. } => {
+            collect_assigned_in_block(tp, body, out, decl_spans);
+        }
+        zz_span_ast::ast::Expr::Match { arms, .. } => {
+            for a in arms {
+                collect_assigned_in_expr(tp, &a.body, out, decl_spans);
+            }
+        }
+        zz_span_ast::ast::Expr::Closure { body, .. } => {
+            collect_assigned_in_expr(tp, &*body, out, decl_spans);
+        }
+        zz_span_ast::ast::Expr::Try { expr, .. } => {
+            collect_assigned_in_expr(tp, expr, out, decl_spans);
+        }
+        zz_span_ast::ast::Expr::Call { args, named, .. } => {
+            for a in args {
+                collect_assigned_in_expr(tp, a, out, decl_spans);
+            }
+            for (_, v) in named {
+                collect_assigned_in_expr(tp, v, out, decl_spans);
+            }
+        }
+        zz_span_ast::ast::Expr::Array { elems, .. } => {
+            for e in elems {
+                collect_assigned_in_expr(tp, e, out, decl_spans);
+            }
+        }
+        zz_span_ast::ast::Expr::Dict { entries, .. } => {
+            for (k, v) in entries {
+                collect_assigned_in_expr(tp, k, out, decl_spans);
+                collect_assigned_in_expr(tp, v, out, decl_spans);
+            }
+        }
+        zz_span_ast::ast::Expr::Paren { expr, .. } => {
+            collect_assigned_in_expr(tp, expr, out, decl_spans);
+        }
+        zz_span_ast::ast::Expr::Tuple { items, .. } => {
+            for e in items {
+                collect_assigned_in_expr(tp, e, out, decl_spans);
+            }
+        }
+        _ => {}
     }
 }
 

@@ -1331,10 +1331,15 @@ pub(crate) fn prepare_run_with_features(
     let mut r2_errors: Vec<zz_frontend::diag::RawDiag> = Vec::new();
     zz_hir::callgraph::check_r2_globals_vs_tasks(&typed.program, &cg, &mut r2_errors);
     if !r2_errors.is_empty() {
-        return Err(format!(
-            "{} error(s) checking plain globals vs tasks",
+        let mut msg = format!(
+            "{} error(s) checking plain globals vs tasks:",
             r2_errors.len()
-        ));
+        );
+        for d in &r2_errors {
+            let code = d.code.map(|c| format!("[{c}] ")).unwrap_or_default();
+            msg.push_str(&format!("\n{code}{}", d.message));
+        }
+        return Err(msg);
     }
     let interp = setup_interp(
         natives,
