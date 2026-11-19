@@ -361,6 +361,18 @@ impl Compiler {
                 _ => None,
             })
             .collect();
+        // Pre-populate state_names from all `state` declarations so that
+        // functions compiled later can resolve state bindings. Declarations
+        // may appear after functions in source order (the loader does not
+        // guarantee declaration-before-use ordering), so we collect them
+        // up front (mirrors the type checker's Pass 2 reordering).
+        for stmt in &program.stmts {
+            if let Stmt::Decl { name, is_state, .. } = stmt {
+                if *is_state {
+                    c.state_names.insert(name.name.clone());
+                }
+            }
+        }
         for (i, stmt) in program.stmts.iter().enumerate() {
             // Every statement but the last is discarded by the `Op::Pop`
             // below, so tell the compiler its value is already dead.
@@ -498,6 +510,18 @@ impl Compiler {
                 _ => None,
             })
             .collect();
+        // Pre-populate state_names from all `state` declarations so that
+        // functions compiled later can resolve state bindings. Declarations
+        // may appear after functions in source order (the loader does not
+        // guarantee declaration-before-use ordering), so we collect them
+        // up front (mirrors the type checker's Pass 2 reordering).
+        for stmt in &program.stmts {
+            if let Stmt::Decl { name, is_state, .. } = stmt {
+                if *is_state {
+                    c.state_names.insert(name.name.clone());
+                }
+            }
+        }
         for (i, stmt) in program.stmts.iter().enumerate() {
             // Every statement but the last is discarded by the `Op::Pop`
             // below, so tell the compiler its value is already dead.

@@ -610,6 +610,21 @@ impl ScopeOps for Checker {
             // sites handle generic instantiation via the Named path below.
             return Some(Type::Named(name.to_string()));
         }
+        // State bindings (module-level `state`) live in the shared registry,
+        // not in env scopes. If a state name was not found in env (e.g. inside
+        // an `atomic { }` block where env scopes are nested), fall back to
+        // `state_names` with a fresh inference variable; the type will be
+        // resolved by unification at the use site.
+        if self.state_names.contains(name) {
+            return Some(self.unifier.fresh_var());
+        }
+        // Also try the bare (last-segment) name for state bindings that were
+        // registered before namespace rewriting.
+        if let Some(bare) = name.rsplit('.').next() {
+            if bare != name && self.state_names.contains(bare) {
+                return Some(self.unifier.fresh_var());
+            }
+        }
         None
     }
 
@@ -646,8 +661,11 @@ impl ScopeOps for Checker {
     /// bindings/functions), then as a struct-field walk from the first part.
     fn lookup_path(&mut self, parts: &[String], span: Span) -> Type {
         let joined = parts.join(".");
-        if let Some(t) = self.lookup_opt(&joined) {
-            return t;
+        match self.lookup_opt(&joined) {
+            Some(t) => {
+                return t;
+            }
+            None => {}
         }
         let Some(root) = self.lookup_opt(&parts[0]) else {
             // Suggest typo corrections for the root name.
