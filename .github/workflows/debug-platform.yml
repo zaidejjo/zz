@@ -93,10 +93,11 @@ jobs:
               echo "cmd=ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity batched_native_parity" >> $GITHUB_OUTPUT
               ;;
             windows-latest)
-              echo "cmd=ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity edge_cast_float_nan edge_float_format" >> $GITHUB_OUTPUT
+              # cargo test takes ONE test-name filter: run each fixture separately.
+              echo "cmd=ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity edge_cast_float_nan && ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity edge_float_format" >> $GITHUB_OUTPUT
               ;;
             ubuntu-latest)
-              echo "cmd=ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity batched_native_parity && cargo test -p zz_cli --test dual_engine_parity edge_cast_float_nan edge_float_format" >> $GITHUB_OUTPUT
+              echo "cmd=ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity batched_native_parity && ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity edge_cast_float_nan && ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity edge_float_format" >> $GITHUB_OUTPUT
               ;;
           esac
           if [ -n "${{ github.event.inputs.test }}" ]; then
