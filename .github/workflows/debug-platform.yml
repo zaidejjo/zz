@@ -1,22 +1,27 @@
 name: Debug multiplatform CI failures
 
+# Debug only: run the failing macOS/Windows/Linux CI tests on each platform,
+# capture backtraces + dumped C + crash reports, upload artifacts on always().
+# Triggered manually (workflow_dispatch: os/test inputs) and on every push to
+# fix/multiplatform-ci so the branch is continuously re-checked.
+#
+# Each job is capped at 15 min. Test commands carry their own internal timeouts
+# (batched_parity: 600s native / 120s VM per driver; edge_float: ~30s), so a
+# hang is bounded per driver and the job cap is the hard stop.
 on:
   workflow_dispatch:
     inputs:
       os:
-        description: "Comma list of OSes to debug: macos, windows, linux"
+        description: "Comma list: macos, windows, linux"
         required: true
         default: "macos,windows,linux"
       test:
-        description: "Test name filter(s), space separated (e.g. batched_native_parity edge_float_format)"
+        description: "Test name filter(s), space separated"
         required: false
         default: ""
   push:
     branches: [fix/multiplatform-ci]
 
-# One debug job per OS. fail-fast false so every platform reports.
-# Hard cap 15 min per job; every test command is wrapped in a perl alarm
-# (universal hard timeout — macOS has no GNU `timeout`).
 jobs:
   debug:
     name: debug ${{ matrix.os }}
@@ -45,12 +50,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: debug-${{ matrix.os }}
-      - name: print inputs
-        shell: bash
-        run: |
-          echo "os input: ${{ github.event.inputs.os }}"
-          echo "test input: ${{ github.event.inputs.test }}"
-          echo "runner: ${{ matrix.os }}"
       - name: install native deps (linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -80,8 +79,7 @@ jobs:
       - name: build zz debug
         id: build
         shell: bash
-        run: |
-          perl -e 'alarm shift; exec @ARGV or die' 540 -- cargo build -p zz_cli
+        run: cargo build -p zz_cli
       - name: determine test command
         id: pick
         shell: bash
@@ -90,8 +88,8 @@ jobs:
           case "$os" in
             macos-latest)
               # macOS failing drivers: 0 (stderr diff), 4 (SIGABRT), 5 (native hang),
-              # 6 (extra native diagnostics), 8 (VM hang). Run the full batched
-              # native parity test; it reports every driver failure at the end.
+              # 6 (extra native diagnostics), 8 (VM hang). One batched run reports
+              # every driver failure at the end.
               echo "cmd=ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity batched_native_parity" >> $GITHUB_OUTPUT
               ;;
             windows-latest)
@@ -114,8 +112,7 @@ jobs:
           fi
           echo "RUNNING: $cmd"
           set +e
-          # 13-minute hard alarm so the job never hangs past its 15-min cap.
-          perl -e 'alarm shift; exec @ARGV or die' 780 -- bash -c "$cmd"
+          bash -c "$cmd"
           rc=$?
           echo "exit_code=$rc" >> $GITHUB_OUTPUT
           echo "ran_cmd=$cmd" >> $GITHUB_OUTPUT
@@ -126,7 +123,6 @@ jobs:
         run: |
           echo "=== inspecting zz_native_rt.lib / libzz_rt.a for zz_float_format_raw ==="
           set +e
-          # Find the native rt staticlib (release/debug target dirs).
           rt=$(find target -name 'zz_native_rt.lib' -o -name 'libzz_native_rt.a' 2>/dev/null | head -1)
           echo "rt archive: $rt"
           if [ -n "$rt" ]; then
