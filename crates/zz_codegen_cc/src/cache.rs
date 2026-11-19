@@ -391,11 +391,47 @@ fn compile_rt_a(
         )))
     })?;
     // lib.exe: lib.exe /out:<archive> <object> ; ar: ar rcs <archive> <object>
+    // On Windows/MSVC, try lib.exe then llvm-lib.exe (ships with LLVM/clang,
+    // which is always on PATH when clang is). Fall back to reporting the last
+    // Io error if none is found.
     let archive_out = if use_lib {
-        Command::new("lib.exe")
-            .arg(format!("/out:{}", tmp_archive_str))
-            .arg(o_path_str)
-            .output()?
+        // On Windows/MSVC, clang drives link.exe which needs a COFF .lib.
+        // Try lib.exe then llvm-lib.exe (ships with LLVM/clang, always on
+        // PATH when clang is). Report the last Io error if none is found.
+        let mut last_err: Option<std::io::Error> = None;
+        let out = 'arch: {
+            for archiver in ["lib.exe", "llvm-lib.exe"] {
+                match Command::new(archiver)
+                    .arg(format!("/out:{}", tmp_archive_str))
+                    .arg(o_path_str)
+                    .output()
+                {
+                    Ok(o) => {
+                        if o.status.success() {
+                            break 'arch o;
+                        }
+                        // Non-zero exit: real failure, don't fall back.
+                        let _ = std::fs::remove_file(&c_path);
+                        let _ = std::fs::remove_file(&o_path);
+                        let _ = std::fs::remove_file(&tmp_archive);
+                        return Err(BuildError::CompileFailed {
+                            stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
+                        });
+                    }
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            return Err(BuildError::Io(std::io::Error::other(
+                last_err
+                    .map(|e| {
+                        format!(
+                            "no MSVC-compatible archiver found (tried lib.exe, llvm-lib.exe): {e}"
+                        )
+                    })
+                    .unwrap_or_else(|| "no MSVC-compatible archiver found".to_string()),
+            )));
+        };
+        out
     } else {
         Command::new("ar")
             .args(["rcs", tmp_archive_str, o_path_str])
