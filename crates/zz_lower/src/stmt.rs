@@ -1910,8 +1910,20 @@ impl Lowerer {
             | Stmt::Enum { .. }
             | Stmt::Impl { .. }
             | Stmt::Trait { .. }
-            | Stmt::Import { .. }
-            | Stmt::Atomic { .. } => {}
+            | Stmt::Import { .. } => {}
+            Stmt::Atomic { body, .. } => {
+                // D3: execute the body while holding the state lock.
+                // D8: only lock when concurrency is reachable.
+                if self.needs_state_lock() {
+                    out.push_str("    zz_state_lock();\n");
+                }
+                for s in &body.stmts {
+                    self.emit_stmt(s, names, out, false);
+                }
+                if self.needs_state_lock() {
+                    out.push_str("    zz_state_unlock();\n");
+                }
+            }
             // Top-level only: emitted in the preamble by `Lowerer::lower`.
             Stmt::ExternBlock { .. } | Stmt::Link { .. } => {}
         }

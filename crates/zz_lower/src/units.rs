@@ -216,6 +216,13 @@ impl Lowerer {
                     if !init_order.contains(&ns) {
                         init_order.push(ns.clone());
                     }
+                    // State decls may be processed under a non-prelude
+                    // namespace (e.g. a function changed current_ns before
+                    // the state decl was reached). Ensure _prelude's init
+                    // runs too so state_init executes before zz_main.
+                    if *is_state && !init_order.contains(&PRELUDE_NS.to_string()) {
+                        init_order.push(PRELUDE_NS.to_string());
+                    }
                     // State decls are initialized under the state lock
                     // below (after the plain-global loop).
                     if *is_state {
@@ -588,12 +595,7 @@ impl Lowerer {
                     code.push('\n');
                 }
             }
-            let mut init_body = inits.get(ns).cloned().unwrap_or_default();
-            // State init must run before any user code in zz_init__prelude()
-            // that reads state variables.
-            if ns == PRELUDE_NS && !state_init.is_empty() {
-                init_body.insert_str(0, &state_init);
-            }
+            let init_body = inits.get(ns).cloned().unwrap_or_default();
             code.push_str(&format!(
                 "void zz_init_{mns}(void) {{\n{init_body}}}\n",
                 mns = mangle(ns)
@@ -624,7 +626,8 @@ impl Lowerer {
             "    return 0;".to_string()
         };
         let entry_glue = format!(
-            "void zz_main(void) {{\n{driver}}}\n\nint zz_call_main(void) {{\n    {main_decl}\n{main_tail}\n}}\n"
+            "void zz_main(void) {{\n{state_init}{driver}}}\n\nint zz_call_main(void) {{\n    {main_decl}\n{main_tail}\n}}\n",
+            state_init = state_init
         );
         let with_main = if self.reachable_funcs.contains(&self.entry_main) {
             let m = format!("zz_fn_{}", mangle(&self.entry_main));

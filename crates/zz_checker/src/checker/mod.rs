@@ -943,7 +943,7 @@ fn check_program_impl(
         if let Stmt::Decl {
             name,
             pub_,
-            is_state,
+            is_state: _,
             ..
         } = stmt
         {

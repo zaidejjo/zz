@@ -3,5 +3,5 @@ state hits := 0
 
 func main() {
     hits = 42
-    println(hits)
+    println("hits = {}", hits)
 }

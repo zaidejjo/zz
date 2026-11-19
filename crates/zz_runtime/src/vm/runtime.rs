@@ -659,13 +659,14 @@ impl Vm {
         macro_rules! yield_check {
             () => {{
                 if crate::value::on_executor() {
-                    // D3: cannot yield while holding the state lock.
-                    if self.state_lock_depth > 0 {
-                        return Err(
-                            self.error("yield or block inside `atomic { }` block", Span::default())
-                        );
-                    }
                     if let Some(reason) = take_yield_slow() {
+                        // D3: cannot yield while holding the state lock.
+                        if self.state_lock_depth > 0 {
+                            return Err(self.error(
+                                "yield or block inside `atomic { }` block",
+                                Span::default(),
+                            ));
+                        }
                         return Ok(Flow::Yield(reason));
                     }
                 }
@@ -1048,20 +1049,28 @@ impl Vm {
                     // Acquire the state lock for the whole body (D3).
                     let _guard = reg.lock();
                     self.state_lock_depth += 1;
-                    // Run the body in a dedicated sub-Vm so it executes as an
-                    // isolated chunk: when its frame pops, run_loop returns
-                    // instead of continuing into the enclosing chunk's code.
-                    let mut sub = Vm::new();
-                    // Mirror the reentrancy depth so state ops inside the body
-                    // see depth > 0 and access the map directly (no re-lock).
-                    sub.state_lock_depth = self.state_lock_depth;
-                    let result = sub.run_chunk(body, interp);
-                    self.state_lock_depth -= 1;
-                    // A yield while holding the state lock is a D3 violation.
-                    if matches!(result, Ok(Flow::Yield(_))) {
-                        return Err(self.error("yield or block inside `atomic { }` block", *span));
-                    }
-                    return result;
+                    // Push a frame for the atomic body so it can access outer
+                    // locals (function parameters, etc.) via the outer Vm's
+                    // stack, and so return/break/continue propagate out of
+                    // atomic correctly without stopping the VM when atomic
+                    // is used at top level.
+                    self.frames.last_mut().unwrap().ip = ip;
+                    self.frames.push(Frame {
+                        chunk: Arc::clone(body),
+                        ip: 0,
+                        prev_env: interp.env.clone(),
+                        stack_base: self.frames.last().unwrap().stack_base,
+                        self_home: None,
+                        defer_stack: Vec::new(),
+                        func_span: Span::default(),
+                    });
+                    // Switch to the body's chunk so the next op executed is
+                    // the body's first op. When the body chunk ends, its frame
+                    // is popped and re_cache!() restores ip from the caller
+                    // frame (past Op::Atomic), so execution continues in the
+                    // caller's chunk.
+                    re_cache!();
+                    yield_check!();
                 }
                 Op::VecPush { home, span } => {
                     let elem = self.stack.pop().unwrap();
@@ -3719,13 +3728,21 @@ impl Vm {
     fn enter_call_frame(
         &mut self,
         chunk: Arc<Chunk>,
-        env: EnvLink,
+        mut env: EnvLink,
         args: Vec<Value>,
         span: Span,
         interp: &mut Interp,
         self_home: Option<TakeHome>,
     ) {
         let stack_base = self.stack.len();
+        // Bind parameter names in the callee's env so they're accessible
+        // via LoadVar from within atomic { } blocks and other nested
+        // contexts where the env lookup doesn't walk the stack.
+        for (i, p) in chunk.params.iter().enumerate() {
+            if i < args.len() {
+                env.define(&p.name.name, args[i].clone());
+            }
+        }
         let mut args = args;
         // Append (not extend+drain): elements move onto the stack while
         // the buffer keeps its allocation and goes back to the scratch

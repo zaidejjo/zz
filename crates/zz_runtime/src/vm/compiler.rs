@@ -2785,28 +2785,6 @@ impl Compiler {
     /// statement can then skip bookkeeping nothing reads. See the
     /// `Stmt::For` arm.
     fn compile_stmt(&mut self, stmt: &Stmt, value_discarded: bool) -> StmtValue {
-        let stmt_kind = match stmt {
-            Stmt::Decl { .. } => "Decl",
-            Stmt::Func { .. } => "Func",
-            Stmt::Atomic { .. } => "Atomic",
-            Stmt::Assign { .. } => "Assign",
-            Stmt::Expr { .. } => "Expr",
-            Stmt::Return { .. } => "Return",
-            Stmt::For { .. } => "For",
-            Stmt::Break { .. } => "Break",
-            Stmt::Continue { .. } => "Continue",
-            Stmt::Defer { .. } => "Defer",
-            Stmt::CompoundAssign { .. } => "CompoundAssign",
-            Stmt::Import { .. } => "Import",
-            Stmt::Enum { .. } => "Enum",
-            Stmt::Struct { .. } => "Struct",
-            Stmt::Trait { .. } => "Trait",
-            Stmt::Impl { .. } => "Impl",
-            Stmt::Destructure { .. } => "Destructure",
-            Stmt::ExternBlock { .. } => "ExternBlock",
-            Stmt::Link { .. } => "Link",
-            Stmt::TypeAlias { .. } => "TypeAlias",
-        };
         match stmt {
             Stmt::Decl {
                 name,
