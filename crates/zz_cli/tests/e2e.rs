@@ -1047,6 +1047,7 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_stdlib_cell_test, "stdlib", "cell_test.zz");
 e2e_success_test!(e2e_stdlib_state_counter, "stdlib", "state_counter.zz");
+e2e_success_test!(e2e_stdlib_state_simple, "stdlib", "state_simple.zz");
 e2e_success_test!(
     e2e_stdlib_option_result_unwrap_test,
     "stdlib",
