@@ -466,7 +466,10 @@ static inline zz_value zz_vec_append(zz_value arr, zz_value item, int *err) {
             a->items = new_items;
             if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_STACK_MAGIC
                 || a->refs == ZZ_ARRAY_ARENA_MAGIC) {
-                a->refs = 0;
+                // Arena→heap migration: the items buffer is now malloc'd and
+                // individually owned, so give it a real refcount (1). The
+                // header stays on the arena (arena_hdr) and is NOT freed here.
+                a->refs = 1;
             }
         } else {
             a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));
@@ -506,7 +509,10 @@ static inline void zz_array_push_adopt(zz_value arr, zz_value item) {
             a->items = new_items;
             if (a->refs == ZZ_ARRAY_LIT_MAGIC || a->refs == ZZ_ARRAY_STACK_MAGIC
                 || a->refs == ZZ_ARRAY_ARENA_MAGIC) {
-                a->refs = 0;
+                // Arena→heap migration: the items buffer is now malloc'd and
+                // individually owned, so give it a real refcount (1). The
+                // header stays on the arena (arena_hdr) and is NOT freed here.
+                a->refs = 1;
             }
         } else {
             a->items = (zz_value *)realloc(a->items, new_cap * sizeof(zz_value));

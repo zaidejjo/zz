@@ -259,6 +259,7 @@ zz_value zz_array_new_arena(zz_arena *arena) {
         // in bulk at arena reset. Set refs to a sentinel so zz_release
         // knows not to free them individually.
         a->refs = 0;
+        a->arena_hdr = true;
     } else {
         a = (zz_array *)calloc(1, sizeof(zz_array));
         a->refs = 1;
@@ -277,7 +278,9 @@ zz_value zz_array_new_arena_sized(zz_arena *arena, size_t cap) {
     zz_array *a;
     if (arena) {
         a = (zz_array *)zz_arena_alloc(arena, sizeof(zz_array), 8);
+        memset(a, 0, sizeof(zz_array));
         a->refs = ZZ_ARRAY_ARENA_MAGIC;
+        a->arena_hdr = true;
         a->len = 0;
         a->cap = cap;
         if (cap > 0) {
@@ -304,7 +307,9 @@ zz_value zz_array_new_lit(zz_arena *arena, size_t n) {
         // Header AND items buffer both bump-allocated: zero realloc, zero
         // malloc. refs = LIT_MAGIC sentinel marks the no-op release path.
         a = (zz_array *)zz_arena_alloc(arena, sizeof(zz_array), 8);
+        memset(a, 0, sizeof(zz_array));
         a->refs = ZZ_ARRAY_LIT_MAGIC;
+        a->arena_hdr = true;
         a->len = 0;
         a->cap = n;
         // NOTE: when n==0 the items buffer would be a zero-size arena
