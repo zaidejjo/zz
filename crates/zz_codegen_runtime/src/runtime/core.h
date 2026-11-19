@@ -786,6 +786,22 @@ static inline zz_vbox *zz_vbox_of(zz_value *payload) {
 // clone the inner value so the box owns an independent reference.
 static inline zz_value zz_clone(zz_value v);
 
+// Load a `state` value with an uninitialized-guard (D1). Aborts with a clear
+// diagnostic if the binding's initializer has not run yet. `slot` points at
+// the `zz_state_*` global; `init_flag` is its parallel `zz_state_init_*`
+// bool, set to true by the generated init code.
+static inline zz_value zz_state_load_checked(zz_value *slot, int *init_flag,
+                                             const char *name) {
+    if (!*init_flag) {
+        fprintf(stderr,
+                "error: read of `state` `%s` before its initializer ran\n"
+                "hint: ensure the `state` declaration executes before any read",
+                name);
+        abort();
+    }
+    return zz_clone(*slot);
+}
+
 // Allocate a box owning one reference to `inner`; returns the payload
 // pointer to store in the wrapper (NULL if the allocation failed).
 static inline zz_value *zz_vbox_new(zz_value inner) {

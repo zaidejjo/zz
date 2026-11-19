@@ -870,10 +870,8 @@ impl Lowerer {
                         // names.lookup() returns None for them — handle here.
                         if self.state_set.contains(name.as_str()) {
                             let cid = Lowerer::state_cid(name);
-                            let val = self.emit_expr(value, names, out);
-                            out.push_str(&format!(
-                                "    zz_state_lock();\n    {cid} = zz_clone({val});\n    zz_state_unlock();\n"
-                            ));
+                            let flag = format!("{}_init", cid);
+                            self.emit_state_write(&cid, &flag, &val, out);
                             return;
                         }
                         if let Some(cid) = names.lookup(name.as_str()).map(|s| s.to_string()) {
@@ -965,9 +963,8 @@ impl Lowerer {
                         // names.lookup() returns None for them — handle here.
                         if self.state_set.contains(&joined) {
                             let cid = Lowerer::state_cid(&joined);
-                            out.push_str(&format!(
-                                "    zz_state_lock();\n    {cid} = zz_clone({val});\n    zz_state_unlock();\n"
-                            ));
+                            let flag = format!("{}_init", cid);
+                            self.emit_state_write(&cid, &flag, &val, out);
                             return;
                         }
                         // Handle struct field assignment: p.x = 99 or r.origin.x = 42
@@ -1590,12 +1587,16 @@ impl Lowerer {
                     _ => None,
                 };
                 if let Some(cid) = state_cid {
+                    let flag = format!("{}_init", cid);
                     let val = self.emit_expr(value, names, out);
-                    let tmp = names.fresh("_old");
+                    let tmp_cur = names.fresh("_cur");
                     let op_sym = crate::context::binop_runtime_op(op);
-                    out.push_str(&format!(
-                        "    zz_state_lock();\n    zz_value {tmp} = zz_clone({cid});\n    {cid} = zz_clone(zz_binop({op_sym}, {tmp}, {val}));\n    zz_state_unlock();\n"
-                    ));
+                    let name_str = match target {
+                        Expr::Ident { name, .. } => name.as_str().to_string(),
+                        Expr::Path { parts, .. } => parts.join("."),
+                        _ => unreachable!(),
+                    };
+                    self.emit_state_rmw(&cid, &flag, &name_str, &tmp_cur, op_sym, &val, out);
                     return;
                 }
                 // RHS first (same order as `=`).

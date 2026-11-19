@@ -490,15 +490,15 @@ impl Lowerer {
                     }
                 }
                 None => {
-                    // State variable read: if `name` is a state binding that
-                    // wasn't rewritten to a dotted path (e.g. inside a native
-                    // call argument), read it under the state lock.
+                    // State variable read: read under the state lock when
+                    // concurrency is reachable, else plain access (D8
+                    // lock elision). `zz_state_load_checked` still guards
+                    // read-before-init (D1).
                     if self.state_set.contains(name) {
                         let cid = Lowerer::state_cid(name);
+                        let flag = format!("{}_init", cid);
                         let tmp = names.fresh("_s");
-                        out.push_str(&format!(
-                            "    zz_state_lock();\n    zz_value {tmp} = zz_clone({cid});\n    zz_state_unlock();\n"
-                        ));
+                        self.emit_state_read(&cid, &flag, name, &tmp, out);
                         return tmp;
                     }
                     // First-class reference to a named function
@@ -529,10 +529,9 @@ impl Lowerer {
                 let joined = parts.join(".");
                 if self.state_set.contains(&joined) {
                     let cid = Lowerer::state_cid(&joined);
+                    let flag = format!("{}_init", cid);
                     let tmp = names.fresh("_s");
-                    out.push_str(&format!(
-                        "    zz_state_lock();\n    zz_value {tmp} = zz_clone({cid});\n    zz_state_unlock();\n"
-                    ));
+                    self.emit_state_read(&cid, &flag, &joined, &tmp, out);
                     return tmp;
                 }
                 // Unit-variant value (`Token.Eof`, no parens): precise via

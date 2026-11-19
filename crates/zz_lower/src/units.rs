@@ -311,11 +311,10 @@ impl Lowerer {
                 }
                 let zz_name = &name.name;
                 let gid = Lowerer::state_cid(zz_name);
+                let flag = format!("{}_init", gid);
                 let mut out = String::new();
                 let val = self.emit_expr(value, &mut names, &mut out);
-                out.push_str(&format!(
-                    "    zz_state_lock();\n    {gid} = zz_clone({val});\n    zz_state_unlock();\n"
-                ));
+                self.emit_state_write(&gid, &flag, &val, &mut out);
                 state_init.push_str(&out);
             }
         }
@@ -382,9 +381,9 @@ impl Lowerer {
             }
         }
         // `state` bindings: `extern zz_value zz_state_<mangled>;` — same
-        // ownership split as plain globals.
+        // ownership split as plain globals. Each has a parallel init flag.
         for (zz_name, cid) in &self.state_list {
-            let line = format!("extern zz_value {cid};\n");
+            let line = format!("extern zz_value {cid};\nextern int {cid}_init;\n");
             let owner = owners
                 .get(zz_name)
                 .map(|o| o.as_str())
@@ -653,7 +652,7 @@ impl Lowerer {
         // `extern` in the header above).
         let mut state_defs = String::new();
         for (_zz_name, cid) in &self.state_list {
-            state_defs.push_str(&format!("zz_value {cid};\n"));
+            state_defs.push_str(&format!("zz_value {cid};\nint {cid}_init = 0;\n"));
         }
         let entry_code = format!(
             "zz_arena _static_arena;\nzz_arena _func_arena;\n{state_defs}__attribute__((constructor)) static void zz_init_process_arenas(void) {{\n    zz_arena_init(&_static_arena, 65536);\n    zz_arena_init(&_func_arena, 65536);\n}}\n{with_main}{trait_defs}{entry_glue}",

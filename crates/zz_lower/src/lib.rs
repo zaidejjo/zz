@@ -350,8 +350,12 @@ impl Lowerer {
         // (`zz_state_<mangled>`) accessed under the process-global state
         // lock. Declared here with external linkage so every TU shares the
         // same binding; initialized in zz_main under the lock.
+        // Each has a parallel `zz_state_init_*` bool (false until the
+        // initializer runs) used by `zz_state_load_checked` to abort on
+        // read-before-init (D1).
         for (_, cid) in &self.state_list {
             globals_decl.push_str(&format!("zz_value {cid};\n"));
+            globals_decl.push_str(&format!("static int {cid}_init = 0;\n"));
         }
         // Module-level static arena for read-only global constants
         // (AllocClass::Static). Lives for the process lifetime; initialized
@@ -576,11 +580,10 @@ impl Lowerer {
                 }
                 let zz_name = &name.name;
                 let gid = Lowerer::state_cid(zz_name);
+                let flag = format!("{}_init", gid);
                 let mut out = String::new();
                 let val = self.emit_expr(value, &mut names, &mut out);
-                out.push_str(&format!(
-                    "    zz_state_lock();\n    {gid} = zz_clone({val});\n    zz_state_unlock();\n"
-                ));
+                self.emit_state_write(&gid, &flag, &val, &mut out);
                 state_init.push_str(&out);
             }
         }

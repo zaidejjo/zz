@@ -986,7 +986,18 @@ impl Vm {
                     } else {
                         reg.get(name)
                     };
-                    self.stack.push(v.unwrap_or(Value::Unit));
+                    match v {
+                        Some(v) => self.stack.push(v),
+                        None => {
+                            return Err(self.error(
+                                format!(
+                                    "read of `state` `{name}` before its initializer ran",
+                                    name = name
+                                ),
+                                *span,
+                            ));
+                        }
+                    }
                 }
                 Op::StoreState(name, span) => {
                     let v = self.stack.pop().unwrap();

@@ -5021,8 +5021,10 @@ impl<'a> Emitter<'a> {
             // ---- shared mutable state (D1/D2/D3/D9) ----
             Op::LoadState { name } => {
                 let cname = format!("zz_state_{}", mangle(self.str(*name)));
+                let flag = format!("{}_init", cname);
+                let sname = self.str(*name).to_string();
                 out.push_str(&format!(
-                    "    zz_state_lock();\n    st[sp++] = zz_clone({cname});\n    zz_state_unlock();\n"
+                    "    zz_state_lock();\n    st[sp++] = zz_state_load_checked(&{cname}, &{flag}, \"{sname}\");\n    zz_state_unlock();\n"
                 ));
             }
             Op::StoreState { name } => {

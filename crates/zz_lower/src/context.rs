@@ -1056,6 +1056,74 @@ impl Lowerer {
             .any(|n| n.contains("task") || n.contains("chan") || n.contains("spawn"))
     }
 
+    /// True when state accesses must go through the process-global lock.
+    /// When no `task`/`chan`/`spawn` native is reachable in the whole program
+    /// (`needs_safepoint() == false`), state compiles to a plain static with
+    /// no lock and no atomics (D8 lock elision).
+    pub(crate) fn needs_state_lock(&self) -> bool {
+        self.needs_safepoint()
+    }
+
+    /// Emit code to read a `state` binding into a fresh temp, conditionally
+    /// under the lock. Returns nothing (pushes the temp name into `out` as
+    /// an expression fragment). `tmp` is the temp variable name; callers
+    /// should use `names.fresh(...)`.
+    pub(crate) fn emit_state_read(
+        &self,
+        cid: &str,
+        flag: &str,
+        name: &str,
+        tmp: &str,
+        out: &mut String,
+    ) {
+        if self.needs_state_lock() {
+            out.push_str(&format!(
+                "    zz_state_lock();\n    zz_value {tmp} = zz_state_load_checked(&{cid}, &{flag}, \"{name}\");\n    zz_state_unlock();\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "    zz_value {tmp} = zz_state_load_checked(&{cid}, &{flag}, \"{name}\");\n"
+            ));
+        }
+    }
+
+    /// Emit code to write `val` into a `state` binding, conditionally under
+    /// the lock. Sets the init flag after the write.
+    pub(crate) fn emit_state_write(&self, cid: &str, flag: &str, val: &str, out: &mut String) {
+        if self.needs_state_lock() {
+            out.push_str(&format!(
+                "    zz_state_lock();\n    {cid} = zz_clone({val});\n    {flag} = 1;\n    zz_state_unlock();\n"
+            ));
+        } else {
+            out.push_str(&format!("    {cid} = zz_clone({val});\n    {flag} = 1;\n"));
+        }
+    }
+
+    /// Emit code for a state read-modify-write (compound assign), one lock
+    /// acquisition when locking is enabled, else plain access. The `rhs`
+    /// expression is already on the value stack / in `val`; `cur` holds the
+    /// previous value read under the lock.
+    pub(crate) fn emit_state_rmw(
+        &self,
+        cid: &str,
+        flag: &str,
+        name: &str,
+        tmp_cur: &str,
+        op_sym: &str,
+        rhs: &str,
+        out: &mut String,
+    ) {
+        if self.needs_state_lock() {
+            out.push_str(&format!(
+                "    zz_state_lock();\n    zz_value {tmp_cur} = zz_state_load_checked(&{cid}, &{flag}, \"{name}\");\n    {cid} = zz_clone(zz_binop({op_sym}, {tmp_cur}, {rhs}));\n    {flag} = 1;\n    zz_state_unlock();\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "    zz_value {tmp_cur} = zz_state_load_checked(&{cid}, &{flag}, \"{name}\");\n    {cid} = zz_clone(zz_binop({op_sym}, {tmp_cur}, {rhs}));\n    {flag} = 1;\n"
+            ));
+        }
+    }
+
     /// Emit a loop-top cooperative safepoint when the program uses
     /// concurrency; otherwise emit nothing (see [`Self::needs_safepoint`]).
     pub(crate) fn emit_safepoint(&self, out: &mut String, indent: &str) {
