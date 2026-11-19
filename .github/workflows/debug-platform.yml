@@ -1,0 +1,155 @@
+name: Debug multiplatform CI failures
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "Comma list of OSes to debug: macos, windows, linux"
+        required: true
+        default: "macos,windows,linux"
+      test:
+        description: "Test name filter(s), space separated (e.g. batched_native_parity edge_float_format)"
+        required: false
+        default: ""
+  push:
+    branches: [fix/multiplatform-ci]
+
+# One debug job per OS. fail-fast false so every platform reports.
+# Hard cap 15 min per job; every test command is wrapped in a perl alarm
+# (universal hard timeout — macOS has no GNU `timeout`).
+jobs:
+  debug:
+    name: debug ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+          - os: windows-latest
+          - os: ubuntu-latest
+    env:
+      RUST_BACKTRACE: "full"
+      ZZ_DUMP_C: ${{ runner.temp }}/zz_dump.c
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: debug-${{ matrix.os }}
+      - name: print inputs
+        shell: bash
+        run: |
+          echo "os input: ${{ github.event.inputs.os }}"
+          echo "test input: ${{ github.event.inputs.test }}"
+          echo "runner: ${{ matrix.os }}"
+      - name: install native deps (linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set +e
+          sudo apt-get update 2>&1 | tail -3 || true
+          sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev 2>&1 | tail -3 || true
+          clang --version || true
+          set -e
+      - name: install native deps (macos)
+        if: matrix.os == 'macos-latest'
+        run: |
+          set -euo pipefail
+          brew install coreutils xz >/dev/null 2>&1 || true
+          clang --version
+      - name: install native deps (windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $llvm = "C:\Program Files\LLVM\bin"
+          if (Test-Path $llvm) { $env:PATH = "$llvm;$env:PATH" }
+          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
+            choco install llvm -y --no-progress
+            $env:PATH = "$llvm;$env:PATH"
+          }
+          clang --version
+      - name: build zz debug
+        id: build
+        shell: bash
+        run: |
+          perl -e 'alarm shift; exec @ARGV or die' 540 -- cargo build -p zz_cli
+      - name: determine test command
+        id: pick
+        shell: bash
+        run: |
+          os="${{ matrix.os }}"
+          case "$os" in
+            macos-latest)
+              # macOS failing drivers: 0 (stderr diff), 4 (SIGABRT), 5 (native hang),
+              # 6 (extra native diagnostics), 8 (VM hang). Run the full batched
+              # native parity test; it reports every driver failure at the end.
+              echo "cmd=ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity batched_native_parity" >> $GITHUB_OUTPUT
+              ;;
+            windows-latest)
+              echo "cmd=ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity edge_cast_float_nan edge_float_format" >> $GITHUB_OUTPUT
+              ;;
+            ubuntu-latest)
+              echo "cmd=ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity batched_native_parity && cargo test -p zz_cli --test dual_engine_parity edge_cast_float_nan edge_float_format" >> $GITHUB_OUTPUT
+              ;;
+          esac
+          if [ -n "${{ github.event.inputs.test }}" ]; then
+            echo "override_cmd=cargo test -p zz_cli --test batched_parity --test dual_engine_parity ${{ github.event.inputs.test }}" >> $GITHUB_OUTPUT
+          fi
+      - name: run failing test(s)
+        id: run
+        shell: bash
+        run: |
+          cmd="${{ steps.pick.outputs.cmd }}"
+          if [ -n "${{ steps.pick.outputs.override_cmd }}" ]; then
+            cmd="${{ steps.pick.outputs.override_cmd }}"
+          fi
+          echo "RUNNING: $cmd"
+          set +e
+          # 13-minute hard alarm so the job never hangs past its 15-min cap.
+          perl -e 'alarm shift; exec @ARGV or die' 780 -- bash -c "$cmd"
+          rc=$?
+          echo "exit_code=$rc" >> $GITHUB_OUTPUT
+          echo "ran_cmd=$cmd" >> $GITHUB_OUTPUT
+          exit $rc
+      - name: Windows link-symbol inspection (zz_float_format_raw)
+        if: matrix.os == 'windows-latest' && always()
+        shell: bash
+        run: |
+          echo "=== inspecting zz_native_rt.lib / libzz_rt.a for zz_float_format_raw ==="
+          set +e
+          # Find the native rt staticlib (release/debug target dirs).
+          rt=$(find target -name 'zz_native_rt.lib' -o -name 'libzz_native_rt.a' 2>/dev/null | head -1)
+          echo "rt archive: $rt"
+          if [ -n "$rt" ]; then
+            if command -v llvm-nm >/dev/null 2>&1; then
+              llvm-nm --defined-only "$rt" 2>/dev/null | grep -i float_format || echo "(llvm-nm: no defined float_format symbol)"
+              llvm-nm "$rt" 2>/dev/null | grep -i float_format || echo "(llvm-nm: no float_format symbol at all)"
+            elif command -v dumpbin >/dev/null 2>&1; then
+              dumpbin /symbols "$rt" 2>/dev/null | grep -i float_format || echo "(dumpbin: no float_format symbol)"
+            else
+              echo "no llvm-nm/dumpbin available"
+            fi
+          fi
+          echo "=== end link inspection ==="
+      - name: upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-${{ matrix.os }}
+          path: |
+            target/debug/deps/*batched_parity*
+            target/debug/deps/*dual_engine_parity*
+            ${{ runner.temp }}/zz_dump.c
+            /tmp/zz_build_*/
+            /tmp/zz-stdlib-native-*/
+            ~/Library/Logs/DiagnosticReports/*
+            /tmp/core.*
+          retention-days: 7
+          if-no-files-found: ignore
