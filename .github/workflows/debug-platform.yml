@@ -31,9 +31,11 @@ jobs:
           - os: ubuntu-latest
     env:
       RUST_BACKTRACE: "full"
-      ZZ_DUMP_C: ${{ runner.temp }}/zz_dump.c
       CARGO_TERM_COLOR: always
     steps:
+      - name: set ZZ_DUMP_C to runner temp
+        shell: bash
+        run: echo "ZZ_DUMP_C=$RUNNER_TEMP/zz_dump.c" >> $GITHUB_ENV
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -146,7 +148,7 @@ jobs:
           path: |
             target/debug/deps/*batched_parity*
             target/debug/deps/*dual_engine_parity*
-            ${{ runner.temp }}/zz_dump.c
+            ${{ env.ZZ_DUMP_C }}
             /tmp/zz_build_*/
             /tmp/zz-stdlib-native-*/
             ~/Library/Logs/DiagnosticReports/*
