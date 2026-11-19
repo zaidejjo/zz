@@ -879,7 +879,12 @@ pub(crate) fn force_undef_flag(symbol: &str, target: Option<&str>, zig: bool) ->
     // to require resolution. `libzz_native_rt.a` is always linked for native
     // builds (float_link=true), so the symbol is always defined.
     if !zig && zz_codegen_ffi::target_os(target) == zz_codegen_ffi::TargetOs::Windows {
-        Some(format!("-Wl,/INCLUDE:{sym}"))
+        // clang-cl forwards unrecognized `/`-prefixed options straight to
+        // link.exe, so `/INCLUDE:<sym>` reaches the linker verbatim and marks
+        // the symbol as required-undefined. The `-Wl,/INCLUDE:<sym>` spelling
+        // is clang/GNU-flavoured and clang-cl does not reliably forward it,
+        // leaving `zz_float_format_raw` undefined (LNK1120) on Windows.
+        Some(format!("/INCLUDE:{sym}"))
     } else {
         Some(format!("-Wl,-u,{sym}"))
     }
@@ -1808,10 +1813,11 @@ mod tests {
             force_undef_flag("zz_float_format_raw", Some("aarch64-apple-darwin"), false),
             Some("-Wl,-u,_zz_float_format_raw".to_string())
         );
-        // lld-link / link.exe spell it `/INCLUDE:<sym>`.
+        // link.exe spell it `/INCLUDE:<sym>`; clang-cl forwards the
+        // `/`-prefixed option verbatim to the linker.
         assert_eq!(
             force_undef_flag("zz_float_format_raw", Some("x86_64-pc-windows-msvc"), false),
-            Some("-Wl,/INCLUDE:zz_float_format_raw".to_string())
+            Some("/INCLUDE:zz_float_format_raw".to_string())
         );
         // Zig parses `-Wl,` itself and rejects the MSVC spelling even for
         // Windows targets ("unsupported linker arg: /INCLUDE:..."), so it
@@ -1828,7 +1834,7 @@ mod tests {
         if cfg!(windows) {
             assert_eq!(
                 force_undef_flag("sym", None, false),
-                Some("-Wl,/INCLUDE:sym".to_string())
+                Some("/INCLUDE:sym".to_string())
             );
             assert_eq!(
                 force_undef_flag("sym", None, true),
