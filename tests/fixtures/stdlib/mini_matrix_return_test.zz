@@ -1,0 +1,43 @@
+// Minimal regression for the native crash in math.matrix_mul.
+//
+// features: arrays, func-call, func-return, int-arith, locals, loops, match, option-result, print, vec-push
+//
+// An array-of-arrays is built by pushing rows into an arena array inside a
+// function, returned via `.ok(...)`, and the caller clones it by matching on
+// the Result. Before the fix the arena array kept `refs == 0` after its
+// items buffer was migrated from the arena to the heap, so `zz_clone` did not
+// bump the refcount and the array was double-freed (native SIGSEGV /
+// "free(): double free"). After the fix migrated arrays carry a real refcount
+// (refs == 1) and arena headers are never passed to free().
+//
+// Smaller than matrix_mul_test.zz: no dot_product helper, no imports, 2x2.
+func make_matrix() -> Result<[[int]], str> {
+    result := []
+    i := 0
+    while i < 2 {
+        row := []
+        j := 0
+        while j < 2 {
+            v := i * 2 + j
+            match .ok(v) {
+                .ok(x) => {
+                    row.push(x)
+                }
+                .err(_) => return .err("x")
+            }
+            j = j + 1
+        }
+        result.push(row)
+        i = i + 1
+    }
+    return .ok(result)
+}
+
+func main() -> int {
+    m := make_matrix()
+    match m {
+        .ok(mm) => println("mini_matrix_ok: {mm}")
+        .err(e) => println("mini_matrix_err: {e}")
+    }
+    return 0
+}
