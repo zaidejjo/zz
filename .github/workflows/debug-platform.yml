@@ -106,6 +106,9 @@ jobs:
       - name: run failing test(s)
         id: run
         shell: bash
+        env:
+          # Windows: forward clang's linker sub-errors (LNK1104 filename).
+          ZZ_CLANG_VERBOSE: ${{ matrix.os == 'windows-latest' && '1' || '0' }}
         run: |
           cmd="${{ steps.pick.outputs.cmd }}"
           if [ -n "${{ steps.pick.outputs.override_cmd }}" ]; then
