@@ -964,7 +964,6 @@ fn collect_globals_in_func(
     dotted_name: &str,
     out: &mut std::collections::HashSet<String>,
 ) {
-    eprintln!("{}", dotted_name);
     for stmt in &tp.program.stmts {
         if let zz_span_ast::ast::Stmt::Func { name, body, .. } = stmt {
             if name.join(".") == dotted_name {
@@ -1123,10 +1122,6 @@ fn collect_assigned_globals(
     for stmt in &tp.program.stmts {
         collect_assigned_in_stmt(tp, stmt, out, decl_spans, &mut state_names, &bare_names);
     }
-    eprintln!(
-        "assigned_globals={:?}, state_names={:?}, bare_names={:?}",
-        out, state_names, bare_names
-    );
 }
 
 fn collect_assigned_in_stmt(
@@ -1148,12 +1143,7 @@ fn collect_assigned_in_stmt(
             decl_spans.insert(name.name.clone(), *span);
             if *is_state {
                 state_names.insert(name.name.clone());
-                collect_assigned_in_expr(tp, value, out, decl_spans, state_names, bare_names);
             }
-            eprintln!(
-                "DEBUG R2: Decl value kind: {:?}",
-                std::mem::discriminant(value)
-            );
             collect_assigned_in_expr(tp, value, out, decl_spans, state_names, bare_names);
         }
         zz_span_ast::ast::Stmt::Assign { target, .. } => match target {
