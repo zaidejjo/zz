@@ -1064,6 +1064,7 @@ e2e_success_test!(
     "state_early_control.zz"
 );
 e2e_success_test!(e2e_stdlib_state_r1_neg, "stdlib", "state_r1_neg.zz");
+e2e_success_test!(e2e_stdlib_state_r2_neg, "stdlib", "state_r2_neg.zz");
 e2e_success_test!(
     e2e_stdlib_option_result_unwrap_test,
     "stdlib",
@@ -1406,6 +1407,7 @@ e2e_error_test!(e2e_err_chan_send_non_chan, "chan_send_non_chan.zz");
 e2e_error_test!(e2e_err_println_function_value, "println_function_value.zz");
 e2e_error_test!(e2e_err_state_blocking_atomic, "state_blocking_atomic.zz");
 e2e_error_test!(e2e_err_state_r1_pos, "state_r1_pos.zz");
+e2e_error_test!(e2e_err_state_r2_pos, "state_r2_pos.zz");
 // M0 edge corpus: both engines fail (messages differ; error parity only
 // requires failure on both sides).
 e2e_error_test!(e2e_err_edge_neg_shift, "edge_neg_shift_err.zz");

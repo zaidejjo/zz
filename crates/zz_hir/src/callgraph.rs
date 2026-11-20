@@ -917,6 +917,7 @@ fn block_contains_task_spawn(block: &zz_span_ast::ast::Block) -> bool {
 fn stmt_contains_task_spawn(s: &zz_span_ast::ast::Stmt) -> bool {
     match s {
         zz_span_ast::ast::Stmt::Expr(e) => expr_contains_task_spawn(e),
+        zz_span_ast::ast::Stmt::Decl { value, .. } => expr_contains_task_spawn(value),
         zz_span_ast::ast::Stmt::For { body, .. } => block_contains_task_spawn(body),
         zz_span_ast::ast::Stmt::Atomic { body, .. } => block_contains_task_spawn(body),
         // Control flow (`if`/`while`/`match`/`block`) arrives here wrapped
@@ -993,6 +994,9 @@ fn collect_globals_from_stmt_deep(
 ) {
     match s {
         zz_span_ast::ast::Stmt::Expr(e) => collect_globals_from_expr_deep(tp, e, out),
+        zz_span_ast::ast::Stmt::Decl { value, .. } => {
+            collect_globals_from_expr_deep(tp, value, out);
+        }
         zz_span_ast::ast::Stmt::Assign { target, value, .. } => {
             collect_globals_from_expr_deep(tp, target, out);
             collect_globals_from_expr_deep(tp, value, out);
@@ -1119,8 +1123,11 @@ fn collect_assigned_in_stmt(
     decl_spans: &mut std::collections::HashMap<String, Span>,
 ) {
     match stmt {
-        zz_span_ast::ast::Stmt::Decl { name, span, .. } => {
+        zz_span_ast::ast::Stmt::Decl {
+            name, span, value, ..
+        } => {
             decl_spans.insert(name.name.clone(), *span);
+            collect_assigned_in_expr(tp, value, out, decl_spans);
         }
         zz_span_ast::ast::Stmt::Assign { target, .. } => match target {
             zz_span_ast::ast::Expr::Ident { name, .. } => {
