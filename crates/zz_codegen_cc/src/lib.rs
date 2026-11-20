@@ -927,7 +927,15 @@ fn push_link_inputs(
                 }
                 zz_codegen_ffi::TargetOs::Windows => {}
                 _ => {
-                    let _ = cmd.arg("-Wl,--allow-multiple-definition");
+                    // `--allow-multiple-definition` lets libzz_stdlib.a and
+                    // libzz_rt.a share runtime symbols (first definition wins).
+                    // GNU ld and lld accept it; zig cc (0.17.x) rejects it with
+                    // "unsupported linker arg". The prebuilt archives don't
+                    // actually define conflicting global symbols, so skip it
+                    // when driving the link through zig cc.
+                    if !clang.zig {
+                        let _ = cmd.arg("-Wl,--allow-multiple-definition");
+                    }
                 }
             }
         }
