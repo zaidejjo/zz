@@ -1988,6 +1988,11 @@ parity_strict!(
     "state_init_order.zz"
 );
 parity_strict!(
+    parity_stdlib_state_identifiers,
+    "stdlib",
+    "state_identifiers.zz"
+);
+parity_strict!(
     parity_stdlib_option_result_unwrap_test,
     "stdlib",
     "option_result_unwrap_test.zz"

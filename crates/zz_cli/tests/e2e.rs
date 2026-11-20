@@ -1072,6 +1072,11 @@ e2e_success_test!(
 );
 e2e_success_test!(e2e_stdlib_state_init_order, "stdlib", "state_init_order.zz");
 e2e_success_test!(
+    e2e_stdlib_state_identifiers,
+    "stdlib",
+    "state_identifiers.zz"
+);
+e2e_success_test!(
     e2e_stdlib_option_result_unwrap_test,
     "stdlib",
     "option_result_unwrap_test.zz"
