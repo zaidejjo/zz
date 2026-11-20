@@ -2924,18 +2924,21 @@ impl Compiler {
                 sub.func_info = self.func_info.clone();
                 sub.enums = self.enums.clone();
                 sub.impl_methods = self.impl_methods.clone();
+                let mut last_stmt_value = StmtValue::None;
                 for s in &body.stmts {
-                    sub.compile_stmt(s, false);
+                    last_stmt_value = sub.compile_stmt(s, false);
                 }
-                // Discard any leftover value.
-                if !body.stmts.is_empty() {
+                // Discard any leftover value from the last statement.
+                if matches!(last_stmt_value, StmtValue::Discard | StmtValue::Keep) {
                     sub.emit(Op::Pop);
                 }
                 self.emit(Op::Atomic {
                     body: Arc::new(sub.chunk),
                     span: *span,
                 });
-                StmtValue::None
+                // The atomic body chunk's return value (pushed by the frame
+                // return mechanism) is discarded: atomic blocks yield no value.
+                StmtValue::Discard
             }
             // Enums register their variant names so qualified
             // construction (`Token.IntLit(1)`) resolves at runtime.

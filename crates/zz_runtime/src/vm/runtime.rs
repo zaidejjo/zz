@@ -1059,7 +1059,13 @@ impl Vm {
                         chunk: Arc::clone(body),
                         ip: 0,
                         prev_env: interp.env.clone(),
-                        stack_base: self.frames.last().unwrap().stack_base,
+                        // The atomic body's stack base is the current stack top,
+                        // NOT the outer frame's stack_base. The outer frame's
+                        // stack_base may sit below items pushed by enclosing
+                        // loops (e.g. ForNext's iterable/index). Truncating to
+                        // the outer base would discard those items when the
+                        // atomic frame pops, corrupting the loop state.
+                        stack_base: self.stack.len(),
                         self_home: None,
                         defer_stack: Vec::new(),
                         func_span: Span::default(),
@@ -2494,23 +2500,47 @@ impl Vm {
                     let Some(li) = self.loops.pop() else {
                         return Err(self.error("`break` outside of a loop", *span));
                     };
-                    if li.frame_idx != self.frames.len() - 1 {
-                        return Err(self.error("`break` outside of a loop", *span));
+                    // Pop any intermediate frames (e.g. atomic blocks) between
+                    // the loop frame and the current frame so break/continue
+                    // can propagate out of `atomic { }` blocks correctly.
+                    while self.frames.len() - 1 > li.frame_idx {
+                        let f = self.frames.pop().unwrap();
+                        interp.env = f.prev_env;
+                        self.stack.truncate(f.stack_base);
                     }
-                    self.stack.truncate(li.stack_base + 1);
-                    interp.env = li.env;
-                    ip = li.exit;
+                    self.loops.retain(|l| l.frame_idx < self.frames.len());
+                    // Refresh code pointer from the (now current) frame; the
+                    // loop below re-fetches op from the updated cached_code.
+                    re_cache!();
+                    let stack_base = li.stack_base;
+                    let env = li.env;
+                    let exit = li.exit;
+                    self.stack.truncate(stack_base + 1);
+                    interp.env = env;
+                    ip = exit;
                 }
                 Op::Continue(span) => {
                     let Some(li) = self.loops.last() else {
                         return Err(self.error("`continue` outside of a loop", *span));
                     };
-                    if li.frame_idx != self.frames.len() - 1 {
-                        return Err(self.error("`continue` outside of a loop", *span));
+                    let frame_idx = li.frame_idx;
+                    let stack_base = li.stack_base;
+                    let slots = li.slots;
+                    let env = li.env.clone();
+                    let header = li.header;
+                    // Pop any intermediate frames (e.g. atomic blocks) between
+                    // the loop frame and the current frame so break/continue
+                    // can propagate out of `atomic { }` blocks correctly.
+                    while self.frames.len() - 1 > frame_idx {
+                        let f = self.frames.pop().unwrap();
+                        interp.env = f.prev_env;
+                        self.stack.truncate(f.stack_base);
                     }
-                    self.stack.truncate(li.stack_base + 1 + li.slots);
-                    interp.env = li.env.clone();
-                    ip = li.header;
+                    self.loops.retain(|l| l.frame_idx < self.frames.len());
+                    re_cache!();
+                    self.stack.truncate(stack_base + 1 + slots);
+                    interp.env = env;
+                    ip = header;
                 }
                 Op::SetLoopResult => {
                     let v = self.stack.pop().unwrap();
