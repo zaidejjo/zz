@@ -108,6 +108,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "cell_test.zz", true),
     ("stdlib", "state_counter.zz", true),
     ("stdlib", "state_simple.zz", true),
+    ("stdlib", "state_field_index.zz", true),
     ("stdlib", "option_result_unwrap_test.zz", false),
     ("stdlib", "cell_struct_test.zz", true),
     ("stdlib", "cell_arena_test.zz", true),

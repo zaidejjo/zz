@@ -3,5 +3,8 @@ state hits := 0
 
 func main() {
     hits = 42
-    println("hits = {}", hits)
+    // Read state into a local before printing (R2: no blocking natives
+    // in state-touching statements outside `atomic { }`).
+    h:int = hits
+    println("hits = {}", h)
 }
