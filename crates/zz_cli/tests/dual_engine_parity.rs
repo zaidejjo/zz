@@ -1971,6 +1971,11 @@ parity_strict!(
     "state_nested_atomic.zz"
 );
 parity_strict!(
+    parity_stdlib_state_early_control,
+    "stdlib",
+    "state_early_control.zz"
+);
+parity_strict!(
     parity_stdlib_option_result_unwrap_test,
     "stdlib",
     "option_result_unwrap_test.zz"

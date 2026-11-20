@@ -143,6 +143,9 @@ struct Frame {
     defer_stack: Vec<Value>,
     /// Source span of the function definition for backtraces.
     func_span: Span,
+    /// True for frames pushed by `Op::Atomic` (synthetic frames that should
+    /// be transparent to `return`/`break`/`continue` unwinding).
+    is_atomic: bool,
 }
 
 /// One active loop (native `for`/`while`). Used by `break`/`continue` to
@@ -448,6 +451,7 @@ impl Vm {
                     defer_stack: saved_defers,
                     self_home: None,
                     func_span: Span::default(),
+                    is_atomic: false,
                 });
             }
         }
@@ -482,6 +486,7 @@ impl Vm {
             self_home: None,
             defer_stack: Vec::new(),
             func_span: Span::default(),
+            is_atomic: false,
         });
 
         self.run_loop(interp)
@@ -1069,6 +1074,7 @@ impl Vm {
                         self_home: None,
                         defer_stack: Vec::new(),
                         func_span: Span::default(),
+                        is_atomic: true,
                     });
                     // Switch to the body's chunk so the next op executed is
                     // the body's first op. When the body chunk ends, its frame
@@ -3831,6 +3837,7 @@ impl Vm {
             self_home,
             defer_stack: saved_defers,
             func_span: span,
+            is_atomic: false,
         });
     }
 
@@ -4092,58 +4099,72 @@ impl Vm {
             }
             Flow::Yield(_) => return Unwind::Error(crate::runtime::EvalError::yield_escape()),
         };
-        let f = self.frames.pop().unwrap();
-        interp.env = f.prev_env;
-        // Copy the mutated `self` (arg 0) back to the receiver home so `impl`
-        // method mutations persist to `c` (`c.inc()` mutating `c`). Must run
-        // before `truncate`, which would otherwise drop arg 0.
-        // For env receivers the mutated `self` is only written back when it
-        // has the same type as the binding (a direct `impl` method). For
-        // promoted/embedded methods, `self` is the embedded sub-struct, whose
-        // type differs from the binding's, so writing it back would corrupt
-        // the outer struct.
-        if let Some(home) = f.self_home {
-            if self.stack.len() > f.stack_base {
-                let self_val = std::mem::replace(&mut self.stack[f.stack_base], Value::Unit);
-                match &home {
-                    TakeHome::Env(name) => {
-                        let persist = interp.env.get(name).is_some_and(|head| {
-                            Self::value_type_name(&head) == Self::value_type_name(&self_val)
-                        });
-                        if persist {
+        // Unwind frames in a loop, skipping past `atomic { }` frames so that
+        // `return` inside `atomic` propagates to the enclosing function.
+        loop {
+            let f = self.frames.pop().unwrap();
+            interp.env = f.prev_env;
+            // Copy the mutated `self` (arg 0) back to the receiver home so
+            // `impl` method mutations persist to `c` (`c.inc()` mutating `c`).
+            // Must run before `truncate`, which would otherwise drop arg 0.
+            // For env receivers the mutated `self` is only written back when
+            // it has the same type as the binding (a direct `impl` method).
+            // For promoted/embedded methods, `self` is the embedded sub-struct,
+            // whose type differs from the binding's, so writing it back would
+            // corrupt the outer struct.
+            if let Some(home) = f.self_home {
+                if self.stack.len() > f.stack_base {
+                    let self_val = std::mem::replace(&mut self.stack[f.stack_base], Value::Unit);
+                    match &home {
+                        TakeHome::Env(name) => {
+                            let persist = interp.env.get(name).is_some_and(|head| {
+                                Self::value_type_name(&head) == Self::value_type_name(&self_val)
+                            });
+                            if persist {
+                                Self::restore_home(self, interp, &home, self_val);
+                            }
+                        }
+                        TakeHome::Slot(_) => {
                             Self::restore_home(self, interp, &home, self_val);
                         }
                     }
-                    TakeHome::Slot(_) => {
-                        Self::restore_home(self, interp, &home, self_val);
-                    }
                 }
             }
-        }
-        self.loops.retain(|li| li.frame_idx < self.frames.len());
-        self.stack.truncate(f.stack_base);
-        if self.frames.is_empty() {
+            self.loops.retain(|li| li.frame_idx < self.frames.len());
+            self.stack.truncate(f.stack_base);
+            // If the popped frame was an `atomic { }` frame and we are
+            // unwinding a `return`, keep unwinding past it so the return
+            // reaches the enclosing function.
+            if f.is_atomic && has_payload {
+                if self.frames.is_empty() {
+                    return Unwind::Escaped(Flow::Return(payload));
+                }
+                continue;
+            }
+            // Not an `atomic` frame (or not a return): stop unwinding here.
+            if self.frames.is_empty() {
+                if let Some(span) = brk {
+                    return Unwind::Escaped(Flow::Break(span));
+                }
+                if let Some(span) = ctn {
+                    return Unwind::Escaped(Flow::Continue(span));
+                }
+                return Unwind::Escaped(Flow::Return(if has_payload {
+                    payload
+                } else {
+                    Value::Unit
+                }));
+            }
             if let Some(span) = brk {
-                return Unwind::Escaped(Flow::Break(span));
+                return Unwind::Error(self.error("`break` outside of a loop", span));
             }
             if let Some(span) = ctn {
-                return Unwind::Escaped(Flow::Continue(span));
+                return Unwind::Error(self.error("`continue` outside of a loop", span));
             }
-            return Unwind::Escaped(Flow::Return(if has_payload {
-                payload
-            } else {
-                Value::Unit
-            }));
+            self.stack
+                .push(if has_payload { payload } else { Value::Unit });
+            return Unwind::Continue;
         }
-        if let Some(span) = brk {
-            return Unwind::Error(self.error("`break` outside of a loop", span));
-        }
-        if let Some(span) = ctn {
-            return Unwind::Error(self.error("`continue` outside of a loop", span));
-        }
-        self.stack
-            .push(if has_payload { payload } else { Value::Unit });
-        Unwind::Continue
     }
 
     /// Build a backtrace string from the current call stack.

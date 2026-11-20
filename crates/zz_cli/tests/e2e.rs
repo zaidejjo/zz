@@ -1059,6 +1059,11 @@ e2e_success_test!(
     "state_nested_atomic.zz"
 );
 e2e_success_test!(
+    e2e_stdlib_state_early_control,
+    "stdlib",
+    "state_early_control.zz"
+);
+e2e_success_test!(
     e2e_stdlib_option_result_unwrap_test,
     "stdlib",
     "option_result_unwrap_test.zz"
