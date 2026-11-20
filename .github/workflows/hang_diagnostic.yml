@@ -1,0 +1,168 @@
+name: Hang diagnostic (macOS only)
+
+# Diagnostic for the macOS-only CI hangs (driver 5 = native closures/recursion,
+# driver 8 = VM concurrency spawn/channel) that do not reproduce on Linux.
+#
+# Runs a single batched driver or a single dual_engine_parity fixture on macOS
+# under an outer watchdog. On timeout the watchdog captures `sample <pid>` plus
+# thread backtraces (lldb/gdb when available) and uploads everything as artifacts
+# so the hang can be diagnosed without guessing.
+#
+# Triggered manually only. timeout-minutes: 10. At most 4 CI runs are needed:
+#   run 1: driver 5 (batched native)   run 2: driver 8 (batched VM)
+#   run 3: single fixture (driver 5)   run 4: single fixture (driver 8)
+on:
+  workflow_dispatch:
+    inputs:
+      driver:
+        description: "Batched driver to run: 5 (native/closures-recursion), 8 (VM/concurrency), or both"
+        required: false
+        default: "both"
+        type: choice
+        options:
+          - "5"
+          - "8"
+          - "both"
+      fixture:
+        description: "Optional single dual_engine_parity fixture (cat/file) to run instead of a driver"
+        required: false
+        default: ""
+      native:
+        description: "Include native leg (1) or VM-only (0). Driver 5 hang is native."
+        required: false
+        default: "1"
+        type: choice
+        options: ["0", "1"]
+
+jobs:
+  diagnose:
+    name: diagnose macos hang
+    runs-on: macos-latest
+    timeout-minutes: 10
+    env:
+      RUST_BACKTRACE: "full"
+      CARGO_TERM_COLOR: always
+      ZZ_RUN_CACHE: "0"
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: cargo cache
+        uses: Swatinem/rust-cache@v2
+      - name: macOS deps (coreutils for pgrep)
+        run: |
+          brew install coreutils >/dev/null 2>&1 || true
+          clang --version
+      - name: build zz debug
+        id: build
+        run: cargo build -p zz_cli
+      - name: pick test command
+        id: pick
+        shell: bash
+        run: |
+          set -euo pipefail
+          drv="${{ github.event.inputs.driver }}"
+          fix="${{ github.event.inputs.fixture }}"
+          nat="${{ github.event.inputs.native }}"
+          if [ -n "$fix" ]; then
+            # Run ONE fixture through dual_engine_parity (VM leg always, native
+            # leg when nat==1). cargo test takes a single name filter.
+            filter="ZZ_DUMP_C=${RUNNER_TEMP}/zz_dump_${fix//\//_}.c cargo test -p zz_cli --test dual_engine_parity -- $fix"
+            if [ "$nat" = "1" ]; then
+              filter="ZZ_BATCH_NATIVE=1 $filter"
+            fi
+            echo "cmd=$filter" >> $GITHUB_OUTPUT
+            echo "kind=fixture" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          # Otherwise run the batched parity driver(s) that hang on macOS CI.
+          # BATCH_NATIVE=1 makes batched_parity own the native legs.
+          base="ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity batched_native_parity"
+          if [ "$nat" = "0" ]; then
+            base="ZZ_PARITY_VM_ONLY=1 cargo test -p zz_cli --test batched_parity batched_native_parity"
+          fi
+          case "$drv" in
+            "5") echo "cmd=ZZ_BATCH_DRIVER_FILTER=driver_5 $base" >> $GITHUB_OUTPUT ;;
+            "8") echo "cmd=ZZ_BATCH_DRIVER_FILTER=driver_8 $base" >> $GITHUB_OUTPUT ;;
+            "both"|*) echo "cmd=$base" >> $GITHUB_OUTPUT ;;
+          esac
+          echo "kind=batch" >> $GITHUB_OUTPUT
+      - name: run with watchdog (sample + backtraces on timeout)
+        id: run
+        shell: bash
+        env:
+          ZZ_BUILD_CACHE: "0"
+          ZZ_BATCH_DRIVER_FILTER: ${{ steps.pick.outputs.driver-filter || '' }}
+        run: |
+          set +eo pipefail
+          cmd="${{ steps.pick.outputs.cmd }}"
+          kind="${{ steps.pick.outputs.kind }}"
+          outfile="${RUNNER_TEMP}/zz_hang_run.log"
+          diagdir="${RUNNER_TEMP}/zz_hang_diag"
+          mkdir -p "$diagdir"
+          echo "=== KIND=$kind ==="
+          echo "=== RUNNING: $cmd ==="
+
+          # Outer watchdog: run the test in the background, poll for up to the
+          # job cap (10 min). On timeout, capture diagnostics from the hung
+          # process before the job is killed.
+          bash -c "$cmd" > "$outfile" 2>&1 &
+          testpid=$!
+          rc=0
+          elapsed=0
+          while [ $elapsed -lt 600 ]; do
+            if ! kill -0 "$testpid" 2>/dev/null; then
+              wait "$testpid"
+              rc=$?
+              break
+            fi
+            sleep 10
+            elapsed=$((elapsed + 10))
+          done
+
+          if [ $elapsed -ge 600 ]; then
+            echo "WATCHDOG: test timed out after 600s — capturing hang diagnostics"
+            # Find the hung zz binary (the actual engine process).
+            zzpid=$(pgrep -f "target/debug/zz" | head -1) || true
+            if [ -n "$zzpid" ]; then
+              echo "=== sample of zz pid $zzpid (10s) ===" > "$diagdir/zz_sample.txt"
+              sample "$zzpid" 10 > "$diagdir/zz_sample.txt" 2>&1 || true
+              echo "=== lldb backtrace of pid $zzpid ===" > "$diagdir/zz_bt.txt"
+              ( lldb -p "$zzpid" --batch -o "thread apply all bt" -o "quit" \
+                > "$diagdir/zz_bt.txt" 2>&1 ) || \
+                ( gdb -p "$zzpid" -batch -ex "thread apply all bt" \
+                > "$diagdir/zz_bt.txt" 2>&1 ) || true
+            else
+              echo "no zz process found; sampling cargo/test parent $testpid" \
+                > "$diagdir/zz_sample.txt"
+              sample "$testpid" 10 > "$diagdir/zz_sample.txt" 2>&1 || true
+            fi
+            cp "$outfile" "$diagdir/zz_run.log"
+            echo "ZZ_HANG=1" >> $GITHUB_OUTPUT
+            rc=124
+          else
+            echo "=== test finished with rc=$rc ==="
+            cp "$outfile" "$diagdir/zz_run.log"
+          fi
+          echo "run_rc=$rc" >> $GITHUB_OUTPUT
+          echo "diagdir=$diagdir" >> $GITHUB_OUTPUT
+          # Always surface the tail of the run log in the job output.
+          tail -n 80 "$outfile" || true
+          exit $rc
+      - name: upload hang diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hang-diagnostic-macos
+          path: |
+            ${{ steps.run.outputs.diagdir && steps.run.outputs.diagdir || '' }}/*
+            ${{ env.RUNNER_TEMP }}/zz_dump_*.c
+            ~/Library/Logs/DiagnosticReports/*
+            /tmp/core.*
+          retention-days: 7
+          if-no-files-found: ignore
