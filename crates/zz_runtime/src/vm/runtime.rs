@@ -742,6 +742,12 @@ impl Vm {
                 }
                 let f = self.frames.pop().unwrap();
                 self.stack.truncate(f.stack_base);
+                // Decrement state_lock_depth when popping an atomic frame,
+                // so cooperative safepoints are re-enabled after the atomic
+                // block completes.
+                if f.is_atomic {
+                    self.state_lock_depth -= 1;
+                }
                 interp.env = f.prev_env;
                 let parent_defers = f.defer_stack;
 
@@ -2513,6 +2519,9 @@ impl Vm {
                         let f = self.frames.pop().unwrap();
                         interp.env = f.prev_env;
                         self.stack.truncate(f.stack_base);
+                        if f.is_atomic {
+                            self.state_lock_depth -= 1;
+                        }
                     }
                     self.loops.retain(|l| l.frame_idx < self.frames.len());
                     // Refresh cached chunk pointers from the current frame.
@@ -2562,6 +2571,9 @@ impl Vm {
                         let f = self.frames.pop().unwrap();
                         interp.env = f.prev_env;
                         self.stack.truncate(f.stack_base);
+                        if f.is_atomic {
+                            self.state_lock_depth -= 1;
+                        }
                     }
                     self.loops.retain(|l| l.frame_idx < self.frames.len());
                     // Refresh cached chunk pointers from the current frame.
@@ -4176,6 +4188,12 @@ impl Vm {
             }
             self.loops.retain(|li| li.frame_idx < self.frames.len());
             self.stack.truncate(f.stack_base);
+            // Decrement state_lock_depth when popping an atomic frame,
+            // so cooperative safepoints are re-enabled after the atomic
+            // block is unwound.
+            if f.is_atomic {
+                self.state_lock_depth -= 1;
+            }
             // If the popped frame was an `atomic { }` frame and we are
             // unwinding a `return`, keep unwinding past it so the return
             // reaches the enclosing function.
