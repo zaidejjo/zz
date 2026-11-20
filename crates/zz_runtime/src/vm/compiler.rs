@@ -2936,8 +2936,9 @@ impl Compiler {
                     body: Arc::new(sub.chunk),
                     span: *span,
                 });
-                // The atomic body chunk's return value (pushed by the frame
-                // return mechanism) is discarded: atomic blocks yield no value.
+                // The atomic body chunk's return value is pushed onto the
+                // stack by the frame return mechanism (line 821). Atomic
+                // blocks yield no value, so discard it here.
                 StmtValue::Discard
             }
             // Enums register their variant names so qualified

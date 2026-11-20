@@ -964,6 +964,7 @@ fn collect_globals_in_func(
     dotted_name: &str,
     out: &mut std::collections::HashSet<String>,
 ) {
+    eprintln!("{}", dotted_name);
     for stmt in &tp.program.stmts {
         if let zz_span_ast::ast::Stmt::Func { name, body, .. } = stmt {
             if name.join(".") == dotted_name {
@@ -1111,9 +1112,21 @@ fn collect_assigned_globals(
     out: &mut std::collections::HashSet<String>,
     decl_spans: &mut std::collections::HashMap<String, Span>,
 ) {
+    let mut state_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Build a set of bare names from namespaced bindings (e.g., "state_r2_pos.plain" -> "plain")
+    // so that bare identifiers inside closures can be matched to their bindings.
+    let bare_names: std::collections::HashSet<&str> = tp
+        .bindings
+        .keys()
+        .filter_map(|k| k.rsplit('.').next())
+        .collect();
     for stmt in &tp.program.stmts {
-        collect_assigned_in_stmt(tp, stmt, out, decl_spans);
+        collect_assigned_in_stmt(tp, stmt, out, decl_spans, &mut state_names, &bare_names);
     }
+    eprintln!(
+        "assigned_globals={:?}, state_names={:?}, bare_names={:?}",
+        out, state_names, bare_names
+    );
 }
 
 fn collect_assigned_in_stmt(
@@ -1121,17 +1134,31 @@ fn collect_assigned_in_stmt(
     stmt: &zz_span_ast::ast::Stmt,
     out: &mut std::collections::HashSet<String>,
     decl_spans: &mut std::collections::HashMap<String, Span>,
+    state_names: &mut std::collections::HashSet<String>,
+    bare_names: &std::collections::HashSet<&str>,
 ) {
     match stmt {
         zz_span_ast::ast::Stmt::Decl {
-            name, span, value, ..
+            name,
+            span,
+            value,
+            is_state,
+            ..
         } => {
             decl_spans.insert(name.name.clone(), *span);
-            collect_assigned_in_expr(tp, value, out, decl_spans);
+            if *is_state {
+                state_names.insert(name.name.clone());
+                collect_assigned_in_expr(tp, value, out, decl_spans, state_names, bare_names);
+            }
+            eprintln!(
+                "DEBUG R2: Decl value kind: {:?}",
+                std::mem::discriminant(value)
+            );
+            collect_assigned_in_expr(tp, value, out, decl_spans, state_names, bare_names);
         }
         zz_span_ast::ast::Stmt::Assign { target, .. } => match target {
             zz_span_ast::ast::Expr::Ident { name, .. } => {
-                if tp.bindings.contains_key(name) {
+                if bare_names.contains(name.as_str()) && !state_names.contains(name) {
                     out.insert(name.clone());
                 }
             }
@@ -1140,32 +1167,36 @@ fn collect_assigned_in_stmt(
                 // namespaced path (`module.counter`). Match it against
                 // `tp.bindings` and record the bare name.
                 if let Some(bare) = binding_basename(tp, parts) {
-                    out.insert(bare);
+                    if !state_names.contains(&bare) {
+                        out.insert(bare);
+                    }
                 }
             }
             _ => {}
         },
         zz_span_ast::ast::Stmt::CompoundAssign { target, .. } => match target {
             zz_span_ast::ast::Expr::Ident { name, .. } => {
-                if tp.bindings.contains_key(name) {
+                if bare_names.contains(name.as_str()) && !state_names.contains(name) {
                     out.insert(name.clone());
                 }
             }
             zz_span_ast::ast::Expr::Path { parts, .. } => {
                 if let Some(bare) = binding_basename(tp, parts) {
-                    out.insert(bare);
+                    if !state_names.contains(&bare) {
+                        out.insert(bare);
+                    }
                 }
             }
             _ => {}
         },
         zz_span_ast::ast::Stmt::Func { body, .. } => {
-            collect_assigned_in_block(tp, body, out, decl_spans);
+            collect_assigned_in_block(tp, body, out, decl_spans, state_names, bare_names);
         }
         zz_span_ast::ast::Stmt::For { body, .. } => {
-            collect_assigned_in_block(tp, body, out, decl_spans);
+            collect_assigned_in_block(tp, body, out, decl_spans, state_names, bare_names);
         }
         zz_span_ast::ast::Stmt::Expr(e) => {
-            collect_assigned_in_expr(tp, e, out, decl_spans);
+            collect_assigned_in_expr(tp, e, out, decl_spans, state_names, bare_names);
         }
         _ => {}
     }
@@ -1176,9 +1207,11 @@ fn collect_assigned_in_block(
     block: &zz_span_ast::ast::Block,
     out: &mut std::collections::HashSet<String>,
     decl_spans: &mut std::collections::HashMap<String, Span>,
+    state_names: &mut std::collections::HashSet<String>,
+    bare_names: &std::collections::HashSet<&str>,
 ) {
     for s in &block.stmts {
-        collect_assigned_in_stmt(tp, s, out, decl_spans);
+        collect_assigned_in_stmt(tp, s, out, decl_spans, state_names, bare_names);
     }
 }
 
@@ -1190,56 +1223,58 @@ fn collect_assigned_in_expr(
     e: &zz_span_ast::ast::Expr,
     out: &mut std::collections::HashSet<String>,
     decl_spans: &mut std::collections::HashMap<String, Span>,
+    state_names: &mut std::collections::HashSet<String>,
+    bare_names: &std::collections::HashSet<&str>,
 ) {
     match e {
         zz_span_ast::ast::Expr::Block(b) => {
-            collect_assigned_in_block(tp, b, out, decl_spans);
+            collect_assigned_in_block(tp, b, out, decl_spans, state_names, bare_names);
         }
         zz_span_ast::ast::Expr::If { then, els, .. } => {
-            collect_assigned_in_block(tp, then, out, decl_spans);
+            collect_assigned_in_block(tp, then, out, decl_spans, state_names, bare_names);
             if let Some(el) = els {
-                collect_assigned_in_expr(tp, el, out, decl_spans);
+                collect_assigned_in_expr(tp, el, out, decl_spans, state_names, bare_names);
             }
         }
         zz_span_ast::ast::Expr::While { body, .. } => {
-            collect_assigned_in_block(tp, body, out, decl_spans);
+            collect_assigned_in_block(tp, body, out, decl_spans, state_names, bare_names);
         }
         zz_span_ast::ast::Expr::Match { arms, .. } => {
             for a in arms {
-                collect_assigned_in_expr(tp, &a.body, out, decl_spans);
+                collect_assigned_in_expr(tp, &a.body, out, decl_spans, state_names, bare_names);
             }
         }
         zz_span_ast::ast::Expr::Closure { body, .. } => {
-            collect_assigned_in_expr(tp, body, out, decl_spans);
+            collect_assigned_in_expr(tp, body, out, decl_spans, state_names, bare_names);
         }
         zz_span_ast::ast::Expr::Try { expr, .. } => {
-            collect_assigned_in_expr(tp, expr, out, decl_spans);
+            collect_assigned_in_expr(tp, expr, out, decl_spans, state_names, bare_names);
         }
         zz_span_ast::ast::Expr::Call { args, named, .. } => {
             for a in args {
-                collect_assigned_in_expr(tp, a, out, decl_spans);
+                collect_assigned_in_expr(tp, a, out, decl_spans, state_names, bare_names);
             }
             for (_, v) in named {
-                collect_assigned_in_expr(tp, v, out, decl_spans);
+                collect_assigned_in_expr(tp, v, out, decl_spans, state_names, bare_names);
             }
         }
         zz_span_ast::ast::Expr::Array { elems, .. } => {
             for e in elems {
-                collect_assigned_in_expr(tp, e, out, decl_spans);
+                collect_assigned_in_expr(tp, e, out, decl_spans, state_names, bare_names);
             }
         }
         zz_span_ast::ast::Expr::Dict { entries, .. } => {
             for (k, v) in entries {
-                collect_assigned_in_expr(tp, k, out, decl_spans);
-                collect_assigned_in_expr(tp, v, out, decl_spans);
+                collect_assigned_in_expr(tp, k, out, decl_spans, state_names, bare_names);
+                collect_assigned_in_expr(tp, v, out, decl_spans, state_names, bare_names);
             }
         }
         zz_span_ast::ast::Expr::Paren { expr, .. } => {
-            collect_assigned_in_expr(tp, expr, out, decl_spans);
+            collect_assigned_in_expr(tp, expr, out, decl_spans, state_names, bare_names);
         }
         zz_span_ast::ast::Expr::Tuple { items, .. } => {
             for e in items {
-                collect_assigned_in_expr(tp, e, out, decl_spans);
+                collect_assigned_in_expr(tp, e, out, decl_spans, state_names, bare_names);
             }
         }
         _ => {}

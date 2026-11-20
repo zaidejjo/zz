@@ -7,16 +7,18 @@ import std.task
 state hits := 0
 
 func inc10() {
-    hits += 1
-    hits += 1
-    hits += 1
-    hits += 1
-    hits += 1
-    hits += 1
-    hits += 1
-    hits += 1
-    hits += 1
-    hits += 1
+    atomic {
+        hits += 1
+        hits += 1
+        hits += 1
+        hits += 1
+        hits += 1
+        hits += 1
+        hits += 1
+        hits += 1
+        hits += 1
+        hits += 1
+    }
 }
 
 func main() -> Result<int, str> {
