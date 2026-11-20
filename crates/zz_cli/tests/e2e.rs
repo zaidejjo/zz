@@ -1066,6 +1066,11 @@ e2e_success_test!(
 e2e_success_test!(e2e_stdlib_state_r1_neg, "stdlib", "state_r1_neg.zz");
 e2e_success_test!(e2e_stdlib_state_r2_neg, "stdlib", "state_r2_neg.zz");
 e2e_success_test!(
+    e2e_stdlib_state_pub_across_modules,
+    "stdlib",
+    "state_pub_across_modules.zz"
+);
+e2e_success_test!(
     e2e_stdlib_option_result_unwrap_test,
     "stdlib",
     "option_result_unwrap_test.zz"

@@ -1978,6 +1978,11 @@ parity_strict!(
 parity_strict!(parity_stdlib_state_r1_neg, "stdlib", "state_r1_neg.zz");
 parity_strict!(parity_stdlib_state_r2_neg, "stdlib", "state_r2_neg.zz");
 parity_strict!(
+    parity_stdlib_state_pub_across_modules,
+    "stdlib",
+    "state_pub_across_modules.zz"
+);
+parity_strict!(
     parity_stdlib_option_result_unwrap_test,
     "stdlib",
     "option_result_unwrap_test.zz"

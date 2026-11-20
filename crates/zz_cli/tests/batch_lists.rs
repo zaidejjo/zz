@@ -113,6 +113,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "state_early_control.zz", true),
     ("stdlib", "state_r1_neg.zz", true),
     ("stdlib", "state_r2_neg.zz", true),
+    ("stdlib", "state_pub_across_modules.zz", true),
     ("stdlib", "option_result_unwrap_test.zz", false),
     ("stdlib", "cell_struct_test.zz", true),
     ("stdlib", "cell_arena_test.zz", true),
