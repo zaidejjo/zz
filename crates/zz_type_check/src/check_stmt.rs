@@ -1216,6 +1216,13 @@ fn collect_state_rw(
 ) {
     for stmt in &block.stmts {
         let span = stmt.span();
+        // Inside `atomic { }` all state accesses are under the lock, so
+        // check-then-act (R1) cannot occur. Skip recording but still
+        // advance the statement index for correct numbering.
+        if *in_atomic {
+            *stmt_idx += 1;
+            continue;
+        }
         match stmt {
             Stmt::Atomic { body, .. } => {
                 let prev = *in_atomic;

@@ -1312,10 +1312,12 @@ fn doctest_rewrite_context(
     std::collections::HashSet<String>,
     std::collections::HashSet<String>,
     std::collections::HashSet<String>,
+    std::collections::HashSet<String>,
 ) {
     let mut heads: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut defs: Vec<String> = Vec::new();
     let mut decls: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut state_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut imports = std::collections::HashSet::new();
     for stmt in stmts {
         match stmt {
@@ -1329,9 +1331,12 @@ fn doctest_rewrite_context(
                     *heads.entry(head.to_string()).or_insert(0) += 1;
                 }
             }
-            Stmt::Decl { name, .. } => {
+            Stmt::Decl { name, is_state, .. } => {
                 defs.push(name.name.clone());
                 decls.insert(name.name.clone());
+                if *is_state {
+                    state_names.insert(name.name.clone());
+                }
                 if let Some((head, _)) = name.name.split_once('.') {
                     *heads.entry(head.to_string()).or_insert(0) += 1;
                 }
@@ -1364,7 +1369,7 @@ fn doctest_rewrite_context(
         top.extend(defs);
         top_bindings.extend(decls);
     }
-    (ns_opt, top, top_bindings, imports)
+    (ns_opt, top, top_bindings, state_names, imports)
 }
 
 /// Graft doc-test fences as synthetic `@test` functions into every loaded
@@ -1392,7 +1397,7 @@ fn graft_doctests(
         // body. Without this, bare references to sibling items fail at
         // runtime — the exact treatment user `@test` bodies received at
         // load. Script-mode modules (all bare) need no rewriting.
-        let (ns_opt, top, top_bindings, imports) =
+        let (ns_opt, top, top_bindings, state_names, imports) =
             doctest_rewrite_context(&loaded.programs[i].stmts);
         let stem = std::path::Path::new(&name)
             .file_stem()
@@ -1531,7 +1536,7 @@ fn graft_doctests(
             // become qualified paths (locals shadow correctly — the real
             // rewriter tracks scopes). Script-mode modules skip this.
             if let Some(ns) = ns_opt.as_deref() {
-                let mut rw = Rewriter::new(ns, &top, &top_bindings);
+                let mut rw = Rewriter::new(ns, &top, &top_bindings, &state_names);
                 rw.imports = imports.clone();
                 rw.push_scope();
                 if let Stmt::Func { body, .. } = &mut func {

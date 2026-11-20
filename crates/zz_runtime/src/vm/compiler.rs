@@ -2459,6 +2459,16 @@ impl Compiler {
             self.emit(Op::LoadState(full.clone(), span));
             return;
         }
+        // State-name path like `p.x` where `p` is a state binding: load the
+        // state value, then walk fields to the leaf. State bindings live in
+        // the shared registry, not in slots or env.
+        if parts.len() > 1 && self.state_names.contains(&parts[0]) {
+            self.emit(Op::LoadState(parts[0].clone(), span));
+            for part in &parts[1..] {
+                self.emit(Op::GetField(part.clone(), span));
+            }
+            return;
+        }
         // A top-level var promoted to a slot is declared under its full
         // dotted name (`add_to_1M.sum`); resolve the joined name first.
         // Move-take: the single global load in `ns.x = f(ns.x, ...)`
@@ -2500,6 +2510,18 @@ impl Compiler {
         // because `resolve(&full)` returns `Resolved::State`, not `Resolved::Slot`.
         if self.state_names.contains(&full) {
             self.emit(Op::StoreState(full.clone(), span));
+            return;
+        }
+        // State-name path like `p.x` where `p` is a state binding: load the
+        // state value, set the field, then store back to the registry. The
+        // new value is already on the stack (compiled by the caller).
+        if parts.len() > 1 && self.state_names.contains(&parts[0]) {
+            self.emit(Op::LoadState(parts[0].clone(), span));
+            for part in &parts[1..parts.len() - 1] {
+                self.emit(Op::GetField(part.clone(), span));
+            }
+            self.emit(Op::SetField(parts.last().unwrap().clone(), span));
+            self.emit(Op::StoreState(parts[0].clone(), span));
             return;
         }
         // Top-level slot promoted under the full dotted name -> direct store.

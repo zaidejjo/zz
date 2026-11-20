@@ -10,6 +10,10 @@ pub struct Rewriter<'a> {
     /// receiver's own `impl`/type namespace, not through a same-named
     /// module-level free function (#500).
     pub(crate) top_bindings: &'a HashSet<String>,
+    /// Top-level `state` bindings. State bindings live in the shared
+    /// registry, not as namespaced C globals, so they must NOT be rewritten
+    /// to `ns.name` when used as `cfg.x` field access receivers.
+    pub(crate) state_names: &'a HashSet<String>,
     /// Imported namespace heads (`ops` from `import ops`, `io` from
     /// `import std.str`, explicit aliases). Calls through them
     /// (`ops.resize(...)`) already resolve and must not be rewritten.
@@ -31,11 +35,17 @@ pub struct Rewriter<'a> {
 }
 
 impl<'a> Rewriter<'a> {
-    pub fn new(ns: &'a str, top: &'a HashSet<String>, top_bindings: &'a HashSet<String>) -> Self {
+    pub fn new(
+        ns: &'a str,
+        top: &'a HashSet<String>,
+        top_bindings: &'a HashSet<String>,
+        state_names: &'a HashSet<String>,
+    ) -> Self {
         Rewriter {
             ns,
             top,
             top_bindings,
+            state_names,
             imports: HashSet::new(),
             ns_aliases: HashMap::new(),
             scopes: vec![HashSet::new()],
@@ -89,7 +99,7 @@ impl<'a> Rewriter<'a> {
             Stmt::Decl {
                 name, ty, value, ..
             } => {
-                if self.top.contains(&name.name) {
+                if self.top.contains(&name.name) && !self.state_names.contains(&name.name) {
                     name.name = format!("{}.{}", self.ns, name.name);
                 }
                 if let Some(t) = ty {
@@ -344,7 +354,10 @@ impl<'a> Rewriter<'a> {
     pub(crate) fn rewrite_expr(&mut self, expr: &mut Expr) {
         match expr {
             Expr::Ident { name, span } => {
-                if self.top.contains(name) && !self.is_shadowed(name) {
+                if self.top.contains(name)
+                    && !self.is_shadowed(name)
+                    && !self.state_names.contains(name)
+                {
                     *expr = Expr::Path {
                         parts: vec![self.ns.to_string(), name.clone()],
                         span: *span,
@@ -525,11 +538,14 @@ impl<'a> Rewriter<'a> {
             }
             Expr::Path { parts, .. } => {
                 // `p.x` on a top-level binding: qualify the root so the
-                // struct-field walk finds `ns.p`.
+                // struct-field walk finds `ns.p`. State bindings stay bare
+                // since they live in the shared registry, not as namespaced
+                // globals.
                 if let Some(first) = parts.first() {
                     if self.top.contains(first)
                         && !self.is_shadowed(first)
                         && !first.starts_with(&format!("{}.", self.ns))
+                        && !self.state_names.contains(first)
                     {
                         parts[0] = format!("{}.{}", self.ns, first);
                     } else if parts.len() > 1 {
