@@ -1,6 +1,6 @@
 first module that broke: <path> <path>
 
-error: type mismatch: expected `int`, found `str`
+error: type mismatch: expected `int` for `variable `x``, found `str`
 
 --> <path>
 |

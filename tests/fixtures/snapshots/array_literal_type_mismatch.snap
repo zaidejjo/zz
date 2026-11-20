@@ -1,0 +1,11 @@
+first module that broke: <path> <path>
+
+error: type mismatch: expected `[int]` for `variable `array_literal_type_mismatch.age``, found `[int | str]`
+
+--> <path>
+|
+3 | age: [int] = [1, 2, 3, 4, "ZAID"]
+| ^^^^^
+= array element `str` does not fit expected element type `int`
+= to fix: change the annotation to `[int | str]` or convert the value
+zz: 1 file(s) failed type-check

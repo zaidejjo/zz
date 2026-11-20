@@ -17,6 +17,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::time::Duration;
 
+mod support;
+
 const SERVER_ZZ: &str = r#"import std.http
 import std.env
 
@@ -34,13 +36,14 @@ func main() {
 "#;
 
 /// Skip helper: native backend needs Linux (fork+epoll) and a C toolchain.
+/// Windows is unsupported (POSIX C runtime); skip via `native_unsupported()`.
 fn require_native_serve() -> bool {
     if std::env::consts::OS != "linux" {
         eprintln!("skip: AOT serve tests need Linux (fork+epoll)");
         return false;
     }
-    if std::env::var("ZZ_SKIP_NATIVE").is_ok() {
-        eprintln!("skip: native backend unsupported (ZZ_SKIP_NATIVE=1)");
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on Windows (ZZ_SKIP_NATIVE=1)");
         return false;
     }
     true

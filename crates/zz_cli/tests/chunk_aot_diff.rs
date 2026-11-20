@@ -65,9 +65,11 @@ fn run_bin(bin: &Path) -> (i32, String) {
     )
 }
 
+/// Skip helper: native backend unsupported on Windows (POSIX C runtime).
+/// Returns false after logging so failures stay visible as skips.
 fn require_native() -> bool {
-    if std::env::var("ZZ_SKIP_NATIVE").is_ok() {
-        eprintln!("skip: native backend unsupported (ZZ_SKIP_NATIVE=1)");
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on Windows (ZZ_SKIP_NATIVE=1)");
         return false;
     }
     true
@@ -860,10 +862,16 @@ fn chunk_matches_hir_stdout_and_exit() {
     if !require_native() {
         return;
     }
-    // One dir per backend so output names never collide.
+    // One temp root per process; each case's per-backend dirs are removed
+    // immediately after comparison so /tmp never holds more than two
+    // built binaries (~35 MB) instead of all ~60 (~1 GB).
     let root =
         TempDirGuard(std::env::temp_dir().join(format!("zz-chunk-diff-{}", std::process::id())));
     for (name, src) in CASES {
+        let mut hir_out = String::new();
+        let mut chunk_out = String::new();
+        let mut hir_exit = String::new();
+        let mut chunk_exit = String::new();
         for backend in ["hir", "chunk"] {
             let dir = root.join(format!("{name}_{backend}"));
             std::fs::create_dir_all(&dir).unwrap();
@@ -879,16 +887,22 @@ fn chunk_matches_hir_stdout_and_exit() {
             let bin = support::exe_in(&dir, name);
             assert!(bin.exists(), "{backend} binary missing for {name}");
             let (rcode, stdout) = run_bin(&bin);
-            std::fs::write(dir.join("got.stdout"), &stdout).unwrap();
-            std::fs::write(dir.join("got.exit"), rcode.to_string()).unwrap();
+            match backend {
+                "hir" => {
+                    hir_out = stdout;
+                    hir_exit = rcode.to_string();
+                }
+                "chunk" => {
+                    chunk_out = stdout;
+                    chunk_exit = rcode.to_string();
+                }
+                _ => unreachable!(),
+            }
+            // Remove this backend's dir immediately: we no longer need the
+            // binary or its output files once stdout/exit are captured.
+            let _ = std::fs::remove_dir_all(&dir);
         }
         // Diff the two backends.
-        let hir_out = std::fs::read_to_string(root.join(format!("{name}_hir/got.stdout"))).unwrap();
-        let chunk_out =
-            std::fs::read_to_string(root.join(format!("{name}_chunk/got.stdout"))).unwrap();
-        let hir_exit = std::fs::read_to_string(root.join(format!("{name}_hir/got.exit"))).unwrap();
-        let chunk_exit =
-            std::fs::read_to_string(root.join(format!("{name}_chunk/got.exit"))).unwrap();
         assert_eq!(
             hir_exit, chunk_exit,
             "{name}: exit differs (hir={hir_exit} chunk={chunk_exit})"

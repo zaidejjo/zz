@@ -6,4 +6,10 @@ error: unknown variant `Num` for enum `enum_unknown_variant.Token` (expected one
 |
 9 | t := Token.Num(1)
 | ^^^^^^^^^^^^
+warning: unused enum variant `enum_unknown_variant.Token.Eof`, consider prefixing with `_Eof` or removing it
+
+= variant is never constructed or pattern-matched
+warning: unused enum variant `enum_unknown_variant.Token.IntLit`, consider prefixing with `_IntLit` or removing it
+
+= variant is never constructed or pattern-matched
 zz: 1 file(s) failed type-check

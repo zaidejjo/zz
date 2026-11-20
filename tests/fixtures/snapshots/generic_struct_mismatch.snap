@@ -1,6 +1,6 @@
 first module that broke: <path> <path>
 
-error: type mismatch: expected `str`, found `int`
+error: type mismatch: expected `str` for `variable `generic_struct_mismatch.s``, found `int`
 
 --> <path>
 |
@@ -14,4 +14,7 @@ warning: unused variable `s` is never read, consider prefixing with `_s`
 4 | s: Box<str> = Box{ v: 1 }
 | ^ help: replace with `_s`
 
+warning: unused struct field `generic_struct_mismatch.Box.v`, consider prefixing with `_v` or removing it
+
+= field is never read
 zz: 1 file(s) failed type-check

@@ -20,4 +20,7 @@ error: Z0006: function returns `try_ambiguous_convert.ErrB` but its body can fal
 | ^^^^^^^^^^^^^^^^^^^ help: replace with `return `
 
 = named functions return a value only through `return`; the last expression is discarded
+warning: unused struct field `try_ambiguous_convert.ErrB.msg`, consider prefixing with `_msg` or removing it
+
+= field is never read
 zz: 1 file(s) failed type-check

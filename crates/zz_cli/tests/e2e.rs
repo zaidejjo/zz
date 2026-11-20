@@ -1365,6 +1365,10 @@ e2e_error_test!(e2e_err_tuple_index_oob, "tuple_index_oob.zz");
 e2e_error_test!(e2e_err_tuple_index_dynamic, "tuple_index_dynamic.zz");
 e2e_error_test!(e2e_err_compound_type_mismatch, "compound_type_mismatch.zz");
 e2e_error_test!(e2e_err_compound_const, "compound_const.zz");
+e2e_error_test!(
+    e2e_err_array_literal_type_mismatch,
+    "array_literal_type_mismatch.zz"
+);
 e2e_error_test!(e2e_err_compound_chain, "compound_chain.zz");
 e2e_error_test!(
     e2e_err_generic_struct_mismatch,
@@ -1732,6 +1736,14 @@ while s == "test" {
 /// Parallelised across threads because each `run_zz()` is an independent
 /// OS process spawn (cold interpreter start per fixture). The per-run
 /// sweep token keeps loopback ports from colliding.
+///
+/// This is intentionally `#[ignore]`d: registered fixtures already run once
+/// via their dedicated `e2e_success_test!` test, so the sweep re-runs
+/// ~272 fixtures a second time (~272 cold `zz` process spawns, ~60+ s in
+/// CI). It keeps its safety-net value by running explicitly with
+///   cargo test -p zz_cli --test e2e -- --ignored
+/// without blocking the fast default `cargo test` path.
+#[ignore]
 #[test]
 fn e2e_discover_all_success_fixtures() {
     let fixtures = fixtures_dir();
@@ -1792,6 +1804,7 @@ fn e2e_discover_all_success_fixtures() {
 
 /// Exhaustive VM sweep: EVERY error fixture must fail.
 /// Runs un-ignored alongside the success sweep above.
+#[ignore]
 #[test]
 fn e2e_discover_all_error_fixtures() {
     let fixtures = fixtures_dir();

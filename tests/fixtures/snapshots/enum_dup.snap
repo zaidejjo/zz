@@ -12,4 +12,7 @@ error: previous definition here
 |
 3 | enum Token {
 | ^^^^^^^^^^^^^^^^^^^^^^^
+warning: unused enum variant `enum_dup.Token.Eof`, consider prefixing with `_Eof` or removing it
+
+= variant is never constructed or pattern-matched
 zz: 1 file(s) failed type-check

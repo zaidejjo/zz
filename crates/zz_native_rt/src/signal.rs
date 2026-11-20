@@ -60,12 +60,34 @@ mod unix {
         let mut pipe = SELF_PIPE.lock().unwrap_or_else(|e| e.into_inner());
         if pipe.is_none() {
             let mut fds: [c_int; 2] = [-1, -1];
-            // SAFETY: `pipe2` writes two valid fds.
-            if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK) } != 0 {
+            // SAFETY: `pipe` writes two valid fds. `pipe2(O_NONBLOCK)` is
+            // Linux-only; use pipe + fcntl so macOS (and Linux) both work.
+            if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
                 return Err(format!(
-                    "signal.install: pipe2 failed: {}",
+                    "signal.install: pipe failed: {}",
                     std::io::Error::last_os_error()
                 ));
+            }
+            let set_nonblock = |fd: c_int| -> Result<(), String> {
+                let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+                if flags == -1 {
+                    return Err(format!(
+                        "signal.install: fcntl F_GETFL failed: {}",
+                        std::io::Error::last_os_error()
+                    ));
+                }
+                if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+                    return Err(format!(
+                        "signal.install: fcntl F_SETFL failed: {}",
+                        std::io::Error::last_os_error()
+                    ));
+                }
+                Ok(())
+            };
+            if let Err(e) = set_nonblock(fds[0]).and_then(|()| set_nonblock(fds[1])) {
+                let _ = unsafe { libc::close(fds[0]) };
+                let _ = unsafe { libc::close(fds[1]) };
+                return Err(e);
             }
             *pipe = Some((fds[0], fds[1]));
         }
@@ -212,6 +234,7 @@ mod tests {
         assert!(!signal_pending(1));
     }
 
+    #[cfg(unix)]
     #[test]
     fn install_then_pending() {
         assert!(signal_install(10).is_ok());

@@ -397,6 +397,7 @@ pub extern "C" fn zz_pty_isatty(fd: CValue, err: *mut std::ffi::c_int) -> CValue
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn open_roundtrip() {
         let (master, slave_fd) = pty_open().expect("pty.open");
@@ -416,6 +417,7 @@ mod tests {
         let _ = unsafe { libc::close(slave_fd) };
     }
 
+    #[cfg(unix)]
     #[test]
     fn ptsname_returns_slave_path() {
         let (master, _slave) = pty_open().expect("pty.open");

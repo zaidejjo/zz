@@ -397,6 +397,10 @@ pub struct Checker {
     /// Used to avoid warning on unused stdlib functions that happen to
     /// not appear in `used_names`.
     pub local_funcs: std::collections::HashSet<String>,
+    /// Structs defined in the current program (not import-seeded).
+    /// Used to scope unused-field warnings to locally-owned structs;
+    /// imported pub structs may be used externally.
+    pub local_structs: std::collections::BTreeSet<String>,
     /// Names defined in the current scope with their spans — for unused
     /// variable warnings. Each scope level has its own map.
     pub defined_names: Vec<HashMap<String, DefinedBinding>>,
@@ -559,6 +563,7 @@ impl Checker {
             shadow_probes: Vec::new(),
             pub_names: std::collections::HashSet::new(),
             local_funcs: std::collections::HashSet::new(),
+            local_structs: std::collections::BTreeSet::new(),
             test_funcs: std::collections::HashSet::new(),
             defined_names: vec![HashMap::new()],
             had_undefined_var: false,

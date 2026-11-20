@@ -10,6 +10,7 @@ use zz_scope::ScopeOps;
 use zz_span_ast::ast::{BinOp, Expr, ImportItem, Pattern, Stmt, Ty};
 use zz_span_ast::span::Span;
 use zz_types::Type;
+use zz_unify::UnifyError;
 
 use crate::TypeCheckOps as _;
 
@@ -112,6 +113,45 @@ fn check_stmt_decl(
             }
             e.context = Some(format!("variable `{}`", name.name));
             checker.report_mismatch_with_notes(e, ann.span, notes);
+        } else {
+            // Unification succeeded, but a heterogeneous literal may have
+            // produced a union whose members don't all fit the concrete
+            // annotation (e.g. `[int] = [1, 2, "x"]` infers `[int | str]`:
+            // `int` matches `int` and `str` is never compared). Reject any
+            // inferred union member that does not fit the expected type.
+            if let Some((member, expected)) = find_union_violation(checker, &vt, &at) {
+                let vt_r = checker.unifier.resolve_deep(&vt);
+                let at_r = checker.unifier.resolve_deep(&at);
+                let binding_ty = at_r.clone();
+                let mut notes = Vec::new();
+                notes.push(format!(
+                    "array element `{member}` does not fit expected element type `{expected}`"
+                ));
+                notes.push(format!(
+                    "to fix: change the annotation to `{vt_r}` or convert the value"
+                ));
+                let e = UnifyError {
+                    message: "type mismatch".into(),
+                    left: vt_r.to_string(),
+                    right: at_r.to_string(),
+                    context: Some(format!("variable `{}`", name.name)),
+                    left_span: None,
+                    right_span: None,
+                    left_ty: Box::new(vt_r),
+                    right_ty: Box::new(at_r),
+                };
+                checker.report_mismatch_with_notes(e, ann.span, notes);
+                // Bind to the expected annotation type so downstream uses are
+                // consistent with the declaration, then return early instead of
+                // binding the inferred union type that doesn't fit.
+                checker.define_var_at(&name.name, binding_ty.clone(), name.span, is_const);
+                if checker.env.len() == 1 {
+                    checker
+                        .new_bindings
+                        .insert(name.name.clone(), binding_ty.clone());
+                }
+                return binding_ty;
+            }
         }
     }
     let rt = checker.unifier.resolve_deep(&vt); // Variant types (Option/Result/Enum) may carry unconstrained payload vars
@@ -304,6 +344,32 @@ fn check_stmt_return(checker: &mut Checker, value: &Option<Expr>, span: Span) ->
                 if !checker.report_result_return_hint(&vt, &ret, v.span()) {
                     checker.report_mismatch(e, v.span());
                 }
+            } else {
+                // Unification succeeded, but a heterogeneous literal may have
+                // produced a union whose members don't all fit the return type.
+                // Reject any inferred union member that does not fit.
+                if let Some((member, expected)) = find_union_violation(checker, &vt, &ret) {
+                    let vt_r = checker.unifier.resolve_deep(&vt);
+                    let ret_r = checker.unifier.resolve_deep(&ret);
+                    let mut notes = Vec::new();
+                    notes.push(format!(
+                        "returned element `{member}` does not fit expected type `{expected}`"
+                    ));
+                    notes.push(format!(
+                        "to fix: convert `{member}` to `{expected}`, or change the return type to `{vt_r}`"
+                    ));
+                    let e = UnifyError {
+                        message: "type mismatch".into(),
+                        left: vt_r.to_string(),
+                        right: ret_r.to_string(),
+                        context: None,
+                        left_span: None,
+                        right_span: None,
+                        left_ty: Box::new(vt_r),
+                        right_ty: Box::new(ret_r),
+                    };
+                    checker.report_mismatch_with_notes(e, v.span(), notes);
+                }
             }
             // A `return` diverges: it never yields a value to the
             // enclosing block. Its statement type is `Never`
@@ -435,9 +501,107 @@ fn check_stmt_assign(checker: &mut Checker, target: &Expr, value: &Expr, span: S
     if checker.errors.len() == errors_before {
         if let Err(e) = checker.unifier.unify(&vt, &tt) {
             checker.report_mismatch(e, span);
+        } else {
+            // Unification succeeded, but a heterogeneous literal may have
+            // produced a union whose members don't all fit the target type.
+            // Reject any inferred union member that does not fit.
+            if let Some((member, expected)) = find_union_violation(checker, &vt, &tt) {
+                let vt_r = checker.unifier.resolve_deep(&vt);
+                let tt_r = checker.unifier.resolve_deep(&tt);
+                let mut notes = Vec::new();
+                notes.push(format!(
+                    "array element `{member}` does not fit expected element type `{expected}`"
+                ));
+                let e = UnifyError {
+                    message: "type mismatch".into(),
+                    left: vt_r.to_string(),
+                    right: tt_r.to_string(),
+                    context: None,
+                    left_span: None,
+                    right_span: None,
+                    left_ty: Box::new(vt_r),
+                    right_ty: Box::new(tt_r),
+                };
+                checker.report_mismatch_with_notes(e, span, notes);
+            }
         }
     }
     Type::Unit
+}
+
+/// After `unify(inferred, expected)` has succeeded, walk both types and reject
+/// any inferred `Union` member that does not fit the concrete expected type at
+/// the same structural position.
+///
+/// Unification's union rule is "matches if any member fits" (loose direction),
+/// so `[int | str]` unifies with `[int]` on the `int` member and `str` slips
+/// through. This is the sound reverse: union-vs-concrete requires *all*
+/// members to fit. Concrete-vs-union stays allowed (a value fits a union if
+/// any member matches), and union-vs-union was already validated by unify.
+///
+/// Returns the first offending `(inferred_member, expected_type)` pair.
+pub(crate) fn find_union_violation(
+    checker: &mut Checker,
+    inferred: &Type,
+    expected: &Type,
+) -> Option<(Type, Type)> {
+    let inf = checker.unifier.resolve_deep(inferred);
+    let exp = checker.unifier.resolve_deep(expected);
+    match (&inf, &exp) {
+        // Structural positions: recurse so nested unions inside arrays,
+        // options, results, tuples, dicts are checked against their concrete
+        // expected counterpart.
+        (Type::Array(a), Type::Array(b)) => find_union_violation(checker, a, b),
+        (Type::Option(a), Type::Option(b)) => find_union_violation(checker, a, b),
+        (Type::Result(a, ea), Type::Result(b, eb)) => {
+            find_union_violation(checker, a, b).or_else(|| find_union_violation(checker, ea, eb))
+        }
+        (Type::Tuple(a), Type::Tuple(b)) if a.len() == b.len() => a
+            .iter()
+            .zip(b)
+            .find_map(|(x, y)| find_union_violation(checker, x, y)),
+        (Type::Dict(ka, va), Type::Dict(kb, vb)) => {
+            find_union_violation(checker, ka, kb).or_else(|| find_union_violation(checker, va, vb))
+        }
+        // Inferred union at a concrete expected position: every member must fit.
+        (Type::Union(ms), _) if !matches!(exp, Type::Union(_)) => {
+            for m in ms {
+                if !member_fits(checker, m, &exp) {
+                    return Some((m.clone(), exp.clone()));
+                }
+            }
+            None
+        }
+        // Concrete inferred vs union expected: loose direction — unification
+        // already validated it. Different constructors: already validated.
+        _ => None,
+    }
+}
+
+/// Does inferred member `m` fit concrete `expected`? A nested union member
+/// must have all its sub-members fit; concrete members must be equal. An
+/// unbound variable is compatible with anything (still undetermined).
+pub(crate) fn member_fits(checker: &mut Checker, m: &Type, expected: &Type) -> bool {
+    let mm = checker.unifier.resolve_deep(m);
+    let ee = checker.unifier.resolve_deep(expected);
+    match (&mm, &ee) {
+        (Type::Var(_), _) | (_, Type::Var(_)) => true,
+        (Type::Union(ms), _) if !matches!(ee, Type::Union(_)) => {
+            ms.iter().all(|sub| member_fits(checker, sub, &ee))
+        }
+        (Type::Array(a), Type::Array(b)) => member_fits(checker, a, b),
+        (Type::Option(a), Type::Option(b)) => member_fits(checker, a, b),
+        (Type::Result(a, ea), Type::Result(b, eb)) => {
+            member_fits(checker, a, b) && member_fits(checker, ea, eb)
+        }
+        (Type::Tuple(a), Type::Tuple(b)) if a.len() == b.len() => {
+            a.iter().zip(b).all(|(x, y)| member_fits(checker, x, y))
+        }
+        (Type::Dict(ka, va), Type::Dict(kb, vb)) => {
+            member_fits(checker, ka, kb) && member_fits(checker, va, vb)
+        }
+        _ => mm == ee,
+    }
 }
 
 fn check_stmt_compound_assign(
