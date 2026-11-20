@@ -4089,7 +4089,7 @@ impl<'a> Emitter<'a> {
                 // `atomic_slot_offset` so body locals land in reserved
                 // frame slots.
                 let slot = if self.atomic_slot_offset > 0 {
-                    *s as u16 + self.atomic_slot_offset
+                    *s + self.atomic_slot_offset
                 } else {
                     *s
                 };
@@ -4120,7 +4120,7 @@ impl<'a> Emitter<'a> {
                 // `st[s]` see current values, while direct loads read the
                 // C local fast. Issue #252.
                 let slot = if self.atomic_slot_offset > 0 {
-                    *s as u16 + self.atomic_slot_offset
+                    *s + self.atomic_slot_offset
                 } else {
                     *s
                 };
@@ -5083,16 +5083,13 @@ impl<'a> Emitter<'a> {
             // become `LoadSlot(s + offset)`/`StoreSlot(s + offset)`.
             match op {
                 Op::LoadSlot(s) => {
-                    out.push_str(&format!(
-                        "    st[sp++] = zz_clone(st[{}]);\n",
-                        *s as u16 + offset
-                    ));
+                    out.push_str(&format!("    st[sp++] = zz_clone(st[{}]);\n", *s + offset));
                 }
                 Op::StoreSlot(s) => {
                     out.push_str(&format!(
                         "    {{ zz_value _v = st[--sp]; zz_release(&st[{}]); st[{}] = _v; }}\n",
-                        *s as u16 + offset,
-                        *s as u16 + offset
+                        *s + offset,
+                        *s + offset
                     ));
                 }
                 // All other ops are emitted generically via `emit_op` with

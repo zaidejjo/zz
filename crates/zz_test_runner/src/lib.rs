@@ -1305,6 +1305,7 @@ fn discover_tests(path: &Path) -> Result<Vec<TestInfo>, String> {
 /// `None` namespace for script-mode modules (all bare — no rewriting).
 /// Same-file multi-namespace edges (#380) keep the majority head; alias
 /// heads are left for the rewriter's import set instead.
+#[allow(clippy::type_complexity)]
 fn doctest_rewrite_context(
     stmts: &[Stmt],
 ) -> (

@@ -1103,6 +1103,7 @@ impl Lowerer {
     /// acquisition when locking is enabled, else plain access. The `rhs`
     /// expression is already on the value stack / in `val`; `cur` holds the
     /// previous value read under the lock.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit_state_rmw(
         &self,
         cid: &str,

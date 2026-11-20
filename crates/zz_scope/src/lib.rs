@@ -661,11 +661,8 @@ impl ScopeOps for Checker {
     /// bindings/functions), then as a struct-field walk from the first part.
     fn lookup_path(&mut self, parts: &[String], span: Span) -> Type {
         let joined = parts.join(".");
-        match self.lookup_opt(&joined) {
-            Some(t) => {
-                return t;
-            }
-            None => {}
+        if let Some(t) = self.lookup_opt(&joined) {
+            return t;
         }
         let Some(root) = self.lookup_opt(&parts[0]) else {
             // Suggest typo corrections for the root name.

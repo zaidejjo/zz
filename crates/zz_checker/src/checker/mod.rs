@@ -940,13 +940,7 @@ fn check_program_impl(
     // before any function body is checked. This ensures state variables are
     // resolvable inside `atomic { }` blocks and other nested contexts.
     for stmt in &program.stmts {
-        if let Stmt::Decl {
-            name,
-            pub_,
-            is_state: _,
-            ..
-        } = stmt
-        {
+        if let Stmt::Decl { name, pub_, .. } = stmt {
             // Track pub on Decl before checking.
             if *pub_ {
                 pub_bindings_set.insert(name.name.clone());

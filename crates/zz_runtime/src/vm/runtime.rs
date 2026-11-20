@@ -2515,9 +2515,30 @@ impl Vm {
                         self.stack.truncate(f.stack_base);
                     }
                     self.loops.retain(|l| l.frame_idx < self.frames.len());
-                    // Refresh code pointer from the (now current) frame; the
-                    // loop below re-fetches op from the updated cached_code.
-                    re_cache!();
+                    // Refresh cached chunk pointers from the current frame.
+                    // ip is set explicitly below, so skip the ip = f.ip part
+                    // of re_cache!() to avoid an unused-assignment warning.
+                    let f = self.frames.last().unwrap();
+                    let c = unsafe { &*Arc::as_ptr(&f.chunk) };
+                    cached_code = &c.code;
+                    cached_constants = &c.constants;
+                    cached_base = f.stack_base;
+                    cached_cov_ids = &c.cov_ids;
+                    cached_cov_file = match &interp.coverage {
+                        Some(cov) => c
+                            .source
+                            .as_deref()
+                            .and_then(|label| cov.file_index(label))
+                            .unwrap_or(usize::MAX),
+                        None => usize::MAX,
+                    };
+                    cached_cov_branch = &c.cov_branch;
+                    cached_spans = &c.spans;
+                    cached_dbg_label = if self.debug.is_some() {
+                        c.source.clone()
+                    } else {
+                        None
+                    };
                     let stack_base = li.stack_base;
                     let env = li.env;
                     let exit = li.exit;
@@ -2543,7 +2564,30 @@ impl Vm {
                         self.stack.truncate(f.stack_base);
                     }
                     self.loops.retain(|l| l.frame_idx < self.frames.len());
-                    re_cache!();
+                    // Refresh cached chunk pointers from the current frame.
+                    // ip is set explicitly below, so skip the ip = f.ip part
+                    // of re_cache!() to avoid an unused-assignment warning.
+                    let f = self.frames.last().unwrap();
+                    let c = unsafe { &*Arc::as_ptr(&f.chunk) };
+                    cached_code = &c.code;
+                    cached_constants = &c.constants;
+                    cached_base = f.stack_base;
+                    cached_cov_ids = &c.cov_ids;
+                    cached_cov_file = match &interp.coverage {
+                        Some(cov) => c
+                            .source
+                            .as_deref()
+                            .and_then(|label| cov.file_index(label))
+                            .unwrap_or(usize::MAX),
+                        None => usize::MAX,
+                    };
+                    cached_cov_branch = &c.cov_branch;
+                    cached_spans = &c.spans;
+                    cached_dbg_label = if self.debug.is_some() {
+                        c.source.clone()
+                    } else {
+                        None
+                    };
                     self.stack.truncate(stack_base + 1 + slots);
                     interp.env = env;
                     ip = header;

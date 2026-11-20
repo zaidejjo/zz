@@ -938,7 +938,7 @@ fn expr_contains_task_spawn(e: &zz_span_ast::ast::Expr) -> bool {
         } => {
             expr_contains_task_spawn(cond)
                 || block_contains_task_spawn(then)
-                || els.as_ref().map_or(false, |e| expr_contains_task_spawn(e))
+                || els.as_ref().is_some_and(|e| expr_contains_task_spawn(e))
         }
         zz_span_ast::ast::Expr::While { cond, body, .. } => {
             expr_contains_task_spawn(cond) || block_contains_task_spawn(body)
@@ -949,7 +949,7 @@ fn expr_contains_task_spawn(e: &zz_span_ast::ast::Expr) -> bool {
             expr_contains_task_spawn(scrutinee)
                 || arms.iter().any(|a| expr_contains_task_spawn(&a.body))
         }
-        zz_span_ast::ast::Expr::Closure { body, .. } => expr_contains_task_spawn(&*body),
+        zz_span_ast::ast::Expr::Closure { body, .. } => expr_contains_task_spawn(body),
         zz_span_ast::ast::Expr::Try { expr, .. } => expr_contains_task_spawn(expr),
         _ => false,
     }
@@ -1080,7 +1080,7 @@ fn collect_globals_from_expr_deep(
             }
         }
         zz_span_ast::ast::Expr::Closure { body, .. } => {
-            collect_globals_from_expr_deep(tp, &*body, out);
+            collect_globals_from_expr_deep(tp, body, out);
         }
         zz_span_ast::ast::Expr::Try { expr, .. } => collect_globals_from_expr_deep(tp, expr, out),
         zz_span_ast::ast::Expr::Array { elems, .. } => {
@@ -1210,7 +1210,7 @@ fn collect_assigned_in_expr(
             }
         }
         zz_span_ast::ast::Expr::Closure { body, .. } => {
-            collect_assigned_in_expr(tp, &*body, out, decl_spans);
+            collect_assigned_in_expr(tp, body, out, decl_spans);
         }
         zz_span_ast::ast::Expr::Try { expr, .. } => {
             collect_assigned_in_expr(tp, expr, out, decl_spans);
