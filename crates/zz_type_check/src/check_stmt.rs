@@ -845,16 +845,13 @@ fn is_blocking_native(name: &str) -> bool {
 /// Check D2/D3 rules for an expression that appears in a statement touching
 /// state. Called from assign/compound-assign/expr statement checkers.
 fn check_expr_atomic_safety(checker: &mut Checker, expr: &Expr, span: Span) {
-    if !expr_references_state(checker, expr) {
-        return; // statement doesn't touch state — nothing to enforce
-    }
-
     if checker.atomic_depth > 0 {
-        // D3: inside `atomic { }` — reject known-blocking natives.
+        // D3: inside `atomic { }` — reject known-blocking natives
+        // regardless of whether the expression touches state.
         check_for_blocking_natives(checker, expr, span);
-    } else {
+    } else if expr_references_state(checker, expr) {
         // D2: outside `atomic { }` — only whitelisted natives / pure
-        // constructs allowed.
+        // constructs allowed when touching state.
         check_whitelist_only(checker, expr, span);
     }
 }
