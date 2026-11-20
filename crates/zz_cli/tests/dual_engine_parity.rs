@@ -1983,6 +1983,11 @@ parity_strict!(
     "state_pub_across_modules.zz"
 );
 parity_strict!(
+    parity_stdlib_state_init_order,
+    "stdlib",
+    "state_init_order.zz"
+);
+parity_strict!(
     parity_stdlib_option_result_unwrap_test,
     "stdlib",
     "option_result_unwrap_test.zz"
