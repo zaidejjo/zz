@@ -1,0 +1,20 @@
+// features: int-arith, locals, print, state
+// Nested atomic blocks: inner and outer atomic on the same state.
+state n := 0
+
+func inc_outer() {
+    atomic {
+        n = n + 1
+        atomic {
+            n = n + 1
+        }
+        n = n + 1
+    }
+}
+
+func main() -> int {
+    inc_outer()
+    if n != 3 { return -1 }
+    println("nested_atomic_ok")
+    return 0
+}

@@ -1054,6 +1054,11 @@ e2e_success_test!(
     "state_field_index.zz"
 );
 e2e_success_test!(
+    e2e_stdlib_state_nested_atomic,
+    "stdlib",
+    "state_nested_atomic.zz"
+);
+e2e_success_test!(
     e2e_stdlib_option_result_unwrap_test,
     "stdlib",
     "option_result_unwrap_test.zz"
