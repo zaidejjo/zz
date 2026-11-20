@@ -1975,6 +1975,7 @@ parity_strict!(
     "stdlib",
     "state_early_control.zz"
 );
+parity_strict!(parity_stdlib_state_r1_neg, "stdlib", "state_r1_neg.zz");
 parity_strict!(
     parity_stdlib_option_result_unwrap_test,
     "stdlib",

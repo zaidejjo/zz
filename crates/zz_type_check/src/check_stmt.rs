@@ -1253,8 +1253,27 @@ fn collect_state_rw(
                 *stmt_idx += 1;
             }
             Stmt::Expr(e) => {
-                collect_state_names_from_expr(checker, e, reads, *stmt_idx, span);
-                *stmt_idx += 1;
+                if let Expr::If {
+                    cond, then, els, ..
+                } = e
+                {
+                    // R1: track reads/writes inside if/else blocks separately
+                    collect_state_names_from_expr(checker, cond, reads, *stmt_idx, span);
+                    collect_state_rw(checker, then, reads, writes, stmt_idx, in_atomic);
+                    if let Some(else_expr) = els {
+                        if let Expr::Block(b) = &**else_expr {
+                            collect_state_rw(checker, b, reads, writes, stmt_idx, in_atomic);
+                        } else {
+                            collect_state_names_from_expr(
+                                checker, else_expr, reads, *stmt_idx, span,
+                            );
+                        }
+                    }
+                    *stmt_idx += 1;
+                } else {
+                    collect_state_names_from_expr(checker, e, reads, *stmt_idx, span);
+                    *stmt_idx += 1;
+                }
             }
             Stmt::For { body, .. } => {
                 collect_state_rw(checker, body, reads, writes, stmt_idx, in_atomic);

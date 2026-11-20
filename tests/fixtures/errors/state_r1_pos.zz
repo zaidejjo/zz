@@ -1,0 +1,12 @@
+// features: int-arith, locals, print, state
+// R1 positive: state is read in one statement and written in a later
+// statement outside `atomic { }` — this is a check-then-act violation.
+state n := 0
+
+func main() -> int {
+    n = 1
+    if n == 1 {
+        n = 2
+    }
+    return 0
+}
