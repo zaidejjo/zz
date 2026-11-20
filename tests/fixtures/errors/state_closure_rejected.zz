@@ -1,0 +1,7 @@
+// features: print, state
+// Z0012: state cannot hold a closure/function value.
+state bad := |x: int| x + 1
+
+func main() -> int {
+    return 0
+}
