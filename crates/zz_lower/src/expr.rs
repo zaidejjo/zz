@@ -1070,7 +1070,14 @@ impl Lowerer {
                                     return format!("zz_binop({c_op}, {boxed_l}, {boxed_r})");
                                 };
                                 if matches!(op, zz_frontend::ast::BinOp::Rem) {
-                                    format!("(double)(fmod({l}, {r}))")
+                                    // fmod takes raw C `double`s, not boxed
+                                    // `zz_value`s: use the verified raw texts
+                                    // `lc`/`rc` (the `Div` arm above does the
+                                    // same). `{l}`/`{r}` are boxed emissions
+                                    // (e.g. `zz_float(360.0)`) and would fail
+                                    // to compile (zz_stdlib `math.mod`:
+                                    // `x % 360.0`).
+                                    format!("(double)(fmod({lc}, {rc}))")
                                 } else {
                                     format!("(double)({lc} {c_op} {rc})")
                                 }
