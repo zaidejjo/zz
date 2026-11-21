@@ -1803,8 +1803,6 @@ fn infer_func(
             }
             Op::RmwState { .. } => {
                 pop(&mut st, pc)?;
-                pop(&mut st, pc)?;
-                st.push(TV::U);
             }
             Op::Atomic { .. } => {
                 // The body runs as a frame: its implicit chunk-end return
