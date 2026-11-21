@@ -1,25 +1,25 @@
 //! Shared mutable state registry for the VM engine.
 //!
-//! One process-global mutex per registry (D7). The registry is owned by
-//! the program run and shared via `Arc` with worker interpreters
+//! One process-global reentrant lock per registry (D7). The registry is
+//! owned by the program run and shared via `Arc` with worker interpreters
 //! (spawned tasks). Reset per `Interp`/test for isolation
 //! (see `docs/test-isolation.md`).
 //!
 //! # Locking and reentrancy
 //!
-//! State access is mutually exclusive between OS threads via `mutex`.
-//! Within a single thread (green task), `state_lock_depth` on the VM
-//! tracks nesting: `atomic { }` increments it on entry and decrements on
-//! exit. When `state_lock_depth > 0`, the current thread holds the mutex
-//! and state ops access the map directly (no re-lock, no deadlock).
-//! Because green tasks never yield while `state_lock_depth > 0`
-//! (D3 runtime guard), no other green task on the same thread can
-//! interleave.
+//! State access is mutually exclusive between OS threads via the reentrant
+//! state lock (`acquire`/`release`). Within one thread, `state_lock_depth`
+//! on the VM tracks `atomic { }` nesting: the `Op::Atomic` arm acquires the
+//! lock for the whole body and the frame exit releases it. When
+//! `state_lock_depth > 0`, the current thread already owns the lock, so
+//! state ops access the map directly (no re-lock, no deadlock).
+//! Because tasks never yield while `state_lock_depth > 0` (D3 runtime
+//! guard), the lock is never held across a suspension.
 
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::ThreadId;
 
 use crate::value::Value;
 
@@ -28,13 +28,14 @@ use crate::value::Value;
 #[derive(Debug)]
 pub struct StateRegistry {
     /// The state map. Direct access via `map_mut()` is only safe when the
-    /// caller holds `mutex` (tracked by `state_lock_depth` on the VM).
+    /// caller owns the state lock (tracked by `state_lock_depth` on the VM).
     states: UnsafeCell<HashMap<String, Value>>,
-    /// Mutex for mutual exclusion between OS threads.
-    mutex: Mutex<()>,
-    /// Shared reentrancy depth counter (informational; the authoritative
-    /// per-thread depth lives on the `Vm`).
-    depth: AtomicUsize,
+    /// Reentrant lock ownership: `(owning thread, acquisition depth)`.
+    /// Guarded only for the bookkeeping itself — the state map is protected
+    /// by the ownership protocol, not by holding this mutex.
+    owner: Mutex<Option<(ThreadId, usize)>>,
+    /// Wakes threads blocked in [`StateRegistry::acquire`].
+    released: Condvar,
 }
 
 unsafe impl Send for StateRegistry {}
@@ -42,16 +43,57 @@ unsafe impl Sync for StateRegistry {}
 
 impl StateRegistry {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            states: UnsafeCell::new(HashMap::new()),
-            mutex: Mutex::new(()),
-            depth: AtomicUsize::new(0),
-        })
+        Arc::new(Self::default())
     }
 
-    /// Acquire the state lock. Returns a guard that releases on drop.
-    pub fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.mutex.lock().unwrap()
+    /// Acquire the reentrant state lock on the current thread. A nested
+    /// acquisition by the owner bumps the depth; another thread blocks
+    /// until every level held by the owner is released.
+    pub fn acquire(&self) {
+        let me = std::thread::current().id();
+        let mut owner = self.owner.lock().unwrap();
+        loop {
+            match owner.as_mut() {
+                None => {
+                    *owner = Some((me, 1));
+                    return;
+                }
+                Some((id, depth)) if *id == me => {
+                    *depth += 1;
+                    return;
+                }
+                Some(_) => owner = self.released.wait(owner).unwrap(),
+            }
+        }
+    }
+
+    /// Release one level of the state lock held by the current thread.
+    pub fn release(&self) {
+        let me = std::thread::current().id();
+        let mut owner = self.owner.lock().unwrap();
+        if let Some((id, depth)) = owner.as_mut() {
+            if *id == me {
+                *depth -= 1;
+                if *depth == 0 {
+                    *owner = None;
+                    drop(owner);
+                    self.released.notify_one();
+                }
+                return;
+            }
+        }
+        debug_assert!(
+            false,
+            "state lock released by a thread that does not hold it"
+        );
+    }
+
+    /// RAII guard for short critical sections (`init`/`get`/`set`/`rmw` and
+    /// a single state op). `atomic { }` bodies use `acquire`/`release`
+    /// explicitly because the hold spans many VM ops.
+    pub fn lock(&self) -> StateGuard<'_> {
+        self.acquire();
+        StateGuard { reg: self }
     }
 
     /// Execute `f` while holding the state lock.
@@ -60,13 +102,10 @@ impl StateRegistry {
         F: FnOnce() -> R,
     {
         let _guard = self.lock();
-        self.depth.fetch_add(1, Ordering::SeqCst);
-        let result = f();
-        self.depth.fetch_sub(1, Ordering::SeqCst);
-        result
+        f()
     }
 
-    /// Unsafe: return `&mut` to the state map. Caller MUST hold `mutex`.
+    /// Unsafe: return `&mut` to the state map. Caller MUST hold the lock.
     /// Used by the VM when `state_lock_depth > 0` (inside `atomic { }`).
     #[allow(clippy::mut_from_ref)]
     pub(crate) unsafe fn map_mut(&self) -> &mut HashMap<String, Value> {
@@ -113,12 +152,23 @@ impl StateRegistry {
     }
 }
 
+/// RAII handle for one level of the reentrant state lock.
+pub struct StateGuard<'a> {
+    reg: &'a StateRegistry,
+}
+
+impl Drop for StateGuard<'_> {
+    fn drop(&mut self) {
+        self.reg.release();
+    }
+}
+
 impl Default for StateRegistry {
     fn default() -> Self {
         Self {
             states: UnsafeCell::new(HashMap::new()),
-            mutex: Mutex::new(()),
-            depth: AtomicUsize::new(0),
+            owner: Mutex::new(None),
+            released: Condvar::new(),
         }
     }
 }
@@ -164,5 +214,29 @@ mod tests {
             );
         });
         assert_eq!(reg.get("n"), Some(Value::Int(1)));
+    }
+
+    #[test]
+    fn reentrant_acquire_release() {
+        let reg = StateRegistry::new();
+        reg.acquire();
+        reg.acquire();
+        reg.release();
+        // Still owned after the inner release: a per-op lock must not block.
+        reg.set("n", Value::Int(1));
+        reg.release();
+        assert_eq!(reg.get("n"), Some(Value::Int(1)));
+    }
+
+    #[test]
+    fn acquire_blocks_other_threads() {
+        let reg = StateRegistry::new();
+        reg.acquire();
+        let clone = Arc::clone(&reg);
+        let handle = std::thread::spawn(move || clone.get("n"));
+        // Give the worker a chance to block, then release.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        reg.release();
+        assert_eq!(handle.join().unwrap(), None);
     }
 }

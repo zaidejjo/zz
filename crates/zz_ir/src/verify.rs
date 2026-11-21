@@ -112,7 +112,9 @@ fn effect(op: &Op) -> i64 {
         Op::LoadState { .. } => 1,
         Op::StoreState { .. } => -1,
         Op::RmwState { .. } => -1,
-        Op::Atomic { .. } => 0,
+        // Atomic runs its body as a frame: the implicit chunk-end return
+        // leaves one value on the caller's stack.
+        Op::Atomic { .. } => 1,
     }
 }
 
@@ -1804,7 +1806,13 @@ fn infer_func(
                 pop(&mut st, pc)?;
                 st.push(TV::U);
             }
-            Op::Atomic { .. } => {}
+            Op::Atomic { .. } => {
+                // The body runs as a frame: its implicit chunk-end return
+                // pushes one value (type unknown) that the owning statement
+                // pops. Mirror `effect()` so the type-state depth matches
+                // the depth simulation at joins.
+                st.push(TV::U);
+            }
         }
         // Successor edges (mirror the depth simulation exactly).
         // MatchError included with the non-fallthroughs: it traps, so

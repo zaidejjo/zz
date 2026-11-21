@@ -582,7 +582,7 @@ impl Lowerer {
                 let gid = Lowerer::state_cid(zz_name);
                 let flag = format!("{}_init", gid);
                 let mut out = String::new();
-                let val = self.emit_expr(value, &mut names, &mut out);
+                let val = self.emit_state_value(value, &mut names, &mut out);
                 self.emit_state_write(&gid, &flag, &val, &mut out);
                 state_init.push_str(&out);
             }

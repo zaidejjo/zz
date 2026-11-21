@@ -85,6 +85,16 @@ impl Lowerer {
         names: &mut NameCtx,
         out: &mut String,
     ) {
+        // `state` home (`arr[i] = v`, field stores on a computed state
+        // receiver): store the owned temp under the state lock. `zz_assign`
+        // retains the new value and releases the old slot; the temp's own
+        // share is then dropped, leaving the slot as sole owner.
+        if let Some((cid, _flag)) = self.state_target_ids(target) {
+            out.push_str(&format!(
+                "    zz_state_lock();\n    zz_assign(&{cid}, {tmp});\n    zz_release(&{tmp});\n    zz_state_unlock();\n"
+            ));
+            return;
+        }
         match target {
             Expr::Ident { name, .. } => {
                 if let Some(cid) = names.lookup(name).map(str::to_string) {
@@ -841,6 +851,14 @@ impl Lowerer {
                 if self.try_emit_move_assign(target, value, names, out) {
                     return;
                 }
+                // `state` targets: the slot is a `zz_value`, so emit the
+                // value in state-storage form (unboxed structs are boxed
+                // into runtime objects) and write it under the state lock.
+                if let Some((cid, flag)) = self.state_target_ids(target) {
+                    let val = self.emit_state_value(value, names, out);
+                    self.emit_state_write(&cid, &flag, &val, out);
+                    return;
+                }
                 let val = self.emit_expr(value, names, out);
                 // If the RHS expression was already lowered to a raw
                 // scalar (int64_t/double/bool), don't try to extract
@@ -864,16 +882,6 @@ impl Lowerer {
                 let value_needs_unbox = !val_is_actually_scalar;
                 match target {
                     Expr::Ident { name, .. } => {
-                        // State variable target: assign to zz_state_* global
-                        // under the state lock. State bindings live in their
-                        // own file-scope globals, not in NameCtx, so
-                        // names.lookup() returns None for them — handle here.
-                        if self.state_set.contains(name.as_str()) {
-                            let cid = Lowerer::state_cid(name);
-                            let flag = format!("{}_init", cid);
-                            self.emit_state_write(&cid, &flag, &val, out);
-                            return;
-                        }
                         if let Some(cid) = names.lookup(name.as_str()).map(|s| s.to_string()) {
                             // Check if the target variable is a scalar type
                             if let Some(ctype) =
@@ -957,14 +965,47 @@ impl Lowerer {
                     }
                     Expr::Path { parts, .. } => {
                         let joined = parts.join(".");
-                        // State variable target: assign to zz_state_* global
-                        // under the state lock. State bindings live in their
-                        // own file-scope globals, not in NameCtx, so
-                        // names.lookup() returns None for them — handle here.
-                        if self.state_set.contains(&joined) {
-                            let cid = Lowerer::state_cid(&joined);
-                            let flag = format!("{}_init", cid);
-                            self.emit_state_write(&cid, &flag, &val, out);
+                        // Field write on a `state` binding (`cfg.x = v`,
+                        // `cfg.a.b = v`): the slot is a shared boxed object,
+                        // so mutate it under the state lock. Field stores
+                        // detach a shared header first, leaving concurrent
+                        // readers their snapshot (value semantics).
+                        if let Some((sname, fields)) = self.state_field_path(parts) {
+                            let cid = Lowerer::state_cid(&sname);
+                            let (boxed_val, boxed_needs_release) =
+                                self.box_index_store_value(value, val.clone(), names, out);
+                            out.push_str("    zz_state_lock();\n");
+                            let mut parents = vec![cid];
+                            for field in &fields[..fields.len() - 1] {
+                                let parent = parents.last().cloned().unwrap_or_default();
+                                let tmp = names.fresh("_sf");
+                                out.push_str(&format!(
+                                    "    zz_value {tmp} = zz_object_get_field(&{parent}, \"{field}\");\n"
+                                ));
+                                parents.push(tmp);
+                            }
+                            let leaf_parent = parents.last().cloned().unwrap_or_default();
+                            let leaf = fields.last().cloned().unwrap_or_default();
+                            out.push_str(&format!(
+                                "    zz_object_set_field(&{leaf_parent}, \"{leaf}\", {boxed_val});\n"
+                            ));
+                            if boxed_needs_release {
+                                out.push_str(&format!("    zz_release(&{boxed_val});\n"));
+                            }
+                            // Value semantics: land each intermediate object
+                            // back into its parent, then drop the temps.
+                            for i in (0..parents.len() - 1).rev() {
+                                out.push_str(&format!(
+                                    "    zz_object_set_field(&{}, \"{}\", {});\n",
+                                    parents[i],
+                                    fields[i],
+                                    parents[i + 1]
+                                ));
+                            }
+                            for tmp in &parents[1..] {
+                                out.push_str(&format!("    zz_release(&{tmp});\n"));
+                            }
+                            out.push_str("    zz_state_unlock();\n");
                             return;
                         }
                         // Handle struct field assignment: p.x = 99 or r.origin.x = 42

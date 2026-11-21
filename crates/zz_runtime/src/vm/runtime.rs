@@ -502,6 +502,17 @@ impl Vm {
         self.run_loop(interp)
     }
 
+    /// Leave one `atomic { }` scope: drop the per-VM depth and release the
+    /// reentrant state lock that `Op::Atomic` acquired for the body. Called
+    /// from every path that pops an atomic frame (normal exit, `break` /
+    /// `continue` unwinding, and `return` unwinding).
+    fn leave_atomic(&mut self, interp: &mut Interp) {
+        self.state_lock_depth -= 1;
+        if let Some(reg) = interp.state_registry.as_ref() {
+            reg.release();
+        }
+    }
+
     /// One cooperative-safepoint tick: decrement the call-frame slice budget
     /// and, once per budget, read the clock to see whether the current
     /// timeslice expired.
@@ -742,11 +753,11 @@ impl Vm {
                 }
                 let f = self.frames.pop().unwrap();
                 self.stack.truncate(f.stack_base);
-                // Decrement state_lock_depth when popping an atomic frame,
-                // so cooperative safepoints are re-enabled after the atomic
-                // block completes.
+                // Leave the atomic scope: drops the per-VM depth and releases
+                // the reentrant state lock acquired by `Op::Atomic`, so
+                // cooperative safepoints (and peer tasks) resume.
                 if f.is_atomic {
-                    self.state_lock_depth -= 1;
+                    self.leave_atomic(interp);
                 }
                 interp.env = f.prev_env;
                 let parent_defers = f.defer_stack;
@@ -1057,8 +1068,10 @@ impl Vm {
                         Some(r) => Arc::clone(r),
                         None => return Err(self.error("state registry not available", *span)),
                     };
-                    // Acquire the state lock for the whole body (D3).
-                    let _guard = reg.lock();
+                    // Acquire the state lock for the whole body (D3). The
+                    // frame exit releases it; `state_lock_depth` makes nested
+                    // ops bypass the lock (same thread, reentrant).
+                    reg.acquire();
                     self.state_lock_depth += 1;
                     // Push a frame for the atomic body so it can access outer
                     // locals (function parameters, etc.) via the outer Vm's
@@ -2520,7 +2533,7 @@ impl Vm {
                         interp.env = f.prev_env;
                         self.stack.truncate(f.stack_base);
                         if f.is_atomic {
-                            self.state_lock_depth -= 1;
+                            self.leave_atomic(interp);
                         }
                     }
                     self.loops.retain(|l| l.frame_idx < self.frames.len());
@@ -2572,7 +2585,7 @@ impl Vm {
                         interp.env = f.prev_env;
                         self.stack.truncate(f.stack_base);
                         if f.is_atomic {
-                            self.state_lock_depth -= 1;
+                            self.leave_atomic(interp);
                         }
                     }
                     self.loops.retain(|l| l.frame_idx < self.frames.len());
@@ -4188,11 +4201,10 @@ impl Vm {
             }
             self.loops.retain(|li| li.frame_idx < self.frames.len());
             self.stack.truncate(f.stack_base);
-            // Decrement state_lock_depth when popping an atomic frame,
-            // so cooperative safepoints are re-enabled after the atomic
-            // block is unwound.
+            // Leave the atomic scope when unwinding past its frame: drop the
+            // per-VM depth and release the reentrant state lock.
             if f.is_atomic {
-                self.state_lock_depth -= 1;
+                self.leave_atomic(interp);
             }
             // If the popped frame was an `atomic { }` frame and we are
             // unwinding a `return`, keep unwinding past it so the return

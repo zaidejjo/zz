@@ -1099,6 +1099,52 @@ impl Lowerer {
         }
     }
 
+    /// Split a dotted reference whose root is a `state` binding into the
+    /// binding name and its field path: `["cfg", "x"]` → `("cfg", ["x"])`.
+    /// Returns `None` when the whole name is a state binding (no field) or
+    /// nothing in `parts` names state.
+    pub(crate) fn state_field_path(&self, parts: &[String]) -> Option<(String, Vec<String>)> {
+        (1..parts.len()).rev().find_map(|k| {
+            let prefix = parts[..k].join(".");
+            self.state_set
+                .contains(&prefix)
+                .then(|| (prefix, parts[k..].to_vec()))
+        })
+    }
+
+    /// `(cid, init_flag)` for `target` when it names a `state` binding
+    /// (bare or dotted), else `None`.
+    pub(crate) fn state_target_ids(&self, target: &Expr) -> Option<(String, String)> {
+        let name = match target {
+            Expr::Ident { name, .. } => name.clone(),
+            Expr::Path { parts, .. } => parts.join("."),
+            _ => return None,
+        };
+        if !self.state_set.contains(&name) {
+            return None;
+        }
+        let cid = Lowerer::state_cid(&name);
+        let flag = format!("{}_init", cid);
+        Some((cid, flag))
+    }
+
+    /// Emit an expression for storage into a `state` slot (always a
+    /// `zz_value`). Unboxed struct values are boxed into a runtime object
+    /// first: the slot cannot hold a raw C struct, and field reads
+    /// (`cfg.x`) plus display go through the boxed accessor. Everything
+    /// else takes the normal lowering path.
+    pub(crate) fn emit_state_value(
+        &self,
+        value: &Expr,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        match self.struct_box_name(value, names) {
+            Some(sname) => self.emit_boxed_value(&sname, value, names, out),
+            None => self.emit_expr(value, names, out),
+        }
+    }
+
     /// Emit code for a state read-modify-write (compound assign), one lock
     /// acquisition when locking is enabled, else plain access. The `rhs`
     /// expression is already on the value stack / in `val`; `cur` holds the

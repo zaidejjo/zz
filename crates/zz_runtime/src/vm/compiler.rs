@@ -710,7 +710,12 @@ impl Compiler {
             Op::LoadState(..) => 1,
             Op::StoreState(..) => -1,
             Op::RmwState(..) => 0,
-            Op::Atomic { .. } => 0,
+            // The atomic body runs as a frame; its implicit chunk-end return
+            // pushes one value onto the caller's stack (which the owning
+            // statement pops). Counting it as 0 shifted every later local
+            // slot one too low — `x := 1; atomic {…}; y := p.x` made `y`
+            // alias `x`'s slot.
+            Op::Atomic { .. } => 1,
         }
     }
 
@@ -2515,12 +2520,25 @@ impl Compiler {
         // State-name path like `p.x` where `p` is a state binding: load the
         // state value, set the field, then store back to the registry. The
         // new value is already on the stack (compiled by the caller).
+        //
+        // `GetField` yields a clone and `SetField` detaches on write, so
+        // every intermediate level must be written back into its parent
+        // (deepest first) before the root goes back to the registry. Without
+        // the loop below, `cfg.inner.v = ...` stored the *inner* struct into
+        // the `cfg` slot, so later `cfg.x` read an `Inner` and failed.
         if parts.len() > 1 && self.state_names.contains(&parts[0]) {
             self.emit(Op::LoadState(parts[0].clone(), span));
             for part in &parts[1..parts.len() - 1] {
                 self.emit(Op::GetField(part.clone(), span));
             }
             self.emit(Op::SetField(parts.last().unwrap().clone(), span));
+            for i in (1..parts.len() - 1).rev() {
+                self.emit(Op::LoadState(parts[0].clone(), span));
+                for part in &parts[1..i] {
+                    self.emit(Op::GetField(part.clone(), span));
+                }
+                self.emit(Op::SetField(parts[i].clone(), span));
+            }
             self.emit(Op::StoreState(parts[0].clone(), span));
             return;
         }

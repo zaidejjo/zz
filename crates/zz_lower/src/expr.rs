@@ -534,6 +534,23 @@ impl Lowerer {
                     self.emit_state_read(&cid, &flag, &joined, &tmp, out);
                     return tmp;
                 }
+                // Field read on a `state` binding (`cfg.x`, `cfg.a.b`): the
+                // slot is a boxed runtime object, so read it under the state
+                // lock and chain the object accessors. The result stays
+                // boxed (`zz_value`), like every other field-read path.
+                if let Some((sname, fields)) = self.state_field_path(parts) {
+                    let cid = Lowerer::state_cid(&sname);
+                    let flag = format!("{}_init", cid);
+                    let tmp = names.fresh("_s");
+                    self.emit_state_read(&cid, &flag, &sname, &tmp, out);
+                    let mut acc = format!("zz_object_get_field(&{tmp}, \"{}\")", fields[0]);
+                    for field in &fields[1..] {
+                        let obj = names.fresh("_sf");
+                        out.push_str(&format!("    zz_value {obj} = {acc};\n"));
+                        acc = format!("zz_object_get_field(&{obj}, \"{field}\")");
+                    }
+                    return acc;
+                }
                 // Unit-variant value (`Token.Eof`, no parens): precise via
                 // the HIR type when available, else by enum name (keeps
                 // typeless top-level scripts working). Both yield to
