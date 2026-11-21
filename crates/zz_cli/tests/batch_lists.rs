@@ -109,6 +109,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "state_counter.zz", true),
     ("stdlib", "state_simple.zz", true),
     ("stdlib", "state_field_index.zz", true),
+    ("stdlib", "state_atomic_locals.zz", true),
     ("stdlib", "state_nested_atomic.zz", true),
     ("stdlib", "state_early_control.zz", true),
     ("stdlib", "state_r1_neg.zz", true),

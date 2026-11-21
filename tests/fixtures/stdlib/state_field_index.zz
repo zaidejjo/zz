@@ -1,19 +1,26 @@
 // features: int-arith, locals, print, state, structs, std-task
-// Field/index write on state under contention: 2 tasks x field, 2 tasks x index.
+// Field/index write on state under contention: 2 tasks x nested field,
+// 2 tasks x index. The checks are real (Result errors fail the run).
 import std.task
+
+pub struct Inner {
+    v: int,
+}
 
 pub struct Cfg {
     x: int,
     y: int,
+    inner: Inner,
     _tag: str,
 }
 
-state cfg := Cfg { x: 0, y: 0, _tag: "cfg" }
+state cfg := Cfg { x: 0, y: 0, inner: Inner { v: 0 }, _tag: "cfg" }
 state arr := [0, 0, 0, 0]
 
-func cfg_inc_x() {
+func cfg_inc() {
     atomic {
         cfg.x = cfg.x + 1
+        cfg.inner.v = cfg.inner.v + 1
     }
 }
 
@@ -23,30 +30,44 @@ func arr_inc(i: int) {
     }
 }
 
-func main() -> int {
-    h0 := task.spawn(|_| { cfg_inc_x() })
-    h1 := task.spawn(|_| { cfg_inc_x() })
+func main() -> Result<int, str> {
+    h0 := task.spawn(|_| { cfg_inc() })
+    h1 := task.spawn(|_| { cfg_inc() })
     h2 := task.spawn(|_| { arr_inc(0) })
     h3 := task.spawn(|_| { arr_inc(1) })
     task.join(h0)
     task.join(h1)
     task.join(h2)
     task.join(h3)
-    // Read state into locals before checking (D2: no println in state-touching stmt)
+    // Read state into locals before checking (D2: no println in a
+    // state-touching statement). The prints make value drift visible.
     cx:int = cfg.x
     cy:int = cfg.y
+    iv:int = cfg.inner.v
+    tag:str = cfg._tag
     a0:int = arr[0]
     a1:int = arr[1]
-    // Print before any if checks on state reads (AOT codegen limitation)
-    println("state_field_index_ok")
+    println(cx)
+    println(cy)
+    println(iv)
+    println(tag)
+    println(a0)
+    println(a1)
     if cx != 2 {
-        return -1
+        return .err("cfg.x")
     }
     if cy != 0 {
-        return -2
+        return .err("cfg.y")
+    }
+    if iv != 2 {
+        return .err("cfg.inner.v")
+    }
+    if tag != "cfg" {
+        return .err("cfg._tag")
     }
     if a0 != 1 || a1 != 1 {
-        return -3
+        return .err("arr")
     }
-    return 0
+    println("state_field_index_ok")
+    return .ok(0)
 }
