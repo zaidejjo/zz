@@ -2317,7 +2317,7 @@ fn files_identical(a: &Path, b: &Path) -> bool {
 #[allow(clippy::type_complexity)]
 pub fn stage_exec_copy(built: &Path) -> Result<(PathBuf, Box<dyn FnOnce()>), String> {
     static STAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
+    let dir = zz_paths::paths::zz_temp_dir().join(format!(
         "zz-native-exec-{}-{}",
         std::process::id(),
         STAGE_COUNTER.fetch_add(1, Ordering::SeqCst)
@@ -2383,7 +2383,8 @@ pub fn transient_build(path: &Path) -> Result<(PathBuf, Box<dyn FnOnce()>), Stri
     // other's binaries — rotating VM-vs-native mismatches.
     static TRANSIENT_COUNTER: AtomicU64 = AtomicU64::new(0);
     let uniq = TRANSIENT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let tmp = std::env::temp_dir().join(format!("zz-native-{}-{uniq}", std::process::id()));
+    let tmp =
+        zz_paths::paths::zz_temp_dir().join(format!("zz-native-{}-{uniq}", std::process::id()));
     std::fs::create_dir_all(&tmp).map_err(|e| format!("cannot create tmp: {e}"))?;
     let bin = tmp.join("zz_out");
     zz_codegen::build_native(

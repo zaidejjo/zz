@@ -3926,6 +3926,7 @@ dependencies = [
  "zz_hir",
  "zz_ir",
  "zz_loader",
+ "zz_paths",
  "zz_plugin",
  "zz_pm",
  "zz_runtime",

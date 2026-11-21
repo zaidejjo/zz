@@ -861,8 +861,14 @@ fn chunk_matches_hir_stdout_and_exit() {
         return;
     }
     // One dir per backend so output names never collide.
-    let root =
-        TempDirGuard(std::env::temp_dir().join(format!("zz-chunk-diff-{}", std::process::id())));
+    let root = TempDirGuard(
+        // Honor `ZZ_TEMP_DIR` (and thus `TMPDIR`) so the heavy linked
+        // binaries land off a small quota-limited `/tmp` on constrained hosts.
+        std::env::var_os("ZZ_TEMP_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!("zz-chunk-diff-{}", std::process::id())),
+    );
     for (name, src) in CASES {
         for backend in ["hir", "chunk"] {
             let dir = root.join(format!("{name}_{backend}"));
