@@ -1058,6 +1058,10 @@ pub(crate) struct PreparedRun {
         std::sync::Arc<std::collections::HashMap<zz_checker::SpanKey, zz_checker::Type>>,
     pub(crate) structs: std::collections::HashMap<String, zz_checker::StructSig>,
     pub(crate) enums: std::collections::HashMap<String, zz_checker::EnumSig>,
+    /// func name → interned Symbol id, so `Compiler::type_of` can resolve a
+    /// call's span to its resolved type (drives `sqlz.query` struct mapping
+    /// and any other type-at-span lookups during VM execution).
+    pub(crate) symbol_map: std::collections::HashMap<String, u32>,
     funcs: std::collections::HashMap<String, zz_checker::FuncSig>,
     entry_path: String,
     /// Threaded out for the run cache: interpreter inputs that cannot be
@@ -1341,6 +1345,7 @@ pub(crate) fn prepare_run_with_features(
         }
         return Err(msg);
     }
+    let symbol_map = typed.program.symbol_map.clone();
     let interp = setup_interp(
         natives,
         &consts,
@@ -1361,6 +1366,7 @@ pub(crate) fn prepare_run_with_features(
         structs: typed.program.structs,
         enums: typed.program.enums,
         funcs: typed.program.funcs,
+        symbol_map: symbol_map.clone(),
         entry_path: path.to_string(),
         consts,
         import_aliases,
@@ -1937,7 +1943,7 @@ fn run_file(
             match prep.interp.run_typed(
                 program,
                 prep.types.clone(),
-                HashMap::new(),
+                prep.symbol_map.clone(),
                 prep.structs.clone(),
                 prep.enums.clone(),
             ) {

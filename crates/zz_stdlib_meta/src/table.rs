@@ -1125,7 +1125,7 @@ pub fn build() -> HashMap<String, FuncSig> {
     // std.json — Phase 2.6 extensions
     m.insert(
         "std.json.pretty".into(),
-        sig(vec![("j", json_t.clone())], Type::Str),
+        sig_t(vec![("j", t.clone())], Type::Str),
     );
     m.insert(
         "std.json.type".into(),

@@ -22,9 +22,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use zz_codegen::{build_options_fingerprint_with, BuildOptions, ClangProvider, PgoMode};
 use zz_frontend::ast::Stmt;
-use zz_frontend::diag::ColorMode;
+use zz_frontend::diag::{ColorMode, RawDiag};
 use zz_frontend::span::Span;
-use zz_hir::{merge_typed_programs, TypedProgram};
+use zz_hir::{callgraph, merge_typed_programs, TypedProgram};
 use zz_loader::{
     find_project_root, load_program_check_with_features, load_program_check_with_features_sink,
     load_program_with_features, load_program_with_features_sink,
@@ -1836,6 +1836,27 @@ pub fn build_release(
             "zz: timing load_check_hir_dce={}ms",
             t_front.elapsed().as_millis()
         );
+    }
+
+    // D5 R2: plain globals reachable from a `task.spawn` closure must be
+    // `state`. Mirror the VM's whole-program check (main.rs:1329-1343) so
+    // `zz run --native` fails with the same Z0017 diagnostic instead of
+    // silently succeeding on a racy global. `pruned` still contains `main`
+    // and anything reachable from it (including spawn closures), so a plain
+    // global assigned inside a task is caught here.
+    let cg = callgraph::build_callgraph(&pruned);
+    let mut r2_errors: Vec<RawDiag> = Vec::new();
+    callgraph::check_r2_globals_vs_tasks(&pruned, &cg, &mut r2_errors);
+    if !r2_errors.is_empty() {
+        let mut msg = format!(
+            "{} error(s) checking plain globals vs tasks:",
+            r2_errors.len()
+        );
+        for d in &r2_errors {
+            let code = d.code.map(|c| format!("[{c}] ")).unwrap_or_default();
+            msg.push_str(&format!("\n{code}{}", d.message));
+        }
+        return Err(msg);
     }
 
     // Resolve the provider now so a missing toolchain fails fast — but
