@@ -935,12 +935,37 @@ fn check_program_impl(
         // `@link` is collected in Pass 2 (check_stmt) to preserve order/dedup.
     }
 
-    // Pass 2: check top-level statements. First process all declarations
-    // (including `state`) so `state_names` and the global env are populated
-    // before any function body is checked. This ensures state variables are
-    // resolvable inside `atomic { }` blocks and other nested contexts.
+    // Pass 2: check top-level statements in dependency order.
+    //
+    // 1. Imports first — module namespaces must be registered before any
+    //    statement can reference `module.item` (e.g. `fs.delete` under
+    //    `import std.fs`). Doing this first also suppresses the spurious
+    //    "add import" hint for already-imported modules (#710).
+    // 2. State declarations — env populated before function bodies so
+    //    state vars are resolvable inside `atomic { }` blocks.
+    // 3. Function/impl bodies — return-type inference vars are resolved
+    //    before declarations that call functions (e.g. `z := five()`).
+    // 4. Non-state declarations + everything else.
     for stmt in &program.stmts {
-        if let Stmt::Decl { name, pub_, .. } = stmt {
+        if matches!(stmt, Stmt::Import { .. }) {
+            let scoped = !matches!(stmt, Stmt::Func { .. } | Stmt::Impl { .. });
+            if scoped {
+                checker.scope.push(Arc::from(TOP_SCOPE));
+            }
+            checker.check_stmt(stmt);
+            if scoped {
+                checker.scope.pop();
+            }
+        }
+    }
+    for stmt in &program.stmts {
+        if let Stmt::Decl {
+            name,
+            pub_,
+            is_state: true,
+            ..
+        } = stmt
+        {
             // Track pub on Decl before checking.
             if *pub_ {
                 pub_bindings_set.insert(name.name.clone());
@@ -955,10 +980,33 @@ fn check_program_impl(
             }
         }
     }
-    // Then process everything else in source order.
     for stmt in &program.stmts {
-        if matches!(stmt, Stmt::Decl { .. }) {
+        if matches!(stmt, Stmt::Func { .. } | Stmt::Impl { .. }) {
+            let scoped = !matches!(stmt, Stmt::Func { .. } | Stmt::Impl { .. });
+            if scoped {
+                checker.scope.push(Arc::from(TOP_SCOPE));
+            }
+            checker.check_stmt(stmt);
+            if scoped {
+                checker.scope.pop();
+            }
+        }
+    }
+    for stmt in &program.stmts {
+        if matches!(
+            stmt,
+            Stmt::Import { .. }
+                | Stmt::Decl { is_state: true, .. }
+                | Stmt::Func { .. }
+                | Stmt::Impl { .. }
+        ) {
             continue;
+        }
+        if let Stmt::Decl { name, pub_, .. } = stmt {
+            // Track pub on Decl before checking.
+            if *pub_ {
+                pub_bindings_set.insert(name.name.clone());
+            }
         }
         let scoped = !matches!(stmt, Stmt::Func { .. } | Stmt::Impl { .. });
         if scoped {
