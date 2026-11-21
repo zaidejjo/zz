@@ -1831,7 +1831,7 @@ static zz_value zz_value_dup_inner(zz_value v, int *err, zz_dup_memo *m) {
 
 // Deep-copy a value for transfer across a thread boundary. See above.
 zz_value zz_value_dup(zz_value v) {
-    zz_dup_entry inline_store[ZZ_DUP_INLINE_CAP];
+    zz_dup_entry inline_store[ZZ_DUP_INLINE_CAP] = {0};
     zz_dup_memo m = {inline_store, 0, ZZ_DUP_INLINE_CAP, 0};
     int discarded_err = 0;
     zz_value out = zz_value_dup_inner(v, &discarded_err, &m);
@@ -3368,7 +3368,7 @@ zz_value zz_spawn_ex(zz_dispatch_fn fn, void **cells,
                      size_t nenv, int is_green, int *err) {
     if (!fn) { *err = 1; return zz_unit(); }
     zz_once(&zz_executor_once, zz_executor_init);
-    zz_dup_entry inline_store[ZZ_DUP_INLINE_CAP];
+    zz_dup_entry inline_store[ZZ_DUP_INLINE_CAP] = {0};
     zz_dup_memo m = {inline_store, 0, ZZ_DUP_INLINE_CAP, 0};
     zz_value owned =
         zz_closure_dup_build(fn, cells, kinds, sizes, nenv, is_green, err, &m);
@@ -9341,7 +9341,7 @@ zz_value zz_typeof(zz_value v, int *err) {
 // a snapshot regardless of ownership analysis. Cycle-safe via the
 // dup memo (same helper as thread crossings).
 zz_value zz_clone_deep(zz_value v, int *err) {
-    zz_dup_entry inline_store[ZZ_DUP_INLINE_CAP];
+    zz_dup_entry inline_store[ZZ_DUP_INLINE_CAP] = {0};
     zz_dup_memo m = {inline_store, 0, ZZ_DUP_INLINE_CAP, 0};
     zz_value out = zz_value_dup_inner(v, err, &m);
     if (m.owned) free(m.items);
