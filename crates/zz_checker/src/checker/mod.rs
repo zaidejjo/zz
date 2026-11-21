@@ -943,9 +943,16 @@ fn check_program_impl(
     //    "add import" hint for already-imported modules (#710).
     // 2. State declarations — env populated before function bodies so
     //    state vars are resolvable inside `atomic { }` blocks.
-    // 3. Function/impl bodies — return-type inference vars are resolved
-    //    before declarations that call functions (e.g. `z := five()`).
-    // 4. Non-state declarations + everything else.
+    // 3. Non-state declarations — variables enter the env before function
+    //    bodies are checked, so `func main() { println(val) }` resolves
+    //    `pub val := 10`. Type-inference errors for unresolved return types
+    //    are deferred (see step 6) rather than emitted immediately.
+    // 4. Function/impl bodies — return-type inference variables are
+    //    resolved here (e.g. `func five() { return 5 }` binds its ret to
+    //    `int`), which unblocks deferred declarations like `z := five()`.
+    // 5. Everything else (non-decl, non-import statements).
+    // 6. Resolve deferred type-inference errors: emit only if the type is
+    //    still unresolved after all function bodies are checked.
     for stmt in &program.stmts {
         if matches!(stmt, Stmt::Import { .. }) {
             let scoped = !matches!(stmt, Stmt::Func { .. } | Stmt::Impl { .. });
@@ -981,24 +988,9 @@ fn check_program_impl(
         }
     }
     for stmt in &program.stmts {
-        if matches!(stmt, Stmt::Func { .. } | Stmt::Impl { .. }) {
-            let scoped = !matches!(stmt, Stmt::Func { .. } | Stmt::Impl { .. });
-            if scoped {
-                checker.scope.push(Arc::from(TOP_SCOPE));
-            }
-            checker.check_stmt(stmt);
-            if scoped {
-                checker.scope.pop();
-            }
-        }
-    }
-    for stmt in &program.stmts {
         if matches!(
             stmt,
-            Stmt::Import { .. }
-                | Stmt::Decl { is_state: true, .. }
-                | Stmt::Func { .. }
-                | Stmt::Impl { .. }
+            Stmt::Import { .. } | Stmt::Decl { is_state: true, .. }
         ) {
             continue;
         }
@@ -1015,6 +1007,32 @@ fn check_program_impl(
         checker.check_stmt(stmt);
         if scoped {
             checker.scope.pop();
+        }
+    }
+    for stmt in &program.stmts {
+        if matches!(stmt, Stmt::Func { .. } | Stmt::Impl { .. }) {
+            let scoped = !matches!(stmt, Stmt::Func { .. } | Stmt::Impl { .. });
+            if scoped {
+                checker.scope.push(Arc::from(TOP_SCOPE));
+            }
+            checker.check_stmt(stmt);
+            if scoped {
+                checker.scope.pop();
+            }
+        }
+    }
+    // Step 6: resolve deferred type-inference errors. A declaration like
+    // `z := five()` defers its "cannot infer type" error until `five`'s
+    // body has been checked and its return-type variable resolved.
+    for (name, span) in std::mem::take(&mut checker.deferred_type_errors) {
+        if let Some(ty) = checker.new_bindings.get(&name) {
+            let rt = checker.unifier.resolve_deep(ty);
+            if zz_infer::contains_var(&rt) {
+                checker.errors.push(zz_diag_core::error_at(
+                    format!("cannot infer the type of `{name}`; add a type annotation"),
+                    span,
+                ));
+            }
         }
     }
 

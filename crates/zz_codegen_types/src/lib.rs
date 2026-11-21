@@ -340,6 +340,9 @@ pub enum BuildError {
     NoClang,
     /// `--pgo` was combined with a foreign `--target`.
     PgoCross,
+    /// `--pgo` was requested with `zig cc` as the C provider, which does not
+    /// emit LLVM profile counters.
+    PgoRequiresClang,
     /// `--static` was requested for a macOS target.
     StaticMacos,
     /// The C compiler failed with `stderr`.
@@ -370,6 +373,13 @@ impl std::fmt::Display for BuildError {
                  install clang 18+ or zig for -p builds"
             ),
             BuildError::PgoCross => write!(f, "Error: --pgo requires a native build target"),
+            BuildError::PgoRequiresClang => write!(
+                f,
+                "PGO instrumentation requires system clang; zig cc does not emit \
+                 profile counters\n\
+                 hint: drop `--cc zig` (or use `--cc clang`) so `zz build --pgo` / \
+                 `--full --` / `--optimize-max` can instrument the binary"
+            ),
             BuildError::StaticMacos => write!(
                 f,
                 "Error: Static binaries are not supported on macOS targets"

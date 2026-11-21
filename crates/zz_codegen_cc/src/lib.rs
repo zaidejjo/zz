@@ -483,6 +483,12 @@ pub fn validate(
                 return Err(BuildError::PgoCross);
             }
         }
+        // zig cc accepts -fprofile-generate/-fprofile-instr-generate for
+        // clang compatibility but does not emit LLVM profile counters, so
+        // training produces zero profile data. Require system clang.
+        if matches!(provider, ClangProvider::Zig) {
+            return Err(BuildError::PgoRequiresClang);
+        }
     }
     if opts.static_link {
         let macos = match target {

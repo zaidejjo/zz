@@ -387,6 +387,11 @@ pub struct Checker {
     /// whether it reads the very binding the declaration shadows from an
     /// enclosing scope (#518). Innermost last — see `begin_shadow_probe`.
     pub shadow_probes: Vec<ShadowProbe>,
+    /// Top-level declarations whose type could not be inferred during
+    /// declaration checking because a callee's return-type variable was
+    /// still unresolved. Re-checked after all function bodies are checked;
+    /// an error is emitted only if the type is still unresolved then.
+    pub deferred_type_errors: Vec<(String, Span)>,
     /// Top-level names marked `pub` — should not emit unused warnings.
     pub pub_names: std::collections::HashSet<String>,
     /// Functions annotated with `@test`, `@bench`, `@setup`, or `@teardown`.
@@ -564,6 +569,7 @@ impl Checker {
             used_names: std::collections::HashSet::new(),
             used_bindings: std::collections::HashSet::new(),
             shadow_probes: Vec::new(),
+            deferred_type_errors: Vec::new(),
             pub_names: std::collections::HashSet::new(),
             local_funcs: std::collections::HashSet::new(),
             test_funcs: std::collections::HashSet::new(),

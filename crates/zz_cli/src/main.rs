@@ -2423,7 +2423,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         zz_build::BuildMode::Static
     };
     let allow_downgrade = mode == zz_build::BuildMode::Static && !is_static;
-    let provider = match cc.as_deref() {
+    let mut provider = match cc.as_deref() {
         None => zz_codegen::ClangProvider::Any,
         Some(name) => zz_codegen::ClangProvider::parse(name).ok_or_else(|| {
             format!(
@@ -2432,6 +2432,28 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
             )
         })?,
     };
+    // PGO instrumentation requires a real Clang: zig cc accepts
+    // -fprofile-generate/-fprofile-instr-generate for clang compatibility
+    // but does not emit LLVM profile counters, so training produces zero
+    // profile data and llvm-profdata merge fails with "no profile data
+    // collected". Force system clang for PGO modes; reject --cc zig + PGO.
+    // PGO actually happens for: `--pgo`, `--full -- <train args>`, and
+    // `--optimize-max`. Plain `--full` (no `--`) is full LTO without PGO.
+    let is_pgo_mode = is_pgo || (is_full && dashdash.is_some()) || is_optimize_max;
+    match provider {
+        zz_codegen::ClangProvider::Zig if is_pgo_mode => {
+            return Err(
+                "PGO instrumentation requires system clang; zig cc does not emit profile counters\n\
+                 hint: drop `--cc zig` (or use `--cc clang`) so `zz build --pgo` / `--full --` / \
+                 `--optimize-max` can instrument the binary"
+                    .to_string(),
+            );
+        }
+        zz_codegen::ClangProvider::Any if is_pgo_mode => {
+            provider = zz_codegen::ClangProvider::Clang;
+        }
+        _ => {}
+    }
     let rel = zz_build::ReleaseOptions {
         target,
         provider,

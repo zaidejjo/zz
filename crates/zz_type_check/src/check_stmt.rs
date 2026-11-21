@@ -185,13 +185,12 @@ fn check_stmt_decl(
                 Type::Dict(k, v) if matches!(k.as_ref(), Type::Var(_)) || matches!(v.as_ref(), Type::Var(_))
             );
             if !may_defer {
-                checker.errors.push(error_at(
-                    format!(
-                        "cannot infer the type of `{}`; add a type annotation",
-                        name.name
-                    ),
-                    name.span,
-                ));
+                // Defer until after function bodies are checked: a callee's
+                // return-type variable may still be unresolved at this
+                // point (e.g. `z := five()` before `func five() { return 5 }`).
+                checker
+                    .deferred_type_errors
+                    .push((name.name.clone(), name.span));
             }
         } else {
             checker.define_var_at(&name.name, d.clone(), name.span, is_const);
