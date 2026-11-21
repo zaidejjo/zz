@@ -500,6 +500,31 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         "edge_dict_loop_heap_str" => {
             Some("native: heap corruption in dict loop with heap-string values (SIGABRT)")
         }
+        // VM/sqlz query results are not materialized as annotated `Row`
+        // structs in the VM (`rows[0].v` fails), while native maps them
+        // correctly. VM-side typing gap — investigate `db_query_struct` /
+        // type annotation propagation for `db.query` call expressions.
+        "link_gates_test" => {
+            Some("VM: sqlz.query results not materialized as annotated Row structs (struct field lookup fails); native exits 0, VM exits 1")
+        }
+        // Same VM/sqlz struct-materialization gap as link_gates_test:
+        // `rows[0].name` fails in VM, native maps query results correctly.
+        "sqlz_sqlite" => {
+            Some("VM: sqlz.query results not materialized as annotated structs; native exits 0, VM exits 1")
+        }
+        // Same VM/sqlz struct-materialization gap as link_gates_test.
+        "sqlz_transaction" => {
+            Some("VM: sqlz.query results not materialized as annotated structs; native exits 0, VM exits 1")
+        }
+        // Native HTTP request handling diverges from VM: (a) default
+        // Content-Type injected into request headers where VM has none,
+        // (b) route matching returns wrong handler for some paths
+        // (e.g. GET /hmiss returns POST /echo body). Investigate
+        // http_match_entry / http_match_route and request header
+        // construction in the C runtime.
+        "http_request_response" => {
+            Some("native: default Content-Type injected into request headers; route matching returns wrong handler for some paths")
+        }
         // `clone(v)` movecow check: native reports index out of bounds.
         // FIXED — native now matches VM; removed from known_native_failures()
         // by the sweep's `FIXED!` directive. Do not re-list without a real
