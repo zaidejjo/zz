@@ -3428,15 +3428,20 @@ impl Vm {
                                         vs.iter().find(|(v, _)| v == &variant).map(|(_, h)| *h)
                                     });
                                     match has {
-                                        Some(has_payload) if has_payload == (args.len() == 1) => {
-                                            let fields = if has_payload {
-                                                vec![(
-                                                    std::sync::Arc::from("value"),
-                                                    args.into_iter().next().unwrap(),
-                                                )]
-                                            } else {
-                                                Vec::new()
-                                            };
+                                        Some(has_payload) if has_payload == !args.is_empty() => {
+                                            let arg_len = args.len();
+                                            let fields: Vec<(std::sync::Arc<str>, Value)> = args
+                                                .into_iter()
+                                                .enumerate()
+                                                .map(|(i, arg)| {
+                                                    let name = if arg_len == 1 {
+                                                        std::sync::Arc::from("value")
+                                                    } else {
+                                                        std::sync::Arc::from(format!("value{i}"))
+                                                    };
+                                                    (name, arg)
+                                                })
+                                                .collect();
                                             self.stack.push(Value::Object(std::sync::Arc::new(
                                                 crate::value::ObjectValue {
                                                     name: format!("{ename}.{variant}"),
