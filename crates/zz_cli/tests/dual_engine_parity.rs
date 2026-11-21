@@ -501,11 +501,13 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
             Some("native: heap corruption in dict loop with heap-string values (SIGABRT)")
         }
         // `clone(v)` movecow check: native reports index out of bounds.
-        "clone_test" => Some("native: clone_test movecow_check index out of bounds"),
+        // FIXED — native now matches VM; removed from known_native_failures()
+        // by the sweep's `FIXED!` directive. Do not re-list without a real
+        // regression.
         // Concurrent channel batch: native SIGSEGV under load.
-        "concurrency_batch_test" => {
-            Some("native: concurrency batch SIGSEGV under parallel send/recv")
-        }
+        // FIXED — native now matches VM; removed from known_native_failures()
+        // by the sweep's `FIXED!` directive. Do not re-list without a real
+        // regression.
         // NOTE: `ns_collision` was listed here (native wrote the call's
         // `self` back to `env["ns_collision"]` for the module-qualified
         // call `ns_collision.helper(...)`, clobbering the global binding
@@ -1620,7 +1622,7 @@ parity_strict!(
     "concurrency_spawn_test.zz"
 );
 parity_strict!(parity_stdlib_channel_test, "stdlib", "channel_test.zz");
-parity_known_failure!(
+parity_strict!(
     parity_stdlib_concurrency_batch_test,
     "stdlib",
     "concurrency_batch_test.zz"
@@ -2017,7 +2019,7 @@ parity_strict!(
     "stdlib",
     "vec_push_shapes.zz"
 );
-parity_known_failure!(parity_stdlib_clone_test, "stdlib", "clone_test.zz");
+parity_strict!(parity_stdlib_clone_test, "stdlib", "clone_test.zz");
 parity_strict!(parity_stdlib_ifpush_test, "stdlib", "ifpush_test.zz");
 parity_strict!(
     parity_stdlib_test_asserts_test,

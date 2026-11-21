@@ -318,11 +318,6 @@ func math.matrix_mul(m1: [[float]], m2: [[float]]) -> Result<[[float]], str> {
         return .err("matrix_mul: dimension mismatch ({rows1}x{cols1}) * ({rows2}x{cols2})")
     }
     // Build result matrix rows1 x cols2.
-    //
-    // Note: `row.push(v)` must run as a statement so the fused `vecpushmethod`
-    // op stores back into `row`'s slot. As a bare match-arm tail expression it
-    // compiles to `callmethod` (which clones the array and leaves `row`
-    // unchanged), producing empty rows.
     result := []
     i := 0
     while i < rows1 {
@@ -333,21 +328,20 @@ func math.matrix_mul(m1: [[float]], m2: [[float]]) -> Result<[[float]], str> {
             col := []
             k := 0
             while k < rows2 {
-                col.push(m2[k][j])
+                col = vec.push(col, m2[k][j])
                 k = k + 1
             }
             // Dot product of row i of m1 with column j of m2
-            dp := math.dot_product(m1[i], col)
-            match dp {
-                .ok(v) => {
-                    row.push(v)
-                    row
-                }
-                .err(_) => return .err("matrix_mul: dot product failed")
+            dp_sum := 0.0
+            kk := 0
+            while kk < rows2 {
+                dp_sum = dp_sum + m1[i][kk] * col[kk]
+                kk = kk + 1
             }
+            row = vec.push(row, dp_sum)
             j = j + 1
         }
-        result.push(row)
+        result = vec.push(result, row)
         i = i + 1
     }
     return .ok(result)

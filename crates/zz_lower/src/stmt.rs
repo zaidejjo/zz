@@ -23,16 +23,13 @@ impl Lowerer {
         // crossing a `zz_value` return slot. `ty_at` misses expressions
         // whose span has no recorded type and would leak a raw C struct.
         let val = self.emit_tail_value(v, names, out);
-        // `return match ...` routes through `emit_match_expr`, which creates
-        // a `_mresult` temporary carrying `cleanup(zz_release)`. When a match
-        // arm's value isn't already refcount-bumped (e.g. a binop like
-        // `"x" + "y"`), cleanup frees the only share and the returned value
-        // dangles. Clone here so the return value owns its own share.
-        if matches!(v, Expr::Match { .. }) {
-            format!("zz_clone({val})")
-        } else {
-            val
-        }
+        // Clone so the returned value owns its own share: the expression may
+        // be a cleanup(zz_release) temporary (e.g. _mresult from a match, or
+        // any tail local) whose cleanup would otherwise free the only share
+        // before the caller receives it, dangling the return value. zz_clone
+        // is a no-op for scalars and interned strings, so this only costs a
+        // refcount bump for heap values.
+        format!("zz_clone({val})")
     }
 
     /// Root binding of a store target chain (`m` in `m[i][j]`, `s` in
@@ -3858,13 +3855,16 @@ impl Lowerer {
             // Tail call/compound was captured into __tail by emit_block.
             if let Some(tmp) = names.stack.get("__tail").and_then(|s| s.last()).cloned() {
                 let ret = self.ret_unbox(tmp.0);
-                out.push_str(&format!("    return {ret};\n"));
+                // Clone so the returned value owns its own share: `__tail` is
+                // a cleanup(zz_release) local whose cleanup would otherwise
+                // free the only share before the caller receives it.
+                out.push_str(&format!("    return zz_clone({ret});\n"));
                 return Some(());
             }
             // Pure leaf tail: emit directly (rarely reached).
             let val = self.emit_tail_value(e, names, out);
             let val = self.ret_unbox(val);
-            out.push_str(&format!("    return {val};\n"));
+            out.push_str(&format!("    return zz_clone({val});\n"));
             return Some(());
         }
         // Trailing `:=`: the declared value is the function value.
@@ -3908,7 +3908,7 @@ impl Lowerer {
             Some(Stmt::Expr(e)) => {
                 let val = self.emit_tail_value(e, names, out);
                 let val = self.ret_unbox(val);
-                out.push_str(&format!("        return {val};\n"));
+                out.push_str(&format!("        return zz_clone({val});\n"));
             }
             Some(Stmt::Return { value, .. }) => match value {
                 Some(v) => {
@@ -3920,7 +3920,7 @@ impl Lowerer {
             Some(Stmt::Decl { name, .. }) => {
                 if let Some(val) = self.decl_tail_value(&name.name, names, out) {
                     let val = self.ret_unbox(val);
-                    out.push_str(&format!("        return {val};\n"));
+                    out.push_str(&format!("        return zz_clone({val});\n"));
                 } else {
                     out.push_str(&format!("        return {};\n", self.ret_unit()));
                 }
