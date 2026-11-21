@@ -76,8 +76,8 @@ jobs:
             if [ "$nat" = "1" ]; then
               filter="ZZ_BATCH_NATIVE=1 $filter"
             fi
-            echo "cmd=$filter" >> $GITHUB_OUTPUT
-            echo "kind=fixture" >> $GITHUB_OUTPUT
+            echo "cmd=$filter" >> "$GITHUB_OUTPUT"
+            echo "kind=fixture" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # Otherwise run the batched parity driver(s) that hang on macOS CI.
@@ -87,11 +87,11 @@ jobs:
             base="ZZ_PARITY_VM_ONLY=1 cargo test -p zz_cli --test batched_parity batched_native_parity"
           fi
           case "$drv" in
-            "5") echo "cmd=ZZ_BATCH_DRIVER_FILTER=driver_5 $base" >> $GITHUB_OUTPUT ;;
-            "8") echo "cmd=ZZ_BATCH_DRIVER_FILTER=driver_8 $base" >> $GITHUB_OUTPUT ;;
-            "both"|*) echo "cmd=$base" >> $GITHUB_OUTPUT ;;
+            "5") echo "cmd=ZZ_BATCH_DRIVER_FILTER=driver_5 $base" >> "$GITHUB_OUTPUT" ;;
+            "8") echo "cmd=ZZ_BATCH_DRIVER_FILTER=driver_8 $base" >> "$GITHUB_OUTPUT" ;;
+            "both"|*) echo "cmd=$base" >> "$GITHUB_OUTPUT" ;;
           esac
-          echo "kind=batch" >> $GITHUB_OUTPUT
+          echo "kind=batch" >> "$GITHUB_OUTPUT"
       - name: run with watchdog (sample + backtraces on timeout)
         id: run
         shell: bash
@@ -115,7 +115,7 @@ jobs:
           testpid=$!
           rc=0
           elapsed=0
-          while [ $elapsed -lt 600 ]; do
+          while [ "$elapsed" -lt 600 ]; do
             if ! kill -0 "$testpid" 2>/dev/null; then
               wait "$testpid"
               rc=$?
@@ -125,7 +125,7 @@ jobs:
             elapsed=$((elapsed + 10))
           done
 
-          if [ $elapsed -ge 600 ]; then
+          if [ "$elapsed" -ge 600 ]; then
             echo "WATCHDOG: test timed out after 600s — capturing hang diagnostics"
             # Find the hung zz binary (the actual engine process).
             zzpid=$(pgrep -f "target/debug/zz" | head -1) || true
@@ -143,14 +143,14 @@ jobs:
               sample "$testpid" 10 > "$diagdir/zz_sample.txt" 2>&1 || true
             fi
             cp "$outfile" "$diagdir/zz_run.log"
-            echo "ZZ_HANG=1" >> $GITHUB_OUTPUT
+            echo "ZZ_HANG=1" >> "$GITHUB_OUTPUT"
             rc=124
           else
             echo "=== test finished with rc=$rc ==="
             cp "$outfile" "$diagdir/zz_run.log"
           fi
-          echo "run_rc=$rc" >> $GITHUB_OUTPUT
-          echo "diagdir=$diagdir" >> $GITHUB_OUTPUT
+          echo "run_rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "diagdir=$diagdir" >> "$GITHUB_OUTPUT"
           # Always surface the tail of the run log in the job output.
           tail -n 80 "$outfile" || true
           exit $rc

@@ -40,7 +40,7 @@ jobs:
     steps:
       - name: set ZZ_DUMP_C to runner temp
         shell: bash
-        run: echo "ZZ_DUMP_C=$RUNNER_TEMP/zz_dump.c" >> $GITHUB_ENV
+        run: echo "ZZ_DUMP_C=$RUNNER_TEMP/zz_dump.c" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -90,18 +90,18 @@ jobs:
               # macOS failing drivers: 0 (stderr diff), 4 (SIGABRT), 5 (native hang),
               # 6 (extra native diagnostics), 8 (VM hang). One batched run reports
               # every driver failure at the end.
-              echo "cmd=ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity batched_native_parity" >> $GITHUB_OUTPUT
+              echo "cmd=ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity batched_native_parity" >> "$GITHUB_OUTPUT"
               ;;
             windows-latest)
               # cargo test takes ONE test-name filter: run each fixture separately.
-              echo "cmd=ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity edge_cast_float_nan && ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity edge_float_format" >> $GITHUB_OUTPUT
+              echo "cmd=ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity edge_cast_float_nan && ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity edge_float_format" >> "$GITHUB_OUTPUT"
               ;;
             ubuntu-latest)
-              echo "cmd=ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity batched_native_parity && ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity edge_cast_float_nan && ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity edge_float_format" >> $GITHUB_OUTPUT
+              echo "cmd=ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity batched_native_parity && ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity edge_cast_float_nan && ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity edge_float_format" >> "$GITHUB_OUTPUT"
               ;;
           esac
           if [ -n "${{ github.event.inputs.test }}" ]; then
-            echo "override_cmd=cargo test -p zz_cli --test batched_parity --test dual_engine_parity ${{ github.event.inputs.test }}" >> $GITHUB_OUTPUT
+            echo "override_cmd=cargo test -p zz_cli --test batched_parity --test dual_engine_parity ${{ github.event.inputs.test }}" >> "$GITHUB_OUTPUT"
           fi
       - name: run failing test(s)
         id: run
@@ -118,8 +118,8 @@ jobs:
           set +e
           bash -c "$cmd"
           rc=$?
-          echo "exit_code=$rc" >> $GITHUB_OUTPUT
-          echo "ran_cmd=$cmd" >> $GITHUB_OUTPUT
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          echo "ran_cmd=$cmd" >> "$GITHUB_OUTPUT"
           exit $rc
       - name: Windows link-symbol inspection (zz_float_format_raw)
         if: matrix.os == 'windows-latest' && always()
