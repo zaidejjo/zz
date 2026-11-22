@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::{BuildError, BuildOptions, Clang};
+use zz_codegen_ffi::{target_os, TargetOs};
 
 /// Cache directory: the shared build cache root (`zz_paths::paths`,
 /// honoring `ZZ_HOME` like every other ZZ path).
@@ -353,9 +354,16 @@ fn compile_rt_a(
         return Err(BuildError::CompileFailed { stderr });
     }
 
-    // Archive into .a
+    // On Windows/MSVC targets, clang drives link.exe, which cannot read GNU
+    // `.a` archives — it needs a COFF `.lib` produced by lib.exe. On every
+    // other target (and for zig cc, which uses lld-link that reads `.a`), use
+    // `ar` and a `.a` archive. This mirrors what Rust does for zz_native_rt
+    // (zz_native_rt.lib on Windows, libzz_native_rt.a elsewhere).
+    let use_lib = target_os(target) == TargetOs::Windows && !clang.zig;
+    let archive_ext = if use_lib { "lib" } else { "a" };
+
     let default_dir = cache_dir().join(&key);
-    let default_path = default_dir.join("libzz_rt.a");
+    let default_path = default_dir.join(format!("libzz_rt.{}", archive_ext));
     let archive_path = dest.unwrap_or(&default_path);
     if let Some(parent) = archive_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -363,10 +371,13 @@ fn compile_rt_a(
     // Build the archive at a unique temp path, then atomically rename over
     // the cache entry: concurrent compilers never observe (or publish) a
     // half-written archive. The pid + counter keep parallel processes and
-    // threads from colliding. The `.a` suffix is kept so linkers that sniff
-    // by extension still treat the unpublished fallback as an archive.
-    let tmp_archive =
-        archive_path.with_file_name(format!(".libzz_rt.{}.{}.tmp.a", std::process::id(), uniq));
+    // threads from colliding.
+    let tmp_archive = archive_path.with_file_name(format!(
+        ".libzz_rt.{}.{}.tmp.{}",
+        std::process::id(),
+        uniq,
+        archive_ext
+    ));
     let tmp_archive_str = tmp_archive.to_str().ok_or_else(|| {
         BuildError::Io(std::io::Error::other(format!(
             "non-UTF8 archive path: {}",
@@ -379,15 +390,59 @@ fn compile_rt_a(
             o_path.display()
         )))
     })?;
-    let ar_out = Command::new("ar")
-        .args(["rcs", tmp_archive_str, o_path_str])
-        .output()?;
-    if !ar_out.status.success() {
+    // lib.exe: lib.exe /out:<archive> <object> ; ar: ar rcs <archive> <object>
+    // On Windows/MSVC, try lib.exe then llvm-lib.exe (ships with LLVM/clang,
+    // which is always on PATH when clang is). Fall back to reporting the last
+    // Io error if none is found.
+    let archive_out = if use_lib {
+        // On Windows/MSVC, clang drives link.exe which needs a COFF .lib.
+        // Try lib.exe then llvm-lib.exe (ships with LLVM/clang, always on
+        // PATH when clang is). Report the last Io error if none is found.
+        let mut last_err: Option<std::io::Error> = None;
+        let out = 'arch: {
+            for archiver in ["lib.exe", "llvm-lib.exe"] {
+                match Command::new(archiver)
+                    .arg(format!("/out:{}", tmp_archive_str))
+                    .arg(o_path_str)
+                    .output()
+                {
+                    Ok(o) => {
+                        if o.status.success() {
+                            break 'arch o;
+                        }
+                        // Non-zero exit: real failure, don't fall back.
+                        let _ = std::fs::remove_file(&c_path);
+                        let _ = std::fs::remove_file(&o_path);
+                        let _ = std::fs::remove_file(&tmp_archive);
+                        return Err(BuildError::CompileFailed {
+                            stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
+                        });
+                    }
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            return Err(BuildError::Io(std::io::Error::other(
+                last_err
+                    .map(|e| {
+                        format!(
+                            "no MSVC-compatible archiver found (tried lib.exe, llvm-lib.exe): {e}"
+                        )
+                    })
+                    .unwrap_or_else(|| "no MSVC-compatible archiver found".to_string()),
+            )));
+        };
+        out
+    } else {
+        Command::new("ar")
+            .args(["rcs", tmp_archive_str, o_path_str])
+            .output()?
+    };
+    if !archive_out.status.success() {
         let _ = std::fs::remove_file(&c_path);
         let _ = std::fs::remove_file(&o_path);
         let _ = std::fs::remove_file(&tmp_archive);
         return Err(BuildError::CompileFailed {
-            stderr: String::from_utf8_lossy(&ar_out.stderr).into_owned(),
+            stderr: String::from_utf8_lossy(&archive_out.stderr).into_owned(),
         });
     }
     let published = std::fs::rename(&tmp_archive, archive_path).is_ok();

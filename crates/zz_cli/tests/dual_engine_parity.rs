@@ -1875,6 +1875,11 @@ parity_strict!(
     "stdlib",
     "matrix_mul_test.zz"
 );
+parity_strict!(
+    parity_stdlib_mini_matrix_return_test,
+    "stdlib",
+    "mini_matrix_return_test.zz"
+);
 parity_strict!(parity_stdlib_math_consts, "stdlib", "math_consts.zz");
 parity_strict!(
     parity_stdlib_const_index_test,

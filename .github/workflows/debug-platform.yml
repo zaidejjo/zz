@@ -1,0 +1,157 @@
+name: Debug multiplatform CI failures
+
+# Debug only: run the failing macOS/Windows/Linux CI tests on each platform,
+# capture backtraces + dumped C + crash reports, upload artifacts on always().
+# Triggered manually (workflow_dispatch: os/test inputs) and on every push to
+# fix/multiplatform-ci so the branch is continuously re-checked.
+#
+# Each job is capped at 15 min. Test commands carry their own internal timeouts
+# (batched_parity: 600s native / 120s VM per driver; edge_float: ~30s), so a
+# hang is bounded per driver and the job cap is the hard stop.
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "Comma list: macos, windows, linux"
+        required: true
+        default: "macos,windows,linux"
+      test:
+        description: "Test name filter(s), space separated"
+        required: false
+        default: ""
+  push:
+    branches: [fix/multiplatform-ci]
+
+jobs:
+  debug:
+    name: debug ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+          - os: windows-latest
+          - os: ubuntu-latest
+    env:
+      RUST_BACKTRACE: "full"
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: set ZZ_DUMP_C to runner temp
+        shell: bash
+        run: echo "ZZ_DUMP_C=$RUNNER_TEMP/zz_dump.c" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: debug-${{ matrix.os }}
+      - name: install native deps (linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set +e
+          sudo apt-get update 2>&1 | tail -3 || true
+          sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev 2>&1 | tail -3 || true
+          clang --version || true
+          set -e
+      - name: install native deps (macos)
+        if: matrix.os == 'macos-latest'
+        run: |
+          set -euo pipefail
+          brew install coreutils xz >/dev/null 2>&1 || true
+          clang --version
+      - name: install native deps (windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $llvm = "C:\Program Files\LLVM\bin"
+          if (Test-Path $llvm) { $env:PATH = "$llvm;$env:PATH" }
+          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
+            choco install llvm -y --no-progress
+            $env:PATH = "$llvm;$env:PATH"
+          }
+          clang --version
+      - name: build zz debug
+        id: build
+        shell: bash
+        run: cargo build -p zz_cli
+      - name: determine test command
+        id: pick
+        shell: bash
+        run: |
+          os="${{ matrix.os }}"
+          case "$os" in
+            macos-latest)
+              # macOS failing drivers: 0 (stderr diff), 4 (SIGABRT), 5 (native hang),
+              # 6 (extra native diagnostics), 8 (VM hang). One batched run reports
+              # every driver failure at the end.
+              echo "cmd=ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity batched_native_parity" >> "$GITHUB_OUTPUT"
+              ;;
+            windows-latest)
+              # cargo test takes ONE test-name filter: run each fixture separately.
+              echo "cmd=ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity edge_cast_float_nan && ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity edge_float_format" >> "$GITHUB_OUTPUT"
+              ;;
+            ubuntu-latest)
+              echo "cmd=ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test batched_parity batched_native_parity && ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity edge_cast_float_nan && ZZ_BATCH_NATIVE=1 cargo test -p zz_cli --test dual_engine_parity edge_float_format" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+          if [ -n "${{ github.event.inputs.test }}" ]; then
+            echo "override_cmd=cargo test -p zz_cli --test batched_parity --test dual_engine_parity ${{ github.event.inputs.test }}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: run failing test(s)
+        id: run
+        shell: bash
+        env:
+          # Windows: forward clang's linker sub-errors (LNK1104 filename).
+          ZZ_CLANG_VERBOSE: ${{ matrix.os == 'windows-latest' && '1' || '0' }}
+        run: |
+          cmd="${{ steps.pick.outputs.cmd }}"
+          if [ -n "${{ steps.pick.outputs.override_cmd }}" ]; then
+            cmd="${{ steps.pick.outputs.override_cmd }}"
+          fi
+          echo "RUNNING: $cmd"
+          set +e
+          bash -c "$cmd"
+          rc=$?
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          echo "ran_cmd=$cmd" >> "$GITHUB_OUTPUT"
+          exit $rc
+      - name: Windows link-symbol inspection (zz_float_format_raw)
+        if: matrix.os == 'windows-latest' && always()
+        shell: bash
+        run: |
+          echo "=== inspecting zz_native_rt.lib / libzz_rt.a for zz_float_format_raw ==="
+          set +e
+          rt=$(find target -name 'zz_native_rt.lib' -o -name 'libzz_native_rt.a' 2>/dev/null | head -1)
+          echo "rt archive: $rt"
+          if [ -n "$rt" ]; then
+            if command -v llvm-nm >/dev/null 2>&1; then
+              llvm-nm --defined-only "$rt" 2>/dev/null | grep -i float_format || echo "(llvm-nm: no defined float_format symbol)"
+              llvm-nm "$rt" 2>/dev/null | grep -i float_format || echo "(llvm-nm: no float_format symbol at all)"
+            elif command -v dumpbin >/dev/null 2>&1; then
+              dumpbin /symbols "$rt" 2>/dev/null | grep -i float_format || echo "(dumpbin: no float_format symbol)"
+            else
+              echo "no llvm-nm/dumpbin available"
+            fi
+          fi
+          echo "=== end link inspection ==="
+      - name: upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-${{ matrix.os }}
+          path: |
+            target/debug/deps/*batched_parity*
+            target/debug/deps/*dual_engine_parity*
+            ${{ env.ZZ_DUMP_C }}
+            /tmp/zz_build_*/
+            /tmp/zz-stdlib-native-*/
+            ~/Library/Logs/DiagnosticReports/*
+            /tmp/core.*
+          retention-days: 7
+          if-no-files-found: ignore

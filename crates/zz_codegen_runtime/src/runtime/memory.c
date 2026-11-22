@@ -206,7 +206,10 @@ void zz_release_array(zz_array *a) {
             zz_release(&a->items[i]);
         }
         free(a->items);
-        free(a);
+        // Arena-allocated headers are reclaimed in bulk at arena reset; only
+        // heap-allocated headers are freed individually here.
+        if (!a->arena_hdr)
+            free(a);
     }
 }
 
