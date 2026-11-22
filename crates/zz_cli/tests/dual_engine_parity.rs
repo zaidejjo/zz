@@ -514,15 +514,6 @@ fn known_native_failure(file: &Path) -> Option<&'static str> {
         // (main.rs `run_file`) so `db_query_struct` resolves `[Struct]`
         // targets and emits the `__struct:` runtime marker. sqlz now passes
         // strict parity in both engines.
-        // Native HTTP request handling diverges from VM: (a) default
-        // Content-Type injected into request headers where VM has none,
-        // (b) route matching returns wrong handler for some paths
-        // (e.g. GET /hmiss returns POST /echo body). Investigate
-        // http_match_entry / http_match_route and request header
-        // construction in the C runtime.
-        "http_request_response" => {
-            Some("native: default Content-Type injected into request headers; route matching returns wrong handler for some paths")
-        }
         // `clone(v)` movecow check: native reports index out of bounds.
         // FIXED — native now matches VM; removed from known_native_failures()
         // by the sweep's `FIXED!` directive. Do not re-list without a real

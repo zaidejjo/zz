@@ -2801,7 +2801,12 @@ impl Lowerer {
                 o.push_str("    return zz_unit();\n");
             }
         } else {
-            o.push_str(&format!("    return {val};\n"));
+            // Bare-body closure: clone the result before returning. The
+            // `result_tmp` temp carries `cleanup(zz_release)`, which would
+            // release the refcounted value after the return struct is copied
+            // — a use-after-free for strs/dicts/etc. `zz_clone` bumps the
+            // refcount so the returned value survives the cleanup.
+            o.push_str(&format!("    return zz_clone({val});\n"));
         }
         o.push_str("}\n");
         o
