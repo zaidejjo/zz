@@ -130,6 +130,12 @@ pub struct CallGraph {
     pub program_defined: HashSet<String>,
     /// Struct names defined by this program.
     pub defined_structs: HashSet<String>,
+    /// All functions whose value is taken anywhere in the program
+    /// (first-class references: `g := helper`, `arr = [helper]`, `f(helper)`,
+    /// struct field `s.f = helper`, etc.). Used to conservatively edge
+    /// unresolved indirect calls so DCE never prunes a function that might
+    /// be called through a function value.
+    pub address_taken: HashSet<String>,
 }
 
 impl CallGraph {
@@ -178,6 +184,238 @@ fn alias_canonical_targets(cg: &CallGraph, parts: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Collect all functions whose value is taken anywhere in the program
+/// (first-class references). Used to conservatively edge unresolved
+/// indirect calls so DCE never prunes a function that might be called
+/// through a function value.
+fn collect_address_taken(tp: &TypedProgram) -> HashSet<String> {
+    let mut taken = HashSet::new();
+    for stmt in tp.stmts() {
+        collect_address_taken_in_stmt(tp, stmt, &mut taken);
+    }
+    taken
+}
+
+fn collect_address_taken_in_stmt(tp: &TypedProgram, stmt: &Stmt, taken: &mut HashSet<String>) {
+    match stmt {
+        Stmt::Func { body, .. } => {
+            for s in &body.stmts {
+                collect_address_taken_in_stmt(tp, s, taken);
+            }
+        }
+        Stmt::Impl { methods, .. } => {
+            for m in methods {
+                if let Stmt::Func { body, .. } = m {
+                    for s in &body.stmts {
+                        collect_address_taken_in_stmt(tp, s, taken);
+                    }
+                }
+            }
+        }
+        Stmt::Decl { value, .. } => {
+            collect_address_taken_in_expr(tp, value, taken);
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(v) = value {
+                collect_address_taken_in_expr(tp, v, taken);
+            }
+        }
+        Stmt::For { iter, body, .. } => {
+            collect_address_taken_in_expr(tp, iter, taken);
+            for s in &body.stmts {
+                collect_address_taken_in_stmt(tp, s, taken);
+            }
+        }
+        Stmt::Defer { expr, .. } => {
+            collect_address_taken_in_expr(tp, expr, taken);
+        }
+        Stmt::Atomic { body, .. } => {
+            for s in &body.stmts {
+                collect_address_taken_in_stmt(tp, s, taken);
+            }
+        }
+        Stmt::Assign { target, value, .. } => {
+            collect_address_taken_in_expr(tp, target, taken);
+            collect_address_taken_in_expr(tp, value, taken);
+        }
+        Stmt::CompoundAssign { target, value, .. } => {
+            collect_address_taken_in_expr(tp, target, taken);
+            collect_address_taken_in_expr(tp, value, taken);
+        }
+        Stmt::Destructure { value, .. } => {
+            collect_address_taken_in_expr(tp, value, taken);
+        }
+        Stmt::Expr(e) => {
+            collect_address_taken_in_expr(tp, e, taken);
+        }
+        _ => {}
+    }
+}
+
+fn collect_address_taken_in_block(
+    tp: &TypedProgram,
+    b: &zz_span_ast::ast::Block,
+    taken: &mut HashSet<String>,
+) {
+    for s in &b.stmts {
+        collect_address_taken_in_stmt(tp, s, taken);
+    }
+}
+
+fn collect_address_taken_in_expr(tp: &TypedProgram, e: &Expr, taken: &mut HashSet<String>) {
+    match e {
+        Expr::Ident { name, .. } => {
+            if tp.funcs.contains_key(name) {
+                taken.insert(name.clone());
+            }
+        }
+        Expr::Path { parts, .. } => {
+            let joined = parts.join(".");
+            if tp.funcs.contains_key(&joined) {
+                taken.insert(joined);
+            }
+        }
+        Expr::Closure { body, .. } => {
+            // Closures are anonymous; walk the body for address-taken refs.
+            collect_address_taken_in_expr(tp, body, taken);
+        }
+        Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            collect_address_taken_in_expr(tp, callee, taken);
+            for a in args {
+                collect_address_taken_in_expr(tp, a, taken);
+            }
+            for (_, a) in named {
+                collect_address_taken_in_expr(tp, a, taken);
+            }
+        }
+        Expr::Block(b) => {
+            for s in &b.stmts {
+                collect_address_taken_in_stmt(tp, s, taken);
+            }
+        }
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            collect_address_taken_in_expr(tp, cond, taken);
+            collect_address_taken_in_block(tp, then, taken);
+            if let Some(el) = els {
+                collect_address_taken_in_expr(tp, el, taken);
+            }
+        }
+        Expr::While { cond, body, .. } => {
+            collect_address_taken_in_expr(tp, cond, taken);
+            collect_address_taken_in_block(tp, body, taken);
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_address_taken_in_expr(tp, scrutinee, taken);
+            for a in arms {
+                if let Some(g) = &a.guard {
+                    collect_address_taken_in_expr(tp, g, taken);
+                }
+                collect_address_taken_in_expr(tp, &a.body, taken);
+            }
+        }
+        Expr::IfLet {
+            value, then, els, ..
+        } => {
+            collect_address_taken_in_expr(tp, value, taken);
+            collect_address_taken_in_block(tp, then, taken);
+            if let Some(el) = els {
+                collect_address_taken_in_expr(tp, el, taken);
+            }
+        }
+        Expr::Try { expr, .. } => {
+            collect_address_taken_in_expr(tp, expr, taken);
+        }
+        Expr::Array { elems, .. } => {
+            for el in elems {
+                collect_address_taken_in_expr(tp, el, taken);
+            }
+        }
+        Expr::Dict { entries, .. } => {
+            for (k, v) in entries {
+                collect_address_taken_in_expr(tp, k, taken);
+                collect_address_taken_in_expr(tp, v, taken);
+            }
+        }
+        Expr::Field { obj, .. } => {
+            collect_address_taken_in_expr(tp, obj, taken);
+        }
+        Expr::Range { start, end, .. } => {
+            collect_address_taken_in_expr(tp, start, taken);
+            collect_address_taken_in_expr(tp, end, taken);
+        }
+        Expr::Index { obj, index, .. } => {
+            collect_address_taken_in_expr(tp, obj, taken);
+            collect_address_taken_in_expr(tp, index, taken);
+        }
+        Expr::Slice {
+            obj, start, end, ..
+        } => {
+            collect_address_taken_in_expr(tp, obj, taken);
+            if let Some(s) = start {
+                collect_address_taken_in_expr(tp, s, taken);
+            }
+            if let Some(e) = end {
+                collect_address_taken_in_expr(tp, e, taken);
+            }
+        }
+        Expr::ListComp {
+            body, iter, filter, ..
+        } => {
+            collect_address_taken_in_expr(tp, iter, taken);
+            if let Some(flt) = filter {
+                collect_address_taken_in_expr(tp, flt, taken);
+            }
+            collect_address_taken_in_expr(tp, body, taken);
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, v) in fields {
+                collect_address_taken_in_expr(tp, v, taken);
+            }
+        }
+        Expr::Paren { expr, .. } => {
+            collect_address_taken_in_expr(tp, expr, taken);
+        }
+        Expr::Unary { expr, .. } => {
+            collect_address_taken_in_expr(tp, expr, taken);
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_address_taken_in_expr(tp, left, taken);
+            collect_address_taken_in_expr(tp, right, taken);
+        }
+        Expr::Variant { arg, .. } => {
+            if let Some(a) = arg {
+                collect_address_taken_in_expr(tp, a, taken);
+            }
+        }
+        Expr::Fmt { parts, .. } => {
+            for p in parts {
+                if let zz_frontend::ast::FmtPart::Expr(inner, _) = p {
+                    collect_address_taken_in_expr(tp, inner, taken);
+                }
+            }
+        }
+        Expr::Is { expr, .. } => {
+            collect_address_taken_in_expr(tp, expr, taken);
+        }
+        Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Str { .. }
+        | Expr::Bool { .. }
+        | Expr::Break { .. }
+        | Expr::Continue { .. }
+        | Expr::Tuple { .. } => {}
+    }
+}
+
 /// Build the call graph for a typed program.
 pub fn build_callgraph(tp: &TypedProgram) -> CallGraph {
     let mut cg = CallGraph::default();
@@ -219,6 +457,11 @@ pub fn build_callgraph(tp: &TypedProgram) -> CallGraph {
         cg.defined_structs.insert(name.clone());
     }
     cg.program_defined = program_defined;
+
+    // Collect the address-taken set (all functions whose value is taken
+    // anywhere as a first-class value) before walking edges, so unresolved
+    // indirect calls can edge to the complete set.
+    cg.address_taken = collect_address_taken(tp);
 
     // Import alias heads (`fspath` from `import std.path as fspath`):
     // qualified calls through them (`fspath.join`) resolve against
@@ -319,17 +562,25 @@ fn walk_expr_for_graph(tp: &TypedProgram, e: &Expr, caller: &str, cg: &mut CallG
             named,
             ..
         } => {
-            // Resolve the callee.
+            // Resolve the callee. Statically-resolved callees (known funcs /
+            // paths / method dispatch) get a precise edge. Anything else — a
+            // local first-class func value, a direct closure invocation, or
+            // any other unresolved callee — conservatively edges to EVERY
+            // function whose value is taken anywhere in the program
+            // (`cg.address_taken`), so DCE never prunes a reachable target.
+            let mut resolved = false;
             match callee.as_ref() {
                 Expr::Ident { name, .. } => {
                     if tp.funcs.contains_key(name) || tp.bindings.contains_key(name) {
                         cg.edge(caller, name);
+                        resolved = true;
                     }
                 }
                 Expr::Path { parts, .. } => {
                     let joined = parts.join(".");
                     if tp.funcs.contains_key(&joined) || tp.bindings.contains_key(&joined) {
                         cg.edge(caller, &joined);
+                        resolved = true;
                     } else if parts.len() >= 2 {
                         // `s.len()` parses as a path call when the receiver
                         // is a plain identifier. If the first part isn't a
@@ -345,8 +596,19 @@ fn walk_expr_for_graph(tp: &TypedProgram, e: &Expr, caller: &str, cg: &mut CallG
                         if candidates.is_empty() {
                             candidates.push(method.clone());
                         }
-                        for c in candidates {
-                            cg.edge(caller, &c);
+                        let mut any_known = false;
+                        for c in &candidates {
+                            if tp.funcs.contains_key(c) || tp.bindings.contains_key(c) {
+                                cg.edge(caller, c);
+                                any_known = true;
+                            }
+                        }
+                        // Only mark resolved if we found a known target;
+                        // otherwise the call is through an unknown receiver
+                        // or a func-typed field/path, and we fall through
+                        // to the address-taken conservative edge below.
+                        if any_known {
+                            resolved = true;
                         }
                     }
                     // Qualified alias calls (`fspath.join`) edge only the
@@ -357,14 +619,40 @@ fn walk_expr_for_graph(tp: &TypedProgram, e: &Expr, caller: &str, cg: &mut CallG
                     }
                 }
                 Expr::Field { obj, name, .. } => {
-                    for m in resolve_methods(tp, caller, obj, name) {
-                        cg.edge(caller, &m);
+                    let methods = resolve_methods(tp, caller, obj, name);
+                    let mut any_known = false;
+                    for m in &methods {
+                        if tp.funcs.contains_key(m) || tp.bindings.contains_key(m) {
+                            cg.edge(caller, m);
+                            any_known = true;
+                        }
                     }
+                    // If no resolved method is a known function, the field
+                    // access may be calling a func-typed field value — treat
+                    // as unresolved indirect call below.
+                    resolved = any_known;
                     // Also descend into the object expression (it may hold
                     // a func used as a value / further calls).
                     walk_expr_for_graph(tp, obj, caller, cg);
                 }
+                Expr::Closure { body, .. } => {
+                    // Direct closure invocation `{|x| x + 1}(5)`: walk the
+                    // body with the enclosing caller so any functions called
+                    // inside the closure body are retained by DCE.
+                    walk_expr_for_graph(tp, body, caller, cg);
+                    resolved = true;
+                }
                 _ => {}
+            }
+            if !resolved {
+                // Unresolved indirect call: callee is a local first-class
+                // func value or otherwise not statically known. Conservatively
+                // edge to every address-taken function so DCE cannot prune a
+                // reachable target. Clone first to avoid borrow conflict.
+                let taken: Vec<String> = cg.address_taken.iter().cloned().collect();
+                for t in taken {
+                    cg.edge(caller, &t);
+                }
             }
             for a in args {
                 walk_expr_for_graph(tp, a, caller, cg);

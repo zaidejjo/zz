@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
 use std::sync::Arc;
+use zz_diag_core::ErrorCode;
 use zz_scope::ScopeOps;
 
 use zz_span_ast::ast::{Program, Stmt};
@@ -1021,6 +1022,33 @@ fn check_program_impl(
             }
         }
     }
+    // Z0013: state read before its declaration (earlier top-level statement).
+    let mut state_decl_idx: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (i, stmt) in program.stmts.iter().enumerate() {
+        if let zz_frontend::ast::Stmt::Decl { name, is_state, .. } = stmt {
+            if *is_state {
+                state_decl_idx.insert(name.name.clone(), i);
+            }
+        }
+    }
+    for (i, stmt) in program.stmts.iter().enumerate() {
+        for (sname, decl_idx) in &state_decl_idx {
+            if *decl_idx > i && stmt_reads_state_name(stmt, sname) {
+                checker.errors.push(
+                    zz_diag_core::error_at(
+                        format!(
+                            "read of `state` `{sname}` before its initializer ran\n\
+                         hint: move the `state {sname}` declaration before this statement",
+                            sname = sname
+                        ),
+                        stmt.span(),
+                    )
+                    .with_code(ErrorCode(13)),
+                );
+            }
+        }
+    }
     // Step 6: resolve deferred type-inference errors. A declaration like
     // `z := five()` defers its "cannot infer type" error until `five`'s
     // body has been checked and its return-type variable resolved.
@@ -1827,4 +1855,77 @@ fn link_symbol_ok(cc: &str, symbol: &str, libs: &[String]) -> bool {
         return false;
     };
     link.status.success()
+}
+
+/// True when `stmt` (top-level) contains a bare identifier reference to `name`.
+fn stmt_reads_state_name(stmt: &zz_frontend::ast::Stmt, name: &str) -> bool {
+    match stmt {
+        zz_frontend::ast::Stmt::Decl { value, .. } => expr_refers_to_name_mod(value, name),
+        zz_frontend::ast::Stmt::Assign { target, value, .. } => {
+            expr_refers_to_name_mod(target, name) || expr_refers_to_name_mod(value, name)
+        }
+        zz_frontend::ast::Stmt::CompoundAssign { target, value, .. } => {
+            expr_refers_to_name_mod(target, name) || expr_refers_to_name_mod(value, name)
+        }
+        zz_frontend::ast::Stmt::Expr(e) => expr_refers_to_name_mod(e, name),
+        zz_frontend::ast::Stmt::Return { value, .. } => value
+            .as_ref()
+            .is_some_and(|v| expr_refers_to_name_mod(v, name)),
+        zz_frontend::ast::Stmt::Defer { expr, .. } => expr_refers_to_name_mod(expr, name),
+        zz_frontend::ast::Stmt::For { body, .. } => block_reads_name_mod(body, name),
+        zz_frontend::ast::Stmt::Atomic { body, .. } => block_reads_name_mod(body, name),
+        _ => false,
+    }
+}
+
+fn expr_refers_to_name_mod(e: &zz_frontend::ast::Expr, name: &str) -> bool {
+    match e {
+        zz_frontend::ast::Expr::Ident { name: n, .. } if n == name => true,
+        zz_frontend::ast::Expr::Path { parts, .. } => parts.iter().any(|p| p == name),
+        zz_frontend::ast::Expr::Field { obj, name: n, .. } if n == name => true,
+        zz_frontend::ast::Expr::Field { obj, .. } => expr_refers_to_name_mod(obj, name),
+        zz_frontend::ast::Expr::Binary { left, right, .. } => {
+            expr_refers_to_name_mod(left, name) || expr_refers_to_name_mod(right, name)
+        }
+        zz_frontend::ast::Expr::Unary { expr, .. } => expr_refers_to_name_mod(expr, name),
+        zz_frontend::ast::Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            expr_refers_to_name_mod(callee, name)
+                || args.iter().any(|a| expr_refers_to_name_mod(a, name))
+                || named.iter().any(|(_, v)| expr_refers_to_name_mod(v, name))
+        }
+        zz_frontend::ast::Expr::Closure { body, .. } => expr_refers_to_name_mod(body, name),
+        zz_frontend::ast::Expr::If {
+            cond, then, els, ..
+        } => {
+            expr_refers_to_name_mod(cond, name)
+                || block_reads_name_mod(then, name)
+                || els
+                    .as_ref()
+                    .is_some_and(|e| expr_refers_to_name_mod(e, name))
+        }
+        zz_frontend::ast::Expr::While { cond, body, .. } => {
+            expr_refers_to_name_mod(cond, name) || block_reads_name_mod(body, name)
+        }
+        zz_frontend::ast::Expr::Block(b) => block_reads_name_mod(b, name),
+        zz_frontend::ast::Expr::Array { elems, .. } => {
+            elems.iter().any(|e| expr_refers_to_name_mod(e, name))
+        }
+        zz_frontend::ast::Expr::Dict { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| expr_refers_to_name_mod(k, name) || expr_refers_to_name_mod(v, name)),
+        zz_frontend::ast::Expr::Paren { expr, .. } => expr_refers_to_name_mod(expr, name),
+        zz_frontend::ast::Expr::Tuple { items, .. } => {
+            items.iter().any(|e| expr_refers_to_name_mod(e, name))
+        }
+        _ => false,
+    }
+}
+
+fn block_reads_name_mod(b: &zz_frontend::ast::Block, name: &str) -> bool {
+    b.stmts.iter().any(|s| stmt_reads_state_name(s, name))
 }

@@ -484,3 +484,177 @@ fn callgraph_has_edges_from_top() {
         "expected println edge, got {edges:?}"
     );
 }
+
+// ---- D5 soundness: unresolved indirect calls edge to address-taken funcs ----
+
+#[test]
+fn indirect_call_through_local_func_value_keeps_target_reachable() {
+    // `g := helper` takes helper's value; `g()` is an indirect call through a
+    // local func value. DCE must keep `helper` reachable.
+    let src = r#"
+func helper(x: int) -> int { return x + 1 }
+func main() {
+    g := helper
+    println(g(1))
+}
+"#;
+    let res = build_with_stdlib(src);
+    assert!(!has_errors(&res.diagnostics), "{:?}", res.diagnostics);
+    let tp = &res.program;
+    let reach = reachable(tp, "main");
+    assert!(
+        reach.funcs.contains("helper"),
+        "helper used via local func value must be kept, got {:?}",
+        reach.funcs
+    );
+}
+
+#[test]
+fn direct_closure_invocation_walks_body() {
+    // `{|x| helper(x)}(5)` directly invokes a closure; `helper` called inside
+    // the closure body must be kept reachable.
+    let src = r#"
+func helper(x: int) -> int { return x + 1 }
+func main() {
+    println({|x| helper(x)}(5))
+}
+"#;
+    let res = build_with_stdlib(src);
+    assert!(!has_errors(&res.diagnostics), "{:?}", res.diagnostics);
+    let tp = &res.program;
+    let reach = reachable(tp, "main");
+    assert!(
+        reach.funcs.contains("helper"),
+        "helper called inside directly-invoked closure must be kept, got {:?}",
+        reach.funcs
+    );
+}
+
+#[test]
+fn func_stored_in_struct_field_keeps_target_reachable() {
+    // `s := Holder{ f: helper }` stores helper in a struct field. If the
+    // checker accepts func-typed struct fields, `helper` must be in the
+    // address-taken set and kept reachable by DCE.
+    let src = r#"
+struct Holder { f: int -> int }
+func helper(x: int) -> int { return x * 2 }
+func main() {
+    s := Holder{ f: helper }
+    println(1)
+}
+"#;
+    let res = build_source(
+        src,
+        HashMap::new(),
+        seed_stdlib(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let Some(res) = res else {
+        eprintln!("struct field test skipped: parse error");
+        return;
+    };
+    assert!(
+        !has_errors(&res.diagnostics),
+        "unexpected diags: {:?}",
+        res.diagnostics
+    );
+    let tp = &res.program;
+    let cg = build_callgraph(tp);
+    assert!(
+        cg.address_taken.contains("helper"),
+        "helper stored in struct field must be in address_taken, got {:?}",
+        cg.address_taken
+    );
+    let reach = reachable(tp, "main");
+    assert!(
+        reach.funcs.contains("helper"),
+        "helper stored in struct field must be kept, got {:?}",
+        reach.funcs
+    );
+}
+
+#[test]
+fn func_stored_in_vec_keeps_target_reachable() {
+    // `arr = [helper]; arr[0]()` stores helper in a vec and calls it
+    // indirectly. DCE must keep `helper` reachable.
+    let src = r#"
+func helper(x: int) -> int { return x + 1 }
+func main() {
+    arr := [helper]
+    println(arr[0](1))
+}
+"#;
+    let res = build_with_stdlib(src);
+    assert!(!has_errors(&res.diagnostics), "{:?}", res.diagnostics);
+    let tp = &res.program;
+    let reach = reachable(tp, "main");
+    assert!(
+        reach.funcs.contains("helper"),
+        "helper stored in vec must be kept, got {:?}",
+        reach.funcs
+    );
+}
+
+#[test]
+fn address_taken_set_includes_direct_func_value_use() {
+    let src = r#"
+func helper(x: int) -> int { return x + 1 }
+func main() {
+    g := helper
+}
+"#;
+    let res = build_with_stdlib(src);
+    let tp = &res.program;
+    let cg = build_callgraph(tp);
+    assert!(
+        cg.address_taken.contains("helper"),
+        "helper must be in address_taken set, got {:?}",
+        cg.address_taken
+    );
+}
+
+#[test]
+fn address_taken_set_includes_func_stored_in_struct_field() {
+    // `Holder{ f: helper }` stores `helper` in a func-typed struct field.
+    // `helper` must be in the address_taken set so unresolved indirect calls
+    // edge to it conservatively.
+    let src = r#"
+struct Holder { f: func() -> int }
+func helper() -> int { return 42 }
+func main() {
+    s := Holder{ f: helper }
+    println(1)
+}
+"#;
+    let res = build_with_stdlib(src);
+    assert!(
+        !has_errors(&res.diagnostics),
+        "unexpected diags: {:?}",
+        res.diagnostics
+    );
+    let tp = &res.program;
+    let cg = build_callgraph(tp);
+    assert!(
+        cg.address_taken.contains("helper"),
+        "helper stored in struct field must be in address_taken, got {:?}",
+        cg.address_taken
+    );
+}
+
+#[test]
+fn unreachable_func_without_address_taken_is_pruned() {
+    // `unused` is never called and never taken as a value — DCE prunes it.
+    let src = r#"
+func used(x: int) -> int { return x + 1 }
+func unused(x: int) -> int { return x * 3 }
+func main() {
+    println(used(21))
+}
+"#;
+    let res = build_with_stdlib(src);
+    let tp = &res.program;
+    let reach = reachable(tp, "main");
+    assert!(!reach.funcs.contains("unused"), "unused must be pruned");
+}

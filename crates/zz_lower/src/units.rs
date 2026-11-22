@@ -1716,4 +1716,35 @@ mod tests {
             );
         }
     }
+
+    /// D8 lock elision: state accesses must go through the process-global
+    /// lock only when task/chan/spawn concurrency is reachable.
+    #[test]
+    fn state_lock_elision_depends_on_concurrency_reachability() {
+        // Program WITHOUT concurrency: no lock calls in generated unit code.
+        let no_conc = "state x := 0\nfunc main() { x = 1 }\n";
+        let units = lower_merged(no_conc);
+        for u in &units.units {
+            assert!(
+                !u.code.contains("zz_state_lock"),
+                "unit {}: lock should be elided without concurrency:\n{}",
+                u.ns,
+                u.code
+            );
+        }
+
+        // Program WITH task.spawn: lock calls present.
+        let with_conc =
+            "import std.task\nstate x := 0\nfunc set_x() { x = 1 }\nfunc main() { task.spawn(|_| { set_x() }) }\n";
+        let units2 = lower_merged(with_conc);
+        let found = units2
+            .units
+            .iter()
+            .any(|u| u.code.contains("zz_state_lock"));
+        assert!(
+            found,
+            "lock should be present with concurrency in any unit:\n{}",
+            units2.header
+        );
+    }
 }

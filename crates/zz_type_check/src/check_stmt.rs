@@ -103,6 +103,20 @@ fn check_stmt_decl(
         checker.define_var_at(&name.name, fv, name.span, is_const);
     }
     let vt = checker.check_expr(value);
+    // Z0013: read of `state` inside its own initializer.
+    if is_state && expr_refers_to_name(checker, value, &name.name) {
+        checker.errors.push(
+            error_at(
+                format!(
+                    "read of `state` `{}` inside its own initializer\n\
+                 hint: initialize `{}` without referencing itself",
+                    name.name, name.name
+                ),
+                name.span,
+            )
+            .with_code(ErrorCode(13)),
+        );
+    }
     // D1: `state` is module-level only in v1. At top level the env stack
     // has exactly one entry (the module scope). Inside any function/block
     // it's deeper.
@@ -484,11 +498,22 @@ fn check_stmt_assign(checker: &mut Checker, target: &Expr, value: &Expr, span: S
             checker.report_mismatch(e, span);
         }
     }
-    // D2/D3: if this assignment touches a state variable, enforce
-    // auto-atomic whitelist (outside atomic) or blocking-native (inside
-    // atomic) rules on all expressions in the statement.
-    check_expr_atomic_safety(checker, target, span);
-    check_expr_atomic_safety(checker, value, span);
+    // D2/D3: if this assignment touches a state variable (target is state OR
+    // value references state), enforce auto-atomic whitelist (outside atomic)
+    // or blocking-native (inside atomic) rules on ALL expressions in the
+    // statement — including the value expression even when it doesn't itself
+    // reference state (e.g. `n = foo()` where `n` is state).
+    let touches_state =
+        expr_references_state(checker, target) || expr_references_state(checker, value);
+    if touches_state {
+        if checker.atomic_depth > 0 {
+            check_for_blocking_natives(checker, target, span);
+            check_for_blocking_natives(checker, value, span);
+        } else {
+            check_whitelist_only(checker, target, span);
+            check_whitelist_only(checker, value, span);
+        }
+    }
     Type::Unit
 }
 
@@ -521,8 +546,17 @@ fn check_stmt_compound_assign(
     }
     // D2/D3: if this compound assignment touches a state variable,
     // enforce auto-atomic safety on all expressions in the statement.
-    check_expr_atomic_safety(checker, target, span);
-    check_expr_atomic_safety(checker, value, span);
+    let touches_state =
+        expr_references_state(checker, target) || expr_references_state(checker, value);
+    if touches_state {
+        if checker.atomic_depth > 0 {
+            check_for_blocking_natives(checker, target, span);
+            check_for_blocking_natives(checker, value, span);
+        } else {
+            check_whitelist_only(checker, target, span);
+            check_whitelist_only(checker, value, span);
+        }
+    }
     Type::Unit
 }
 
@@ -809,12 +843,17 @@ fn expr_references_state_pattern(_checker: &Checker, _pat: &zz_span_ast::ast::Pa
     false
 }
 
-/// Returns true if `name` is a stdlib native marked `readonly` (pure,
-/// non-blocking) — these are whitelisted for D2 auto-atomic statements.
-fn is_whitelisted_native(checker: &Checker, name: &str) -> bool {
-    zz_checker_core::lookup_std(&checker.funcs, name)
-        .map(|sig| sig.readonly)
-        .unwrap_or(false)
+/// Returns true if `name` is a stdlib native marked `state_safe` (pure,
+/// non-blocking, never calls back into user code, no I/O) — these are
+/// whitelisted for D2 auto-atomic statements.
+///
+/// This is separate from `FuncSig.readonly` (ARC retain elision). A native
+/// can be readonly but not state_safe (e.g. one that allocates), or
+/// state_safe but not readonly (rare). The two concepts are independent.
+fn is_whitelisted_native(_checker: &Checker, name: &str) -> bool {
+    let safe = zz_checker_core::state_safe_natives();
+    safe.contains(name)
+        || zz_checker_core::canonical_std_name(name).is_some_and(|c| safe.contains(&c))
 }
 
 /// Returns true if `name` is a known-blocking native — forbidden inside
@@ -1473,4 +1512,72 @@ fn is_state_target(checker: &Checker, expr: &Expr) -> bool {
         Expr::Field { name, .. } => checker.state_names.contains(name),
         _ => false,
     }
+}
+
+/// True when `expr` contains a bare identifier reference to `name`.
+fn expr_refers_to_name(checker: &Checker, expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::Ident { name: n, .. } if n == name => true,
+        Expr::Path { parts, .. } => parts.iter().any(|p| p == name),
+        Expr::Field { obj, name: n, .. } if n == name => true,
+        Expr::Field { obj, .. } => expr_refers_to_name(checker, obj, name),
+        Expr::Binary { left, right, .. } => {
+            expr_refers_to_name(checker, left, name) || expr_refers_to_name(checker, right, name)
+        }
+        Expr::Unary { expr, .. } => expr_refers_to_name(checker, expr, name),
+        Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            expr_refers_to_name(checker, callee, name)
+                || args.iter().any(|a| expr_refers_to_name(checker, a, name))
+                || named
+                    .iter()
+                    .any(|(_, v)| expr_refers_to_name(checker, v, name))
+        }
+        Expr::Closure { body, .. } => expr_refers_to_name(checker, body, name),
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            expr_refers_to_name(checker, cond, name)
+                || expr_refers_to_name_block(checker, then, name)
+                || els
+                    .as_ref()
+                    .is_some_and(|e| expr_refers_to_name(checker, e, name))
+        }
+        Expr::While { cond, body, .. } => {
+            expr_refers_to_name(checker, cond, name)
+                || expr_refers_to_name_block(checker, body, name)
+        }
+        Expr::Block(b) => expr_refers_to_name_block(checker, b, name),
+        Expr::Array { elems, .. } => elems.iter().any(|e| expr_refers_to_name(checker, e, name)),
+        Expr::Dict { entries, .. } => entries.iter().any(|(k, v)| {
+            expr_refers_to_name(checker, k, name) || expr_refers_to_name(checker, v, name)
+        }),
+        Expr::Paren { expr, .. } => expr_refers_to_name(checker, expr, name),
+        Expr::Tuple { items, .. } => items.iter().any(|e| expr_refers_to_name(checker, e, name)),
+        _ => false,
+    }
+}
+
+fn expr_refers_to_name_block(checker: &Checker, b: &zz_span_ast::ast::Block, name: &str) -> bool {
+    b.stmts.iter().any(|s| match s {
+        Stmt::Decl { value, .. } => expr_refers_to_name(checker, value, name),
+        Stmt::Assign { target, value, .. } => {
+            expr_refers_to_name(checker, target, name) || expr_refers_to_name(checker, value, name)
+        }
+        Stmt::CompoundAssign { target, value, .. } => {
+            expr_refers_to_name(checker, target, name) || expr_refers_to_name(checker, value, name)
+        }
+        Stmt::Expr(e) => expr_refers_to_name(checker, e, name),
+        Stmt::Return { value, .. } => value
+            .as_ref()
+            .is_some_and(|v| expr_refers_to_name(checker, v, name)),
+        Stmt::Defer { expr, .. } => expr_refers_to_name(checker, expr, name),
+        Stmt::For { body, .. } => expr_refers_to_name_block(checker, body, name),
+        Stmt::Atomic { body, .. } => expr_refers_to_name_block(checker, body, name),
+        _ => false,
+    })
 }
