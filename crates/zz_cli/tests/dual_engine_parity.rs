@@ -2049,6 +2049,21 @@ parity_strict!(
 );
 parity_strict!(parity_stdlib_state_d2_neg, "stdlib", "state_d2_neg.zz");
 parity_strict!(
+    parity_stdlib_state_d2_vec_push,
+    "stdlib",
+    "state_d2_vec_push.zz"
+);
+parity_strict!(
+    parity_stdlib_state_d2_dict_set,
+    "stdlib",
+    "state_d2_dict_set.zz"
+);
+parity_strict!(
+    parity_stdlib_state_d2_struct_field,
+    "stdlib",
+    "state_d2_struct_field.zz"
+);
+parity_strict!(
     parity_stdlib_state_composite_contention,
     "stdlib",
     "state_composite_contention.zz"

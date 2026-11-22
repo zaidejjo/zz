@@ -1,0 +1,14 @@
+// features: int-arith, locals, print, state, structs
+// D2: struct-field update on a state struct compiles without `atomic { }`.
+// Single self-contained RMW statement (read+write in one statement) then
+// pure reads — no cross-statement read-then-write (R1).
+struct Acct { bal: int }
+
+state acct := Acct { bal: 0 }
+
+func main() -> int {
+    acct.bal = acct.bal + 15
+    if acct.bal != 15 { return -1 }
+    println("state_d2_struct_field_ok")
+    return 0
+}

@@ -1100,6 +1100,21 @@ e2e_success_test!(e2e_stdlib_state_d2_math_ok, "stdlib", "state_d2_math_ok.zz");
 e2e_success_test!(e2e_stdlib_state_d2_str_ok, "stdlib", "state_d2_str_ok.zz");
 e2e_success_test!(e2e_stdlib_state_d2_neg, "stdlib", "state_d2_neg.zz");
 e2e_success_test!(
+    e2e_stdlib_state_d2_vec_push,
+    "stdlib",
+    "state_d2_vec_push.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d2_dict_set,
+    "stdlib",
+    "state_d2_dict_set.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d2_struct_field,
+    "stdlib",
+    "state_d2_struct_field.zz"
+);
+e2e_success_test!(
     e2e_stdlib_state_composite_contention,
     "stdlib",
     "state_composite_contention.zz"
@@ -1460,7 +1475,6 @@ e2e_error_test!(
 );
 e2e_error_test!(e2e_err_state_r2_vec_func, "state_r2_vec_func.zz");
 e2e_error_test!(e2e_err_state_r2_struct_field, "state_r2_struct_field.zz");
-e2e_error_test!(e2e_err_state_d2_vec_push, "state_d2_vec_push.zz");
 e2e_error_test!(
     e2e_err_state_d2_closure_native,
     "state_d2_closure_native.zz"

@@ -1105,6 +1105,17 @@ pub fn state_safe_natives() -> HashSet<String> {
     s.insert("std.str.find_in".into());
     s.insert("std.str.rfind_in".into());
 
+    // std.str builders — linear string builders. Non-closure, non-blocking,
+    // no-I/O, never call back into user code (they mutate a builder buffer
+    // directly), so they are safe inside D2 auto-atomic statements.
+    s.insert("std.str.builder".into());
+    s.insert("std.str.push_part".into());
+    s.insert("std.str.finish".into());
+    s.insert("std.str.builder_len".into());
+    s.insert("std.str.join_parts".into());
+    s.insert("std.str.push_byte".into());
+    s.insert("std.str.extend".into());
+
     // std.math — pure arithmetic queries.
     s.insert("std.math.abs".into());
     s.insert("std.math.signum".into());
@@ -1117,11 +1128,23 @@ pub fn state_safe_natives() -> HashSet<String> {
     s.insert("std.math.pow".into());
     s.insert("std.math.sqrt".into());
 
-    // std.vec — pure query natives only (NOT push/pop/sort/insert/remove).
+    // std.vec — pure query natives plus the non-closure, non-blocking,
+    // no-I/O mutating natives (push/insert/remove/pop/sort). These are
+    // safe inside D2 auto-atomic statements: they take a plain value
+    // receiver, never call back into user code, and do no I/O or blocking.
+    // Closure-taking forms (sort_by, sort_by_desc, sort_key) stay OUT.
     s.insert("std.vec.len".into());
     s.insert("std.vec.contains".into());
+    s.insert("std.vec.push".into());
+    s.insert("std.vec.insert".into());
+    s.insert("std.vec.remove".into());
+    s.insert("std.vec.pop".into());
+    s.insert("std.vec.sort".into());
 
-    // std.dict — pure query natives only (NOT get/set/insert/remove).
+    // std.dict — dicts use index syntax (`d[k] = v`, `d[k]`) which lowers
+    // to a store op (allowed under D2 as field/index access), so there are
+    // no `dict.set`/`dict.insert`/`dict.remove` natives to whitelist. Pure
+    // query natives only.
     s.insert("std.dict.len".into());
     s.insert("std.dict.contains".into());
     s.insert("std.dict.get".into());

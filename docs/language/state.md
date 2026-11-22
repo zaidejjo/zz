@@ -67,25 +67,37 @@ that touches `state` → **compile error**, fix hint: "wrap in `atomic { }`".
 
 ### Whitelist derivation
 
-Derived from the native metadata in `crates/zz_stdlib_meta/src/table.rs`
-(`FuncSig.readonly`, set by the `#[readonly]`/`#[pure]` decorator) — every
-native that is pure, non-blocking, and does not touch concurrency state.
-Whitelisted natives (with justification):
+Derived from `crates/zz_checker_core/src/lib.rs` `state_safe_natives()` — the
+audited set of natives that are pure, non-blocking, never call back into user
+code, and do no I/O. These are exactly the natives allowed inside D2
+auto-atomic statements (outside `atomic { }`).
+
+Whitelisted natives:
 
 | Native | Justification |
 |--------|---------------|
-| `std.str.length`, `std.str.contains`, `std.str.find`, `std.str.split` | Pure string queries, no side effects, non-blocking |
-| `std.math.*` (readonly ones: abs, signum, clamp, floor, ceil, round, etc.) | Pure arithmetic |
-| `len`, `range`, `ord`, `chr` | Pure builtins |
-| `std.vec.*` query natives that are readonly | Read-only vector ops |
-| `std.dict.*` query natives that are readonly | Read-only dict ops |
+| `range`, `len`, `ord`, `chr` | Pure builtins |
+| `std.str.length`, `std.str.contains`, `std.str.find`, `std.str.rfind`, `std.str.byte_len`, `std.str.ord`, `std.str.starts_with`, `std.str.ends_with`, `std.str.starts_with_at`, `std.str.ends_with_at`, `std.str.is_empty`, `std.str.count`, `std.str.count_in`, `std.str.find_in`, `std.str.rfind_in` | Pure string queries, no side effects, non-blocking |
+| `std.str.builder`, `std.str.push_part`, `std.str.finish`, `std.str.builder_len`, `std.str.join_parts`, `std.str.push_byte`, `std.str.extend` | Linear string builders; mutate a builder buffer directly, no user callback, no I/O, non-blocking |
+| `std.math.abs`, `std.math.signum`, `std.math.clamp`, `std.math.floor`, `std.math.ceil`, `std.math.round`, `std.math.min`, `std.math.max`, `std.math.pow`, `std.math.sqrt` | Pure arithmetic |
+| `std.vec.len`, `std.vec.contains`, `std.vec.push`, `std.vec.insert`, `std.vec.remove`, `std.vec.pop`, `std.vec.sort` | Vector ops; non-closure forms only — closure-taking `sort_by`/`sort_by_desc`/`sort_key` stay OUT |
+| `std.dict.len`, `std.dict.contains`, `std.dict.get`, `std.dict.keys`, `std.dict.values` | Dict query natives. Dicts use index syntax (`d["k"] = v`, `d["k"]`) which lowers to a store op allowed under D2; there are no `dict.set`/`dict.insert`/`dict.remove` natives |
+| `std.json.len`, `std.json.has`, `std.json.type`, `std.json.as_str`, `std.json.as_int`, `std.json.as_float`, `std.json.as_bool`, `std.json.is_null`, `std.json.is_bool`, `std.json.is_number`, `std.json.is_string`, `std.json.is_array`, `std.json.is_object`, `std.json.is_empty`, `std.json.deep_get`, `std.json.path_exists`, `std.json.path_get_or` | Pure JSON queries (NOT parse/stringify/merge) |
+| `std.sys.os`, `std.sys.arch`, `std.sys.cpu_count`, `std.sys.hostname`, `std.sys.total_mem`, `std.sys.avail_mem` | Pure system-info queries |
+| `std.log.get_level` | Pure query only (NOT set_level/set_format/to_file) |
+| `std.crypto.sha256`, `std.crypto.sha256_bytes`, `std.crypto.sha512`, `std.crypto.hmac_sha256`, `std.crypto.random_bytes`, `std.crypto.ct_eq` | Pure hash/query (NOT keygen/sign/verify/Argon2/bcrypt) |
+| `std.encoding.base64_encode`, `std.encoding.base64_decode`, `std.encoding.base64_decode_bytes`, `std.encoding.hex_encode`, `std.encoding.hex_decode`, `std.encoding.url_encode`, `std.encoding.url_decode` | Pure encoding/decoding |
+| `std.regexp.is_match`, `std.regexp.find`, `std.regexp.captures`, `std.regexp.is_email` | Pure regexp query only (NOT compile) |
+| `std.uuid.is_valid` | Pure validation only (NOT v4/v7/parse) |
+| `std.args.get_str`, `std.args.get_int`, `std.args.get_bool`, `std.args.positional`, `std.args.was_help` | Pure getters only (NOT parser/flag setters) |
 
-Exact list emitted in Phase 2 by scanning `FuncSig.readonly == true` and
-manually auditing for blocking/concurrency contact. Natives that are NOT
-whitelisted (blocking or effectful): `chan.recv`, `chan.send`, `task.join`,
-`task.spawn`, `time.sleep_ms`, `time.sleep_micros`, `std.fs.*` (blocking I/O),
-`std.net.*`, `std.http.*`, `std.process.*`, `std.env.set_var`, `sqlz.*`,
-`io.*`, `print`/`println` (side effect on stdout).
+Still EXCLUDED (blocking, effectful, I/O, closure-taking, spawn/chan/task):
+`chan.recv`, `chan.send`, `task.join`, `task.spawn`, `time.sleep_ms`,
+`time.sleep_micros`, `std.fs.*`, `std.net.*`, `std.http.*`, `std.process.*`,
+`std.env.set_var`, `sqlz.*`, `io.*`, `print`/`println`, and closure-taking
+natives (`vec.sort_by`, `vec.sort_by_desc`, `vec.sort_key`, `map`, `filter`,
+…). Those raise **Z0014** inside an auto-atomic statement: "wrap the
+statement in `atomic { }`".
 
 ## D3 — `atomic { ... }` block
 
