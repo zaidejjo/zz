@@ -197,6 +197,38 @@ async fn hover_let_binding() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn hover_state_binding() {
+    let (service, state) = setup();
+    let uri: Url = "file:///test.zz".parse().unwrap();
+    let src = "state hits := 0\n";
+    open_and_check(&state, &uri, src);
+
+    let pos = Position {
+        line: 0,
+        character: 6,
+    };
+    let hover = service
+        .inner()
+        .hover(HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: pos,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        })
+        .await
+        .unwrap();
+    let hover = hover.expect("should have hover for state");
+    match hover.contents {
+        HoverContents::Markup(m) => {
+            assert!(m.value.contains("state"));
+            assert!(m.value.contains("hits"));
+        }
+        _ => panic!("expected markup content"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn hover_missing_document_returns_none() {
     let (service, _) = setup();
     let uri: Url = "file:///nonexistent.zz".parse().unwrap();

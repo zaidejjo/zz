@@ -1,0 +1,57 @@
+// features: imports, int-arith, locals, print, std-task, state
+// Two states updated together inside `atomic { }`: invariant sum stays
+// constant. 4 tasks each transfer 10 units from `a` to `b`.
+// Total = 100 always (50 + 50 initially).
+// Repeats 5 times to verify no torn reads under contention.
+import std.task
+
+state a := 50
+state b := 50
+
+func transfer10() {
+    atomic {
+        a = a - 1
+        a = a - 1
+        a = a - 1
+        a = a - 1
+        a = a - 1
+        a = a - 1
+        a = a - 1
+        a = a - 1
+        a = a - 1
+        a = a - 1
+        b = b + 1
+        b = b + 1
+        b = b + 1
+        b = b + 1
+        b = b + 1
+        b = b + 1
+        b = b + 1
+        b = b + 1
+        b = b + 1
+        b = b + 1
+    }
+}
+
+func main() -> Result<int, str> {
+    for run in 0..5 {
+        a = 50
+        b = 50
+        h0 := task.spawn(|_| { transfer10() })
+        h1 := task.spawn(|_| { transfer10() })
+        h2 := task.spawn(|_| { transfer10() })
+        h3 := task.spawn(|_| { transfer10() })
+        task.join(h0)
+        task.join(h1)
+        task.join(h2)
+        task.join(h3)
+        if a + b != 100 {
+            return .err("invariant_broken")
+        }
+        if a != 10 || b != 90 {
+            return .err("unexpected_values")
+        }
+    }
+    println("invariant_ok")
+    return .ok(0)
+}

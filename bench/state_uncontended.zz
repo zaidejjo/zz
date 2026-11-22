@@ -1,0 +1,13 @@
+// features: int-arith, locals, print, state
+// Benchmark: uncontended state op cost (single task, no contention).
+state hits := 0
+
+func main() -> int {
+    for i in 0..100000 {
+        hits = hits + 1
+    }
+    println(hits)
+    if hits != 100000 { return -1 }
+    println("bench_state_uncontended_ok")
+    return 0
+}

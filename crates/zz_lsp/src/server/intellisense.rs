@@ -180,7 +180,16 @@ pub(crate) async fn handle_hover(backend: &Backend, params: HoverParams) -> Resu
             contents.push_str("}\n");
             contents.push_str("```\n");
         } else if let Some(ty) = check_result.bindings.get(&name) {
-            contents.push_str(&format!("**let** `{name}: {ty}`\n"));
+            // Check if this is a `state` declaration (module-level shared mutable state).
+            let is_state = program
+                .stmts
+                .iter()
+                .any(|s| matches!(s, zz_frontend::ast::Stmt::Decl { name: n, is_state: true, .. } if n.name == name));
+            if is_state {
+                contents.push_str(&format!("**state** `{name}: {ty}`\n"));
+            } else {
+                contents.push_str(&format!("**let** `{name}: {ty}`\n"));
+            }
         } else if let Some(Expr::Field {
             name: field, obj, ..
         }) = node.expr

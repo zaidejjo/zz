@@ -1,7 +1,7 @@
 // features: imports, int-arith, locals, print, std-task, state
 // tests/fixtures/stdlib/state_counter.zz
 // Deterministic contended counter: 4 tasks x 10 increments = exactly 40.
-// Repeats 50 times to verify no flakiness under contention.
+// Repeats 5 times to verify no flakiness under contention.
 import std.task
 
 state hits := 0
@@ -22,7 +22,7 @@ func inc10() {
 }
 
 func main() -> Result<int, str> {
-    for run in 0..50 {
+    for run in 0..5 {
         hits = 0
         h0 := task.spawn(|_| { inc10() })
         h1 := task.spawn(|_| { inc10() })

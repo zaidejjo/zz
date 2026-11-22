@@ -2023,6 +2023,42 @@ parity_strict!(
     "state_identifiers.zz"
 );
 parity_strict!(
+    parity_stdlib_state_r2_local_only,
+    "stdlib",
+    "state_r2_local_only.zz"
+);
+parity_strict!(
+    parity_stdlib_state_r2_read_only_task,
+    "stdlib",
+    "state_r2_read_only_task.zz"
+);
+parity_strict!(
+    parity_stdlib_state_r2_state_ok,
+    "stdlib",
+    "state_r2_state_ok.zz"
+);
+parity_strict!(
+    parity_stdlib_state_d2_math_ok,
+    "stdlib",
+    "state_d2_math_ok.zz"
+);
+parity_strict!(
+    parity_stdlib_state_d2_str_ok,
+    "stdlib",
+    "state_d2_str_ok.zz"
+);
+parity_strict!(parity_stdlib_state_d2_neg, "stdlib", "state_d2_neg.zz");
+parity_strict!(
+    parity_stdlib_state_composite_contention,
+    "stdlib",
+    "state_composite_contention.zz"
+);
+parity_strict!(
+    parity_stdlib_state_two_state_invariant,
+    "stdlib",
+    "state_two_state_invariant.zz"
+);
+parity_strict!(
     parity_stdlib_option_result_unwrap_test,
     "stdlib",
     "option_result_unwrap_test.zz"

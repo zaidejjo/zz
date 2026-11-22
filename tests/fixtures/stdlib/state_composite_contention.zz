@@ -1,0 +1,42 @@
+// features: imports, int-arith, locals, print, std-task, state, std-vec
+// Composite state under contention: 4 tasks each push 10 items to a shared vec.
+// Expects exact length 40 (4 * 10) after all tasks complete.
+// Repeats 5 times to verify no flakiness under contention.
+import std.task
+import std.vec
+
+state log := []
+
+func push10() {
+    atomic {
+        log = vec.push(log, 1)
+        log = vec.push(log, 1)
+        log = vec.push(log, 1)
+        log = vec.push(log, 1)
+        log = vec.push(log, 1)
+        log = vec.push(log, 1)
+        log = vec.push(log, 1)
+        log = vec.push(log, 1)
+        log = vec.push(log, 1)
+        log = vec.push(log, 1)
+    }
+}
+
+func main() -> Result<int, str> {
+    for run in 0..5 {
+        log = []
+        h0 := task.spawn(|_| { push10() })
+        h1 := task.spawn(|_| { push10() })
+        h2 := task.spawn(|_| { push10() })
+        h3 := task.spawn(|_| { push10() })
+        task.join(h0)
+        task.join(h1)
+        task.join(h2)
+        task.join(h3)
+        if vec.len(log) != 40 {
+            return .err("composite_len_mismatch")
+        }
+    }
+    println("composite_ok")
+    return .ok(0)
+}

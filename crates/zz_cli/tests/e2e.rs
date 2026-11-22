@@ -1082,6 +1082,34 @@ e2e_success_test!(
     "state_identifiers.zz"
 );
 e2e_success_test!(
+    e2e_stdlib_state_r2_local_only,
+    "stdlib",
+    "state_r2_local_only.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_r2_read_only_task,
+    "stdlib",
+    "state_r2_read_only_task.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_r2_state_ok,
+    "stdlib",
+    "state_r2_state_ok.zz"
+);
+e2e_success_test!(e2e_stdlib_state_d2_math_ok, "stdlib", "state_d2_math_ok.zz");
+e2e_success_test!(e2e_stdlib_state_d2_str_ok, "stdlib", "state_d2_str_ok.zz");
+e2e_success_test!(e2e_stdlib_state_d2_neg, "stdlib", "state_d2_neg.zz");
+e2e_success_test!(
+    e2e_stdlib_state_composite_contention,
+    "stdlib",
+    "state_composite_contention.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_two_state_invariant,
+    "stdlib",
+    "state_two_state_invariant.zz"
+);
+e2e_success_test!(
     e2e_stdlib_option_result_unwrap_test,
     "stdlib",
     "option_result_unwrap_test.zz"
@@ -1425,6 +1453,24 @@ e2e_error_test!(e2e_err_state_blocking_atomic, "state_blocking_atomic.zz");
 e2e_error_test!(e2e_err_state_r1_pos, "state_r1_pos.zz");
 e2e_error_test!(e2e_err_state_r2_pos, "state_r2_pos.zz");
 e2e_error_test!(e2e_err_state_closure_rejected, "state_closure_rejected.zz");
+e2e_error_test!(e2e_err_state_r2_local_func, "state_r2_local_func.zz");
+e2e_error_test!(
+    e2e_err_state_r2_direct_closure,
+    "state_r2_direct_closure.zz"
+);
+e2e_error_test!(e2e_err_state_r2_vec_func, "state_r2_vec_func.zz");
+e2e_error_test!(e2e_err_state_r2_struct_field, "state_r2_struct_field.zz");
+e2e_error_test!(e2e_err_state_d2_vec_push, "state_d2_vec_push.zz");
+e2e_error_test!(
+    e2e_err_state_d2_closure_native,
+    "state_d2_closure_native.zz"
+);
+e2e_error_test!(e2e_err_state_d2_user_call, "state_d2_user_call.zz");
+e2e_error_test!(e2e_err_state_z0013_self_init, "state_z0013_self_init.zz");
+e2e_error_test!(
+    e2e_err_state_z0013_before_decl,
+    "state_z0013_before_decl.zz"
+);
 // M0 edge corpus: both engines fail (messages differ; error parity only
 // requires failure on both sides).
 e2e_error_test!(e2e_err_edge_neg_shift, "edge_neg_shift_err.zz");

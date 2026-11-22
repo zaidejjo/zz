@@ -1,0 +1,8 @@
+// features: int-arith, locals, print, state
+// Z0013: state read before its declaration at top level.
+println(x)
+state x := 1
+
+func main() -> int {
+    return 0
+}
