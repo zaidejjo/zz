@@ -8,7 +8,7 @@ import std.sqlz
 
 ## Purpose
 
-`std.sqlz` is the only SQLite module. `open(path) -> db`, `exec(db, sql) -> int` (rows changed), `query(db, sql) -> [T]` (rows mapped to structs), `close(db)`. The SQL param is checked by `verify_sql_params` (Fmt segments become `?N` bound params); `query`'s return unifies with the caller's annotation (`let users: [User] = sqlz.query(...)`) so the runtime can map columns positionally into that struct. Handle variables named `db` (`db := sqlz.open(..); db.exec(..)`) are method calls.
+`std.sqlz` is the only SQLite module. `open(path) -> db`, `exec(db, sql) -> int` (rows changed), `query(db, sql) -> [T]` (rows mapped to structs), `close(db)`. The SQL param is checked by `verify_sql_params` (Fmt segments become `?N` bound params); `query`'s return unifies with the caller's annotation (`users: [User] = sqlz.query(...)`) so the runtime can map columns positionally into that struct. Handle variables named `db` (`db := sqlz.open(..); db.exec(..)`) are method calls.
 
 Postgres: `import std.sqlz.postgres as pg` — `pg.connect`, `pg.exec`, `pg.query`, `pg.close`. MySQL: `import std.sqlz.mysql as my` — same shape. Both wire-protocol drivers; MySQL uses binary prepared statements.
 

@@ -1,6 +1,7 @@
 # Shared Mutable State — `state` / `atomic { }`
 
-Status: design (Phase 0). Implemented across VM + AOT in phases 1–4.
+Status: implemented (VM + AOT). All decisions D1–D10 are implemented.
+Remaining: docs/tooling (LSP hover, benchmarks, test-isolation row).
 
 ## Problem
 
@@ -231,5 +232,17 @@ coverage (test `error_codes_have_explanations` enforces this).
 
 ## Deviations from D1–D10
 
-None yet. Any deviation found during implementation will be listed here with
-evidence before proceeding past the gate that discovers it.
+None found during implementation. All decisions D1–D10 are implemented as specified.
+
+## Choosing between `state`, `cell`, and `chan`
+
+| Construct | Best for | Cost | Concurrency model |
+|-----------|----------|------|-------------------|
+| `state` | Module-level shared mutable state accessed from multiple tasks | One process-global lock (elided in AOT when no concurrency reachable) | Lock-protected, value semantics, no borrows out |
+| `cell` | Single-threaded mutable interior (e.g. accumulator within one task) | Zero (plain field access) | No cross-task safety — task-local only |
+| `chan` | Message passing between tasks | Queue + condvar per channel | Send/recv with blocking, no shared state |
+
+- Use `state` when multiple tasks need to read/write the same module-level variable (counters, configs, registries).
+- Use `cell` when you need mutation within a single task and no cross-task access.
+- Use `chan` when you want to pass values between tasks without shared memory (producer/consumer patterns).
+- Never store closures/function values in `state` (Z0012) — they capture by reference through shared heap cells and would smuggle unsynchronized state across tasks.
