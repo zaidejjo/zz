@@ -386,6 +386,15 @@ fn native_skip_reason(file: &Path) -> Option<&'static str> {
             // Revisit if it starts failing deterministically.
             Some("TLS listener socket teardown is non-deterministic natively under load")
         }
+        "net_write_after_close_test" => {
+            // The write-after-close result depends on socket-teardown timing:
+            // the client drains FIN via `read_line` (bounded by SO_RCVTIMEO) then
+            // writes until EPIPE. Under load `read_line` can time out before the
+            // server's spawned shutdown runs, so writes succeed instead of erroring.
+            // Non-deterministic between engines; not a VM-vs-native bug (both
+            // surface EPIPE as a `Result`, see #424). e2e still covers it on VM.
+            Some("write-after-close result depends on socket-teardown timing (non-deterministic under load)")
+        }
         "time_ops" | "time_test" | "bench_memory_arena" => {
             Some("output contains time.now_ms() — non-deterministic timestamps")
         }
