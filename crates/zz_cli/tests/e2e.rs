@@ -1125,6 +1125,8 @@ e2e_success_test!(
     "stdlib",
     "state_two_state_invariant.zz"
 );
+e2e_success_test!(e2e_stdlib_atomic_positions, "stdlib", "atomic_positions.zz");
+e2e_success_test!(e2e_stdlib_atomic_semicolon, "stdlib", "atomic_semicolon.zz");
 e2e_success_test!(
     e2e_stdlib_option_result_unwrap_test,
     "stdlib",

@@ -2074,6 +2074,16 @@ parity_strict!(
     "state_two_state_invariant.zz"
 );
 parity_strict!(
+    parity_stdlib_atomic_positions,
+    "stdlib",
+    "atomic_positions.zz"
+);
+parity_strict!(
+    parity_stdlib_atomic_semicolon,
+    "stdlib",
+    "atomic_semicolon.zz"
+);
+parity_strict!(
     parity_stdlib_option_result_unwrap_test,
     "stdlib",
     "option_result_unwrap_test.zz"

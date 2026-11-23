@@ -128,6 +128,8 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "state_d2_struct_field.zz", true),
     ("stdlib", "state_composite_contention.zz", true),
     ("stdlib", "state_two_state_invariant.zz", true),
+    ("stdlib", "atomic_positions.zz", true),
+    ("stdlib", "atomic_semicolon.zz", true),
     ("stdlib", "c_runtime_b1_closures.zz", true),
     ("stdlib", "c_runtime_b5_closure_cells.zz", true),
     ("stdlib", "c_runtime_b6_array_arena_migrate.zz", true),

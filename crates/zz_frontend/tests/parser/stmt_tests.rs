@@ -978,3 +978,111 @@ fn atomic_still_works_as_identifier() {
         other => panic!("expected short decl, got {other:?}"),
     }
 }
+
+#[test]
+fn atomic_at_statement_start_in_if_body() {
+    // `atomic { ... }` at statement start inside an `if` then-block must be an
+    // atomic block, not `c { atomic { ... } }` parsed as a struct literal.
+    let p = parse_ok(
+        "func f(c: bool) {\n    if c {\n        atomic {\n            x = 1\n        }\n    }\n}",
+    );
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func { body, .. } => match &body.stmts[0] {
+            zz_frontend::ast::Stmt::Expr(e) => match e {
+                zz_frontend::ast::Expr::If { then, .. } => match &then.stmts[0] {
+                    zz_frontend::ast::Stmt::Atomic { .. } => {}
+                    other => panic!("expected atomic block in if then, got {other:?}"),
+                },
+                other => panic!("expected if expr, got {other:?}"),
+            },
+            other => panic!("expected expr stmt, got {other:?}"),
+        },
+        other => panic!("expected func, got {other:?}"),
+    }
+}
+
+#[test]
+fn atomic_at_statement_start_in_for_body() {
+    let p = parse_ok(
+        "func f() {\n    for i in 0..5 {\n        atomic {\n            x = 1\n        }\n    }\n}",
+    );
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func { body, .. } => match &body.stmts[0] {
+            zz_frontend::ast::Stmt::For { body, .. } => match &body.stmts[0] {
+                zz_frontend::ast::Stmt::Atomic { .. } => {}
+                other => panic!("expected atomic block in for body, got {other:?}"),
+            },
+            other => panic!("expected for stmt, got {other:?}"),
+        },
+        other => panic!("expected func, got {other:?}"),
+    }
+}
+
+#[test]
+fn atomic_at_statement_start_in_closure() {
+    let p = parse_ok("func f() {\n    g := || {\n        atomic {\n            x = 1\n        }\n    }\n    g\n}");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func { body, .. } => match &body.stmts[0] {
+            zz_frontend::ast::Stmt::Decl { value, .. } => match value {
+                zz_frontend::ast::Expr::Closure { body, .. } => match body.as_ref() {
+                    zz_frontend::ast::Expr::Block(block) => match &block.stmts[0] {
+                        zz_frontend::ast::Stmt::Atomic { .. } => {}
+                        other => panic!("expected atomic block in closure, got {other:?}"),
+                    },
+                    other => panic!("expected block expr in closure, got {other:?}"),
+                },
+                other => panic!("expected closure, got {other:?}"),
+            },
+            other => panic!("expected decl, got {other:?}"),
+        },
+        other => panic!("expected func, got {other:?}"),
+    }
+}
+
+#[test]
+fn atomic_at_statement_start_after_semicolon() {
+    // `atomic { ... }` after a `;`-terminated statement must still be an
+    // atomic block. The trailing `;` produces a warning (redundant), but must
+    // not abort parsing of the following `atomic`.
+    let parsed = parse("func f() {\n    x := 0;\n    atomic {\n        x = 1\n    }\n}");
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .all(|d| d.severity == zz_frontend::diag::Severity::Warning),
+        "expected only warnings, got {:?}",
+        parsed.errors
+    );
+    let p = parsed.program;
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func { body, .. } => {
+            assert_eq!(body.stmts.len(), 2);
+            match &body.stmts[1] {
+                zz_frontend::ast::Stmt::Atomic { .. } => {}
+                other => panic!("expected atomic block after semicolon, got {other:?}"),
+            }
+        }
+        other => panic!("expected func, got {other:?}"),
+    }
+}
+
+#[test]
+fn atomic_in_match_arm() {
+    let p = parse_ok("func f(c: bool) {\n    match c {\n        true => atomic {\n            x = 1\n        },\n        false => {}\n    }\n}");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func { body, .. } => match &body.stmts[0] {
+            zz_frontend::ast::Stmt::Expr(e) => match e {
+                zz_frontend::ast::Expr::Match { arms, .. } => match &arms[0].body {
+                    zz_frontend::ast::Expr::Block(block) => match &block.stmts[0] {
+                        zz_frontend::ast::Stmt::Atomic { .. } => {}
+                        other => panic!("expected atomic block in match arm, got {other:?}"),
+                    },
+                    other => panic!("expected block expr in match arm, got {other:?}"),
+                },
+                other => panic!("expected match expr, got {other:?}"),
+            },
+            other => panic!("expected expr stmt, got {other:?}"),
+        },
+        other => panic!("expected func, got {other:?}"),
+    }
+}

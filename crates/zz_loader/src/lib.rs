@@ -1415,7 +1415,15 @@ impl Loader {
             Some(program) => program,
             None => {
                 let parsed = parse(&source);
-                if !parsed.errors.is_empty() {
+                // Only hard errors abort loading: warnings (e.g. redundant
+                // semicolon) are reported to the user but must not silently
+                // drop the module — otherwise `atomic { x = 1; x = 2 }`
+                // would run with no lock and lose updates under contention.
+                if parsed
+                    .errors
+                    .iter()
+                    .any(|d| d.severity == zz_frontend::diag::Severity::Error)
+                {
                     self.errors.push(LoadError {
                         name: path.display().to_string(),
                         source,

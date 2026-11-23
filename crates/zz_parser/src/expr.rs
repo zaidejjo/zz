@@ -925,10 +925,17 @@ impl<'a> Parser<'a> {
                 // be any shape (`int`, `[str]`, `{str: int}`,
                 // `Map<str, int>`, ...), so disambiguate by speculatively
                 // parsing one type after the colon and checking for `=`.
+                //
+                // When the next-next token is `{` (e.g. `c { atomic { ... } }`),
+                // the inner `{` starts a nested block, not a struct field
+                // value — require adjacency (`atomic{...}`, not `atomic {...}`)
+                // to avoid swallowing `atomic` as a struct name and breaking
+                // statement-level `atomic` blocks.
                 if self.at(TokenKind::LBrace)
                     && self.peek_kind_at(1) == TokenKind::Ident
                     && (self.peek_kind_at(2) == TokenKind::Colon
-                        || self.peek_kind_at(2) == TokenKind::LBrace)
+                        || (self.peek_kind_at(2) == TokenKind::LBrace
+                            && end.end == self.peek().span.start))
                 {
                     let is_decl_block = self.peek_kind_at(2) == TokenKind::Colon
                         && self.brace_starts_typed_decl_block();
