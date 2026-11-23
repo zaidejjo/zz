@@ -1,0 +1,25 @@
+// features: int-arith, locals, print, state, std-task, std-vec
+// Task C: closure-taking native invoked from a task (callback) — the inline
+// callback touches a plain global directly inside the task closure → Z0017.
+import std.task
+import std.vec
+
+state_counter := 0 // plain mutable global reachable from a task → Z0017
+
+func main() -> int {
+    data := [3, 1, 2]
+    h := task.spawn(|_| {
+        data = std.vec.sort_by(data, |a, b| {
+            state_counter = state_counter + 1
+            if a < b {
+                return -1
+            }
+            if a > b {
+                return 1
+            }
+            return 0
+        })
+    })
+    task.join(h)
+    return 0
+}

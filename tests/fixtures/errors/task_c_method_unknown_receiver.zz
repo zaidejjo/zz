@@ -1,0 +1,27 @@
+// features: int-arith, locals, print, state, std-task
+// Task C: method call on an unknown receiver reaching a plain global → Z0017.
+// `processor` is address-taken (stored/passed as a func value); an indirect
+// method-style call edges conservatively to it, making it task-reachable.
+import std.task
+
+state_counter := 0 // plain mutable global reachable from a task → Z0017
+
+type Processor = func(int) -> int
+
+func process(x: int) -> int {
+    state_counter = state_counter + x
+    return state_counter
+}
+
+func run_unknown(p: Processor, x: int) -> int {
+    // indirect call through a func-typed param (unknown receiver)
+    return p(x)
+}
+
+func main() -> int {
+    h := task.spawn(|_| {
+        run_unknown(process, 7)
+    })
+    task.join(h)
+    return 0
+}

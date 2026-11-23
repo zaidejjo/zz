@@ -47,4 +47,22 @@ ship as a checker error, not a silent change.
 - Spawning copies captures (snapshot isolation). Channels and join handles are
   the only sharing. See [Chan](../stdlib/chan.md).
 
+## Shared mutable state (`state` / `atomic`)
+
+Ordinary bindings have value semantics (independent copies). `state` globals are
+the deliberate, controlled exception: they are shared, mutable process-global
+cells that any task can read or write.
+
+- Declare with `state name := value` (not `name := value`). Reading or assigning
+  a `state` global outside `atomic { }` is a single self-contained read-modify
+  only when written as one expression (`n = n + 1`); a read in one statement and
+  a write in another is rejected as a check-then-act (Z0016).
+- Wrap read-modify-write sequences in `atomic { }` so they execute
+  indivisibly under the process-global state lock. Blocking/I/O/closure-taking
+  natives are forbidden inside `atomic { }` (Z0014).
+- Plain (non-`state`) globals assigned anywhere are rejected if any
+  task-reachable code can read or write them (Z0017) — declare them `state`
+  instead. Green tasks never yield while holding the lock, so the lock is
+  reentrant-safe and elided when no concurrency is reachable (D8).
+
 Deep spec: [types.md](../types.md) Value Semantics.

@@ -259,6 +259,7 @@ fn run_zz_with_token(file: &Path, sweep_token: Option<&str>) -> (i32, String, St
     let mut cmd = Command::new(zz_bin);
     cmd.arg("run")
         .arg(file)
+        .env("ZZ_RUN_CACHE", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1480,6 +1481,13 @@ e2e_error_test!(
     "state_d2_closure_native.zz"
 );
 e2e_error_test!(e2e_err_state_d2_user_call, "state_d2_user_call.zz");
+e2e_error_test!(e2e_err_task_c_fn_arg_task, "task_c_fn_arg_task.zz");
+e2e_error_test!(e2e_err_task_c_func_in_global, "task_c_func_in_global.zz");
+e2e_error_test!(
+    e2e_err_task_c_method_unknown_receiver,
+    "task_c_method_unknown_receiver.zz"
+);
+e2e_error_test!(e2e_err_task_c_native_callback, "task_c_native_callback.zz");
 e2e_error_test!(e2e_err_state_z0013_self_init, "state_z0013_self_init.zz");
 e2e_error_test!(
     e2e_err_state_z0013_before_decl,

@@ -3396,6 +3396,21 @@ impl CheckDedupe {
     }
 }
 
+/// Merge per-module programs (dependency order) into one program for
+/// whole-program analyses (HIR build, call graph, R2 checks).
+fn merge_loaded_programs(programs: &[zz_frontend::ast::Program]) -> zz_frontend::ast::Program {
+    zz_frontend::ast::Program {
+        stmts: programs
+            .iter()
+            .flat_map(|p| p.stmts.iter().cloned())
+            .collect(),
+        span: programs
+            .last()
+            .map(|p| p.span)
+            .unwrap_or_else(|| Span::new(0, 0)),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_or_fix_path(
     path_arg: &Option<String>,
@@ -3490,7 +3505,7 @@ pub(crate) fn check_or_fix_path(
         // Any error-severity diagnostic fails the check (#292): fixable
         // errors are still errors (warnings alone stay exit 0). Compute this
         // before cross-entry dedupe so a repeated error still fails the run.
-        let has_errors = loaded
+        let mut has_errors = loaded
             .errors
             .iter()
             .any(|e| e.diags.iter().any(|d| d.severity == Severity::Error));
@@ -3501,6 +3516,36 @@ pub(crate) fn check_or_fix_path(
                 e.diags.retain(|d| !dedupe.is_duplicate(&owner, d));
             }
             loaded.errors.retain(|e| !e.diags.is_empty());
+        }
+
+        // D5 R2: plain globals reachable from a `task.spawn` closure must be
+        // `state`. `zz run` already enforces this; mirror it here so `zz check`
+        // reports the same Z0017 instead of silently passing racy globals.
+        // Cheap textual prefilter: only programs that spawn tasks can have a
+        // task-reachable global, so the extra HIR build stays rare.
+        if !has_errors && !do_fix && source.contains("task.spawn") {
+            let merged = merge_loaded_programs(&loaded.programs);
+            let typed = zz_hir::build_program(
+                &merged,
+                std::collections::HashMap::new(),
+                loaded.funcs.clone(),
+                loaded.structs.clone(),
+                loaded.aliases.clone(),
+                loaded.enums.clone(),
+                loaded.traits.clone(),
+                loaded.trait_impls.clone(),
+            );
+            let cg = zz_hir::callgraph::build_callgraph(&typed.program);
+            let mut r2_diags: Vec<zz_frontend::diag::RawDiag> = Vec::new();
+            zz_hir::callgraph::check_r2_globals_vs_tasks(&typed.program, &cg, &mut r2_diags);
+            if !r2_diags.is_empty() {
+                has_errors = true;
+                loaded.errors.push(zz_loader::LoadError {
+                    name: path_str.clone(),
+                    source: source.to_string(),
+                    diags: r2_diags,
+                });
+            }
         }
 
         // Classify fixits by safety.

@@ -571,14 +571,29 @@ fn walk_expr_for_graph(tp: &TypedProgram, e: &Expr, caller: &str, cg: &mut CallG
             let mut resolved = false;
             match callee.as_ref() {
                 Expr::Ident { name, .. } => {
-                    if tp.funcs.contains_key(name) || tp.bindings.contains_key(name) {
+                    if tp.bindings.contains_key(name) {
+                        // A first-class function value held in a global,
+                        // variable, or parameter (bindings) — not a defined
+                        // function. Conservatively treat as an unresolved
+                        // indirect call so DCE retains every address-taken
+                        // target and R2/Z0017 sees code reachable through
+                        // func values stored in globals/params and called
+                        // from tasks. (Globals can also appear in `tp.funcs`
+                        // for codegen; bindings wins here.)
+                        resolved = false;
+                    } else if tp.funcs.contains_key(name) {
                         cg.edge(caller, name);
                         resolved = true;
                     }
                 }
                 Expr::Path { parts, .. } => {
                     let joined = parts.join(".");
-                    if tp.funcs.contains_key(&joined) || tp.bindings.contains_key(&joined) {
+                    if tp.bindings.contains_key(&joined) {
+                        // A first-class function value held in a global /
+                        // variable (bindings): unresolved indirect call, as
+                        // for the Ident case above.
+                        resolved = false;
+                    } else if tp.funcs.contains_key(&joined) {
                         cg.edge(caller, &joined);
                         resolved = true;
                     } else if parts.len() >= 2 {
@@ -1138,8 +1153,12 @@ pub fn check_r2_globals_vs_tasks(
             continue;
         }
         for callee in cg.edges.get(&f).cloned().unwrap_or_default() {
-            if task_funcs.insert(callee.clone()) {
-                task_roots.push_back(callee.clone());
+            // Do not insert here: the pop-side `insert` both dedupes and
+            // marks expanded. Inserting at discovery time would make the
+            // later pop see "already present" and skip expanding that
+            // node's callees (depth-2+ task-reachable functions lost).
+            if !task_funcs.contains(&callee) {
+                task_roots.push_back(callee);
             }
         }
     }
@@ -1206,6 +1225,15 @@ fn stmt_contains_task_spawn(s: &zz_span_ast::ast::Stmt) -> bool {
     match s {
         zz_span_ast::ast::Stmt::Expr(e) => expr_contains_task_spawn(e),
         zz_span_ast::ast::Stmt::Decl { value, .. } => expr_contains_task_spawn(value),
+        zz_span_ast::ast::Stmt::Assign { target, value, .. }
+        | zz_span_ast::ast::Stmt::CompoundAssign { target, value, .. } => {
+            expr_contains_task_spawn(target) || expr_contains_task_spawn(value)
+        }
+        zz_span_ast::ast::Stmt::Destructure { value, .. } => expr_contains_task_spawn(value),
+        zz_span_ast::ast::Stmt::Return { value, .. } => {
+            value.as_ref().is_some_and(expr_contains_task_spawn)
+        }
+        zz_span_ast::ast::Stmt::Defer { expr, .. } => expr_contains_task_spawn(expr),
         zz_span_ast::ast::Stmt::For { body, .. } => block_contains_task_spawn(body),
         zz_span_ast::ast::Stmt::Atomic { body, .. } => block_contains_task_spawn(body),
         // Control flow (`if`/`while`/`match`/`block`) arrives here wrapped
@@ -1217,8 +1245,15 @@ fn stmt_contains_task_spawn(s: &zz_span_ast::ast::Stmt) -> bool {
 
 fn expr_contains_task_spawn(e: &zz_span_ast::ast::Expr) -> bool {
     match e {
-        zz_span_ast::ast::Expr::Call { callee, .. } => {
+        zz_span_ast::ast::Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
             callee_name(callee).as_deref() == Some("task.spawn")
+                || args.iter().any(expr_contains_task_spawn)
+                || named.iter().any(|(_, v)| expr_contains_task_spawn(v))
         }
         zz_span_ast::ast::Expr::Block(b) => block_contains_task_spawn(b),
         zz_span_ast::ast::Expr::If {
@@ -1322,7 +1357,19 @@ fn collect_globals_from_expr_deep(
 ) {
     match e {
         zz_span_ast::ast::Expr::Ident { name, .. } => {
+            // Globals are stored under qualified keys (`module.counter`) while
+            // R2 bookkeeping (assigned globals, `state` names) uses bare
+            // names. Normalize to the bare name so the two sides match.
             if tp.bindings.contains_key(name) {
+                if let Some(bare) = name.rsplit('.').next() {
+                    out.insert(bare.to_string());
+                }
+            } else if !name.contains('.')
+                && tp
+                    .bindings
+                    .keys()
+                    .any(|k| k.rsplit('.').next() == Some(name.as_str()))
+            {
                 out.insert(name.clone());
             }
         }
@@ -1429,44 +1476,58 @@ fn collect_assigned_in_stmt(
             ..
         } => {
             decl_spans.insert(name.name.clone(), *span);
+            if let Some(bare) = name.name.rsplit('.').next() {
+                decl_spans.entry(bare.to_string()).or_insert(*span);
+            }
             if *is_state {
                 state_names.insert(name.name.clone());
+                if let Some(bare) = name.name.rsplit('.').next() {
+                    state_names.insert(bare.to_string());
+                }
             }
             collect_assigned_in_expr(tp, value, out, decl_spans, state_names, bare_names);
         }
-        zz_span_ast::ast::Stmt::Assign { target, .. } => match target {
-            zz_span_ast::ast::Expr::Ident { name, .. } => {
-                if bare_names.contains(name.as_str()) && !state_names.contains(name) {
-                    out.insert(name.clone());
-                }
-            }
-            zz_span_ast::ast::Expr::Path { parts, .. } => {
-                // After namespace rewriting, a top-level global target is a
-                // namespaced path (`module.counter`). Match it against
-                // `tp.bindings` and record the bare name.
-                if let Some(bare) = binding_basename(tp, parts) {
-                    if !state_names.contains(&bare) {
-                        out.insert(bare);
+        zz_span_ast::ast::Stmt::Assign { target, value, .. } => {
+            match target {
+                zz_span_ast::ast::Expr::Ident { name, .. } => {
+                    if bare_names.contains(name.as_str()) && !state_names.contains(name) {
+                        out.insert(name.clone());
                     }
                 }
-            }
-            _ => {}
-        },
-        zz_span_ast::ast::Stmt::CompoundAssign { target, .. } => match target {
-            zz_span_ast::ast::Expr::Ident { name, .. } => {
-                if bare_names.contains(name.as_str()) && !state_names.contains(name) {
-                    out.insert(name.clone());
-                }
-            }
-            zz_span_ast::ast::Expr::Path { parts, .. } => {
-                if let Some(bare) = binding_basename(tp, parts) {
-                    if !state_names.contains(&bare) {
-                        out.insert(bare);
+                zz_span_ast::ast::Expr::Path { parts, .. } => {
+                    // After namespace rewriting, a top-level global target is a
+                    // namespaced path (`module.counter`). Match it against
+                    // `tp.bindings` and record the bare name.
+                    if let Some(bare) = binding_basename(tp, parts) {
+                        if !state_names.contains(&bare) {
+                            out.insert(bare);
+                        }
                     }
                 }
+                _ => collect_assigned_in_expr(tp, target, out, decl_spans, state_names, bare_names),
             }
-            _ => {}
-        },
+            // Assignments nested in the RHS (e.g. inside a closure passed to
+            // `vec.sort_by`) still run wherever the expression runs.
+            collect_assigned_in_expr(tp, value, out, decl_spans, state_names, bare_names);
+        }
+        zz_span_ast::ast::Stmt::CompoundAssign { target, value, .. } => {
+            match target {
+                zz_span_ast::ast::Expr::Ident { name, .. } => {
+                    if bare_names.contains(name.as_str()) && !state_names.contains(name) {
+                        out.insert(name.clone());
+                    }
+                }
+                zz_span_ast::ast::Expr::Path { parts, .. } => {
+                    if let Some(bare) = binding_basename(tp, parts) {
+                        if !state_names.contains(&bare) {
+                            out.insert(bare);
+                        }
+                    }
+                }
+                _ => collect_assigned_in_expr(tp, target, out, decl_spans, state_names, bare_names),
+            }
+            collect_assigned_in_expr(tp, value, out, decl_spans, state_names, bare_names);
+        }
         zz_span_ast::ast::Stmt::Func { body, .. } => {
             collect_assigned_in_block(tp, body, out, decl_spans, state_names, bare_names);
         }
