@@ -1,0 +1,14 @@
+// features: int-arith, locals, print, state
+// D2: `x := foo(s)` reads state `s` but writes only the local `x`, so the
+// call to `foo` (a non-whitelisted user function) is allowed without
+// `atomic { }`. The state read is snapshotted atomically at lowering time.
+state s := 7
+
+func foo(x: int) -> int { return x * 2 }
+
+func main() -> int {
+    x := foo(s)
+    if x != 14 { return -1 }
+    println("state_d2_read_only_decl_ok")
+    return 0
+}

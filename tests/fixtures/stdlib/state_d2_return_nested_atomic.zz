@@ -1,0 +1,23 @@
+// features: int-arith, locals, print, state
+// D2(b): early returns in nested `atomic { }` blocks must not trigger Z0006.
+state s := 0
+
+func compute(flag: bool) -> int {
+    atomic {
+        s = 1
+        if flag {
+            return 10
+        } else {
+            return 20
+        }
+    }
+}
+
+func main() -> int {
+    x := compute(true)
+    if x != 10 { return -1 }
+    y := compute(false)
+    if y != 20 { return -1 }
+    println("state_d2_return_nested_atomic_ok")
+    return 0
+}

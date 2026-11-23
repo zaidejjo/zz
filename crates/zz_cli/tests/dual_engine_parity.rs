@@ -2084,6 +2084,31 @@ parity_strict!(
     "atomic_semicolon.zz"
 );
 parity_strict!(
+    parity_stdlib_state_d2_read_only_print,
+    "stdlib",
+    "state_d2_read_only_print.zz"
+);
+parity_strict!(
+    parity_stdlib_state_d2_read_only_decl,
+    "stdlib",
+    "state_d2_read_only_decl.zz"
+);
+parity_strict!(
+    parity_stdlib_state_d2_read_only_if,
+    "stdlib",
+    "state_d2_read_only_if.zz"
+);
+parity_strict!(
+    parity_stdlib_state_d2_return_in_atomic,
+    "stdlib",
+    "state_d2_return_in_atomic.zz"
+);
+parity_strict!(
+    parity_stdlib_state_d2_return_nested_atomic,
+    "stdlib",
+    "state_d2_return_nested_atomic.zz"
+);
+parity_strict!(
     parity_stdlib_option_result_unwrap_test,
     "stdlib",
     "option_result_unwrap_test.zz"

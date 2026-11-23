@@ -629,6 +629,11 @@ impl NameCtx {
 pub struct Lowerer {
     pub(crate) reachable_funcs: std::collections::HashSet<String>,
     pub(crate) reachable_natives: std::collections::HashSet<String>,
+    /// True when any extern "C" plugin is linked into the program. Plugin
+    /// code runs on arbitrary OS threads and can touch state through the
+    /// C-ABI, invalidating lock elision (D8). When set, state accesses
+    /// always go through the process-global lock.
+    pub(crate) has_extern_plugin: bool,
     pub(crate) entry_main: String,
     pub(crate) tp: zz_hir::TypedProgram,
     /// Result of escape analysis: maps spans to allocation classification.
@@ -812,6 +817,7 @@ impl Lowerer {
         let mut lowerer = Lowerer {
             reachable_funcs,
             reachable_natives,
+            has_extern_plugin: false,
             entry_main,
             tp,
             escape,
@@ -1049,11 +1055,22 @@ impl Lowerer {
     /// and fold tight scalar reductions to closed form (Rust parity
     /// on `sum 0..N`). Omission is always *correct* — the safepoint
     /// never suspends the C frame, it only yields the OS thread —
-    /// so the gate is deliberately broad (any task/chan/spawn use).
+    /// so the gate is deliberately broad (any task/chan/spawn use, or
+    /// any extern "C" plugin linked, since plugin code runs on
+    /// arbitrary OS threads and can touch state through the C-ABI).
     pub(crate) fn needs_safepoint(&self) -> bool {
-        self.reachable_natives
-            .iter()
-            .any(|n| n.contains("task") || n.contains("chan") || n.contains("spawn"))
+        self.has_extern_plugin
+            || self
+                .reachable_natives
+                .iter()
+                .any(|n| n.contains("task") || n.contains("chan") || n.contains("spawn"))
+    }
+
+    /// Mark that any extern "C" plugin is linked into the program. Plugin
+    /// code runs on arbitrary OS threads and can touch state through the
+    /// C-ABI, so state lock elision (D8) must be disabled.
+    pub fn set_has_extern_plugin(&mut self, val: bool) {
+        self.has_extern_plugin = val;
     }
 
     /// True when state accesses must go through the process-global lock.

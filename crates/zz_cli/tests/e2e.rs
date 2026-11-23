@@ -1116,6 +1116,31 @@ e2e_success_test!(
     "state_d2_struct_field.zz"
 );
 e2e_success_test!(
+    e2e_stdlib_state_d2_read_only_print,
+    "stdlib",
+    "state_d2_read_only_print.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d2_read_only_decl,
+    "stdlib",
+    "state_d2_read_only_decl.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d2_read_only_if,
+    "stdlib",
+    "state_d2_read_only_if.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d2_return_in_atomic,
+    "stdlib",
+    "state_d2_return_in_atomic.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d2_return_nested_atomic,
+    "stdlib",
+    "state_d2_return_nested_atomic.zz"
+);
+e2e_success_test!(
     e2e_stdlib_state_composite_contention,
     "stdlib",
     "state_composite_contention.zz"

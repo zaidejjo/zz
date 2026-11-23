@@ -74,10 +74,13 @@ pub(crate) fn check_stmt(checker: &mut Checker, stmt: &Stmt) -> Type {
         Stmt::Atomic { body, span: _ } => {
             // D3: entering an `atomic { }` block increments the depth
             // counter. Blocking natives are rejected inside.
+            // Propagate the body's type so a `return`/`break`/`continue`
+            // inside `atomic { }` counts as divergence (no spurious Z0006
+            // fall-through when the only exit is inside the block).
             checker.atomic_depth += 1;
-            checker.check_block(body);
+            let result = checker.check_block(body);
             checker.atomic_depth -= 1;
-            Type::Unit
+            result
         }
     }
 }
@@ -397,9 +400,13 @@ fn check_stmt_expr(checker: &mut Checker, e: &Expr) -> Type {
     if !checker.tail_is_value {
         checker.warn_if_discarded(e, &t);
     }
-    // D2/D3: if this expression statement touches a state variable,
-    // enforce auto-atomic safety on it.
-    check_expr_atomic_safety(checker, e, e.span());
+    // D2/D3: an `Expr` statement never assigns, so it can only READ
+    // state (read-only state access). Outside `atomic { }` any call is
+    // allowed — state reads are snapshotted atomically at lowering
+    // time. Inside `atomic { }` blocking natives are still rejected (D3).
+    if checker.atomic_depth > 0 {
+        check_for_blocking_natives(checker, e, e.span());
+    }
     t
 }
 
@@ -498,14 +505,15 @@ fn check_stmt_assign(checker: &mut Checker, target: &Expr, value: &Expr, span: S
             checker.report_mismatch(e, span);
         }
     }
-    // D2/D3: if this assignment touches a state variable (target is state OR
-    // value references state), enforce auto-atomic whitelist (outside atomic)
-    // or blocking-native (inside atomic) rules on ALL expressions in the
-    // statement — including the value expression even when it doesn't itself
-    // reference state (e.g. `n = foo()` where `n` is state).
-    let touches_state =
-        expr_references_state(checker, target) || expr_references_state(checker, value);
-    if touches_state {
+    // D2/D3: if this assignment WRITES a state variable (target is state),
+    // enforce auto-atomic safety on all expressions — a non-whitelisted call
+    // in the value keeps Z0014 (check-then-act must be atomic). If the
+    // target is local but the value merely READS state, that's read-only
+    // state access: any call is allowed, state reads are snapshotted
+    // atomically at lowering time.
+    let writes_state = expr_references_state(checker, target);
+    let reads_state = expr_references_state(checker, value);
+    if writes_state {
         if checker.atomic_depth > 0 {
             check_for_blocking_natives(checker, target, span);
             check_for_blocking_natives(checker, value, span);
@@ -513,6 +521,8 @@ fn check_stmt_assign(checker: &mut Checker, target: &Expr, value: &Expr, span: S
             check_whitelist_only(checker, target, span);
             check_whitelist_only(checker, value, span);
         }
+    } else if reads_state {
+        // Read-only state access: nothing to enforce here.
     }
     Type::Unit
 }
@@ -544,11 +554,13 @@ fn check_stmt_compound_assign(
             checker.report_mismatch(e, span);
         }
     }
-    // D2/D3: if this compound assignment touches a state variable,
-    // enforce auto-atomic safety on all expressions in the statement.
-    let touches_state =
-        expr_references_state(checker, target) || expr_references_state(checker, value);
-    if touches_state {
+    // D2/D3: if this compound assignment WRITES a state variable (target is
+    // state), enforce auto-atomic safety. If the target is local but the
+    // value merely READS state, that's read-only state access: any call is
+    // allowed, state reads are snapshotted atomically at lowering time.
+    let writes_state = expr_references_state(checker, target);
+    let reads_state = expr_references_state(checker, value);
+    if writes_state {
         if checker.atomic_depth > 0 {
             check_for_blocking_natives(checker, target, span);
             check_for_blocking_natives(checker, value, span);
@@ -556,6 +568,8 @@ fn check_stmt_compound_assign(
             check_whitelist_only(checker, target, span);
             check_whitelist_only(checker, value, span);
         }
+    } else if reads_state {
+        // Read-only state access: nothing to enforce here.
     }
     Type::Unit
 }
@@ -880,20 +894,6 @@ fn is_blocking_native(name: &str) -> bool {
         || name.starts_with("io.")
 }
 
-/// Check D2/D3 rules for an expression that appears in a statement touching
-/// state. Called from assign/compound-assign/expr statement checkers.
-fn check_expr_atomic_safety(checker: &mut Checker, expr: &Expr, span: Span) {
-    if checker.atomic_depth > 0 {
-        // D3: inside `atomic { }` — reject known-blocking natives
-        // regardless of whether the expression touches state.
-        check_for_blocking_natives(checker, expr, span);
-    } else if expr_references_state(checker, expr) {
-        // D2: outside `atomic { }` — only whitelisted natives / pure
-        // constructs allowed when touching state.
-        check_whitelist_only(checker, expr, span);
-    }
-}
-
 /// Walk `expr` and report any call to a known-blocking native (D3).
 fn check_for_blocking_natives(checker: &mut Checker, expr: &Expr, span: Span) {
     match expr {
@@ -1063,8 +1063,9 @@ fn check_whitelist_only(checker: &mut Checker, expr: &Expr, span: Span) {
                     checker.errors.push(
                         error_at(
                             format!(
-                                "`{name}` cannot be called in a statement that touches `state`\n\
-                             hint: wrap the statement in `atomic {{ }}`",
+                                "`{name}` cannot be called in a statement that WRITES `state`\n\
+                             hint: wrap the statement in `atomic {{ }}` (reads of state are \
+                             allowed without `atomic`)",
                                 name = name
                             ),
                             *s,

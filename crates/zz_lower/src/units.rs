@@ -1747,4 +1747,53 @@ mod tests {
             units2.header
         );
     }
+
+    #[test]
+    fn state_lock_elision_disabled_when_extern_plugin_linked() {
+        // WITHOUT concurrency but WITH an extern plugin linked: lock calls
+        // must be present because plugin code runs on arbitrary OS threads
+        // and can touch state through the C-ABI.
+        let src = "state x := 0\nfunc set_x() { x = 1 }\nfunc main() { set_x() }\n";
+        let parsed = zz_frontend::parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let funcs = zz_stdlib::stdlib_funcs();
+        let structs: HashMap<String, zz_checker::StructSig> = HashMap::new();
+        let enums: HashMap<String, zz_checker::EnumSig> = HashMap::new();
+        let user = zz_hir::build_program(
+            &parsed.program,
+            HashMap::new(),
+            funcs,
+            structs,
+            HashMap::new(),
+            enums,
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let programs = vec![user.program];
+        let merged = zz_hir::merge_typed_programs(programs);
+        let (_pruned, reach) = zz_hir::dce(&merged, "main");
+        let mut lowerer = Lowerer::new(
+            reach.funcs.clone(),
+            reach.natives.clone(),
+            "main".to_string(),
+            merged,
+        );
+        assert!(
+            !lowerer.needs_safepoint(),
+            "safepoint must be off without concurrency or plugins"
+        );
+        lowerer.set_has_extern_plugin(true);
+        assert!(
+            lowerer.needs_safepoint(),
+            "safepoint must be on when an extern plugin is linked"
+        );
+        assert!(
+            lowerer.needs_state_lock(),
+            "state lock must be kept when an extern plugin is linked"
+        );
+    }
 }

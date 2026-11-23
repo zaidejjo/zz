@@ -182,7 +182,15 @@ pub fn build_native_units_with_sink(
     let verbose = opts.verbose;
     let t_lower = std::time::Instant::now();
     sink.generating();
-    let mut lowered = precompiled_lowerer(tp, reach, entry_main).lower_units(&entry_ns);
+    let mut lowerer = precompiled_lowerer(tp, reach, entry_main);
+    // Lock elision (D8) is disabled whenever any extern "C" plugin is linked:
+    // plugin code runs on arbitrary OS threads and can touch state through
+    // the C-ABI, invalidating the assumption that only green-task code
+    // touches state.
+    if !opts.plugin_link_args.is_empty() || !opts.plugin_artifacts.is_empty() {
+        lowerer.set_has_extern_plugin(true);
+    }
+    let mut lowered = lowerer.lower_units(&entry_ns);
     reject_unimplemented_natives(&lowered.unimplemented_natives)?;
     if verbose {
         eprintln!("zz: timing lower_units={}ms", t_lower.elapsed().as_millis());
@@ -256,7 +264,15 @@ pub fn build_native_with_sink(
     let verbose = opts.verbose;
     let t_lower = std::time::Instant::now();
     sink.generating();
-    let lowered = precompiled_lowerer(tp, reach, entry_main).lower();
+    let mut lowerer = precompiled_lowerer(tp, reach, entry_main);
+    // Lock elision (D8) is disabled whenever any extern "C" plugin is linked:
+    // plugin code runs on arbitrary OS threads and can touch state through
+    // the C-ABI, invalidating the assumption that only green-task code
+    // touches state.
+    if !opts.plugin_link_args.is_empty() || !opts.plugin_artifacts.is_empty() {
+        lowerer.set_has_extern_plugin(true);
+    }
+    let lowered = lowerer.lower();
     reject_unimplemented_natives(&lowered.unimplemented_natives)?;
     if verbose {
         eprintln!("zz: timing lower={}ms", t_lower.elapsed().as_millis());
