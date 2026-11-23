@@ -1419,17 +1419,26 @@ impl Loader {
                 // semicolon) are reported to the user but must not silently
                 // drop the module — otherwise `atomic { x = 1; x = 2 }`
                 // would run with no lock and lose updates under contention.
-                if parsed
+                let has_errors = parsed
                     .errors
                     .iter()
-                    .any(|d| d.severity == zz_frontend::diag::Severity::Error)
-                {
+                    .any(|d| d.severity == zz_frontend::diag::Severity::Error);
+                if has_errors {
                     self.errors.push(LoadError {
                         name: path.display().to_string(),
                         source,
                         diags: parsed.errors,
                     });
                     return Ok(());
+                }
+                // Report warnings (without aborting) so the user still sees
+                // them even though the module loads and runs.
+                if !parsed.errors.is_empty() {
+                    self.errors.push(LoadError {
+                        name: path.display().to_string(),
+                        source: source.clone(),
+                        diags: parsed.errors.clone(),
+                    });
                 }
 
                 // Expand explicit decorators before import scanning and namespacing

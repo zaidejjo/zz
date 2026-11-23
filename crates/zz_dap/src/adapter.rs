@@ -433,10 +433,18 @@ impl Adapter {
 
 fn check_parses(program: &str, source: &str) -> Result<(), String> {
     let parsed = zz_frontend::parse(source);
-    if parsed.errors.is_empty() {
-        Ok(())
-    } else {
+    // Only hard parse errors block launch; warnings (e.g. redundant
+    // semicolon) are reported to the user but must not silently prevent
+    // execution — otherwise `atomic { x = 1; x = 2 }` would run with no
+    // lock and lose updates under contention.
+    if parsed
+        .errors
+        .iter()
+        .any(|d| d.severity == zz_frontend::diag::Severity::Error)
+    {
         Err(format!("parse errors in {program}: {:?}", parsed.errors))
+    } else {
+        Ok(())
     }
 }
 

@@ -1092,12 +1092,17 @@ pub fn verify(
     original_src: &str,
     formatted_src: &str,
 ) -> Result<(), FmtError> {
-    // 1. Re-parse must succeed.
+    // 1. Re-parse must succeed (hard errors only; warnings don't block).
     let parsed = parse(formatted_src);
-    if !parsed.errors.is_empty() {
+    if parsed
+        .errors
+        .iter()
+        .any(|d| d.severity == zz_frontend::diag::Severity::Error)
+    {
         let summary = parsed
             .errors
             .iter()
+            .filter(|d| d.severity == zz_frontend::diag::Severity::Error)
             .map(|e| e.message.clone())
             .collect::<Vec<_>>()
             .join("; ");

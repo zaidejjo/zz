@@ -957,6 +957,34 @@ fn state_still_works_as_identifier() {
 }
 
 #[test]
+fn state_field_access_not_decl() {
+    // `foo.state` is field access, not a state declaration.
+    let p = parse_ok("x := foo.state");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { value, .. } => match value {
+            zz_frontend::ast::Expr::Path { parts, .. } => {
+                assert_eq!(parts, &["foo", "state"]);
+            }
+            other => panic!("expected path foo.state, got {other:?}"),
+        },
+        other => panic!("expected decl, got {other:?}"),
+    }
+}
+
+#[test]
+fn state_after_comment_and_blank_line() {
+    // `state` works after comments and blank lines.
+    let p = parse_ok("// comment\n\nstate x := 1");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { name, is_state, .. } => {
+            assert_eq!(name.name, "x");
+            assert!(*is_state);
+        }
+        other => panic!("expected state decl, got {other:?}"),
+    }
+}
+
+#[test]
 fn atomic_block_parses() {
     let p = parse_ok("atomic {\n    hits = hits + 1\n}");
     match &p.stmts[0] {
@@ -1080,6 +1108,85 @@ fn atomic_in_match_arm() {
                     other => panic!("expected block expr in match arm, got {other:?}"),
                 },
                 other => panic!("expected match expr, got {other:?}"),
+            },
+            other => panic!("expected expr stmt, got {other:?}"),
+        },
+        other => panic!("expected func, got {other:?}"),
+    }
+}
+
+#[test]
+fn atomic_no_space_before_brace_is_atomic_block() {
+    // `atomic{ ... }` (no space) at statement start is an atomic block, not
+    // a struct literal.
+    let p = parse_ok("func f() {\n    atomic{\n        x = 1\n    }\n}");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func { body, .. } => match &body.stmts[0] {
+            zz_frontend::ast::Stmt::Atomic { .. } => {}
+            other => panic!("expected atomic block, got {other:?}"),
+        },
+        other => panic!("expected func, got {other:?}"),
+    }
+}
+
+#[test]
+fn atomic_then_atomic_variable_shadowing() {
+    // `atomic` can be a variable name, and `atomic { ... }` at statement
+    // start is still an atomic block.
+    let p = parse_ok("func f() {\n    atomic := 1\n    atomic {\n        x = 1\n    }\n}");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func { body, .. } => {
+            assert_eq!(body.stmts.len(), 2);
+            match &body.stmts[0] {
+                zz_frontend::ast::Stmt::Decl { name, .. } => {
+                    assert_eq!(name.name, "atomic");
+                }
+                other => panic!("expected decl, got {other:?}"),
+            }
+            match &body.stmts[1] {
+                zz_frontend::ast::Stmt::Atomic { .. } => {}
+                other => panic!("expected atomic block, got {other:?}"),
+            }
+        }
+        other => panic!("expected func, got {other:?}"),
+    }
+}
+
+#[test]
+fn atomic_in_else_body() {
+    let p = parse_ok("func f(c: bool) {\n    if c {}\n    else { atomic { x = 1 } }\n}");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func { body, .. } => match &body.stmts[0] {
+            zz_frontend::ast::Stmt::Expr(e) => match e {
+                zz_frontend::ast::Expr::If { els, .. } => match els {
+                    Some(else_expr) => match else_expr.as_ref() {
+                        zz_frontend::ast::Expr::Block(block) => match &block.stmts[0] {
+                            zz_frontend::ast::Stmt::Atomic { .. } => {}
+                            other => panic!("expected atomic block in else, got {other:?}"),
+                        },
+                        other => panic!("expected block expr in else, got {other:?}"),
+                    },
+                    None => panic!("expected else branch"),
+                },
+                other => panic!("expected if expr, got {other:?}"),
+            },
+            other => panic!("expected expr stmt, got {other:?}"),
+        },
+        other => panic!("expected func, got {other:?}"),
+    }
+}
+
+#[test]
+fn atomic_in_while_body() {
+    let p = parse_ok("func f() {\n    n := 0\n    while n < 2 {\n        atomic { x = 1 }\n        n = n + 1\n    }\n}");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func { body, .. } => match &body.stmts[1] {
+            zz_frontend::ast::Stmt::Expr(e) => match e {
+                zz_frontend::ast::Expr::While { body, .. } => match &body.stmts[0] {
+                    zz_frontend::ast::Stmt::Atomic { .. } => {}
+                    other => panic!("expected atomic block in while, got {other:?}"),
+                },
+                other => panic!("expected while expr, got {other:?}"),
             },
             other => panic!("expected expr stmt, got {other:?}"),
         },

@@ -46,10 +46,17 @@ pub struct TriviaReport {
 /// silently masked.
 pub fn format_source(source: &str, config: &FmtConfig) -> Result<String, FmtError> {
     let parsed = parse(source);
-    if !parsed.errors.is_empty() {
+    // Only hard parse errors block formatting; warnings (e.g. redundant
+    // semicolon) are reported but must not silently refuse to format.
+    if parsed
+        .errors
+        .iter()
+        .any(|d| d.severity == zz_frontend::diag::Severity::Error)
+    {
         let summary = parsed
             .errors
             .iter()
+            .filter(|d| d.severity == zz_frontend::diag::Severity::Error)
             .map(|e| e.message.clone())
             .collect::<Vec<_>>()
             .join("; ");
