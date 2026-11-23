@@ -164,10 +164,14 @@ impl<'a> Parser<'a> {
             // `state` stays a plain identifier everywhere else.
             TokenKind::Ident if self.peek().text == "state" => self.parse_state_decl(false),
             // `atomic { ... }` — contextual keyword at statement start +
-            // `{`. Executes the body under the state lock.
-            TokenKind::Ident
-                if self.peek().text == "atomic" && self.peek_kind_at(1) == TokenKind::LBrace =>
-            {
+            // `{`. Executes the body under the state lock. `atomic` may be
+            // followed by statement-end tokens (newline/semicolon) before
+            // `{`, e.g. `atomic\n{ ... }`.
+            TokenKind::Ident if self.peek().text == "atomic" && self.atomic_followed_by_block() => {
+                // Skip any StmtEnds between `atomic` and `{`.
+                while self.at(TokenKind::StmtEnd) {
+                    self.advance();
+                }
                 self.parse_atomic()
             }
             // `(a, b) := expr` — tuple destructuring declaration.
@@ -497,6 +501,18 @@ impl<'a> Parser<'a> {
                 Stmt::Expr(expr)
             }
         }
+    }
+
+    /// True when `atomic` at the current position is followed (skipping any
+    /// statement-end tokens) by `{`. This allows `atomic\n{ ... }` to be
+    /// parsed as an atomic block rather than as an identifier expression
+    /// followed by a block statement.
+    pub(crate) fn atomic_followed_by_block(&self) -> bool {
+        let mut pos = self.pos + 1;
+        while pos < self.toks.len() && self.toks[pos].kind == TokenKind::StmtEnd {
+            pos += 1;
+        }
+        pos < self.toks.len() && self.toks[pos].kind == TokenKind::LBrace
     }
 
     /// True when the upcoming tokens form a `@link` directive rather than a

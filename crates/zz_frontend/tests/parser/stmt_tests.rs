@@ -985,6 +985,63 @@ fn state_after_comment_and_blank_line() {
 }
 
 #[test]
+fn state_at_top_level() {
+    // `state x := 1` at top level is a state declaration.
+    let p = parse_ok("state x := 1");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { name, is_state, .. } => {
+            assert_eq!(name.name, "x");
+            assert!(*is_state);
+        }
+        other => panic!("expected state decl, got {other:?}"),
+    }
+}
+
+#[test]
+fn state_pub_declaration() {
+    // `pub state x := 1` is a state declaration.
+    let p = parse_ok("pub state x := 1");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl {
+            name,
+            is_state,
+            pub_,
+            ..
+        } => {
+            assert_eq!(name.name, "x");
+            assert!(*is_state);
+            assert!(*pub_);
+        }
+        other => panic!("expected pub state decl, got {other:?}"),
+    }
+}
+
+#[test]
+fn state_inside_block_parses_as_state_decl() {
+    // `state x := 1` inside a block parses as a state declaration (contextual
+    // keyword). The Z0011 error ("only allowed at module level") is a checker
+    // error, not a parser error.
+    let p = parse_ok("func f() {\n    state x := 1\n}");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func { body, .. } => match &body.stmts[0] {
+            zz_frontend::ast::Stmt::Decl { name, is_state, .. } => {
+                assert_eq!(name.name, "x");
+                assert!(*is_state);
+            }
+            other => panic!("expected state decl inside block, got {other:?}"),
+        },
+        other => panic!("expected func, got {other:?}"),
+    }
+}
+
+#[test]
+fn state_struct_and_function_named_state() {
+    // A struct or function named `state` is allowed (contextual keyword).
+    let p = parse_ok("struct state { x: int }\nfunc state() -> int { return 0 }");
+    assert_eq!(p.stmts.len(), 2);
+}
+
+#[test]
 fn atomic_block_parses() {
     let p = parse_ok("atomic {\n    hits = hits + 1\n}");
     match &p.stmts[0] {
@@ -1192,4 +1249,38 @@ fn atomic_in_while_body() {
         },
         other => panic!("expected func, got {other:?}"),
     }
+}
+
+#[test]
+fn atomic_newline_before_brace_is_atomic_block() {
+    // `atomic\n{ ... }` (newline between `atomic` and `{`) must parse as an
+    // atomic block, not as an identifier expression followed by a block.
+    let p = parse_ok("func f() {\n    atomic\n    {\n        x = 1\n    }\n}");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Func { body, .. } => match &body.stmts[0] {
+            zz_frontend::ast::Stmt::Atomic { .. } => {}
+            other => panic!("expected atomic block after newline, got {other:?}"),
+        },
+        other => panic!("expected func, got {other:?}"),
+    }
+}
+
+#[test]
+fn atomic_after_struct_name_is_parse_error() {
+    // `c { atomic { ... } }` where `c` is a struct name must produce a clear
+    // parse error, not silently treat `atomic` as an identifier or struct-literal
+    // field.
+    let parsed = parse("struct C { x: int }\nfunc f() {\n    c { atomic { c.x = 1 } }\n}");
+    assert!(
+        !parsed.errors.is_empty(),
+        "expected parse error for `c {{ atomic {{ ... }} }}`, got no errors"
+    );
+    assert!(
+        parsed
+            .errors
+            .iter()
+            .any(|d| d.message.contains("expected end of statement, found `{`")),
+        "expected 'expected end of statement' error, got: {:?}",
+        parsed.errors
+    );
 }
