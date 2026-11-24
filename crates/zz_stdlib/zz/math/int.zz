@@ -4,23 +4,35 @@
 
 // ── Int aggregation ──────────────────────────────────────────────────────────
 
-func math.sum(arr: [int]) -> int {
-    total := 0
-    for x in arr {
-        total = total + x
+func math.sum<T: Num>(arr: [T]) -> Option<T> {
+    if vec.len(arr) == 0 {
+        return .none
     }
-    return total
+    total := arr[0]
+    i := 1
+    n := vec.len(arr)
+    while i < n {
+        total = total + arr[i]
+        i = i + 1
+    }
+    return .some(total)
 }
 
-func math.product(arr: [int]) -> int {
-    total := 1
-    for x in arr {
-        total = total * x
+func math.product<T: Num>(arr: [T]) -> Option<T> {
+    if vec.len(arr) == 0 {
+        return .none
     }
-    return total
+    total := arr[0]
+    i := 1
+    n := vec.len(arr)
+    while i < n {
+        total = total * arr[i]
+        i = i + 1
+    }
+    return .some(total)
 }
 
-func math.count(arr: [int], target: int) -> int {
+func math.count<T: Eq>(arr: [T], target: T) -> int {
     n := 0
     for x in arr {
         if x == target {

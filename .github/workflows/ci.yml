@@ -78,6 +78,11 @@ jobs:
         # declarative table in `zz_stdlib_meta`. Fails when a signature was
         # edited by hand without regenerating.
         run: cargo run -q -p zz_stdlib_meta --bin regen -- --check
+      - name: pnsa archive drift (zz_stdlib_native --check)
+        # `libzz_stdlib.a` and `zz_stdlib.manifest` must match the stdlib
+        # sources on disk. Fails when a .zz file was edited without
+        # regenerating the precompiled archive.
+        run: cargo run -q -p zz_stdlib_native -- --check
       - name: actionlint (workflow syntax + shellcheck)
         # Not preinstalled on the Ubuntu images (exit 127 otherwise). Pinned
         # release tarballs: no third-party action, no dangling "latest".

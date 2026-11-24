@@ -2,7 +2,7 @@
 // Module: std.math
 // File: linalg.zz (part of std.math split, see crates/zz_stdlib/zz/math/)
 
-// ── Dot product ──────────────────────────────────────────────────────────────
+// ── Dot product ────────────────────────────────────────────────────────────
 
 func math.dot_product(v1: [float], v2: [float]) -> Result<float, str> {
     if vec.len(v1) != vec.len(v2) {

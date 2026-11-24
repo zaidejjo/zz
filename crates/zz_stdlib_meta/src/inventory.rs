@@ -65,8 +65,6 @@ pub const PURE_ZZ: &[&str] = &[
     "std.math.is_odd",
     "std.math.min_arr",
     "std.math.max_arr",
-    "std.math.sum_f",
-    "std.math.product_f",
     "std.math.mean_f",
     "std.math.median_f",
     // PNSA: mean/median delegate to _f variants (pure-Zz).
@@ -123,8 +121,6 @@ pub const PURE_ZZ: &[&str] = &[
     "math.is_odd",
     "math.min_arr",
     "math.max_arr",
-    "math.sum_f",
-    "math.product_f",
     "math.mean_f",
     "math.median_f",
     "math.factorial",

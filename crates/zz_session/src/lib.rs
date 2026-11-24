@@ -889,7 +889,7 @@ mod tests {
         let mut s = Session::new("<test>");
         let out = s.eval("import std.math\nmath.sum([1, 2, 3, 4])");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
-        assert_eq!(out.output, "10");
+        assert_eq!(out.output, ".some(10)");
     }
 
     #[test]
@@ -897,7 +897,7 @@ mod tests {
         let mut s = Session::new("<test>");
         let out = s.eval("import std.math\nmath.product([2, 3, 4])");
         assert!(out.errors.is_none(), "errors: {:?}", out.errors);
-        assert_eq!(out.output, "24");
+        assert_eq!(out.output, ".some(24)");
     }
 
     #[test]

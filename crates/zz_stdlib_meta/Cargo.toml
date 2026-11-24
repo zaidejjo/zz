@@ -13,3 +13,4 @@ path = "src/regen.rs"
 
 [dependencies]
 zz_checker = { path = "../zz_checker" }
+zz_span_ast = { path = "../zz_span_ast" }

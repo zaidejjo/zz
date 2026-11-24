@@ -4408,6 +4408,7 @@ name = "zz_stdlib_meta"
 version = "0.4.0"
 dependencies = [
  "zz_checker",
+ "zz_span_ast",
 ]
 
 [[package]]

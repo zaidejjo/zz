@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use zz_checker::{FuncSig, Type};
+use zz_span_ast::ast::TraitBound;
 
 /// Build a non-generic signature.
 fn sig(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
@@ -29,6 +30,23 @@ fn sig_t(params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
     FuncSig {
         generics: vec!["T".to_string()],
         bounds: Vec::new(),
+        params: params
+            .into_iter()
+            .map(|(n, t)| (n.to_string(), t))
+            .collect(),
+        has_default: vec![],
+        ret,
+        is_extern: false,
+        readonly: false,
+        extern_c_symbol: None,
+    }
+}
+
+/// Build a signature generic over `T` with trait bounds.
+fn sig_t_bound(bounds: Vec<TraitBound>, params: Vec<(&str, Type)>, ret: Type) -> FuncSig {
+    FuncSig {
+        generics: vec!["T".to_string()],
+        bounds: vec![("T".to_string(), bounds)],
         params: params
             .into_iter()
             .map(|(n, t)| (n.to_string(), t))
@@ -2665,7 +2683,11 @@ pub fn build() -> HashMap<String, FuncSig> {
     // Native Rust versions still handle float overloads at runtime.
     m.insert(
         "std.math.abs".into(),
-        sig_t(vec![("v", t.clone())], t.clone()),
+        sig_t_bound(
+            vec![TraitBound::Num, TraitBound::Ord],
+            vec![("v", t.clone())],
+            t.clone(),
+        ),
     );
     m.insert(
         "std.math.floor".into(),
@@ -2708,14 +2730,19 @@ pub fn build() -> HashMap<String, FuncSig> {
     );
     m.insert(
         "std.math.clamp".into(),
-        sig_t(
+        sig_t_bound(
+            vec![TraitBound::Ord],
             vec![("val", t.clone()), ("min", t.clone()), ("max", t.clone())],
             t.clone(),
         ),
     );
     m.insert(
         "std.math.signum".into(),
-        sig_t(vec![("x", t.clone())], t.clone()),
+        sig_t_bound(
+            vec![TraitBound::Num, TraitBound::Ord],
+            vec![("x", t.clone())],
+            t.clone(),
+        ),
     );
     m.insert(
         "std.math.hypot".into(),
@@ -2861,22 +2888,31 @@ pub fn build() -> HashMap<String, FuncSig> {
     );
 
     // Pure-ZZ stdlib: math helpers (compiled from zz/math/mod.zz)
-    // min/max are generic <T>; count counts occurrences.
-    // sum/product/sum_f/product_f/min_val/max_val live in std.vec instead.
+    // sum/product are generic <T: Num>; count counts occurrences (<T: Eq>).
+    // vec.sum/product/min_val/max_val live in std.vec instead.
     m.insert(
         "std.math.sum".into(),
-        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
+        sig_t_bound(
+            vec![TraitBound::Num],
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
     );
     m.insert(
         "std.math.product".into(),
-        sig(vec![("arr", Type::Array(Box::new(Type::Int)))], Type::Int),
+        sig_t_bound(
+            vec![TraitBound::Num],
+            vec![("arr", Type::Array(Box::new(t.clone())))],
+            Type::Option(Box::new(t.clone())),
+        ),
     );
     m.insert(
         "std.math.count".into(),
-        sig(
+        sig_t_bound(
+            vec![TraitBound::Eq],
             vec![
-                ("arr", Type::Array(Box::new(Type::Int))),
-                ("target", Type::Int),
+                ("arr", Type::Array(Box::new(t.clone()))),
+                ("target", t.clone()),
             ],
             Type::Int,
         ),
@@ -2884,11 +2920,19 @@ pub fn build() -> HashMap<String, FuncSig> {
     // Generic min/max — work for int, float, str (anything comparable)
     m.insert(
         "std.math.min".into(),
-        sig_t(vec![("a", t.clone()), ("b", t.clone())], t.clone()),
+        sig_t_bound(
+            vec![TraitBound::Ord],
+            vec![("a", t.clone()), ("b", t.clone())],
+            t.clone(),
+        ),
     );
     m.insert(
         "std.math.max".into(),
-        sig_t(vec![("a", t.clone()), ("b", t.clone())], t.clone()),
+        sig_t_bound(
+            vec![TraitBound::Ord],
+            vec![("a", t.clone()), ("b", t.clone())],
+            t.clone(),
+        ),
     );
     m.insert(
         "std.math.is_even".into(),
@@ -2898,25 +2942,19 @@ pub fn build() -> HashMap<String, FuncSig> {
         "std.math.is_odd".into(),
         sig(vec![("n", Type::Int)], Type::Bool),
     );
-    // Float aggregation — Kahan compensated summation
-    m.insert(
-        "std.math.sum_f".into(),
-        sig(vec![("arr", float_arr.clone())], Type::Float),
-    );
-    m.insert(
-        "std.math.product_f".into(),
-        sig(vec![("arr", float_arr.clone())], Type::Float),
-    );
+    // Generic array min/max (empty-safe)
     m.insert(
         "std.math.min_arr".into(),
-        sig_t(
+        sig_t_bound(
+            vec![TraitBound::Ord],
             vec![("arr", Type::Array(Box::new(t.clone())))],
             Type::Option(Box::new(t.clone())),
         ),
     );
     m.insert(
         "std.math.max_arr".into(),
-        sig_t(
+        sig_t_bound(
+            vec![TraitBound::Ord],
             vec![("arr", Type::Array(Box::new(t.clone())))],
             Type::Option(Box::new(t.clone())),
         ),
