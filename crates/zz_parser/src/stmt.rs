@@ -1689,7 +1689,22 @@ impl<'a> Parser<'a> {
                         // Any other name is a user trait. Single-file parsing
                         // cannot see the trait table, so the checker validates
                         // it (with a suggestion) against its registered traits.
-                        other => bounds.push(TraitBound::User(other.to_string())),
+                        // Suggest a known bound if the name starts with one
+                        // (e.g. `Number` → `Num`).
+                        other => {
+                            const KNOWN: &[&str] = &["Num", "Ord", "Eq", "Display"];
+                            if let Some(suggested) = KNOWN.iter().find(|k| other.starts_with(*k)) {
+                                self.push_error(
+                                    error_at(format!("unknown trait bound `{other}`"), id.span)
+                                        .with_fixit(FixIt::safe(
+                                            id.span,
+                                            suggested.to_string(),
+                                            format!("did you mean `{suggested}`?"),
+                                        )),
+                                );
+                            }
+                            bounds.push(TraitBound::User(other.to_string()));
+                        }
                     }
                 }
                 if self.eat(TokenKind::Plus) {

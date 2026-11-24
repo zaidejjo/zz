@@ -455,72 +455,69 @@ impl Lowerer {
                     format!("zz_clone({fvar})")
                 }
             }
-            Expr::Ident { name, .. } => match names.lookup(name) {
-                Some(cid) => {
-                    // Check if the variable is a scalar type that can be used directly
-                    if let Some(ctype) = names.lookup_type(name) {
-                        // Moved-from temporaries (`x = f(x)` fast path):
-                        // the slot was taken, so pass the temp through
-                        // without a `zz_clone` bump.
-                        if super::move_elide::is_moved_type(Some(ctype)) {
-                            return cid.to_string();
-                        }
-                        match ctype {
-                            "int64_t" | "double" | "bool" => cid.to_string(),
-                            // Raw C structs are Copy (not refcounted) — pass
-                            // through; cloning would also be a type error
-                            // (zz_clone takes zz_value).
-                            t if t.starts_with("zz_struct_") => cid.to_string(),
-                            _ => {
-                                // Native callees borrow their arguments
-                                // (they never retain/release them), so pass
-                                // the bare local instead of zz_clone — a
-                                // clone would bump the refcount with nothing
-                                // to drop it, leaking the share.
-                                if self.native_call_args.get() {
-                                    cid.to_string()
-                                } else {
-                                    format!("zz_clone({cid})")
+            Expr::Ident { name, .. } => {
+                // State variable read: read under the state lock when
+                // concurrency is reachable, else plain access (D8
+                // lock elision). `zz_state_load_checked` still guards
+                // read-before-init (D1). When inside a batched read
+                // (state_read_batch_depth > 0), emit_state_read skips
+                // lock/unlock since the outermost caller already holds it,
+                // so multiple state reads in one expression (e.g. `a + b`)
+                // are atomic under a single lock acquisition.
+                if self.state_set.contains(name) {
+                    let cid = Lowerer::state_cid(name);
+                    let flag = format!("{}_init", cid);
+                    let tmp = names.fresh("_s");
+                    self.emit_state_read(&cid, &flag, name, &tmp, out);
+                    return tmp;
+                }
+                match names.lookup(name) {
+                    Some(cid) => {
+                        // Check if the variable is a scalar type that can be used directly
+                        if let Some(ctype) = names.lookup_type(name) {
+                            // Moved-from temporaries (`x = f(x)` fast path):
+                            // the slot was taken, so pass the temp through
+                            // without a `zz_clone` bump.
+                            if super::move_elide::is_moved_type(Some(ctype)) {
+                                return cid.to_string();
+                            }
+                            match ctype {
+                                "int64_t" | "double" | "bool" => cid.to_string(),
+                                // Raw C structs are Copy (not refcounted) — pass
+                                // through; cloning would also be a type error
+                                // (zz_clone takes zz_value).
+                                t if t.starts_with("zz_struct_") => cid.to_string(),
+                                _ => {
+                                    // Native callees borrow their arguments
+                                    // (they never retain/release them), so pass
+                                    // the bare local instead of zz_clone — a
+                                    // clone would bump the refcount with nothing
+                                    // to drop it, leaking the share.
+                                    if self.native_call_args.get() {
+                                        cid.to_string()
+                                    } else {
+                                        format!("zz_clone({cid})")
+                                    }
                                 }
                             }
-                        }
-                    } else {
-                        // Fallback to safe behavior if type unknown
-                        format!("zz_clone({cid})")
-                    }
-                }
-                None => {
-                    // State variable read: read under the state lock when
-                    // concurrency is reachable, else plain access (D8
-                    // lock elision). `zz_state_load_checked` still guards
-                    // read-before-init (D1).
-                    if self.state_set.contains(name) {
-                        let cid = Lowerer::state_cid(name);
-                        let flag = format!("{}_init", cid);
-                        let tmp = names.fresh("_s");
-                        self.emit_state_read(&cid, &flag, name, &tmp, out);
-                        return tmp;
-                    }
-                    // First-class reference to a named function
-                    // (`f := add`): box the static function when it
-                    // resolves (selective-import canonical first, then
-                    // the bare spelling). Bare selective-import consts
-                    // (`import std.math(PI)` then `PI`, or `PI as pi`)
-                    // lower to float literals — the checker only lets valid
-                    // consts reach here unresolved. Anything else unknown
-                    // stays unit (the checker rejects it upstream).
-                    if let Some(v) = self.static_func_value_ident(name) {
-                        return v;
-                    }
-                    // Aliased consts resolve through the import map first.
-                    if let Some(canonical) = self.import_fn_aliases.get(name) {
-                        if let Some(v) = super::math_const_c_literal(canonical) {
-                            return v;
+                        } else {
+                            // Fallback to safe behavior if type unknown
+                            format!("zz_clone({cid})")
                         }
                     }
-                    super::math_const_c_literal(name).unwrap_or_else(|| "zz_unit()".to_string())
+                    None => {
+                        // First-class reference to a named function
+                        // (`f := add`): box the static function when it
+                        // resolves (selective-import canonical first, then
+                        // the bare spelling). Bare selective-import consts
+                        // (`import std.math(PI)` then `PI`, or `PI as pi`)
+                        // lower to float literals — the checker only lets valid
+                        // consts reach here unresolved. Anything else unknown
+                        format!("zz_clone({name})")
+                    }
                 }
-            },
+            }
+
             Expr::Path { parts, span } => {
                 // State reads: lock, clone from zz_state_*, unlock.
                 // After namespace rewriting, top-level state bindings are

@@ -560,7 +560,16 @@ impl Lowerer {
                     Some(ref sname) => self.emit_boxed_value(sname, value, names, out),
                     None => {
                         self.flat_comp_ok.set(flat_comp);
-                        let v = self.emit_expr(value, names, out);
+                        let v = if self.expr_reads_state(value) {
+                            self.state_read_batch_depth.set(1);
+                            out.push_str("    zz_state_lock();\n");
+                            let v = self.emit_expr_stateful(value, names, out);
+                            out.push_str("    zz_state_unlock();\n");
+                            self.state_read_batch_depth.set(0);
+                            v
+                        } else {
+                            self.emit_expr(value, names, out)
+                        };
                         self.flat_comp_ok.set(false);
                         v
                     }
@@ -852,11 +861,29 @@ impl Lowerer {
                 // value in state-storage form (unboxed structs are boxed
                 // into runtime objects) and write it under the state lock.
                 if let Some((cid, flag)) = self.state_target_ids(target) {
-                    let val = self.emit_state_value(value, names, out);
+                    let val = if self.expr_reads_state(value) {
+                        self.state_read_batch_depth.set(1);
+                        out.push_str("    zz_state_lock();\n");
+                        let val = self.emit_state_value(value, names, out);
+                        out.push_str("    zz_state_unlock();\n");
+                        self.state_read_batch_depth.set(0);
+                        val
+                    } else {
+                        self.emit_state_value(value, names, out)
+                    };
                     self.emit_state_write(&cid, &flag, &val, out);
                     return;
                 }
-                let val = self.emit_expr(value, names, out);
+                let val = if self.expr_reads_state(value) {
+                    self.state_read_batch_depth.set(1);
+                    out.push_str("    zz_state_lock();\n");
+                    let val = self.emit_expr(value, names, out);
+                    out.push_str("    zz_state_unlock();\n");
+                    self.state_read_batch_depth.set(0);
+                    val
+                } else {
+                    self.emit_expr(value, names, out)
+                };
                 // If the RHS expression was already lowered to a raw
                 // scalar (int64_t/double/bool), don't try to extract
                 // .i/.f/.b — just assign directly. Otherwise the boxed
@@ -1761,7 +1788,7 @@ impl Lowerer {
                         if self.green_active() {
                             self.stmt_direct.set(true);
                         }
-                        let val = self.emit_expr(e, names, out);
+                        let val = self.emit_expr_stateful(e, names, out);
                         // Box raw scalars for the `zz_value` temp: tail
                         // calls to specialized functions (and scalar
                         // temporaries generally) lower raw. Idempotent —
@@ -1793,7 +1820,7 @@ impl Lowerer {
                         if !is_struct && WRITEBACK_METHODS.contains(&method.as_str()) {
                             if let Some(cid) = names.lookup(&obj).map(|s| s.to_string()) {
                                 *self.void_context.borrow_mut() = true;
-                                let val = self.emit_expr(e, names, out);
+                                let val = self.emit_expr_stateful(e, names, out);
                                 *self.void_context.borrow_mut() = false;
                                 out.push_str(&format!("    zz_assign(&{cid}, {val});\n"));
                                 return;
@@ -1808,7 +1835,7 @@ impl Lowerer {
                     // result owns a refcounted share that must be released.
                     // `emit_expr` takes &mut self, so capture first.
                     let release_result = stmt_call_needs_release(self, e, names);
-                    let val = self.emit_expr(e, names, out);
+                    let val = self.emit_expr_stateful(e, names, out);
                     *self.void_context.borrow_mut() = false;
                     // A discarded statement-position call to a *raising* native
                     // propagates its error: native failures raise in the VM,
@@ -1849,7 +1876,7 @@ impl Lowerer {
                     if void_if {
                         *self.void_context.borrow_mut() = true;
                     }
-                    let expr_tmp = self.emit_expr(e, names, out);
+                    let expr_tmp = self.emit_expr_stateful(e, names, out);
                     // Statement-position `match` discards its result temp,
                     // but `_mresult` holds a `zz_clone` of the arm value that
                     // keeps the matched container non-unique across loop
