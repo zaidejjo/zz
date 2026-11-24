@@ -127,13 +127,58 @@ func math.to_degrees(rad: float) -> float {
 // ── Degree variants ────────────────────────────────────────────────────────
 
 func math.sin_deg(x: float) -> float {
+    norm := x % 360.0
+    if norm < 0.0 {
+        norm = norm + 360.0
+    }
+    q := norm / 90.0
+    match int(q) {
+        .some(qi) => {
+            if q == float(qi) {
+                if qi == 1 {
+                    return 1.0
+                }
+                if qi == 3 {
+                    return -1.0
+                }
+                return 0.0
+            }
+        }
+        .none => {}
+    }
     return math.sin(math.to_radians(x))
 }
 
 func math.cos_deg(x: float) -> float {
+    norm := x % 360.0
+    if norm < 0.0 {
+        norm = norm + 360.0
+    }
+    q := norm / 90.0
+    match int(q) {
+        .some(qi) => {
+            if q == float(qi) {
+                if qi == 0 {
+                    return 1.0
+                }
+                if qi == 2 {
+                    return -1.0
+                }
+                return 0.0
+            }
+        }
+        .none => {}
+    }
     return math.cos(math.to_radians(x))
 }
 
 func math.tan_deg(x: float) -> float {
-    return math.tan(math.to_radians(x))
+    double := x * 2.0
+    s := math.sin_deg(double)
+    c := math.cos_deg(double)
+    denom := 1.0 + c
+    if denom == 0.0 {
+        return 1.0 / 0.0
+    }
+    return s / denom
 }
