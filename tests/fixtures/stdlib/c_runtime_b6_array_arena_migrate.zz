@@ -1,0 +1,19 @@
+// features: arrays, for-loop, func-call, int-arith, locals, print, std-vec
+// E2E: B6 — arena-backed arrays migrated to heap (refs reset to 0 by
+// zz_vec_append) must be freed with free(), never free()d as arena memory.
+// Build, push (migrate), and drop arrays in a loop under ASan/UBSan.
+func main() {
+    i := 0
+    s := 0
+    while i < 300 {
+        a := []
+        j := 0
+        while j < 8 {
+            a = vec.push(a, j)
+            j = j + 1
+        }
+        s = s + a.len()
+        i = i + 1
+    }
+    println("b6_array_arena_migrate_ok={s}")
+}

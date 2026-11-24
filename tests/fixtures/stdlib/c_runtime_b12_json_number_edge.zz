@@ -1,0 +1,21 @@
+// features: for-loop, func-call, int-arith, locals, print, std-json
+// E2E: B12 — json_parse_number must not let strtod read past the input
+// buffer (a number ending exactly at p->len). It now scans into a
+// NUL-terminated buffer first. Parse numbers that end exactly at EOF plus
+// a long digit run; run under ASan to catch the out-of-bounds read.
+import std.json
+
+func main() {
+    ok := 1
+    a := json.parse("123") ?? json.null()
+    b := json.parse("1.5e10") ?? json.null()
+    c := json.parse("-0.25") ?? json.null()
+    d := json.parse("12345678901234567890") ?? json.null()
+    if a == json.null() { ok = 0 }
+    if b == json.null() { ok = 0 }
+    if c == json.null() { ok = 0 }
+    if d == json.null() { ok = 0 }
+    if json.as_int(a) != 123 { ok = 0 }
+    if ok != 1 { println("b12_json_number_edge=FAIL") }
+    else { println("b12_json_number_edge_ok") }
+}

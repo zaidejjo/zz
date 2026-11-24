@@ -1,0 +1,35 @@
+// features: closures, for-loop, func-call, int-arith, locals, print, std-chan, std-task
+// E2E: B11 — zz_handoff_run_inline must restore the suspend verdict only
+// when the inline nesting is balanced; a nested inline waiter clobbers the
+// thread-local verdict between save and restore, and an unconditional
+// restore reinstalls a stale verdict=1, making the trampoline drop the
+// sender's completion (lost join result + leaked frame/rep). This chains two
+// inline handoffs (depth 2); without B11 the final recv hangs.
+import std.task
+import std.chan
+
+func main() {
+    i := 0
+    total := 0
+    while i < 100 {
+        c1 := std.chan()
+        c2 := std.chan()
+        // Waiter 2 registered first on c2; waiter 1 on c1.
+        w2 := task.spawn(|_| {
+            v:int = std.chan.recv(c2)
+            v
+        })
+        w1 := task.spawn(|_| {
+            v:int = std.chan.recv(c1)
+            std.chan.send(c2, v + 1)
+        })
+        std.chan.send(c1, 5)      // hands off to w1 (depth 1)
+        // w1 sends on c2, handing off to w2 (depth 2).
+        r:int = std.chan.recv(c2)
+        task.join(w1)
+        task.join(w2)
+        total = total + r
+        i = i + 1
+    }
+    println("b11_handoff_inline_nest_ok={total}")
+}

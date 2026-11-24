@@ -474,6 +474,7 @@ void zz_green_resumed(void) {
 typedef struct {
     zz_dispatch_fn fn;
     size_t nenv;
+    size_t refs;          // B1: closure refcount; creation = one owner share
     // Per-cell kind (`ZZ_CELL_VALUE`/`ZZ_CELL_RAW`) and byte size for RAW
     // cells. NULL when nenv == 0. Owned by the rep (copied at creation).
     unsigned char *cell_kind;
@@ -543,6 +544,7 @@ zz_value zz_closure_make(zz_dispatch_fn f) {
     if (!rep) return zz_unit();
     rep->fn = f;
     rep->nenv = 0;
+    rep->refs = 1;
     rep->cell_kind = NULL;
     rep->cell_size = NULL;
     rep->is_green = 0;
@@ -628,6 +630,7 @@ zz_value zz_closure_make_ex_typed(
     if (!rep) return zz_unit();
     rep->fn = f;
     rep->nenv = nenv;
+    rep->refs = 1;
     rep->is_green = 0;
     rep->embedded = 1;
     rep->inline_vals = 0;
@@ -657,9 +660,18 @@ zz_value zz_closure_make_ex_typed(
                 rep->env[i] = cells[i];
             } else {
                 rep->env[i] = malloc(sizeof(zz_value));
-                if (rep->env[i]) {
-                    *(zz_value *)rep->env[i] = zz_unit();
+                if (!rep->env[i]) {
+                    // B5: fail closed. Free the replacement cells already
+                    // allocated for earlier NULL sources, drop the rep, and
+                    // return the null-payload OOM closure (same convention
+                    // as zz_closure_make). Never leave rep with a NULL cell
+                    // that dispatch would dereference.
+                    for (size_t j = 0; j < i; j++)
+                        if (!cells[j]) free(rep->env[j]);
+                    free(rep);
+                    return zz_unit();
                 }
+                *(zz_value *)rep->env[i] = zz_unit();
             }
         }
     } else {
@@ -713,9 +725,10 @@ zz_value zz_closure_make_ex_typed_green(
 // Pooled inline blocks rejoin the rep-block pool instead of freeing
 // (forward: pool block lives below with the dup path).
 static void zz_rep_block_checkin(void *block, size_t size);
-static void zz_closure_release_rep(zz_value v) {
-    if (v.tag != ZZ_NATIVE || !v.payload) return;
-    zz_closure_rep *rep = (zz_closure_rep *)(void *)v.payload;
+// B1: release the rep's cells and the block itself. Caller must have
+// already established this is the last owner (refs reached 0). Nulls nothing
+// — value-param callers (executor) do not use the value after release.
+static void zz_closure_rep_teardown(zz_closure_rep *rep) {
     for (size_t i = 0; i < rep->nenv; i++) {
         if (!rep->env[i]) continue;
         unsigned char kind = ZZ_CELL_VALUE;
@@ -740,6 +753,36 @@ static void zz_closure_release_rep(zz_value v) {
         }
         free(rep);
     }
+}
+
+// B1: drop one owner share of a closure rep; teardown + free at refs==0.
+// NULL payload (OOM closure) is a no-op. Used by the executor's direct
+// release sites (each task owns exactly one share, dropped once).
+static void zz_closure_release_rep(zz_value v) {
+    if (v.tag != ZZ_NATIVE || !v.payload) return;
+    zz_closure_rep *rep = (zz_closure_rep *)(void *)v.payload;
+    if (__atomic_sub_fetch(&rep->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
+    zz_closure_rep_teardown(rep);
+}
+
+// B1: pointer-taking release that also nulls the slot, for use by the
+// refcount switches (core.h) and anywhere the caller must not keep a
+// dangling payload after the last share is dropped.
+void zz_closure_release(zz_value *v) {
+    if (v->tag != ZZ_NATIVE || !v->payload) return;
+    zz_closure_rep *rep = (zz_closure_rep *)(void *)v->payload;
+    // Only the last owner teardowns; non-last owners keep their valid share.
+    if (__atomic_sub_fetch(&rep->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
+    zz_closure_rep_teardown(rep);
+    v->payload = NULL;
+}
+
+// B1: bump the rep refcount (acquire one owner share). NULL payload is a
+// no-op.
+void zz_closure_retain(zz_value v) {
+    if (v.tag != ZZ_NATIVE || !v.payload) return;
+    zz_closure_rep *rep = (zz_closure_rep *)(void *)v.payload;
+    __atomic_add_fetch(&rep->refs, 1, __ATOMIC_RELAXED);
 }
 
 void **zz_closure_env(zz_value v, size_t *nenv) {
@@ -1771,9 +1814,10 @@ static zz_value zz_value_dup_inner(zz_value v, int *err, zz_dup_memo *m) {
         }
         zz_value out = zz_closure_dup_build(fn, env, sk, ss, nenv,
                                             is_green, err, m);
-        // `zz_closure_dup_build` degrades to the shared source on OOM;
-        // only memoize real copies (the source never aliases a copy).
-        if (out.payload != v.payload) {
+        // `zz_closure_dup_build` degrades to a null-payload closure on OOM;
+        // only memoize real, non-null copies so a later dup of the source is
+        // not handed the broken memoized copy (silent data loss).
+        if (out.payload != NULL && out.payload != v.payload) {
             if (v.payload) zz_dup_memo_put(m, v.payload, out);
         }
         return out;
@@ -2173,7 +2217,29 @@ zz_value zz_chan_send_batch(zz_value chan, zz_value arr, int *err) {
     if (enqueued == a->len
         && __atomic_load_n(&ch->green_waiters, __ATOMIC_ACQUIRE) == 0
         && __atomic_load_n(&ch->sleepers, __ATOMIC_ACQUIRE) == 0) {
-        // All enqueued lock-free, no waiter can be racing.
+        // All enqueued lock-free. Still serve any green waiter that
+        // registered between the last enqueue and this check (B3): without
+        // the handoff the waiter is stranded with values sitting in the
+        // ring that no future send hands off (lost wakeup). Mirror the
+        // mutex path below and `zz_chan_send`.
+        zz_mtx_lock(&ch->lock);
+        {
+            zz_task_t wt;
+            int wis_task = 0;
+            if (zz_chan_handoff_locked(ch, zz_unit(), &wt, &wis_task)) {
+                int gparked = __atomic_load_n(&ch->gparked, __ATOMIC_ACQUIRE) > 0;
+                zz_mtx_unlock(&ch->lock);
+                if (wis_task && !zz_handoff_run_inline(wt)) zz_enqueue_task(wt);
+                if (gparked) {
+                    zz_mtx_lock(&ch->lock);
+                    zz_cnd_broadcast(&ch->cond);
+                    zz_mtx_unlock(&ch->lock);
+                }
+                *err = 0;
+                return zz_unit();
+            }
+        }
+        zz_mtx_unlock(&ch->lock);
         *err = 0;
         return zz_unit();
     }
@@ -2233,13 +2299,18 @@ zz_value zz_chan_recv_batch(zz_value chan, zz_value n, int *err) {
     if (want == 0) { *err = 0; return zz_array_new(); }
     zz_value out = zz_array_new();
     if (out.tag != ZZ_ARRAY || !out.arr) { *err = 1; return zz_unit(); }
-    // Lock-free fast path: pop up to `want` from the ring.
-    while (out.arr->len < want) {
-        zz_value v;
-        if (!zz_ring_try_dequeue(ch, &v)) break;
-        zz_array_push(out.arr, v);
+    // Lock-free fast path: pop up to `want` from the ring. Gated on zero
+    // green waiters (B4): a registered waiter must observe every value, so
+    // lock-free takes stop while one exists — otherwise recv_batch can
+    // dequeue a value a waiter should receive and strand it (lost wakeup).
+    if (__atomic_load_n(&ch->green_waiters, __ATOMIC_ACQUIRE) == 0) {
+        while (out.arr->len < want) {
+            zz_value v;
+            if (!zz_ring_try_dequeue(ch, &v)) break;
+            zz_array_push(out.arr, v);
+        }
+        if (out.arr->len == want) { *err = 0; return out; }
     }
-    if (out.arr->len == want) { *err = 0; return out; }
     // Slow path: drain spill (older), then ring, under one mutex.
     zz_mtx_lock(&ch->lock);
     while (out.arr->len < want && ch->len > 0) {
@@ -2923,10 +2994,20 @@ static int zz_handoff_run_inline(zz_task_t task) {
     // suspended to the trampoline, which would drop its completion (lost
     // join result + leaked frame/rep). The sender's own verdict is
     // meaningless mid-`send` — only the trampoline reads it.
+    int saved_depth = zz_handoff_depth;
     int saved_verdict = zz_suspend_verdict;
+    zz_handoff_depth++;
     zz_run_task(task);
-    zz_suspend_verdict = saved_verdict;
     zz_handoff_depth--;
+    // Restore the verdict only if the nesting is balanced: a nested inline
+    // run between the save and this restore clobbers the thread-local
+    // verdict, and an unconditional restore here would reinstall a stale
+    // verdict=1, making the trampoline drop the sender's completion (lost
+    // join result + leaked frame/rep). Stack-disciplined restore guards
+    // that (B11).
+    if (zz_handoff_depth == saved_depth) {
+        zz_suspend_verdict = saved_verdict;
+    }
     return 1;
 }
 

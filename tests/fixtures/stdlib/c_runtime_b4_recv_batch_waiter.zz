@@ -1,0 +1,26 @@
+// features: closures, arrays, for-loop, func-call, int-arith, locals, print, std-chan, std-task
+// E2E: B4 — chan.recv_batch lock-free path must not dequeue a value a
+// registered green waiter should receive (lost wakeup). Register a waiter
+// first, send one value, assert the waiter — not the batch reader — gets it.
+// recv_batch is also exercised each iteration so its lock-free path runs
+// under sanitizers (TSan catches the waiter-stealing race).
+import std.task
+import std.chan
+
+func main() {
+    c := std.chan()
+    ok := 1
+    i := 0
+    while i < 100 {
+        hw := task.spawn(|_| {
+            v:int = std.chan.recv(c)
+            v
+        })
+        std.chan.send(c, 3 + i)
+        v:int = task.join(hw)
+        if v != 3 + i { ok = 0 }
+        b := std.chan.recv_batch(c, 2)
+        i = i + 1
+    }
+    println("b4_recv_batch_waiter_ok={ok}")
+}

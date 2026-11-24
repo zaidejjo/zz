@@ -62,7 +62,6 @@ pub(super) fn run(src: &str) -> Result<Value, String> {
             Err(e) => return Err(format!("math stdlib compile error: {e}")),
         }
     }
-
     interp
         .run(&parsed.program)
         .map_err(|e| e.message.to_string())

@@ -832,6 +832,11 @@ zz_value zz_iter_filter(zz_value items, zz_value f, int *err) {
         if (zz_truthy(r)) {
             zz_array_push(out.arr, zz_clone(arr.arr->items[i]));
         }
+        // B7: the closure's return value `r` carries a reference; release it
+        // so a heap return (str/array/dict/...) is not leaked on every
+        // filter invocation. `zz_iter_map` adopts `r` via push; filter only
+        // adopts the passing item, so `r` itself must be dropped here.
+        zz_release(&r);
     }
     zz_green_frame_set(saved_fr);
     zz_release(&arr);
@@ -1067,7 +1072,15 @@ static void zz_object_detach(zz_value *obj) {
             break;
         }
     }
-    o->refs--;
+    // B9: atomic decrement so co-owners across threads can't race. When this
+    // was the last owner of the old header, release its fields and free it;
+    // otherwise co-owners keep their intact view of `o`.
+    if (__atomic_sub_fetch(&o->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+        for (size_t i = 0; i < o->len * 2; i++) {
+            zz_release(&o->fields[i]);
+        }
+        free(o);
+    }
     obj->obj = fresh;
 }
 
