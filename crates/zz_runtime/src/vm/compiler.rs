@@ -2843,505 +2843,514 @@ impl Compiler {
         if reads_state && self.in_atomic_depth == 0 {
             self.emit(Op::StateBatchBegin(stmt.span()));
         }
-        let result = match stmt {
-            Stmt::Decl {
-                name,
-                value,
-                is_state,
-                ..
-            } => {
-                // D1: `state` bindings live in the shared registry, not in
-                // frame slots or the env chain. Register the name so loads/
-                // stores emit `LoadState`/`StoreState`.
-                if *is_state {
-                    self.state_names.insert(name.name.clone());
-                }
-                self.compile_expr(value);
-                if *is_state {
-                    // `state name := expr` — store the initializer into the
-                    // state registry. No slot allocation.
-                    if self.is_main && self.scope_depth == 0 {
-                        self.emit(Op::StoreState(name.name.clone(), value.span()));
+        let result = 'compile: {
+            match stmt {
+                Stmt::Decl {
+                    name,
+                    value,
+                    is_state,
+                    ..
+                } => {
+                    // D1: `state` bindings live in the shared registry, not in
+                    // frame slots or the env chain. Register the name so loads/
+                    // stores emit `LoadState`/`StoreState`.
+                    if *is_state {
+                        self.state_names.insert(name.name.clone());
                     }
-                    // Non-module-level `state` is a compile error (caught by
-                    // the checker); here we just store the value into a slot
-                    // to keep the stack balanced.
-                    StmtValue::None
-                } else if self.is_main && self.scope_depth == 0 {
-                    // Top-level: value goes into the reserved slot region.
-                    if self.captured_at_top.contains(&name.name) {
-                        self.emit(Op::DefineVar(name.name.clone()));
-                        self.locals.push(Local {
-                            name: name.name.clone(),
-                            slot: 0,
-                            in_env: true,
-                        });
-                        // DefineVar re-pushes the value; discard it.
-                        StmtValue::Discard
-                    } else {
-                        let slot = self.promoted_slots[&name.name];
-                        self.emit(Op::StoreSlot(slot as u16));
-                        self.record_slot(slot, self.type_of(value.span()).cloned());
-                        // Sync back to env at frame exit so later chunks
-                        // (REPL statements, other modules) can read it.
-                        self.chunk
-                            .toplevel_slots
-                            .push((name.name.clone(), slot as u16));
-                        self.locals.push(Local {
-                            name: name.name.clone(),
-                            slot,
-                            in_env: false,
-                        });
-                        // StoreSlot consumes the value; nothing left on the
-                        // statement stack.
-                        StmtValue::None
-                    }
-                } else if self.declare_local(&name.name) {
-                    // Named local: the init value sits on top; record its
-                    // resolved type for the IR locals table.
-                    self.record_slot(self.stack_height - 1, self.type_of(value.span()).cloned());
-                    StmtValue::Keep
-                } else {
-                    StmtValue::Discard
-                }
-            }
-            Stmt::Import { .. } => StmtValue::None,
-            // VM stub: extern C requires --native; calls fail at runtime with
-            // a clear error (see vm/runtime.rs LoadVar/native dispatch).
-            Stmt::ExternBlock { .. } | Stmt::Link { .. } => StmtValue::None,
-            Stmt::Func {
-                name, params, body, ..
-            } => {
-                let fname = name.join(".");
-                let chunk = self.compile_func_body(&fname, body, params);
-                self.emit(Op::MakeFunc {
-                    name: fname,
-                    params: params.clone(),
-                    chunk,
-                    defaults: Vec::new(),
-                });
-                StmtValue::Discard
-            }
-            Stmt::Return { value, .. } => {
-                match value {
-                    Some(e) => self.compile_expr(e),
-                    None => self.emit_const(Value::Unit),
-                }
-                self.emit(Op::Return);
-                StmtValue::None
-            }
-            Stmt::Struct { name, fields, .. } => {
-                self.emit(Op::RegisterStruct {
-                    name: name.join("."),
-                    fields: fields.iter().map(|(n, _)| n.name.clone()).collect(),
-                });
-                StmtValue::Discard
-            }
-            // Aliases erase at check time: no ops to emit, so the statement
-            // owns no value. `Discard` here would make the owning container
-            // emit a `Pop` for a value that was never pushed, shifting every
-            // later slot by one — `type A = int` followed by `x := 1` used to
-            // panic in `StoreSlot`.
-            Stmt::TypeAlias { .. } => StmtValue::None,
-            // Traits erase at check time: their impl methods are ordinary
-            // functions, reached through the runtime's method dispatch.
-            Stmt::Trait { .. } => StmtValue::None,
-            Stmt::Atomic { body, span } => {
-                // Compile the body as a sub-chunk. The VM executes it under
-                // the state lock (see `Op::Atomic` in runtime.rs).
-                let mut sub = Compiler::new();
-                sub.type_scope = self.type_scope.clone();
-                sub.symbol_map = self.symbol_map.clone();
-                sub.top_globals = self.top_globals.clone();
-                sub.state_names = self.state_names.clone();
-                sub.types = self.types.clone();
-                sub.structs = self.structs.clone();
-                sub.native_names = self.native_names.clone();
-                sub.func_info = self.func_info.clone();
-                sub.enums = self.enums.clone();
-                sub.impl_methods = self.impl_methods.clone();
-                sub.in_atomic_depth = self.in_atomic_depth + 1;
-                let mut last_stmt_value = StmtValue::None;
-                for s in &body.stmts {
-                    last_stmt_value = sub.compile_stmt(s, false);
-                }
-                // Discard any leftover value from the last statement.
-                if matches!(last_stmt_value, StmtValue::Discard | StmtValue::Keep) {
-                    sub.emit(Op::Pop);
-                }
-                self.emit(Op::Atomic {
-                    body: Arc::new(sub.chunk),
-                    span: *span,
-                });
-                // The atomic body chunk's return value is pushed onto the
-                // stack by the frame return mechanism (line 821). Atomic
-                // blocks yield no value, so discard it here.
-                StmtValue::Discard
-            }
-            // Enums register their variant names so qualified
-            // construction (`Token.IntLit(1)`) resolves at runtime.
-            // Values are plain `Object`s — no other state needed.
-            Stmt::Enum { name, variants, .. } => {
-                self.emit(Op::RegisterEnum {
-                    name: name.join("."),
-                    variants: variants
-                        .iter()
-                        .map(|(n, p)| (n.name.clone(), p.is_some()))
-                        .collect(),
-                });
-                StmtValue::Discard
-            }
-            Stmt::Impl { name, methods, .. } => {
-                let type_name = name.join(".");
-                for method in methods {
-                    if let Stmt::Func {
-                        name: mname,
-                        generics: _,
-                        params,
-                        ret: _,
-                        body,
-                        ..
-                    } = method
-                    {
-                        let full_name = format!("{}.{}", type_name, mname.join("."));
-                        let chunk = self.compile_func_body(&full_name, body, params);
-                        self.emit(Op::MakeFunc {
-                            name: full_name,
-                            params: params.clone(),
-                            chunk,
-                            defaults: Vec::new(),
-                        });
-                    }
-                }
-                StmtValue::Discard
-            }
-            Stmt::For {
-                vars,
-                iter,
-                body,
-                span,
-            } => {
-                let pre = self.stack_height;
-                let num_vars_u8 = vars.len() as u8;
-                self.emit_const(Value::Unit);
-                self.compile_expr(iter);
-                let setup_pos = self.chunk.code.len();
-                self.emit(Op::ForSetup {
-                    exit: 0,
-                    header: 0,
-                    span: *span,
-                    num_vars: num_vars_u8,
-                });
-                // Rotated loop: enter at the test (emitted after the body),
-                // so a non-exhausted `ForNext` jumps straight into the body.
-                // That makes `ForNext` the back-edge as well as the test —
-                // one dispatch per iteration instead of two — while
-                // `continue` still targets it (the loop frame's header).
-                let entry_pos = self.chunk.code.len();
-                self.emit(Op::Jump(0));
-                let body_start = self.chunk.code.len();
-                // No standalone `Safepoint` here: the cooperative yield check
-                // is charged to `ForNext` instead. `ForNext` runs once per
-                // iteration and is the header target for both the back-edge
-                // and `continue`, so the check still cannot be skipped — at
-                // one dispatch less per iteration.
-                // Determine if any var is captured by an inner closure
-                let any_captured = vars.iter().any(|v| self.captured.contains(&v.name));
-                let var_names: Vec<String> = vars.iter().map(|v| v.name.clone()).collect();
-                // Push locals for each var — last var at highest slot,
-                // first at lowest
-                let num_vars = vars.len();
-                // Declared loop-variable types for the IR locals table:
-                // element types of the iterable (skipped for env-captured
-                // vars, which bind in the environment, and for dynamics).
-                let elem_tys = self
-                    .type_of(iter.span())
-                    .and_then(|t| Self::iter_elems(t, num_vars));
-                for (i, v) in vars.iter().enumerate().rev() {
-                    let in_env = self.captured.contains(&v.name);
-                    if !in_env {
-                        if let Some(tys) = elem_tys.as_ref().and_then(|e| e.get(i).cloned()) {
-                            self.record_slot(self.stack_height - num_vars + i, Some(tys));
-                        }
-                    }
-                    self.locals.push(Local {
-                        name: v.name.clone(),
-                        slot: self.stack_height - num_vars + i,
-                        in_env,
-                    });
-                }
-                // Loop-var slots for the IR vartab, in var order
-                // (`u16::MAX` = env-captured, no slot): lets AOT peels
-                // address the pushed values without re-deriving positions.
-                // Pushed after the `ForNext` is emitted (below): vartab
-                // entries pair with `ForNext` ops in chunk order, and a
-                // nested loop in the body emits its op first.
-                let vartab_slots: Vec<u16> = (0..num_vars)
-                    .map(|i| {
-                        let v = &vars[i];
-                        if self.captured.contains(&v.name) {
-                            u16::MAX
-                        } else {
-                            (self.stack_height - num_vars + i) as u16
-                        }
-                    })
-                    .collect();
-                let body_needs_env = self.scope_declares_captured(body);
-                // The loop's result slot is written before `ForSetup` and only
-                // read by a caller that keeps the loop's value. When the caller
-                // drops it, nothing reads it — and then nothing reads the
-                // body's own trailing value either, so the body is told that
-                // up front (see `compile_block_body`'s `trailing_value_dead`).
-                let dead_result = value_discarded && !body_needs_env;
-                if body_needs_env {
-                    self.emit(Op::EnterScope);
-                }
-                self.scope_depth += 1;
-                let body_tail = self.compile_block_body(body, true, dead_result);
-                self.scope_depth -= 1;
-                if body_needs_env {
-                    self.emit(Op::ExitScope);
-                }
-                if !dead_result {
-                    if body_tail.needs_result_unit {
-                        // Trailing slot declaration (see `compile_block_body`):
-                        // supply the loop-result value `SetLoopResult` pops.
-                        self.emit_const(Value::Unit);
-                    }
-                    self.emit(Op::SetLoopResult);
-                }
-                // A dead-result body leaves nothing behind (see
-                // `compile_block_body`), so there is no tail value to settle.
-                // Either way the loop's own slot keeps the `Unit` placeholder
-                // written before `ForSetup`, which the caller's `Op::Pop`
-                // removes.
-                // Test + back-edge last (rotated layout): `patch_jump` fills
-                // the exit, then the entry jump and the setup header point at
-                // it.
-                let header = self.emit_for_next(var_names, any_captured, body_start, *span);
-                self.patch_jump(header);
-                let exit = self.chunk.code.len();
-                self.chunk.fornext_slots.push(vartab_slots);
-                self.chunk.code[entry_pos] = Op::Jump(header);
-                self.chunk.code[setup_pos] = Op::ForSetup {
-                    exit,
-                    header,
-                    span: *span,
-                    num_vars: num_vars_u8,
-                };
-                // Pop locals
-                for _ in vars {
-                    self.locals.pop();
-                }
-                self.stack_height = pre + 1;
-                StmtValue::Discard
-            }
-            Stmt::Break { span } => {
-                self.emit(Op::Break(*span));
-                StmtValue::None
-            }
-            Stmt::Continue { span } => {
-                self.emit(Op::Continue(*span));
-                StmtValue::None
-            }
-            Stmt::Defer { expr, .. } => {
-                let body = Block {
-                    stmts: vec![Stmt::Expr(expr.as_ref().clone())],
-                    span: expr.span(),
-                };
-                let scope = self.type_scope.clone();
-                let chunk = self.compile_func_body(&scope, &body, &[]);
-                self.emit(Op::MakeClosure {
-                    params: vec![],
-                    chunk,
-                    defaults: Vec::new(),
-                });
-                self.emit(Op::DeferRecord);
-                StmtValue::None
-            }
-            Stmt::Destructure { pat, value, .. } => {
-                self.compile_expr(value);
-                self.compile_destructure(pat);
-                StmtValue::None
-            }
-            Stmt::Assign { target, value, .. } => match target {
-                // `_ = expr` — evaluate `expr` for effect, drop the value.
-                // There is no storage for `_`, so just compile the RHS and
-                // let the caller discard the result.
-                Expr::Ident { name, .. } if name == "_" => {
                     self.compile_expr(value);
+                    if *is_state {
+                        // `state name := expr` — store the initializer into the
+                        // state registry. No slot allocation.
+                        if self.is_main && self.scope_depth == 0 {
+                            self.emit(Op::StoreState(name.name.clone(), value.span()));
+                        }
+                        // Non-module-level `state` is a compile error (caught by
+                        // the checker); here we just store the value into a slot
+                        // to keep the stack balanced.
+                        StmtValue::None
+                    } else if self.is_main && self.scope_depth == 0 {
+                        // Top-level: value goes into the reserved slot region.
+                        if self.captured_at_top.contains(&name.name) {
+                            self.emit(Op::DefineVar(name.name.clone()));
+                            self.locals.push(Local {
+                                name: name.name.clone(),
+                                slot: 0,
+                                in_env: true,
+                            });
+                            // DefineVar re-pushes the value; discard it.
+                            StmtValue::Discard
+                        } else {
+                            let slot = self.promoted_slots[&name.name];
+                            self.emit(Op::StoreSlot(slot as u16));
+                            self.record_slot(slot, self.type_of(value.span()).cloned());
+                            // Sync back to env at frame exit so later chunks
+                            // (REPL statements, other modules) can read it.
+                            self.chunk
+                                .toplevel_slots
+                                .push((name.name.clone(), slot as u16));
+                            self.locals.push(Local {
+                                name: name.name.clone(),
+                                slot,
+                                in_env: false,
+                            });
+                            // StoreSlot consumes the value; nothing left on the
+                            // statement stack.
+                            StmtValue::None
+                        }
+                    } else if self.declare_local(&name.name) {
+                        // Named local: the init value sits on top; record its
+                        // resolved type for the IR locals table.
+                        self.record_slot(
+                            self.stack_height - 1,
+                            self.type_of(value.span()).cloned(),
+                        );
+                        StmtValue::Keep
+                    } else {
+                        StmtValue::Discard
+                    }
+                }
+                Stmt::Import { .. } => StmtValue::None,
+                // VM stub: extern C requires --native; calls fail at runtime with
+                // a clear error (see vm/runtime.rs LoadVar/native dispatch).
+                Stmt::ExternBlock { .. } | Stmt::Link { .. } => StmtValue::None,
+                Stmt::Func {
+                    name, params, body, ..
+                } => {
+                    let fname = name.join(".");
+                    let chunk = self.compile_func_body(&fname, body, params);
+                    self.emit(Op::MakeFunc {
+                        name: fname,
+                        params: params.clone(),
+                        chunk,
+                        defaults: Vec::new(),
+                    });
                     StmtValue::Discard
                 }
-                Expr::Ident { name, span } => {
-                    // Fast path: `x = x + y` / `x = x + 1` / `x = x + N` with
-                    // operands resolving to local slots -> single fused op.
-                    // Nested left spines (`x = (x + y) % 7`) fuse into a short
-                    // chain that reuses the target slot as scratch.
-                    if let Some(ops) = self.try_slot_binop_chain(name, value) {
-                        for op in ops {
-                            self.emit(op);
-                        }
-                        self.stmt_unit(value_discarded)
-                    } else if let Some(op) = self.try_slot_binop(name, value) {
-                        self.emit(op);
-                        self.stmt_unit(value_discarded)
-                    } else if self.try_emit_move_push_ident(name, *span, value) {
-                        self.stmt_unit(value_discarded)
-                    } else if let Resolved::Slot(dst_slot) = self.resolve(name) {
-                        // `x = s.f` -> GetFieldSlotIdx: copy field straight
-                        // into dst slot, no container clone, no stack traffic.
-                        if let Expr::Field {
-                            obj, name: field, ..
-                        } = value
-                        {
-                            if let Some(op) =
-                                self.try_emit_get_field_slot_idx(obj, field, dst_slot as u16, *span)
-                            {
-                                self.emit(op);
-                                return self.stmt_unit(value_discarded);
-                            }
-                        }
-                        // `x = arr[i]` -> IndexIntSlot: single bounds check,
-                        // no tag loop.
-                        if let Expr::Index { obj, index, .. } = value {
-                            if let Some(op) =
-                                self.try_emit_index_int_slot(obj, index, dst_slot as u16, *span)
-                            {
-                                self.emit(op);
-                                return self.stmt_unit(value_discarded);
-                            }
-                            // `x = dict[key]` -> IndexDictInt: int-keyed dict
-                            // fast path.
-                            if let Some(op) =
-                                self.try_emit_index_dict_int(obj, index, dst_slot as u16, *span)
-                            {
-                                self.emit(op);
-                                return self.stmt_unit(value_discarded);
-                            }
-                        }
-                        // Fall through to generic store below.
-                        self.compile_expr(value);
-                        self.move_take = None;
-                        self.emit(Op::StoreSlot(dst_slot as u16));
-                        self.stmt_unit(value_discarded)
-                    } else {
-                        // Move-take for `x = f(x, ...)`: the flag makes the
-                        // single `x` load take; cleared after the RHS either
-                        // way (unfired means some exotic path skipped the
-                        // load — the generic clone stands in).
-                        if let Some(home) = self.thread_take_home(name, value) {
-                            self.move_take = Some((name.clone(), home));
-                        }
-                        self.compile_expr(value);
-                        self.move_take = None;
-                        match self.resolve(name) {
-                            Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
-                            Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
-                            Resolved::State => self.emit(Op::StoreState(name.clone(), *span)),
-                        }
-                        self.stmt_unit(value_discarded)
+                Stmt::Return { value, .. } => {
+                    match value {
+                        Some(e) => self.compile_expr(e),
+                        None => self.emit_const(Value::Unit),
                     }
+                    self.emit(Op::Return);
+                    StmtValue::None
                 }
-                Expr::Path { parts, span } => {
-                    let full = parts.join(".");
-                    // Move-take: fused push/field takes (locals and
-                    // module-global homes). State bindings live in the
-                    // registry, not slots, so they cannot use move-path
-                    // optimization; fall through to StoreState.
-                    if parts.len() == 2
-                        && !self.state_names.contains(&full)
-                        && self.try_emit_move_path(parts, *span, value)
-                    {
-                        return self.stmt_unit(value_discarded);
+                Stmt::Struct { name, fields, .. } => {
+                    self.emit(Op::RegisterStruct {
+                        name: name.join("."),
+                        fields: fields.iter().map(|(n, _)| n.name.clone()).collect(),
+                    });
+                    StmtValue::Discard
+                }
+                // Aliases erase at check time: no ops to emit, so the statement
+                // owns no value. `Discard` here would make the owning container
+                // emit a `Pop` for a value that was never pushed, shifting every
+                // later slot by one — `type A = int` followed by `x := 1` used to
+                // panic in `StoreSlot`.
+                Stmt::TypeAlias { .. } => StmtValue::None,
+                // Traits erase at check time: their impl methods are ordinary
+                // functions, reached through the runtime's method dispatch.
+                Stmt::Trait { .. } => StmtValue::None,
+                Stmt::Atomic { body, span } => {
+                    // Compile the body as a sub-chunk. The VM executes it under
+                    // the state lock (see `Op::Atomic` in runtime.rs).
+                    let mut sub = Compiler::new();
+                    sub.type_scope = self.type_scope.clone();
+                    sub.symbol_map = self.symbol_map.clone();
+                    sub.top_globals = self.top_globals.clone();
+                    sub.state_names = self.state_names.clone();
+                    sub.types = self.types.clone();
+                    sub.structs = self.structs.clone();
+                    sub.native_names = self.native_names.clone();
+                    sub.func_info = self.func_info.clone();
+                    sub.enums = self.enums.clone();
+                    sub.impl_methods = self.impl_methods.clone();
+                    sub.in_atomic_depth = self.in_atomic_depth + 1;
+                    let mut last_stmt_value = StmtValue::None;
+                    for s in &body.stmts {
+                        last_stmt_value = sub.compile_stmt(s, false);
                     }
-                    // Move-take for `ns.x = f(ns.x, ...)`: thread the
-                    // global through the call instead of cloning it
-                    // (slot homes only; the flag is consumed by the
-                    // single matching path load, cleared either way).
-                    if parts.len() == 2 && self.thread_classify_path(parts, value, *span).is_some()
-                    {
-                        if let Some((flag_key, home)) = self.thread_take_home_path(parts) {
-                            self.move_take = Some((flag_key, home));
+                    // Discard any leftover value from the last statement.
+                    if matches!(last_stmt_value, StmtValue::Discard | StmtValue::Keep) {
+                        sub.emit(Op::Pop);
+                    }
+                    self.emit(Op::Atomic {
+                        body: Arc::new(sub.chunk),
+                        span: *span,
+                    });
+                    // The atomic body chunk's return value is pushed onto the
+                    // stack by the frame return mechanism (line 821). Atomic
+                    // blocks yield no value, so discard it here.
+                    StmtValue::Discard
+                }
+                // Enums register their variant names so qualified
+                // construction (`Token.IntLit(1)`) resolves at runtime.
+                // Values are plain `Object`s — no other state needed.
+                Stmt::Enum { name, variants, .. } => {
+                    self.emit(Op::RegisterEnum {
+                        name: name.join("."),
+                        variants: variants
+                            .iter()
+                            .map(|(n, p)| (n.name.clone(), p.is_some()))
+                            .collect(),
+                    });
+                    StmtValue::Discard
+                }
+                Stmt::Impl { name, methods, .. } => {
+                    let type_name = name.join(".");
+                    for method in methods {
+                        if let Stmt::Func {
+                            name: mname,
+                            generics: _,
+                            params,
+                            ret: _,
+                            body,
+                            ..
+                        } = method
+                        {
+                            let full_name = format!("{}.{}", type_name, mname.join("."));
+                            let chunk = self.compile_func_body(&full_name, body, params);
+                            self.emit(Op::MakeFunc {
+                                name: full_name,
+                                params: params.clone(),
+                                chunk,
+                                defaults: Vec::new(),
+                            });
+                        }
+                    }
+                    StmtValue::Discard
+                }
+                Stmt::For {
+                    vars,
+                    iter,
+                    body,
+                    span,
+                } => {
+                    let pre = self.stack_height;
+                    let num_vars_u8 = vars.len() as u8;
+                    self.emit_const(Value::Unit);
+                    self.compile_expr(iter);
+                    let setup_pos = self.chunk.code.len();
+                    self.emit(Op::ForSetup {
+                        exit: 0,
+                        header: 0,
+                        span: *span,
+                        num_vars: num_vars_u8,
+                    });
+                    // Rotated loop: enter at the test (emitted after the body),
+                    // so a non-exhausted `ForNext` jumps straight into the body.
+                    // That makes `ForNext` the back-edge as well as the test —
+                    // one dispatch per iteration instead of two — while
+                    // `continue` still targets it (the loop frame's header).
+                    let entry_pos = self.chunk.code.len();
+                    self.emit(Op::Jump(0));
+                    let body_start = self.chunk.code.len();
+                    // No standalone `Safepoint` here: the cooperative yield check
+                    // is charged to `ForNext` instead. `ForNext` runs once per
+                    // iteration and is the header target for both the back-edge
+                    // and `continue`, so the check still cannot be skipped — at
+                    // one dispatch less per iteration.
+                    // Determine if any var is captured by an inner closure
+                    let any_captured = vars.iter().any(|v| self.captured.contains(&v.name));
+                    let var_names: Vec<String> = vars.iter().map(|v| v.name.clone()).collect();
+                    // Push locals for each var — last var at highest slot,
+                    // first at lowest
+                    let num_vars = vars.len();
+                    // Declared loop-variable types for the IR locals table:
+                    // element types of the iterable (skipped for env-captured
+                    // vars, which bind in the environment, and for dynamics).
+                    let elem_tys = self
+                        .type_of(iter.span())
+                        .and_then(|t| Self::iter_elems(t, num_vars));
+                    for (i, v) in vars.iter().enumerate().rev() {
+                        let in_env = self.captured.contains(&v.name);
+                        if !in_env {
+                            if let Some(tys) = elem_tys.as_ref().and_then(|e| e.get(i).cloned()) {
+                                self.record_slot(self.stack_height - num_vars + i, Some(tys));
+                            }
+                        }
+                        self.locals.push(Local {
+                            name: v.name.clone(),
+                            slot: self.stack_height - num_vars + i,
+                            in_env,
+                        });
+                    }
+                    // Loop-var slots for the IR vartab, in var order
+                    // (`u16::MAX` = env-captured, no slot): lets AOT peels
+                    // address the pushed values without re-deriving positions.
+                    // Pushed after the `ForNext` is emitted (below): vartab
+                    // entries pair with `ForNext` ops in chunk order, and a
+                    // nested loop in the body emits its op first.
+                    let vartab_slots: Vec<u16> = (0..num_vars)
+                        .map(|i| {
+                            let v = &vars[i];
+                            if self.captured.contains(&v.name) {
+                                u16::MAX
+                            } else {
+                                (self.stack_height - num_vars + i) as u16
+                            }
+                        })
+                        .collect();
+                    let body_needs_env = self.scope_declares_captured(body);
+                    // The loop's result slot is written before `ForSetup` and only
+                    // read by a caller that keeps the loop's value. When the caller
+                    // drops it, nothing reads it — and then nothing reads the
+                    // body's own trailing value either, so the body is told that
+                    // up front (see `compile_block_body`'s `trailing_value_dead`).
+                    let dead_result = value_discarded && !body_needs_env;
+                    if body_needs_env {
+                        self.emit(Op::EnterScope);
+                    }
+                    self.scope_depth += 1;
+                    let body_tail = self.compile_block_body(body, true, dead_result);
+                    self.scope_depth -= 1;
+                    if body_needs_env {
+                        self.emit(Op::ExitScope);
+                    }
+                    if !dead_result {
+                        if body_tail.needs_result_unit {
+                            // Trailing slot declaration (see `compile_block_body`):
+                            // supply the loop-result value `SetLoopResult` pops.
+                            self.emit_const(Value::Unit);
+                        }
+                        self.emit(Op::SetLoopResult);
+                    }
+                    // A dead-result body leaves nothing behind (see
+                    // `compile_block_body`), so there is no tail value to settle.
+                    // Either way the loop's own slot keeps the `Unit` placeholder
+                    // written before `ForSetup`, which the caller's `Op::Pop`
+                    // removes.
+                    // Test + back-edge last (rotated layout): `patch_jump` fills
+                    // the exit, then the entry jump and the setup header point at
+                    // it.
+                    let header = self.emit_for_next(var_names, any_captured, body_start, *span);
+                    self.patch_jump(header);
+                    let exit = self.chunk.code.len();
+                    self.chunk.fornext_slots.push(vartab_slots);
+                    self.chunk.code[entry_pos] = Op::Jump(header);
+                    self.chunk.code[setup_pos] = Op::ForSetup {
+                        exit,
+                        header,
+                        span: *span,
+                        num_vars: num_vars_u8,
+                    };
+                    // Pop locals
+                    for _ in vars {
+                        self.locals.pop();
+                    }
+                    self.stack_height = pre + 1;
+                    StmtValue::Discard
+                }
+                Stmt::Break { span } => {
+                    self.emit(Op::Break(*span));
+                    StmtValue::None
+                }
+                Stmt::Continue { span } => {
+                    self.emit(Op::Continue(*span));
+                    StmtValue::None
+                }
+                Stmt::Defer { expr, .. } => {
+                    let body = Block {
+                        stmts: vec![Stmt::Expr(expr.as_ref().clone())],
+                        span: expr.span(),
+                    };
+                    let scope = self.type_scope.clone();
+                    let chunk = self.compile_func_body(&scope, &body, &[]);
+                    self.emit(Op::MakeClosure {
+                        params: vec![],
+                        chunk,
+                        defaults: Vec::new(),
+                    });
+                    self.emit(Op::DeferRecord);
+                    StmtValue::None
+                }
+                Stmt::Destructure { pat, value, .. } => {
+                    self.compile_expr(value);
+                    self.compile_destructure(pat);
+                    StmtValue::None
+                }
+                Stmt::Assign { target, value, .. } => match target {
+                    // `_ = expr` — evaluate `expr` for effect, drop the value.
+                    // There is no storage for `_`, so just compile the RHS and
+                    // let the caller discard the result.
+                    Expr::Ident { name, .. } if name == "_" => {
+                        self.compile_expr(value);
+                        StmtValue::Discard
+                    }
+                    Expr::Ident { name, span } => {
+                        // Fast path: `x = x + y` / `x = x + 1` / `x = x + N` with
+                        // operands resolving to local slots -> single fused op.
+                        // Nested left spines (`x = (x + y) % 7`) fuse into a short
+                        // chain that reuses the target slot as scratch.
+                        if let Some(ops) = self.try_slot_binop_chain(name, value) {
+                            for op in ops {
+                                self.emit(op);
+                            }
+                            self.stmt_unit(value_discarded)
+                        } else if let Some(op) = self.try_slot_binop(name, value) {
+                            self.emit(op);
+                            self.stmt_unit(value_discarded)
+                        } else if self.try_emit_move_push_ident(name, *span, value) {
+                            self.stmt_unit(value_discarded)
+                        } else if let Resolved::Slot(dst_slot) = self.resolve(name) {
+                            // `x = s.f` -> GetFieldSlotIdx: copy field straight
+                            // into dst slot, no container clone, no stack traffic.
+                            if let Expr::Field {
+                                obj, name: field, ..
+                            } = value
+                            {
+                                if let Some(op) = self.try_emit_get_field_slot_idx(
+                                    obj,
+                                    field,
+                                    dst_slot as u16,
+                                    *span,
+                                ) {
+                                    self.emit(op);
+                                    return self.stmt_unit(value_discarded);
+                                }
+                            }
+                            // `x = arr[i]` -> IndexIntSlot: single bounds check,
+                            // no tag loop.
+                            if let Expr::Index { obj, index, .. } = value {
+                                if let Some(op) =
+                                    self.try_emit_index_int_slot(obj, index, dst_slot as u16, *span)
+                                {
+                                    self.emit(op);
+                                    return self.stmt_unit(value_discarded);
+                                }
+                                // `x = dict[key]` -> IndexDictInt: int-keyed dict
+                                // fast path.
+                                if let Some(op) =
+                                    self.try_emit_index_dict_int(obj, index, dst_slot as u16, *span)
+                                {
+                                    self.emit(op);
+                                    return self.stmt_unit(value_discarded);
+                                }
+                            }
+                            // Fall through to generic store below.
                             self.compile_expr(value);
                             self.move_take = None;
-                            self.compile_path_store(parts, *span);
-                            return self.stmt_unit(value_discarded);
+                            self.emit(Op::StoreSlot(dst_slot as u16));
+                            self.stmt_unit(value_discarded)
+                        } else {
+                            // Move-take for `x = f(x, ...)`: the flag makes the
+                            // single `x` load take; cleared after the RHS either
+                            // way (unfired means some exotic path skipped the
+                            // load — the generic clone stands in).
+                            if let Some(home) = self.thread_take_home(name, value) {
+                                self.move_take = Some((name.clone(), home));
+                            }
+                            self.compile_expr(value);
+                            self.move_take = None;
+                            match self.resolve(name) {
+                                Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
+                                Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
+                                Resolved::State => self.emit(Op::StoreState(name.clone(), *span)),
+                            }
+                            self.stmt_unit(value_discarded)
                         }
                     }
-                    let full = parts.join(".");
-                    // Take-restore field stores (#242): pure stores and
-                    // self-read-modify-write skip the container clone.
-                    // Module-namespace targets fall through (their heads
-                    // never resolve to a takeable home).
-                    if parts.len() == 2
-                        && (self.try_emit_field_binop_take(&parts[0], &parts[1], value, *span)
-                            || self.try_emit_set_field_take(&parts[0], &parts[1], value, *span))
-                    {
-                        return self.stmt_unit(value_discarded);
-                    }
-                    // Namespaced top-level slot promotion: `ns.sum = ns.sum + i`
-                    // resolves to a direct slot when the full name is a local.
-                    if let Resolved::Slot(_) = self.resolve(&full) {
-                        if let Some(op) = self.try_slot_binop_path(parts, value) {
-                            self.emit(op);
-                            return self.stmt_unit(value_discarded);
-                        }
-                    }
-                    self.compile_expr(value);
-                    self.compile_path_store(parts, *span);
-                    self.stmt_unit(value_discarded)
-                }
-                Expr::Index { obj, index, span } => {
-                    // Take-restore plain index stores (`a[i] = v`): keeps
-                    // the container uniquely owned so the element write
-                    // mutates in place instead of deep-copying it.
-                    if self.try_emit_set_index_take(obj, index, value, *span, None) {
-                        return self.stmt_unit(value_discarded);
-                    }
-                    // Take-restore indexed field stores (#242): `s.f[i]`
-                    // and path-spelled equivalents.
-                    let home_field: Option<(&str, &str)> = match obj.as_ref() {
-                        Expr::Field {
-                            obj: inner,
-                            name: f,
-                            ..
-                        } => Self::field_home_obj(inner).map(|h| (h, f.as_str())),
-                        Expr::Path { parts, .. } if parts.len() == 2 => {
-                            Some((parts[0].as_str(), parts[1].as_str()))
-                        }
-                        _ => None,
-                    };
-                    if let Some((home, field)) = home_field {
-                        if self.try_emit_set_field_index_take(home, field, index, value, *span) {
-                            return self.stmt_unit(value_discarded);
-                        }
-                    }
-                    // Source order: base, index, value (spec §7). The
-                    // stack layout stays [base, index, value] for the new
-                    // StoreIndexOp pop order (value, index, object).
-                    self.compile_expr(obj);
-                    self.compile_expr(index);
-                    self.compile_expr(value);
-                    self.emit(Op::StoreIndexOp(*span));
-                    self.compile_write_back(obj);
-                    self.stmt_unit(value_discarded)
-                }
-                Expr::Field { obj, name, span } => {
-                    // Move-take for simple field homes (`s.f = ...`).
-                    if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
-                        let target = Expr::Path {
-                            parts: vec![obj_name.clone(), name.clone()],
-                            span: *span,
-                        };
-                        let nv = self.normalize_move_value(value);
-                        let v2 = nv.as_ref().unwrap_or(value);
-                        if let Some(MoveKind::FieldPush { obj: o, field: f }) =
-                            classify_self_assign(&target, v2)
+                    Expr::Path { parts, span } => {
+                        let full = parts.join(".");
+                        // Move-take: fused push/field takes (locals and
+                        // module-global homes). State bindings live in the
+                        // registry, not slots, so they cannot use move-path
+                        // optimization; fall through to StoreState.
+                        if parts.len() == 2
+                            && !self.state_names.contains(&full)
+                            && self.try_emit_move_path(parts, *span, value)
                         {
-                            // Receiver must spell the target exactly (a
-                            // differently-spelled occurrence names another
-                            // variable, e.g. a shadowing twin).
-                            let receiver_ok = match value {
+                            return self.stmt_unit(value_discarded);
+                        }
+                        // Move-take for `ns.x = f(ns.x, ...)`: thread the
+                        // global through the call instead of cloning it
+                        // (slot homes only; the flag is consumed by the
+                        // single matching path load, cleared either way).
+                        if parts.len() == 2
+                            && self.thread_classify_path(parts, value, *span).is_some()
+                        {
+                            if let Some((flag_key, home)) = self.thread_take_home_path(parts) {
+                                self.move_take = Some((flag_key, home));
+                                self.compile_expr(value);
+                                self.move_take = None;
+                                self.compile_path_store(parts, *span);
+                                return self.stmt_unit(value_discarded);
+                            }
+                        }
+                        let full = parts.join(".");
+                        // Take-restore field stores (#242): pure stores and
+                        // self-read-modify-write skip the container clone.
+                        // Module-namespace targets fall through (their heads
+                        // never resolve to a takeable home).
+                        if parts.len() == 2
+                            && (self.try_emit_field_binop_take(&parts[0], &parts[1], value, *span)
+                                || self.try_emit_set_field_take(&parts[0], &parts[1], value, *span))
+                        {
+                            return self.stmt_unit(value_discarded);
+                        }
+                        // Namespaced top-level slot promotion: `ns.sum = ns.sum + i`
+                        // resolves to a direct slot when the full name is a local.
+                        if let Resolved::Slot(_) = self.resolve(&full) {
+                            if let Some(op) = self.try_slot_binop_path(parts, value) {
+                                self.emit(op);
+                                return self.stmt_unit(value_discarded);
+                            }
+                        }
+                        self.compile_expr(value);
+                        self.compile_path_store(parts, *span);
+                        self.stmt_unit(value_discarded)
+                    }
+                    Expr::Index { obj, index, span } => {
+                        // Take-restore plain index stores (`a[i] = v`): keeps
+                        // the container uniquely owned so the element write
+                        // mutates in place instead of deep-copying it.
+                        if self.try_emit_set_index_take(obj, index, value, *span, None) {
+                            return self.stmt_unit(value_discarded);
+                        }
+                        // Take-restore indexed field stores (#242): `s.f[i]`
+                        // and path-spelled equivalents.
+                        let home_field: Option<(&str, &str)> = match obj.as_ref() {
+                            Expr::Field {
+                                obj: inner,
+                                name: f,
+                                ..
+                            } => Self::field_home_obj(inner).map(|h| (h, f.as_str())),
+                            Expr::Path { parts, .. } if parts.len() == 2 => {
+                                Some((parts[0].as_str(), parts[1].as_str()))
+                            }
+                            _ => None,
+                        };
+                        if let Some((home, field)) = home_field {
+                            if self.try_emit_set_field_index_take(home, field, index, value, *span)
+                            {
+                                return self.stmt_unit(value_discarded);
+                            }
+                        }
+                        // Source order: base, index, value (spec §7). The
+                        // stack layout stays [base, index, value] for the new
+                        // StoreIndexOp pop order (value, index, object).
+                        self.compile_expr(obj);
+                        self.compile_expr(index);
+                        self.compile_expr(value);
+                        self.emit(Op::StoreIndexOp(*span));
+                        self.compile_write_back(obj);
+                        self.stmt_unit(value_discarded)
+                    }
+                    Expr::Field { obj, name, span } => {
+                        // Move-take for simple field homes (`s.f = ...`).
+                        if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+                            let target = Expr::Path {
+                                parts: vec![obj_name.clone(), name.clone()],
+                                span: *span,
+                            };
+                            let nv = self.normalize_move_value(value);
+                            let v2 = nv.as_ref().unwrap_or(value);
+                            if let Some(MoveKind::FieldPush { obj: o, field: f }) =
+                                classify_self_assign(&target, v2)
+                            {
+                                // Receiver must spell the target exactly (a
+                                // differently-spelled occurrence names another
+                                // variable, e.g. a shadowing twin).
+                                let receiver_ok = match value {
                                 Expr::Call { args, .. } => {
                                     args.first().is_some_and(|r| {
                                         matches!(r, Expr::Field { obj: ro, name: rn, .. }
@@ -3350,73 +3359,125 @@ impl Compiler {
                                 }
                                 _ => false,
                             };
-                            if o == *obj_name
-                                && f == *name
-                                && receiver_ok
-                                && self.try_emit_move_field(&o, &f, value, *span)
+                                if o == *obj_name
+                                    && f == *name
+                                    && receiver_ok
+                                    && self.try_emit_move_field(&o, &f, value, *span)
+                                {
+                                    return self.stmt_unit(value_discarded);
+                                }
+                            }
+                        }
+                        // Take-restore field stores (#242): pure stores and
+                        // self-read-modify-write skip the container clone.
+                        if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
+                            if self.try_emit_field_binop_take(obj_name, name, value, *span)
+                                || self.try_emit_set_field_take(obj_name, name, value, *span)
                             {
                                 return self.stmt_unit(value_discarded);
                             }
                         }
-                    }
-                    // Take-restore field stores (#242): pure stores and
-                    // self-read-modify-write skip the container clone.
-                    if let Expr::Ident { name: obj_name, .. } = obj.as_ref() {
-                        if self.try_emit_field_binop_take(obj_name, name, value, *span)
-                            || self.try_emit_set_field_take(obj_name, name, value, *span)
+                        // Source order: base, then value (spec §7). `Swap`
+                        // feeds the value-below `SetField` layout.
+                        self.compile_expr(obj);
+                        self.compile_expr(value);
+                        self.emit(Op::Swap);
+                        // Type-driven fast path for field assignment.
+                        if let Some(zz_checker::Type::Struct(struct_name, _)) =
+                            self.type_of(obj.span())
                         {
-                            return self.stmt_unit(value_discarded);
-                        }
-                    }
-                    // Source order: base, then value (spec §7). `Swap`
-                    // feeds the value-below `SetField` layout.
-                    self.compile_expr(obj);
-                    self.compile_expr(value);
-                    self.emit(Op::Swap);
-                    // Type-driven fast path for field assignment.
-                    if let Some(zz_checker::Type::Struct(struct_name, _)) = self.type_of(obj.span())
-                    {
-                        if let Some(sig) = self.structs.as_ref().and_then(|s| s.get(struct_name)) {
-                            if let Some(idx) = sig.fields.iter().position(|(n, _)| n == name) {
-                                self.emit(Op::SetFieldIdx(idx as u16, *span));
-                                self.compile_write_back(obj);
-                                return self.stmt_unit(value_discarded);
+                            if let Some(sig) =
+                                self.structs.as_ref().and_then(|s| s.get(struct_name))
+                            {
+                                if let Some(idx) = sig.fields.iter().position(|(n, _)| n == name) {
+                                    self.emit(Op::SetFieldIdx(idx as u16, *span));
+                                    self.compile_write_back(obj);
+                                    return self.stmt_unit(value_discarded);
+                                }
                             }
                         }
+                        self.emit(Op::SetField(name.clone(), *span));
+                        self.compile_write_back(obj);
+                        self.stmt_unit(value_discarded)
                     }
-                    self.emit(Op::SetField(name.clone(), *span));
-                    self.compile_write_back(obj);
-                    self.stmt_unit(value_discarded)
-                }
-                _ => {
-                    // Defensive: an assignment target that cannot be stored
-                    // to. Leave the stack untouched rather than aborting.
-                    StmtValue::None
-                }
-            },
-            Stmt::CompoundAssign {
-                target,
-                op,
-                value,
-                span,
-            } => match target {
-                Expr::Ident { name, .. } if self.state_names.contains(name) => {
-                    // D2: `state x OP= v` is a single atomic RMW under one
-                    // lock acquisition. Emit `RmwState` directly instead of
-                    // rewriting to `Assign` (which would be separate
-                    // LoadState + StoreState — not atomic).
-                    self.compile_expr(value);
-                    self.emit(Op::RmwState(name.clone(), *op, *span));
-                    StmtValue::None
-                }
-                Expr::Path { parts, span: pspan } => {
-                    let full = parts.join(".");
-                    if self.state_names.contains(&full) {
-                        self.compile_expr(value);
-                        self.emit(Op::RmwState(parts.join("."), *op, *pspan));
+                    _ => {
+                        // Defensive: an assignment target that cannot be stored
+                        // to. Leave the stack untouched rather than aborting.
                         StmtValue::None
-                    } else {
-                        // Fall through to generic path
+                    }
+                },
+                Stmt::CompoundAssign {
+                    target,
+                    op,
+                    value,
+                    span,
+                } => match target {
+                    Expr::Ident { name, .. } if self.state_names.contains(name) => {
+                        // D2: `state x OP= v` is a single atomic RMW under one
+                        // lock acquisition. Emit `RmwState` directly instead of
+                        // rewriting to `Assign` (which would be separate
+                        // LoadState + StoreState — not atomic).
+                        self.compile_expr(value);
+                        self.emit(Op::RmwState(name.clone(), *op, *span));
+                        StmtValue::None
+                    }
+                    Expr::Path { parts, span: pspan } => {
+                        let full = parts.join(".");
+                        if self.state_names.contains(&full) {
+                            self.compile_expr(value);
+                            self.emit(Op::RmwState(parts.join("."), *op, *pspan));
+                            StmtValue::None
+                        } else {
+                            // Fall through to generic path
+                            let synthetic = Stmt::Assign {
+                                target: target.clone(),
+                                value: Expr::Binary {
+                                    op: *op,
+                                    left: Box::new(target.clone()),
+                                    right: Box::new(value.clone()),
+                                    span: *span,
+                                },
+                                span: *span,
+                            };
+                            self.compile_stmt(&synthetic, value_discarded)
+                        }
+                    }
+                    Expr::Ident { .. } => {
+                        // Side-effect-free receivers: rewrite to the plain
+                        // Assign path with a synthesized
+                        // `target = target OP value`, so slot fusion, green
+                        // handling, and struct paths behave identically.
+                        // (Re-evaluating an Ident/Path is unobservable.)
+                        //
+                        // The fused fast paths key off the Binary node's
+                        // span in the checker's type table, which has no
+                        // entry for a synthesized node. Seed it with the
+                        // target's own type: the checker already unified
+                        // `target OP value` with the target, so this is
+                        // exactly what `x = x OP y` would have recorded.
+                        // Without it, `x += 1` falls off the SlotInc fast
+                        // path and runs ~25% slower than `x = x + 1`.
+                        if let Some(ty) = self.type_of(target.span()).cloned() {
+                            // `types` is shared (`Arc`); `make_mut` clones
+                            // only if another owner exists, otherwise edits
+                            // in place — either way our synthetic entry never
+                            // leaks into anyone else's table.
+                            if let Some(types) = self.types.as_mut() {
+                                let table = std::sync::Arc::make_mut(types);
+                                table.insert(
+                                    zz_checker::SpanKey::new(
+                                        zz_arena::Symbol(
+                                            *self
+                                                .symbol_map
+                                                .get(&self.type_scope)
+                                                .expect("type_scope should be in symbol_map"),
+                                        ),
+                                        *span,
+                                    ),
+                                    ty,
+                                );
+                            }
+                        }
                         let synthetic = Stmt::Assign {
                             target: target.clone(),
                             value: Expr::Binary {
@@ -3429,267 +3490,227 @@ impl Compiler {
                         };
                         self.compile_stmt(&synthetic, value_discarded)
                     }
-                }
-                Expr::Ident { .. } => {
-                    // Side-effect-free receivers: rewrite to the plain
-                    // Assign path with a synthesized
-                    // `target = target OP value`, so slot fusion, green
-                    // handling, and struct paths behave identically.
-                    // (Re-evaluating an Ident/Path is unobservable.)
-                    //
-                    // The fused fast paths key off the Binary node's
-                    // span in the checker's type table, which has no
-                    // entry for a synthesized node. Seed it with the
-                    // target's own type: the checker already unified
-                    // `target OP value` with the target, so this is
-                    // exactly what `x = x OP y` would have recorded.
-                    // Without it, `x += 1` falls off the SlotInc fast
-                    // path and runs ~25% slower than `x = x + 1`.
-                    if let Some(ty) = self.type_of(target.span()).cloned() {
-                        // `types` is shared (`Arc`); `make_mut` clones
-                        // only if another owner exists, otherwise edits
-                        // in place — either way our synthetic entry never
-                        // leaks into anyone else's table.
-                        if let Some(types) = self.types.as_mut() {
-                            let table = std::sync::Arc::make_mut(types);
-                            table.insert(
-                                zz_checker::SpanKey::new(
-                                    zz_arena::Symbol(
-                                        *self
-                                            .symbol_map
-                                            .get(&self.type_scope)
-                                            .expect("type_scope should be in symbol_map"),
-                                    ),
-                                    *span,
-                                ),
-                                ty,
-                            );
+                    Expr::Index { obj, index, .. } => {
+                        // Take-restore compound index stores (`a[i] += v`): same
+                        // win as the plain store, and the sharper case in
+                        // practice (counting loops). The rhs is evaluated before
+                        // the take, so `a[i] += a[j]` still stays generic.
+                        if self.try_emit_set_index_take(obj, index, value, *span, Some(*op)) {
+                            return self.stmt_unit(value_discarded);
+                        }
+                        // Receiver first (same order as the tree-walker),
+                        // each evaluated exactly once.
+                        self.compile_expr(obj);
+                        self.compile_expr(index);
+                        self.compile_expr(value);
+                        self.emit(Op::CompoundIndexOp {
+                            op: *op,
+                            span: *span,
+                        });
+                        self.compile_write_back(obj);
+                        self.stmt_unit(value_discarded)
+                    }
+                    Expr::Field { obj, name, .. } => {
+                        self.compile_expr(obj);
+                        self.compile_expr(value);
+                        self.emit(Op::CompoundFieldOp {
+                            name: name.clone(),
+                            op: *op,
+                            span: *span,
+                        });
+                        self.compile_write_back(obj);
+                        self.stmt_unit(value_discarded)
+                    }
+                    _ => {
+                        // Defensive: a compound-assignment target that cannot be
+                        // stored to. Leave the stack untouched rather than aborting.
+                        StmtValue::None
+                    }
+                },
+                Stmt::Expr(e) => {
+                    // A discarded `if` needs no value: compile it as a statement,
+                    // which drops the missing-else arm's `const unit`, the `jmp`
+                    // over it and the caller's `Pop` — three ops out of every
+                    // statement-position `if` in a loop body. Only when the value
+                    // is dead; a trailing `if` whose value is read keeps the
+                    // value-producing shape.
+                    if value_discarded {
+                        if let Expr::If {
+                            cond,
+                            then,
+                            els,
+                            span,
+                        } = e
+                        {
+                            self.compile_if_stmt(cond, then, els, *span);
+                            break 'compile StmtValue::None;
+                        }
+                        // A discarded `while` needs no loop-result value: the
+                        // per-iteration `SetLoopResult` and the unit it popped
+                        // only ever fed a caller that read the value.
+                        if let Expr::While { cond, body, span } = e {
+                            self.compile_while(cond, body, *span, true);
+                            break 'compile StmtValue::None;
                         }
                     }
-                    let synthetic = Stmt::Assign {
-                        target: target.clone(),
-                        value: Expr::Binary {
-                            op: *op,
-                            left: Box::new(target.clone()),
-                            right: Box::new(value.clone()),
-                            span: *span,
-                        },
-                        span: *span,
-                    };
-                    self.compile_stmt(&synthetic, value_discarded)
-                }
-                Expr::Index { obj, index, .. } => {
-                    // Take-restore compound index stores (`a[i] += v`): same
-                    // win as the plain store, and the sharper case in
-                    // practice (counting loops). The rhs is evaluated before
-                    // the take, so `a[i] += a[j]` still stays generic.
-                    if self.try_emit_set_index_take(obj, index, value, *span, Some(*op)) {
-                        return self.stmt_unit(value_discarded);
+                    // Move-take: fused `x.push(e)` / `x.append(e)` /
+                    // `append(x, e)` statements (take, push reusing the owned
+                    // `Vec`, store back — the existing write-back below stays
+                    // for every other method).
+                    if self.try_emit_move_push_stmt(e) {
+                        break 'compile StmtValue::None;
                     }
-                    // Receiver first (same order as the tree-walker),
-                    // each evaluated exactly once.
-                    self.compile_expr(obj);
-                    self.compile_expr(index);
-                    self.compile_expr(value);
-                    self.emit(Op::CompoundIndexOp {
-                        op: *op,
-                        span: *span,
-                    });
-                    self.compile_write_back(obj);
-                    self.stmt_unit(value_discarded)
-                }
-                Expr::Field { obj, name, .. } => {
-                    self.compile_expr(obj);
-                    self.compile_expr(value);
-                    self.emit(Op::CompoundFieldOp {
-                        name: name.clone(),
-                        op: *op,
-                        span: *span,
-                    });
-                    self.compile_write_back(obj);
-                    self.stmt_unit(value_discarded)
-                }
-                _ => {
-                    // Defensive: a compound-assignment target that cannot be
-                    // stored to. Leave the stack untouched rather than aborting.
-                    StmtValue::None
-                }
-            },
-            Stmt::Expr(e) => {
-                // A discarded `if` needs no value: compile it as a statement,
-                // which drops the missing-else arm's `const unit`, the `jmp`
-                // over it and the caller's `Pop` — three ops out of every
-                // statement-position `if` in a loop body. Only when the value
-                // is dead; a trailing `if` whose value is read keeps the
-                // value-producing shape.
-                if value_discarded {
-                    if let Expr::If {
-                        cond,
-                        then,
-                        els,
-                        span,
+                    // Method call write-back: if `obj.method(args)` is called as a
+                    // statement, the return value (e.g. the new array from push/pop)
+                    // must be written back to `obj` so the mutation is visible.
+                    // Only intercept known mutating methods to avoid corrupting
+                    // non-mutating calls (e.g. `arr.len()` should not write back).
+                    if let Expr::Call {
+                        callee,
+                        args,
+                        named,
+                        ..
                     } = e
                     {
-                        self.compile_if_stmt(cond, then, els, *span);
-                        return StmtValue::None;
-                    }
-                    // A discarded `while` needs no loop-result value: the
-                    // per-iteration `SetLoopResult` and the unit it popped
-                    // only ever fed a caller that read the value.
-                    if let Expr::While { cond, body, span } = e {
-                        self.compile_while(cond, body, *span, true);
-                        return StmtValue::None;
-                    }
-                }
-                // Move-take: fused `x.push(e)` / `x.append(e)` /
-                // `append(x, e)` statements (take, push reusing the owned
-                // `Vec`, store back — the existing write-back below stays
-                // for every other method).
-                if self.try_emit_move_push_stmt(e) {
-                    return StmtValue::None;
-                }
-                // Method call write-back: if `obj.method(args)` is called as a
-                // statement, the return value (e.g. the new array from push/pop)
-                // must be written back to `obj` so the mutation is visible.
-                // Only intercept known mutating methods to avoid corrupting
-                // non-mutating calls (e.g. `arr.len()` should not write back).
-                if let Expr::Call {
-                    callee,
-                    args,
-                    named,
-                    ..
-                } = e
-                {
-                    // Known mutating array methods that return the modified array.
-                    const MUTATING_METHODS: &[&str] =
-                        &["push", "pop", "insert", "remove", "reverse", "sort"];
+                        // Known mutating array methods that return the modified array.
+                        const MUTATING_METHODS: &[&str] =
+                            &["push", "pop", "insert", "remove", "reverse", "sort"];
 
-                    // Handle `arr.push(x)` — parsed as Path { parts: ["arr", "push"] }
-                    if let Expr::Path { parts, .. } = callee.as_ref() {
-                        if parts.len() == 2 {
-                            let method_name = &parts[1];
-                            // A dotted stdlib native (`fs.append`,
-                            // `fs.remove`, …) is a real call, not an
-                            // array-method write-back. The typed pipeline
-                            // knows every native name; without it the
-                            // rewrite would emit LoadVar(fs) for a module
-                            // namespace ("undefined variable `fs`").
-                            let dotted = parts.join(".");
-                            let is_native = self
-                                .native_names
-                                .as_ref()
-                                .is_some_and(|n| zz_checker::contains_std(n, &dotted));
-                            if !is_native && MUTATING_METHODS.contains(&method_name.as_str()) {
-                                let obj_name = &parts[0];
-                                // Compile: LoadVar(obj) + args + CallMethod(method)
-                                match self.resolve(obj_name) {
-                                    Resolved::Slot(slot) => self.emit(Op::LoadSlot(slot as u16)),
-                                    Resolved::Env => {
-                                        self.emit(Op::LoadVar(obj_name.clone(), e.span()))
+                        // Handle `arr.push(x)` — parsed as Path { parts: ["arr", "push"] }
+                        if let Expr::Path { parts, .. } = callee.as_ref() {
+                            if parts.len() == 2 {
+                                let method_name = &parts[1];
+                                // A dotted stdlib native (`fs.append`,
+                                // `fs.remove`, …) is a real call, not an
+                                // array-method write-back. The typed pipeline
+                                // knows every native name; without it the
+                                // rewrite would emit LoadVar(fs) for a module
+                                // namespace ("undefined variable `fs`").
+                                let dotted = parts.join(".");
+                                let is_native = self
+                                    .native_names
+                                    .as_ref()
+                                    .is_some_and(|n| zz_checker::contains_std(n, &dotted));
+                                if !is_native && MUTATING_METHODS.contains(&method_name.as_str()) {
+                                    let obj_name = &parts[0];
+                                    // Compile: LoadVar(obj) + args + CallMethod(method)
+                                    match self.resolve(obj_name) {
+                                        Resolved::Slot(slot) => {
+                                            self.emit(Op::LoadSlot(slot as u16))
+                                        }
+                                        Resolved::Env => {
+                                            self.emit(Op::LoadVar(obj_name.clone(), e.span()))
+                                        }
+                                        Resolved::State => {
+                                            self.emit(Op::LoadState(obj_name.clone(), e.span()))
+                                        }
                                     }
-                                    Resolved::State => {
-                                        self.emit(Op::LoadState(obj_name.clone(), e.span()))
+                                    for a in args {
+                                        self.compile_expr(a);
                                     }
-                                }
-                                for a in args {
-                                    self.compile_expr(a);
-                                }
-                                for (_, val) in named {
-                                    self.compile_expr(val);
-                                }
-                                self.emit(Op::CallMethod {
-                                    name: method_name.clone(),
-                                    argc: (args.len() + named.len()) as u16,
-                                    span: e.span(),
-                                    recv_home: None,
-                                });
-                                // Write back: StoreVar(obj) pops the result into the variable
-                                match self.resolve(obj_name) {
-                                    Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
-                                    Resolved::Env => {
-                                        self.emit(Op::StoreVar(obj_name.clone(), e.span()))
+                                    for (_, val) in named {
+                                        self.compile_expr(val);
                                     }
-                                    Resolved::State => {
-                                        self.emit(Op::StoreState(obj_name.clone(), e.span()))
+                                    self.emit(Op::CallMethod {
+                                        name: method_name.clone(),
+                                        argc: (args.len() + named.len()) as u16,
+                                        span: e.span(),
+                                        recv_home: None,
+                                    });
+                                    // Write back: StoreVar(obj) pops the result into the variable
+                                    match self.resolve(obj_name) {
+                                        Resolved::Slot(slot) => {
+                                            self.emit(Op::StoreSlot(slot as u16))
+                                        }
+                                        Resolved::Env => {
+                                            self.emit(Op::StoreVar(obj_name.clone(), e.span()))
+                                        }
+                                        Resolved::State => {
+                                            self.emit(Op::StoreState(obj_name.clone(), e.span()))
+                                        }
                                     }
+                                    break 'compile StmtValue::None;
                                 }
-                                return StmtValue::None;
+                            }
+                        }
+                        // Chained receiver (`base.field.push(x)`, deeper chains
+                        // alike): method is the last segment; call on the chain
+                        // value, then store back through the chain (any depth).
+                        // Without this the result was discarded — a silent no-op
+                        // that diverged from the assign form (`b.cmds = ...`).
+                        if let Expr::Path { parts, .. } = callee.as_ref() {
+                            if parts.len() >= 3 {
+                                let method_name = parts.last().unwrap();
+                                let dotted = parts.join(".");
+                                let is_native = self
+                                    .native_names
+                                    .as_ref()
+                                    .is_some_and(|n| zz_checker::contains_std(n, &dotted));
+                                if !is_native && MUTATING_METHODS.contains(&method_name.as_str()) {
+                                    let recv_parts = parts[..parts.len() - 1].to_vec();
+                                    self.compile_path_load(&recv_parts, e.span());
+                                    for a in args {
+                                        self.compile_expr(a);
+                                    }
+                                    for (_, val) in named {
+                                        self.compile_expr(val);
+                                    }
+                                    self.emit(Op::CallMethod {
+                                        name: method_name.clone(),
+                                        argc: (args.len() + named.len()) as u16,
+                                        span: e.span(),
+                                        recv_home: None,
+                                    });
+                                    self.compile_path_store(&recv_parts, e.span());
+                                    break 'compile StmtValue::None;
+                                }
+                            }
+                        }
+                        // Handle `obj.method(x)` — parsed as Field { obj, name }
+                        if let Expr::Field {
+                            obj: field_obj,
+                            name: method_name,
+                            ..
+                        } = callee.as_ref()
+                        {
+                            if MUTATING_METHODS.contains(&method_name.as_str()) {
+                                if let Expr::Ident { name, span } = field_obj.as_ref() {
+                                    self.compile_expr(field_obj);
+                                    for a in args {
+                                        self.compile_expr(a);
+                                    }
+                                    for (_, val) in named {
+                                        self.compile_expr(val);
+                                    }
+                                    self.emit(Op::CallMethod {
+                                        name: method_name.clone(),
+                                        argc: (args.len() + named.len()) as u16,
+                                        span: e.span(),
+                                        recv_home: None,
+                                    });
+                                    match self.resolve(name) {
+                                        Resolved::Slot(slot) => {
+                                            self.emit(Op::StoreSlot(slot as u16))
+                                        }
+                                        Resolved::Env => {
+                                            self.emit(Op::StoreVar(name.clone(), *span))
+                                        }
+                                        Resolved::State => {
+                                            self.emit(Op::StoreState(name.clone(), *span))
+                                        }
+                                    }
+                                    break 'compile StmtValue::None;
+                                }
                             }
                         }
                     }
-                    // Chained receiver (`base.field.push(x)`, deeper chains
-                    // alike): method is the last segment; call on the chain
-                    // value, then store back through the chain (any depth).
-                    // Without this the result was discarded — a silent no-op
-                    // that diverged from the assign form (`b.cmds = ...`).
-                    if let Expr::Path { parts, .. } = callee.as_ref() {
-                        if parts.len() >= 3 {
-                            let method_name = parts.last().unwrap();
-                            let dotted = parts.join(".");
-                            let is_native = self
-                                .native_names
-                                .as_ref()
-                                .is_some_and(|n| zz_checker::contains_std(n, &dotted));
-                            if !is_native && MUTATING_METHODS.contains(&method_name.as_str()) {
-                                let recv_parts = parts[..parts.len() - 1].to_vec();
-                                self.compile_path_load(&recv_parts, e.span());
-                                for a in args {
-                                    self.compile_expr(a);
-                                }
-                                for (_, val) in named {
-                                    self.compile_expr(val);
-                                }
-                                self.emit(Op::CallMethod {
-                                    name: method_name.clone(),
-                                    argc: (args.len() + named.len()) as u16,
-                                    span: e.span(),
-                                    recv_home: None,
-                                });
-                                self.compile_path_store(&recv_parts, e.span());
-                                return StmtValue::None;
-                            }
-                        }
-                    }
-                    // Handle `obj.method(x)` — parsed as Field { obj, name }
-                    if let Expr::Field {
-                        obj: field_obj,
-                        name: method_name,
-                        ..
-                    } = callee.as_ref()
-                    {
-                        if MUTATING_METHODS.contains(&method_name.as_str()) {
-                            if let Expr::Ident { name, span } = field_obj.as_ref() {
-                                self.compile_expr(field_obj);
-                                for a in args {
-                                    self.compile_expr(a);
-                                }
-                                for (_, val) in named {
-                                    self.compile_expr(val);
-                                }
-                                self.emit(Op::CallMethod {
-                                    name: method_name.clone(),
-                                    argc: (args.len() + named.len()) as u16,
-                                    span: e.span(),
-                                    recv_home: None,
-                                });
-                                match self.resolve(name) {
-                                    Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
-                                    Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
-                                    Resolved::State => {
-                                        self.emit(Op::StoreState(name.clone(), *span))
-                                    }
-                                }
-                                return StmtValue::None;
-                            }
-                        }
-                    }
+                    // NOTE: the bare `append(arr, val)` builtin was removed — push
+                    // is `vec.push(x, e)` or the method `x.push(e)`.
+                    self.compile_expr(e);
+                    StmtValue::Discard
                 }
-                // NOTE: the bare `append(arr, val)` builtin was removed — push
-                // is `vec.push(x, e)` or the method `x.push(e)`.
-                self.compile_expr(e);
-                StmtValue::Discard
             }
-        };
+        }; // close match, then 'compile block
         if reads_state && self.in_atomic_depth == 0 {
             self.emit(Op::StateBatchEnd(stmt.span()));
         }

@@ -1,0 +1,108 @@
+warning: unused build dependency `cc`
+  --> crates/zz_stdlib_native/Cargo.toml:25:1
+   |
+25 | cc = "1"
+   | ^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `cc`
+warning: `zz_stdlib_native` (manifest) generated 1 warning
+   Compiling zz_span_ast v0.4.0 (/home/zaid/Projects/zz/crates/zz_span_ast)
+   Compiling zz_codegen_runtime v0.4.0 (/home/zaid/Projects/zz/crates/zz_codegen_runtime)
+   Compiling zz_paths v0.4.0 (/home/zaid/Projects/zz/crates/zz_paths)
+   Compiling zz_diag_core v0.4.0 (/home/zaid/Projects/zz/crates/zz_diag_core)
+   Compiling zz_lexer v0.4.0 (/home/zaid/Projects/zz/crates/zz_lexer)
+   Compiling zz_diag v0.4.0 (/home/zaid/Projects/zz/crates/zz_diag)
+   Compiling zz_unify v0.4.0 (/home/zaid/Projects/zz/crates/zz_unify)
+   Compiling zz_http_routes v0.4.0 (/home/zaid/Projects/zz/crates/zz_http_routes)
+   Compiling zz_parser v0.4.0 (/home/zaid/Projects/zz/crates/zz_parser)
+   Compiling zz_checker_core v0.4.0 (/home/zaid/Projects/zz/crates/zz_checker_core)
+   Compiling zz_infer v0.4.0 (/home/zaid/Projects/zz/crates/zz_infer)
+   Compiling zz_frontend v0.4.0 (/home/zaid/Projects/zz/crates/zz_frontend)
+   Compiling zz_structs v0.4.0 (/home/zaid/Projects/zz/crates/zz_structs)
+   Compiling zz_sigs v0.4.0 (/home/zaid/Projects/zz/crates/zz_sigs)
+   Compiling zz_scope v0.4.0 (/home/zaid/Projects/zz/crates/zz_scope)
+   Compiling zz_pm v0.4.0 (/home/zaid/Projects/zz/crates/zz_pm)
+   Compiling zz_fmt v0.4.0 (/home/zaid/Projects/zz/crates/zz_fmt)
+   Compiling zz_lints v0.4.0 (/home/zaid/Projects/zz/crates/zz_lints)
+   Compiling zz_type_check v0.4.0 (/home/zaid/Projects/zz/crates/zz_type_check)
+   Compiling zz_checker v0.4.0 (/home/zaid/Projects/zz/crates/zz_checker)
+   Compiling zz_runtime v0.4.0 (/home/zaid/Projects/zz/crates/zz_runtime)
+   Compiling zz_stdlib_meta v0.4.0 (/home/zaid/Projects/zz/crates/zz_stdlib_meta)
+   Compiling zz_hir v0.4.0 (/home/zaid/Projects/zz/crates/zz_hir)
+   Compiling zz_codegen_ffi v0.4.0 (/home/zaid/Projects/zz/crates/zz_codegen_ffi)
+warning: unexpected `cfg` condition value: `nolock_selftest`
+   --> crates/zz_runtime/src/vm/runtime.rs:230:19
+    |
+230 |         #[cfg(not(feature = "nolock_selftest"))]
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `nolock_selftest` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition value: `nolock_selftest`
+    --> crates/zz_runtime/src/vm/runtime.rs:1139:31
+     |
+1139 |                     #[cfg(not(feature = "nolock_selftest"))]
+     |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+     |
+     = note: no expected values for `feature`
+     = help: consider adding `nolock_selftest` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `nolock_selftest`
+    --> crates/zz_runtime/src/vm/runtime.rs:1153:31
+     |
+1153 |                     #[cfg(not(feature = "nolock_selftest"))]
+     |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+     |
+     = note: no expected values for `feature`
+     = help: consider adding `nolock_selftest` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+   Compiling fuzz v0.1.0 (/home/zaid/Projects/zz/fuzz)
+warning: `zz_runtime` (lib) generated 3 warnings
+   Compiling zz_stdlib v0.4.0 (/home/zaid/Projects/zz/crates/zz_stdlib)
+   Compiling zz_ir v0.4.0 (/home/zaid/Projects/zz/crates/zz_ir)
+   Compiling zz_plugin v0.1.0 (/home/zaid/Projects/zz/crates/zz_plugin)
+   Compiling zz_codegen_cc v0.4.0 (/home/zaid/Projects/zz/crates/zz_codegen_cc)
+   Compiling zz_run_cache v0.4.0 (/home/zaid/Projects/zz/crates/zz_run_cache)
+   Compiling zz_lower v0.4.0 (/home/zaid/Projects/zz/crates/zz_lower)
+   Compiling zz_loader v0.4.0 (/home/zaid/Projects/zz/crates/zz_loader)
+   Compiling zz_session v0.4.0 (/home/zaid/Projects/zz/crates/zz_session)
+   Compiling zz_repl v0.4.0 (/home/zaid/Projects/zz/crates/zz_repl)
+warning: unused variable: `body`
+    --> crates/zz_lower/src/context.rs:1182:29
+     |
+1182 |             Expr::Closure { body, .. } => false, // closures capture, don't directly read
+     |                             ^^^^ help: try ignoring the field: `body: _`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `static_func_value` and `static_func_value_ident` are never used
+    --> crates/zz_lower/src/expr.rs:5966:8
+     |
+ 229 | impl Lowerer {
+     | ------------ methods in this implementation
+...
+5966 |     fn static_func_value(&self, name: &str) -> Option<String> {
+     |        ^^^^^^^^^^^^^^^^^
+...
+5994 |     fn static_func_value_ident(&self, name: &str) -> Option<String> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling zz_chunk v0.4.0 (/home/zaid/Projects/zz/crates/zz_chunk)
+   Compiling zz_codegen v0.4.0 (/home/zaid/Projects/zz/crates/zz_codegen)
+warning: `zz_lower` (lib) generated 2 warnings (run `cargo fix --lib -p zz_lower` to apply 1 suggestion)
+   Compiling zz_build v0.4.0 (/home/zaid/Projects/zz/crates/zz_build)
+   Compiling zz_lsp v0.4.0 (/home/zaid/Projects/zz/crates/zz_lsp)
+   Compiling zz_test_runner v0.4.0 (/home/zaid/Projects/zz/crates/zz_test_runner)
+   Compiling zz_cli v0.4.0 (/home/zaid/Projects/zz/crates/zz_cli)
+   Compiling zz_stdlib_native v0.4.0 (/home/zaid/Projects/zz/crates/zz_stdlib_native)
+   Compiling zz-dap v0.4.0 (/home/zaid/Projects/zz/crates/zz_dap)
+warning: `zz_lower` (lib test) generated 2 warnings (2 duplicates)
+warning: `zz_runtime` (lib test) generated 3 warnings (3 duplicates)

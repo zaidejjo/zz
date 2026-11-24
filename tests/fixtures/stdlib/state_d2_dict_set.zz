@@ -1,4 +1,4 @@
-// features: int-arith, locals, print, state, std-dict
+// features: int-arith, locals, print, state, dicts
 // D2: dict index-store on a state dict compiles without `atomic { }`.
 // Dicts use index syntax (`d["k"] = v`) — there are no `dict.set`/`dict.insert`/
 // `dict.remove` natives; the index store is the "dict.set" equivalent.
