@@ -1,0 +1,188 @@
+# Step 3b — root cause of the multi-state read tear
+
+Date: 2026-11-25
+Engine under test: default `zz run` (bytecode VM, `zz_runtime`)
+Build: `cargo build -p zz_cli` from a clean tree at `b2d6f0b4`
+
+## Verdict
+
+The state lock itself is sound. The defect is in the **compiler**: a batch
+region (one lock acquisition) is opened and closed **per state-read node**,
+not per statement. Any statement whose header expression reads `state`
+through more than one node — array literals, struct literals, fmt strings,
+call arguments, and any shape without an explicit enclosing wrapper — takes
+one lock per read, so a writer's `atomic { }` body lands between two reads
+and the reader observes values from two different instants.
+
+Writers are not at fault: every writer-side mutation is inside one lock, and
+the map invariant holds at every `atomic` exit and at every batch end.
+
+## Evidence 1 — `[a, b]` compiles to two batch regions
+
+`zz dis --vm` on the probe below (fresh compile; the run-cache artifact has
+the same shape):
+
+```
+   7  StateBatchBegin(677..678)
+   8  LoadState("a", 677..678)
+   9  StateBatchEnd(677..678)
+  10  StateBatchBegin(680..681)
+  11  LoadState("b", 680..681)
+  12  StateBatchEnd(680..681)
+  13  MakeArray(2)
+```
+
+Two acquisitions (`acquire`/`release` per `StateBatchEnd`) for one statement
+header.
+
+## Evidence 2 — the same pair read under `atomic { }` is one region
+
+```
+Atomic { body: Chunk { code: [
+  StateBatchBegin(1016..1028), LoadState("a"), LoadState("b"),
+  BinOp(Add), PushConst(0), BinOp(Ne), StateBatchEnd(1016..1028), ...
+```
+
+One region, and the control reader reports zero violations in every run.
+
+## Evidence 3 — measured on the unfixed build
+
+`zz run` of the probe (5000 batched reads, 5000 atomic-control reads, two
+writers doing `atomic { a -= 1; busy(); b += 1 }` /
+`atomic { b -= 1; busy(); a += 1 }`):
+
+```
+batched_torn a=48 b=51
+batched_torn a=56 b=43
+batched_torn a=54 b=45
+batched_violations=427
+atomic_violations=0
+---
+batched_torn a=87 b=12
+batched_torn a=89 b=12
+batched_torn a=90 b=9
+batched_violations=763
+atomic_violations=0
+---
+batched_violations=0
+atomic_violations=0
+```
+
+Torn pairs are real (`48 + 51 = 99`): each value is individually correct and
+the map always satisfies `a + b == 100` — the two reads happened at
+different instants.
+
+## Evidence 4 — the writers and the lock are exonerated
+
+Instrumented build (temporary probes, reverted):
+
+| Probe | Result |
+| --- | --- |
+| `a + b` invariant checked at every `leave_atomic` | never violated |
+| `a + b` invariant checked at every `StateBatchEnd` | never violated |
+| two threads owning the reentrant lock at once | never (`inside` never > 1) |
+| reentrant `acquire` by a second task on one thread | never |
+| task resumed with `state_lock_depth`/`state_batch_depth` > 0 | never |
+| batched `LoadState` with the lock owned by another thread | never |
+| `LoadState` executed with `state_batch_depth == 0` inside a region | never |
+
+So: writers hold the lock across their pair, the reader holds the lock at
+each load, and the registry mutex is exclusive. The reader still sees a tear
+because the region it holds covers only one read.
+
+## Executed-code path (why both layers must be fixed)
+
+`zz run` executes **cached IR raised back to bytecode** (`ZZ_VERBOSE=1`:
+`zz: run cache hit <slug>`; artifacts under `$ZZ_HOME/cache/run-v2/<slug>/m0.zzc`).
+The freshly compiled VM chunk and `raise(lower(chunk))` have the same
+per-node region shape shown above, so the defect is reproduced through both
+paths.
+
+## Fix (as specified in step 3b.2)
+
+Statement-level snapshot, in every lowering path:
+
+1. At the start of each statement, collect the `state` names read by that
+   statement's header expression (expression leaves only; never bodies,
+   arms, or nested closures).
+2. Emit one region that loads those names **into temporaries**:
+   `StateSnapshotBegin(names)` → `LoadState name` → `StoreTemp` … →
+   `StateSnapshotEnd`. Nothing else runs inside the region.
+3. Compile the header with those names bound to the temporaries, so calls,
+   I/O, bodies and arms run after the lock is released.
+4. No batching inside `atomic { }` (the user hold already covers the
+   statement). While conditions snapshot once per evaluation.
+5. Layers: `zz_runtime` (`vm/compiler.rs`, `vm/runtime.rs`, `vm/op.rs`),
+   `zz_ir` (op + codec + dis + verify + raise + lower), `zz_chunk`
+   (C temps + one lock), `zz_lower` (AOT `_snapN` temps, replacing
+   `emit_expr_stateful`'s lock-across-calls).
+
+Regression boundary: statements that write state keep RMW atomicity (Z0014
+already forbids calls there).
+
+## Probe source
+
+```zz
+import std.task
+
+state a := 100
+state b := 0
+state stop := 0
+
+func busy() {
+    x := 0
+    for i in 0..200 { x = (x + i * 7) % 1009 }
+    if x < 0 { println("unreachable") }
+}
+
+func writer_fwd() {
+    n := 0
+    while stop == 0 && n < 20000 {
+        atomic { a -= 1; busy(); b += 1 }
+        n += 1
+    }
+}
+
+func writer_back() {
+    n := 0
+    while stop == 0 && n < 20000 {
+        atomic { b -= 1; busy(); a += 1 }
+        n += 1
+    }
+}
+
+func batched_reader(m: int) -> int {
+    v := 0
+    for i in 0..m {
+        pair := [a, b]
+        if pair[0] + pair[1] != 100 {
+            v += 1
+            if v < 4 { println("batched_torn a={pair[0]} b={pair[1]}") }
+        }
+    }
+    return v
+}
+
+func atomic_reader(m: int) -> int {
+    v := 0
+    for i in 0..m {
+        atomic { if a + b != 100 { v += 1 } }
+    }
+    return v
+}
+
+func main() -> Result<int, str> {
+    h0 := task.spawn(|_| { writer_fwd() })
+    h1 := task.spawn(|_| { writer_back() })
+    hr := task.spawn(|_| { batched_reader(5000) })
+    v: int = task.join(hr)
+    ha := task.spawn(|_| { atomic_reader(5000) })
+    va: int = task.join(ha)
+    atomic { stop = 1 }
+    task.join(h0)
+    task.join(h1)
+    println("batched_violations={v}")
+    println("atomic_violations={va}")
+    return .ok(0)
+}
+```
