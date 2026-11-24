@@ -1,108 +1,60 @@
-warning: unused build dependency `cc`
-  --> crates/zz_stdlib_native/Cargo.toml:25:1
-   |
-25 | cc = "1"
-   | ^^^^^^^^
-   |
-   = note: `cargo::unused_dependencies` is set to `warn` by default
-help: consider removing the dependency on `cc`
-warning: `zz_stdlib_native` (manifest) generated 1 warning
-   Compiling zz_span_ast v0.4.0 (/home/zaid/Projects/zz/crates/zz_span_ast)
-   Compiling zz_codegen_runtime v0.4.0 (/home/zaid/Projects/zz/crates/zz_codegen_runtime)
-   Compiling zz_paths v0.4.0 (/home/zaid/Projects/zz/crates/zz_paths)
-   Compiling zz_diag_core v0.4.0 (/home/zaid/Projects/zz/crates/zz_diag_core)
-   Compiling zz_lexer v0.4.0 (/home/zaid/Projects/zz/crates/zz_lexer)
-   Compiling zz_diag v0.4.0 (/home/zaid/Projects/zz/crates/zz_diag)
-   Compiling zz_unify v0.4.0 (/home/zaid/Projects/zz/crates/zz_unify)
-   Compiling zz_http_routes v0.4.0 (/home/zaid/Projects/zz/crates/zz_http_routes)
-   Compiling zz_parser v0.4.0 (/home/zaid/Projects/zz/crates/zz_parser)
-   Compiling zz_checker_core v0.4.0 (/home/zaid/Projects/zz/crates/zz_checker_core)
-   Compiling zz_infer v0.4.0 (/home/zaid/Projects/zz/crates/zz_infer)
-   Compiling zz_frontend v0.4.0 (/home/zaid/Projects/zz/crates/zz_frontend)
-   Compiling zz_structs v0.4.0 (/home/zaid/Projects/zz/crates/zz_structs)
-   Compiling zz_sigs v0.4.0 (/home/zaid/Projects/zz/crates/zz_sigs)
-   Compiling zz_scope v0.4.0 (/home/zaid/Projects/zz/crates/zz_scope)
-   Compiling zz_pm v0.4.0 (/home/zaid/Projects/zz/crates/zz_pm)
-   Compiling zz_fmt v0.4.0 (/home/zaid/Projects/zz/crates/zz_fmt)
-   Compiling zz_lints v0.4.0 (/home/zaid/Projects/zz/crates/zz_lints)
-   Compiling zz_type_check v0.4.0 (/home/zaid/Projects/zz/crates/zz_type_check)
-   Compiling zz_checker v0.4.0 (/home/zaid/Projects/zz/crates/zz_checker)
-   Compiling zz_runtime v0.4.0 (/home/zaid/Projects/zz/crates/zz_runtime)
-   Compiling zz_stdlib_meta v0.4.0 (/home/zaid/Projects/zz/crates/zz_stdlib_meta)
-   Compiling zz_hir v0.4.0 (/home/zaid/Projects/zz/crates/zz_hir)
-   Compiling zz_codegen_ffi v0.4.0 (/home/zaid/Projects/zz/crates/zz_codegen_ffi)
-warning: unexpected `cfg` condition value: `nolock_selftest`
-   --> crates/zz_runtime/src/vm/runtime.rs:230:19
-    |
-230 |         #[cfg(not(feature = "nolock_selftest"))]
-    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
-    |
-    = note: no expected values for `feature`
-    = help: consider adding `nolock_selftest` as a feature in `Cargo.toml`
-    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
-    = note: `#[warn(unexpected_cfgs)]` on by default
+     Running tests/bytecode_parity.rs (target/debug/build/zz_cli/8db49a780467372f/out/bytecode_parity-8db49a780467372f)
 
-warning: unexpected `cfg` condition value: `nolock_selftest`
-    --> crates/zz_runtime/src/vm/runtime.rs:1139:31
-     |
-1139 |                     #[cfg(not(feature = "nolock_selftest"))]
-     |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
-     |
-     = note: no expected values for `feature`
-     = help: consider adding `nolock_selftest` as a feature in `Cargo.toml`
-     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+running 2 tests
+test bytecode_file_roundtrip ... ok
+test bytecode_parity_all ... ok
 
-warning: unexpected `cfg` condition value: `nolock_selftest`
-    --> crates/zz_runtime/src/vm/runtime.rs:1153:31
-     |
-1153 |                     #[cfg(not(feature = "nolock_selftest"))]
-     |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
-     |
-     = note: no expected values for `feature`
-     = help: consider adding `nolock_selftest` as a feature in `Cargo.toml`
-     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 55.55s
 
-   Compiling fuzz v0.1.0 (/home/zaid/Projects/zz/fuzz)
-warning: `zz_runtime` (lib) generated 3 warnings
-   Compiling zz_stdlib v0.4.0 (/home/zaid/Projects/zz/crates/zz_stdlib)
-   Compiling zz_ir v0.4.0 (/home/zaid/Projects/zz/crates/zz_ir)
-   Compiling zz_plugin v0.1.0 (/home/zaid/Projects/zz/crates/zz_plugin)
-   Compiling zz_codegen_cc v0.4.0 (/home/zaid/Projects/zz/crates/zz_codegen_cc)
-   Compiling zz_run_cache v0.4.0 (/home/zaid/Projects/zz/crates/zz_run_cache)
-   Compiling zz_lower v0.4.0 (/home/zaid/Projects/zz/crates/zz_lower)
-   Compiling zz_loader v0.4.0 (/home/zaid/Projects/zz/crates/zz_loader)
-   Compiling zz_session v0.4.0 (/home/zaid/Projects/zz/crates/zz_session)
-   Compiling zz_repl v0.4.0 (/home/zaid/Projects/zz/crates/zz_repl)
-warning: unused variable: `body`
-    --> crates/zz_lower/src/context.rs:1182:29
-     |
-1182 |             Expr::Closure { body, .. } => false, // closures capture, don't directly read
-     |                             ^^^^ help: try ignoring the field: `body: _`
-     |
-     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+     Running tests/c_plugin_e2e.rs (target/debug/build/zz_cli/d51b2586629c858f/out/c_plugin_e2e-d51b2586629c858f)
 
-warning: methods `static_func_value` and `static_func_value_ident` are never used
-    --> crates/zz_lower/src/expr.rs:5966:8
-     |
- 229 | impl Lowerer {
-     | ------------ methods in this implementation
-...
-5966 |     fn static_func_value(&self, name: &str) -> Option<String> {
-     |        ^^^^^^^^^^^^^^^^^
-...
-5994 |     fn static_func_value_ident(&self, name: &str) -> Option<String> {
-     |        ^^^^^^^^^^^^^^^^^^^^^^^
-     |
-     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+running 1 test
+test c_plugin_vm_and_aot_agree ... ok
 
-   Compiling zz_chunk v0.4.0 (/home/zaid/Projects/zz/crates/zz_chunk)
-   Compiling zz_codegen v0.4.0 (/home/zaid/Projects/zz/crates/zz_codegen)
-warning: `zz_lower` (lib) generated 2 warnings (run `cargo fix --lib -p zz_lower` to apply 1 suggestion)
-   Compiling zz_build v0.4.0 (/home/zaid/Projects/zz/crates/zz_build)
-   Compiling zz_lsp v0.4.0 (/home/zaid/Projects/zz/crates/zz_lsp)
-   Compiling zz_test_runner v0.4.0 (/home/zaid/Projects/zz/crates/zz_test_runner)
-   Compiling zz_cli v0.4.0 (/home/zaid/Projects/zz/crates/zz_cli)
-   Compiling zz_stdlib_native v0.4.0 (/home/zaid/Projects/zz/crates/zz_stdlib_native)
-   Compiling zz-dap v0.4.0 (/home/zaid/Projects/zz/crates/zz_dap)
-warning: `zz_lower` (lib test) generated 2 warnings (2 duplicates)
-warning: `zz_runtime` (lib test) generated 3 warnings (3 duplicates)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.66s
+
+     Running tests/cache_e2e.rs (target/debug/build/zz_cli/8e563addadadf302/out/cache_e2e-8e563addadadf302)
+
+running 5 tests
+test clean_stays_quiet_without_cache ... ok
+test clean_reports_global_cache_with_hint ... ok
+test cache_clean_empty_reports_plainly ... ok
+test cache_clean_clears_whole_tree ... ok
+test native_build_honors_zz_home ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.82s
+
+     Running tests/chunk_aot_diff.rs (target/debug/build/zz_cli/cc8c41e62438d67e/out/chunk_aot_diff-cc8c41e62438d67e)
+
+running 3 tests
+test reap_stale_dirs_in_keeps_recent_zz_dirs ... ok
+test reap_stale_dirs_in_reaps_stale_zz_dirs ... ok
+test chunk_matches_hir_stdout_and_exit has been running for over 60 seconds
+test chunk_matches_hir_stdout_and_exit ... FAILED
+
+failures:
+
+---- chunk_matches_hir_stdout_and_exit stdout ----
+
+thread 'chunk_matches_hir_stdout_and_exit' (479535) panicked at crates/zz_cli/tests/chunk_aot_diff.rs:996:13:
+chunk build of stdlib_str failed: building /tmp/zz-chunk-diff-479534/stdlib_str_chunk/stdlib_str.zz (dev)
+==> [1/5] Checking: 1 module (1 cached)
+==> [1/5] Checking: 1 module (0 cached)
+==> [2/5] Optimizing: 17 functions
+ZZ_DEBUG_LINK_CMD: ["cc", "-fwrapv", "-fno-strict-aliasing", "-O0", "-g", "-ffunction-sections", "-fdata-sections", "-Wl,--gc-sections", "-fuse-ld=lld", "-o", "/home/zaid/.zz/cache/e5cd745d55797aab-53caee52-nodeps-0475cbe6a4936155-306610664cc2e82e-host-0000001b2a6b6c3b-none-none-none-ffd74826c916400e-Dev-chunk-host.480862.0.tmp", "/tmp/zz-build-480862-0/prog.c", "-lm", "-DZZ_HAS_CURL=0", "-DZZ_HAS_SQLITE3=0", "/home/zaid/.zz/cache/x86_64-unknown-linux-gnu-dev-17967e07356ec9a0-f41396e1a1808c90-0.17.1-rt7-nosan-c0s0p0f1/libzz_rt.a", "-Wl,-u,zz_float_format_raw", "-L/home/zaid/.zz/cache/native-rt/v1-bdae5effa8a17cf58176ea40d33468ea", "-lzz_native_rt", "/home/zaid/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/lib/libstd-7d3c8b3343c9c95a.rlib", "-lpthread", "-ldl", "-lm", "-lunwind"]
+ZZ_LINK_STDERR: zig: warning: argument unused during compilation: '-fuse-ld=lld' [-Wunused-command-line-argument]
+
+==> [3/5] Compiling: 1 file
+==> [4/5] Linking: 1 file
+==> [5/5] Publishing: failed
+zz: cannot write binary: Disk quota exceeded (os error 122)
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    chunk_matches_hir_stdout_and_exit
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 71.50s
+
+error: test failed, to rerun pass `-p zz_cli --test chunk_aot_diff`

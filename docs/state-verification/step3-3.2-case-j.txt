@@ -1,0 +1,31 @@
+; zzcz v5
+; types=2 strings=7 consts=4 funcs=2
+func f0 "main" arity=0 entry max_stack=2 sig=()->unknown locals=[]
+  0000  const c0 ; int(1)  ; @0..0
+  0001  storestate "a"  ; @0..0
+  0002  const c1 ; int(2)  ; @0..0
+  0003  storestate "b"  ; @0..0
+  0004  regstruct "bench_j.S" ("x", "y")  ; @0..0
+  0005  pop  ; @0..0
+  0006  makefunc f1  ; @0..0
+  0007  const c3 ; unit  ; @0..0
+func f1 "bench_j.main" arity=0 max_stack=3 sig=()->int locals=[]
+  0000  statebatchbegin  ; @0..0
+  0001  loadstate "a"  ; @0..0
+  0002  statebatchend  ; @0..0
+  0003  statebatchbegin  ; @0..0
+  0004  loadstate "b"  ; @0..0
+  0005  statebatchend  ; @0..0
+  0006  makearray 2  ; @0..0
+  0007  statebatchbegin  ; @0..0
+  0008  loadstate "a"  ; @0..0
+  0009  statebatchend  ; @0..0
+  0010  statebatchbegin  ; @0..0
+  0011  loadstate "b"  ; @0..0
+  0012  statebatchend  ; @0..0
+  0013  makestruct "bench_j.S" ("x", "y")  ; @100..116
+  0014  const c2 ; int(0)  ; @0..0
+  0015  ret  ; @0..0
+  0016  popn 1  ; @0..0
+  0017  pop  ; @0..0
+  0018  const c3 ; unit  ; @0..0

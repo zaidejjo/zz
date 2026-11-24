@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# When enabled, batch state reads do NOT acquire the state lock, allowing
+# self-testing of multi-read atomicity without locking (nolock builds).
+nolock_selftest = []
+
 [dependencies]
 zz_frontend = { path = "../zz_frontend" }
 zz_checker = { path = "../zz_checker" }

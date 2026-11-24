@@ -1,0 +1,24 @@
+; zzcz v5
+; types=2 strings=4 consts=4 funcs=2
+func f0 "main" arity=0 entry max_stack=2 sig=()->unknown locals=[]
+  0000  const c0 ; int(0)  ; @0..0
+  0001  storestate "s"  ; @0..0
+  0002  makefunc f1  ; @0..0
+  0003  const c1 ; unit  ; @0..0
+func f1 "bench_f.main" arity=0 max_stack=3 sig=()->int locals=[]
+  0000  whilesetup exit=12 header=2  ; @0..0
+  0001  const c1 ; unit  ; @0..0
+  0002  statebatchbegin  ; @0..0
+  0003  loadstate "s"  ; @0..0
+  0004  const c2 ; int(10)  ; @0..0
+  0005  binop Lt  ; @60..66
+  0006  statebatchend  ; @0..0
+  0007  whilecond exit=12  ; @54..87
+  0008  const c3 ; int(5)  ; @0..0
+  0009  callnative "time.sleep_ms" argc=1  ; @69..85
+  0010  pop  ; @0..0
+  0011  jmp 2  ; @0..0
+  0012  pop  ; @0..0
+  0013  const c0 ; int(0)  ; @0..0
+  0014  ret  ; @0..0
+  0015  const c1 ; unit  ; @0..0

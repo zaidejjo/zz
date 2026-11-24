@@ -1179,7 +1179,7 @@ impl Lowerer {
                     || args.iter().any(|a| self.expr_reads_state(a))
                     || named.iter().any(|(_, v)| self.expr_reads_state(v))
             }
-            Expr::Closure { body, .. } => false, // closures capture, don't directly read
+            Expr::Closure { .. } => false, // closures capture, don't directly read
             Expr::Block(b) => b.stmts.iter().any(|s| self.stmt_reads_state(s)),
             Expr::If {
                 cond, then, els, ..

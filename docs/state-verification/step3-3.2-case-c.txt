@@ -1,0 +1,25 @@
+; zzcz v5
+; types=2 strings=7 consts=6 funcs=2
+func f0 "main" arity=0 entry max_stack=2 sig=()->unknown locals=[]
+  0000  const c0 ; int(1)  ; @0..0
+  0001  storestate "a"  ; @0..0
+  0002  const c1 ; int(2)  ; @0..0
+  0003  storestate "b"  ; @0..0
+  0004  makefunc f1  ; @0..0
+  0005  const c5 ; unit  ; @0..0
+func f1 "bench_c.main" arity=0 max_stack=5 sig=()->int locals=[]
+  0000  const c2 ; str("")  ; @0..0
+  0001  statebatchbegin  ; @0..0
+  0002  loadstate "a"  ; @0..0
+  0003  statebatchend  ; @0..0
+  0004  const c3 ; str(" ")  ; @0..0
+  0005  statebatchbegin  ; @0..0
+  0006  loadstate "b"  ; @0..0
+  0007  statebatchend  ; @0..0
+  0008  const c2 ; str("")  ; @0..0
+  0009  concat 5  ; @0..0
+  0010  callnative "println" argc=1  ; @52..70
+  0011  pop  ; @0..0
+  0012  const c4 ; int(0)  ; @0..0
+  0013  ret  ; @0..0
+  0014  const c5 ; unit  ; @0..0

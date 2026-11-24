@@ -1,0 +1,28 @@
+; zzcz v5
+; types=2 strings=6 consts=3 funcs=3
+func f0 "main" arity=0 entry max_stack=2 sig=()->unknown locals=[]
+  0000  makefunc f1  ; @0..0
+  0001  pop  ; @0..0
+  0002  const c0 ; int(1)  ; @0..0
+  0003  storestate "a"  ; @0..0
+  0004  makefunc f2  ; @0..0
+  0005  const c1 ; unit  ; @0..0
+func f1 "bench_h.bar" arity=0 max_stack=1 sig=()->int locals=[]
+  0000  const c0 ; int(1)  ; @0..0
+  0001  ret  ; @0..0
+  0002  const c1 ; unit  ; @0..0
+func f2 "bench_h.main" arity=0 max_stack=1 sig=()->int locals=[]
+  0000  statebatchbegin  ; @0..0
+  0001  loadstate "a"  ; @0..0
+  0002  statebatchend  ; @0..0
+  0003  matcharm int(1) next=6 env=false restore=true  ; @0..0
+  0004  callpath "bench_h"."bar" argc=0  ; @94..99
+  0005  jmp 10  ; @0..0
+  0006  matcharm _ next=9 env=false restore=true  ; @0..0
+  0007  const c2 ; int(0)  ; @0..0
+  0008  jmp 10  ; @0..0
+  0009  matcherror  ; @69..126
+  0010  pop  ; @0..0
+  0011  const c2 ; int(0)  ; @0..0
+  0012  ret  ; @0..0
+  0013  const c1 ; unit  ; @0..0
