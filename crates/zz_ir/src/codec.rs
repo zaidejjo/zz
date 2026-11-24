@@ -1612,6 +1612,8 @@ fn decode_op(r: &mut Reader) -> Result<Op, IrError> {
         104 => Ok(Op::Atomic {
             body: FuncId(r.u32()?),
         }),
+        105 => Ok(Op::StateBatchBegin),
+        106 => Ok(Op::StateBatchEnd),
         _ => Err(IrError::new("unknown .zzc op tag")),
     }
 }

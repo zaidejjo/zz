@@ -152,6 +152,11 @@ pub struct Compiler {
     /// unit. A struct-typed receiver can then be resolved at compile time
     /// (see `resolved_method`) instead of through the dynamic call op.
     impl_methods: std::collections::HashSet<String>,
+    /// Nesting depth of `atomic { }` blocks being compiled. When > 0,
+    /// statements inside an atomic body already hold the state lock via
+    /// `Op::Atomic`, so batch begin/end wrapping is skipped (it would
+    /// prematurely release the lock).
+    in_atomic_depth: u32,
 }
 
 enum JumpKind {
@@ -211,6 +216,7 @@ impl Compiler {
             top_globals: std::collections::HashSet::new(),
             state_names: std::collections::HashSet::new(),
             impl_methods: std::collections::HashSet::new(),
+            in_atomic_depth: 0,
             type_scope: zz_checker::TOP_SCOPE.to_string(),
         }
     }
@@ -716,6 +722,8 @@ impl Compiler {
             // slot one too low — `x := 1; atomic {…}; y := p.x` made `y`
             // alias `x`'s slot.
             Op::Atomic { .. } => 1,
+            Op::StateBatchBegin(..) => 0,
+            Op::StateBatchEnd(..) => 0,
         }
     }
 
@@ -2825,7 +2833,17 @@ impl Compiler {
     /// statement can then skip bookkeeping nothing reads. See the
     /// `Stmt::For` arm.
     fn compile_stmt(&mut self, stmt: &Stmt, value_discarded: bool) -> StmtValue {
-        match stmt {
+        // Wrap state-reading statements in a batched region so multiple
+        // state reads (e.g. `a + b`) are atomic under one lock acquisition.
+        // Batch wrapping at the statement level guarantees exactly one
+        // StateBatchBegin/StateBatchEnd pair per statement — no early-return
+        // path inside compile_expr can skip StateBatchEnd (that caused a
+        // lock leak and unbounded memory growth).
+        let reads_state = self.stmt_reads_state(stmt);
+        if reads_state && self.in_atomic_depth == 0 {
+            self.emit(Op::StateBatchBegin(stmt.span()));
+        }
+        let result = match stmt {
             Stmt::Decl {
                 name,
                 value,
@@ -2942,6 +2960,7 @@ impl Compiler {
                 sub.func_info = self.func_info.clone();
                 sub.enums = self.enums.clone();
                 sub.impl_methods = self.impl_methods.clone();
+                sub.in_atomic_depth = self.in_atomic_depth + 1;
                 let mut last_stmt_value = StmtValue::None;
                 for s in &body.stmts {
                     last_stmt_value = sub.compile_stmt(s, false);
@@ -3670,7 +3689,11 @@ impl Compiler {
                 self.compile_expr(e);
                 StmtValue::Discard
             }
+        };
+        if reads_state && self.in_atomic_depth == 0 {
+            self.emit(Op::StateBatchEnd(stmt.span()));
         }
+        result
     }
 
     fn compile_block(&mut self, block: &Block) {
@@ -4308,6 +4331,86 @@ impl Compiler {
             sub.emit(Op::ExitScope);
         }
         Arc::new(sub.chunk)
+    }
+
+    /// True when expression `e` reads any `state` binding. Used to decide
+    /// whether to wrap expression evaluation in a batched state-read region
+    /// so multiple state reads in one expression are atomic under a single
+    /// lock acquisition.
+    fn expr_reads_state(&self, e: &Expr) -> bool {
+        use zz_frontend::ast::Expr;
+        match e {
+            Expr::Ident { name, .. } => self.state_names.contains(name),
+            Expr::Path { parts, .. } => parts.iter().any(|p| {
+                self.state_names.contains(p) || self.state_names.contains(&parts.join("."))
+            }),
+            Expr::Binary { left, right, .. } => {
+                self.expr_reads_state(left) || self.expr_reads_state(right)
+            }
+            Expr::Unary { expr, .. } => self.expr_reads_state(expr),
+            Expr::Try { expr, .. } => self.expr_reads_state(expr),
+            Expr::Call {
+                callee,
+                args,
+                named,
+                ..
+            } => {
+                self.expr_reads_state(callee)
+                    || args.iter().any(|a| self.expr_reads_state(a))
+                    || named.iter().any(|(_, v)| self.expr_reads_state(v))
+            }
+            Expr::Closure { .. } => false, // closures capture, don't directly read state
+            Expr::Block(b) => b.stmts.iter().any(|s| self.stmt_reads_state(s)),
+            Expr::If {
+                cond, then, els, ..
+            } => {
+                self.expr_reads_state(cond)
+                    || self.block_reads_state(then)
+                    || els.iter().any(|e| self.expr_reads_state(e))
+            }
+            Expr::While { cond, body, .. } => {
+                self.expr_reads_state(cond) || self.block_reads_state(body)
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                self.expr_reads_state(scrutinee)
+                    || arms.iter().any(|a| self.expr_reads_state(&a.body))
+            }
+            Expr::Array { elems, .. } => elems.iter().any(|e| self.expr_reads_state(e)),
+            Expr::Dict { entries, .. } => entries
+                .iter()
+                .any(|(k, v)| self.expr_reads_state(k) || self.expr_reads_state(v)),
+            Expr::Fmt { parts, .. } => parts.iter().any(
+                |p| matches!(p, zz_frontend::ast::FmtPart::Expr(e, _) if self.expr_reads_state(e)),
+            ),
+            Expr::Paren { expr, .. } => self.expr_reads_state(expr),
+            Expr::Tuple { items, .. } => items.iter().any(|e| self.expr_reads_state(e)),
+            _ => false,
+        }
+    }
+
+    /// True when statement `s` reads state.
+    fn stmt_reads_state(&self, s: &zz_frontend::ast::Stmt) -> bool {
+        use zz_frontend::ast::Stmt;
+        match s {
+            Stmt::Expr(e) => self.expr_reads_state(e),
+            Stmt::Assign { target, value, .. } => {
+                self.expr_reads_state(target) || self.expr_reads_state(value)
+            }
+            Stmt::CompoundAssign { target, value, .. } => {
+                self.expr_reads_state(target) || self.expr_reads_state(value)
+            }
+            Stmt::Decl { value, .. } => self.expr_reads_state(value),
+            Stmt::Return { value, .. } => value.iter().any(|e| self.expr_reads_state(e)),
+            Stmt::Defer { expr, .. } => self.expr_reads_state(expr),
+            _ => false,
+        }
+    }
+
+    /// True when any statement in `block` reads state.
+    fn block_reads_state(&self, b: &zz_frontend::ast::Block) -> bool {
+        b.stmts.iter().any(|s| self.stmt_reads_state(s))
     }
 
     fn compile_expr(&mut self, expr: &Expr) {

@@ -115,6 +115,8 @@ fn effect(op: &Op) -> i64 {
         // Atomic runs its body as a frame: the implicit chunk-end return
         // leaves one value on the caller's stack.
         Op::Atomic { .. } => 1,
+        Op::StateBatchBegin => 0,
+        Op::StateBatchEnd => 0,
     }
 }
 
@@ -1811,6 +1813,8 @@ fn infer_func(
                 // the depth simulation at joins.
                 st.push(TV::U);
             }
+            Op::StateBatchBegin => {}
+            Op::StateBatchEnd => {}
         }
         // Successor edges (mirror the depth simulation exactly).
         // MatchError included with the non-fallthroughs: it traps, so

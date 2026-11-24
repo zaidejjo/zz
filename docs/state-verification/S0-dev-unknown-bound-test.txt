@@ -1,0 +1,60 @@
+warning: unused build dependency `cc`
+  --> crates/zz_stdlib_native/Cargo.toml:25:1
+   |
+25 | cc = "1"
+   | ^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `cc`
+warning: `zz_stdlib_native` (manifest) generated 1 warning
+   Compiling zz_span_ast v0.4.0 (/home/zaid/Projects/zz/crates/zz_span_ast)
+   Compiling zz_diag_core v0.4.0 (/home/zaid/Projects/zz/crates/zz_diag_core)
+   Compiling zz_diag v0.4.0 (/home/zaid/Projects/zz/crates/zz_diag)
+   Compiling zz_lexer v0.4.0 (/home/zaid/Projects/zz/crates/zz_lexer)
+   Compiling zz_parser v0.4.0 (/home/zaid/Projects/zz/crates/zz_parser)
+   Compiling zz_frontend v0.4.0 (/home/zaid/Projects/zz/crates/zz_frontend)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.59s
+     Running unittests src/lib.rs (target/debug/build/zz_frontend/bd062516ef3c9a1b/out/zz_frontend-bd062516ef3c9a1b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 88 filtered out; finished in 0.00s
+
+     Running tests/ast_tests.rs (target/debug/build/zz_frontend/aa3fea50fc5f2f72/out/ast_tests-aa3fea50fc5f2f72)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/fmt_tests.rs (target/debug/build/zz_frontend/fdd08802fa46e0af/out/fmt_tests-fdd08802fa46e0af)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/lexer_tests.rs (target/debug/build/zz_frontend/7a196794fbc1a626/out/lexer_tests-7a196794fbc1a626)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 28 filtered out; finished in 0.00s
+
+     Running tests/parser_tests.rs (target/debug/build/zz_frontend/a381e94b45d68228/out/parser_tests-a381e94b45d68228)
+
+running 1 test
+test parser::stmt_tests::unknown_bound_suggests_known ... FAILED
+
+failures:
+
+---- parser::stmt_tests::unknown_bound_suggests_known stdout ----
+
+thread 'parser::stmt_tests::unknown_bound_suggests_known' (197744) panicked at crates/zz_frontend/tests/parser/stmt_tests.rs:626:5:
+expected `Num` suggestion, got: []
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    parser::stmt_tests::unknown_bound_suggests_known
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 169 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p zz_frontend --test parser_tests`

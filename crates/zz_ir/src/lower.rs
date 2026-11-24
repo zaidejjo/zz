@@ -893,6 +893,8 @@ impl<'a> Lowerer<'a> {
                 self.seal_sig(id, Some("atomic"));
                 Ok(vec![Op::Atomic { body: id }])
             }
+            VmOp::StateBatchBegin(..) => Ok(vec![Op::StateBatchBegin]),
+            VmOp::StateBatchEnd(..) => Ok(vec![Op::StateBatchEnd]),
         }
     }
 

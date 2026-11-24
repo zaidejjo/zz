@@ -212,6 +212,29 @@ pub struct Vm {
     /// hold the state lock and state ops access the map directly (no
     /// re-lock, no deadlock). See D3.
     state_lock_depth: usize,
+    /// Nesting depth of batched state-read regions. >0 means the state lock
+    /// is held for the whole region and `LoadState`/`StoreState` skip
+    /// individual lock/unlock. Used for multi-state expressions like
+    /// `a + b` to be atomic under one lock.
+    state_batch_depth: usize,
+}
+
+/// True when the current thread holds the state lock (via `atomic { }` or
+/// a batched state-read region). Under `nolock_selftest`, batch reads do
+/// NOT acquire the lock, so only `atomic { }` counts.
+impl Vm {
+    fn state_lock_held(&self) -> bool {
+        if self.state_lock_depth > 0 {
+            return true;
+        }
+        #[cfg(not(feature = "nolock_selftest"))]
+        {
+            if self.state_batch_depth > 0 {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 /// One memoized `CallPath` resolution.
@@ -266,6 +289,7 @@ impl Vm {
             debug: None,
             call_cache: (0..CALL_CACHE_LEN).map(|_| None).collect(),
             state_lock_depth: 0,
+            state_batch_depth: 0,
         }
     }
 
@@ -525,7 +549,7 @@ impl Vm {
         // D3: cannot yield while holding the state lock. Reset the budget
         // and keep running — the lock is released when the `Atomic` op
         // completes.
-        if self.state_lock_depth > 0 {
+        if self.state_lock_held() {
             self.slice_budget = SAFEPOINT_BUDGET;
             self.slice_start = Some(std::time::Instant::now());
             return false;
@@ -677,7 +701,7 @@ impl Vm {
                 if crate::value::on_executor() {
                     if let Some(reason) = take_yield_slow() {
                         // D3: cannot yield while holding the state lock.
-                        if self.state_lock_depth > 0 {
+                        if self.state_lock_held() {
                             return Err(self.error(
                                 "yield or block inside `atomic { }` block",
                                 Span::default(),
@@ -1003,8 +1027,9 @@ impl Vm {
                         .state_registry
                         .as_ref()
                         .ok_or_else(|| self.error("state registry not available", *span))?;
-                    let v = if self.state_lock_depth > 0 {
-                        // Inside `atomic { }`: we hold the lock, direct access.
+                    let v = if self.state_lock_depth > 0 || self.state_batch_depth > 0 {
+                        // Inside `atomic { }` or a batched read: we hold the
+                        // lock, direct access.
                         unsafe { reg.map_mut().get(name).cloned() }
                     } else {
                         reg.get(name)
@@ -1028,7 +1053,7 @@ impl Vm {
                         .state_registry
                         .as_ref()
                         .ok_or_else(|| self.error("state registry not available", *span))?;
-                    if self.state_lock_depth > 0 {
+                    if self.state_lock_depth > 0 || self.state_batch_depth > 0 {
                         unsafe {
                             reg.map_mut().insert(name.clone(), v);
                         }
@@ -1102,6 +1127,35 @@ impl Vm {
                     // caller's chunk.
                     re_cache!();
                     yield_check!();
+                }
+                Op::StateBatchBegin(_span) => {
+                    let reg = match interp.state_registry.as_ref() {
+                        Some(r) => Arc::clone(r),
+                        None => return Err(self.error("state registry not available", *_span)),
+                    };
+                    // nolock_selftest: batch reads do NOT acquire the state lock,
+                    // simulating lock-free multi-state reads to verify that
+                    // batching is required for atomicity (violations should occur).
+                    #[cfg(not(feature = "nolock_selftest"))]
+                    if self.state_batch_depth == 0 {
+                        reg.acquire();
+                    }
+                    self.state_batch_depth += 1;
+                }
+                Op::StateBatchEnd(_span) => {
+                    if self.state_batch_depth == 0 {
+                        return Err(
+                            self.error("StateBatchEnd without matching StateBatchBegin", *_span)
+                        );
+                    }
+                    self.state_batch_depth -= 1;
+                    // nolock_selftest: batch reads do NOT release the state lock.
+                    #[cfg(not(feature = "nolock_selftest"))]
+                    if self.state_batch_depth == 0 {
+                        if let Some(reg) = interp.state_registry.as_ref() {
+                            reg.release();
+                        }
+                    }
                 }
                 Op::VecPush { home, span } => {
                     let elem = self.stack.pop().unwrap();

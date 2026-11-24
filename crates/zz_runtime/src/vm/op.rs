@@ -638,6 +638,14 @@ pub enum Op {
     /// incremented on entry and decremented on exit; state ops inside the
     /// body access the map directly (reentrant, no deadlock).
     Atomic { body: Arc<Chunk>, span: Span },
+    /// Begin a batched state-read region: acquire the state lock once and
+    /// increment `state_batch_depth`. All `LoadState`/`StoreState` ops
+    /// inside skip individual lock/unlock. Multiple state reads in one
+    /// expression (e.g. `a + b`) are atomic under a single lock acquisition.
+    StateBatchBegin(Span),
+    /// End a batched state-read region: decrement `state_batch_depth` and
+    /// release the state lock if depth reaches zero.
+    StateBatchEnd(Span),
 }
 
 /// Coarse class of an opcode, used by `zz dis --vm` and `ZZ_VM_STATS`.
@@ -823,6 +831,8 @@ impl Op {
             Op::StoreState(..) => "StoreState",
             Op::RmwState(..) => "RmwState",
             Op::Atomic { .. } => "Atomic",
+            Op::StateBatchBegin(..) => "StateBatchBegin",
+            Op::StateBatchEnd(..) => "StateBatchEnd",
         }
     }
 
@@ -912,7 +922,9 @@ impl Op {
             | Op::IfLetMatch { .. }
             | Op::TryOp(..)
             | Op::DeferRecord
-            | Op::Atomic { .. } => OpClass::Control,
+            | Op::Atomic { .. }
+            | Op::StateBatchBegin(..)
+            | Op::StateBatchEnd(..) => OpClass::Control,
 
             Op::Call { .. }
             | Op::CallPath { .. }

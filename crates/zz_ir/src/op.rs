@@ -537,6 +537,10 @@ pub enum Op {
     Atomic {
         body: FuncId,
     },
+    /// Begin a batched state-read region (VM batch state reads).
+    StateBatchBegin,
+    /// End a batched state-read region (VM batch state reads).
+    StateBatchEnd,
 }
 
 impl Op {
@@ -647,6 +651,8 @@ impl Op {
             Op::StoreState { .. } => 102,
             Op::RmwState { .. } => 103,
             Op::Atomic { .. } => 104,
+            Op::StateBatchBegin => 105,
+            Op::StateBatchEnd => 106,
         }
     }
 
@@ -757,6 +763,8 @@ impl Op {
             Op::StoreState { .. } => "storestate",
             Op::RmwState { .. } => "rmwstate",
             Op::Atomic { .. } => "atomic",
+            Op::StateBatchBegin => "statebatchbegin",
+            Op::StateBatchEnd => "statebatchend",
         }
     }
 

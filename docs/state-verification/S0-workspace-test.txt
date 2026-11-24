@@ -1,0 +1,663 @@
+warning: unused build dependency `cc`
+  --> crates/zz_stdlib_native/Cargo.toml:25:1
+   |
+25 | cc = "1"
+   | ^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `cc`
+warning: `zz_stdlib_native` (manifest) generated 1 warning
+   Compiling zz_span_ast v0.4.0 (/home/zaid/Projects/zz/crates/zz_span_ast)
+   Compiling zz_paths v0.4.0 (/home/zaid/Projects/zz/crates/zz_paths)
+   Compiling zz_codegen_runtime v0.4.0 (/home/zaid/Projects/zz/crates/zz_codegen_runtime)
+   Compiling zz_codegen_types v0.4.0 (/home/zaid/Projects/zz/crates/zz_codegen_types)
+   Compiling zz_diag_core v0.4.0 (/home/zaid/Projects/zz/crates/zz_diag_core)
+   Compiling zz_unify v0.4.0 (/home/zaid/Projects/zz/crates/zz_unify)
+   Compiling zz_diag v0.4.0 (/home/zaid/Projects/zz/crates/zz_diag)
+   Compiling zz_lexer v0.4.0 (/home/zaid/Projects/zz/crates/zz_lexer)
+   Compiling zz_checker_core v0.4.0 (/home/zaid/Projects/zz/crates/zz_checker_core)
+   Compiling zz_http_routes v0.4.0 (/home/zaid/Projects/zz/crates/zz_http_routes)
+   Compiling zz_parser v0.4.0 (/home/zaid/Projects/zz/crates/zz_parser)
+   Compiling zz_frontend v0.4.0 (/home/zaid/Projects/zz/crates/zz_frontend)
+   Compiling zz_infer v0.4.0 (/home/zaid/Projects/zz/crates/zz_infer)
+   Compiling zz_pm v0.4.0 (/home/zaid/Projects/zz/crates/zz_pm)
+   Compiling zz_structs v0.4.0 (/home/zaid/Projects/zz/crates/zz_structs)
+   Compiling zz_sigs v0.4.0 (/home/zaid/Projects/zz/crates/zz_sigs)
+   Compiling zz_scope v0.4.0 (/home/zaid/Projects/zz/crates/zz_scope)
+   Compiling zz_fmt v0.4.0 (/home/zaid/Projects/zz/crates/zz_fmt)
+   Compiling zz_lints v0.4.0 (/home/zaid/Projects/zz/crates/zz_lints)
+   Compiling zz_type_check v0.4.0 (/home/zaid/Projects/zz/crates/zz_type_check)
+   Compiling zz_checker v0.4.0 (/home/zaid/Projects/zz/crates/zz_checker)
+   Compiling zz_runtime v0.4.0 (/home/zaid/Projects/zz/crates/zz_runtime)
+   Compiling zz_stdlib_meta v0.4.0 (/home/zaid/Projects/zz/crates/zz_stdlib_meta)
+   Compiling zz_hir v0.4.0 (/home/zaid/Projects/zz/crates/zz_hir)
+   Compiling zz_codegen_ffi v0.4.0 (/home/zaid/Projects/zz/crates/zz_codegen_ffi)
+   Compiling fuzz v0.1.0 (/home/zaid/Projects/zz/fuzz)
+   Compiling zz_stdlib v0.4.0 (/home/zaid/Projects/zz/crates/zz_stdlib)
+   Compiling zz_ir v0.4.0 (/home/zaid/Projects/zz/crates/zz_ir)
+   Compiling zz_plugin v0.1.0 (/home/zaid/Projects/zz/crates/zz_plugin)
+   Compiling zz_codegen_cc v0.4.0 (/home/zaid/Projects/zz/crates/zz_codegen_cc)
+   Compiling zz_run_cache v0.4.0 (/home/zaid/Projects/zz/crates/zz_run_cache)
+   Compiling zz_lower v0.4.0 (/home/zaid/Projects/zz/crates/zz_lower)
+   Compiling zz_loader v0.4.0 (/home/zaid/Projects/zz/crates/zz_loader)
+warning: unused variable: `body`
+    --> crates/zz_lower/src/context.rs:1182:29
+     |
+1182 |             Expr::Closure { body, .. } => false, // closures capture, don't directly read
+     |                             ^^^^ help: try ignoring the field: `body: _`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `static_func_value` and `static_func_value_ident` are never used
+    --> crates/zz_lower/src/expr.rs:5966:8
+     |
+ 229 | impl Lowerer {
+     | ------------ methods in this implementation
+...
+5966 |     fn static_func_value(&self, name: &str) -> Option<String> {
+     |        ^^^^^^^^^^^^^^^^^
+...
+5994 |     fn static_func_value_ident(&self, name: &str) -> Option<String> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling zz_session v0.4.0 (/home/zaid/Projects/zz/crates/zz_session)
+   Compiling zz_lsp v0.4.0 (/home/zaid/Projects/zz/crates/zz_lsp)
+   Compiling zz_chunk v0.4.0 (/home/zaid/Projects/zz/crates/zz_chunk)
+   Compiling zz_codegen v0.4.0 (/home/zaid/Projects/zz/crates/zz_codegen)
+   Compiling zz_build v0.4.0 (/home/zaid/Projects/zz/crates/zz_build)
+   Compiling zz_repl v0.4.0 (/home/zaid/Projects/zz/crates/zz_repl)
+   Compiling zz_test_runner v0.4.0 (/home/zaid/Projects/zz/crates/zz_test_runner)
+   Compiling zz_cli v0.4.0 (/home/zaid/Projects/zz/crates/zz_cli)
+warning: `zz_lower` (lib) generated 2 warnings (run `cargo fix --lib -p zz_lower` to apply 1 suggestion)
+   Compiling zz_stdlib_native v0.4.0 (/home/zaid/Projects/zz/crates/zz_stdlib_native)
+   Compiling zz-dap v0.4.0 (/home/zaid/Projects/zz/crates/zz_dap)
+warning: `zz_lower` (lib test) generated 2 warnings (2 duplicates)
+warning: unused dependency `tracing`
+  --> crates/zz_fmt/Cargo.toml:14:1
+   |
+14 | tracing = "0.1"
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `tracing`
+warning: `zz_fmt` (manifest) generated 1 warning
+warning: unused dependency `zz_suggest`
+  --> crates/zz_parser/Cargo.toml:11:1
+   |
+11 | zz_suggest = { path = "../zz_suggest" }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `zz_suggest`
+warning: `zz_parser` (manifest) generated 1 warning
+warning: unused dependency `base64`
+  --> crates/zz_pm/Cargo.toml:22:1
+   |
+22 | base64 = { workspace = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `base64`
+help: to still use for development builds, move to `dev-dependencies`
+warning: unused dependency `memmap2`
+  --> crates/zz_pm/Cargo.toml:14:1
+   |
+14 | memmap2 = { workspace = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `memmap2`
+warning: unused dependency `rayon`
+  --> crates/zz_pm/Cargo.toml:13:1
+   |
+13 | rayon = { workspace = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `rayon`
+warning: `zz_pm` (manifest) generated 3 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5m 18s
+     Running unittests src/lib.rs (target/debug/build/fuzz/828c4eabceb4ae8f/out/fuzz-828c4eabceb4ae8f)
+
+running 1 test
+test tests::fuzz_seed_inputs ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/build/zz-dap/bdb9c483e8b4a2a2/out/zz_dap-bdb9c483e8b4a2a2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/e2e.rs (target/debug/build/zz-dap/b7c3b51fa64f02aa/out/e2e-b7c3b51fa64f02aa)
+
+running 4 tests
+test step_over_advances_line ... ok
+test full_debug_session ... ok
+test step_in_and_out_of_call ... ok
+test expand_struct_and_paged_array ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running unittests src/lib.rs (target/debug/build/zz_arena/ac518932e576dcfa/out/zz_arena-ac518932e576dcfa)
+
+running 22 tests
+test bump::tests::scoped_bump_alloc_through_deref ... ok
+test bump::tests::scoped_bump_default_is_empty ... ok
+test bump::tests::scoped_bump_checkpoint_rewind ... ok
+test bump::tests::scoped_bump_into_inner_preserves_without_reset ... ok
+test bump::tests::scoped_bump_manual_reset_then_drop_is_idempotent ... ok
+test collections::tests::empty_freeze ... ok
+test bump::tests::scoped_bump_shrink_guard_drops_cleanly ... ok
+test intern::tests::clear_resets ... ok
+test collections::tests::stage_and_freeze ... ok
+test intern::tests::dedups_and_stable ... ok
+test intern::tests::deterministic_order ... ok
+test intern::tests::intern_arc_shares_allocation ... ok
+test tests::alloc_scalars_and_slices ... ok
+test tests::alignment_holds ... ok
+test tests::caps_error_cleanly ... ok
+test tests::freeze_is_shareable ... ok
+test tests::checkpoint_rewind_nested ... ok
+test tests::scoped_rewinds_on_err_and_keeps_on_ok ... ok
+test tests::reset_retains_and_reuses ... ok
+test tests::with_hint_presizes ... ok
+test tests::zero_sized_and_empty ... ok
+test tests::large_value_spills ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (target/debug/build/zz_build/cde5dcece921b4e3/out/zz_build-cde5dcece921b4e3)
+
+running 9 tests
+test tests::hook_interpreter_is_extension_driven ... ok
+test tests::noop_observer_is_the_default ... ok
+test tests::alias_cache_entry_never_overwrites ... ok
+test tests::build_target_names_package_or_file ... ok
+test tests::bin_naming_host_and_cross ... ok
+test tests::step_labels_are_backend_neutral ... ok
+test tests::output_dir_prefers_project_root_bin ... ok
+test tests::phased_program_reports_steps_one_and_two ... ok
+test tests::transient_builds_are_isolated_across_threads ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.61s
+
+     Running unittests src/lib.rs (target/debug/build/zz_checker/97268624e497a334/out/zz_checker-97268624e497a334)
+
+running 7 tests
+test checker::cache_serde_tests::func_sig_roundtrips ... ok
+test checker::cache_serde_tests::struct_sig_and_type_roundtrip ... ok
+test checker::unreachable_guard_tests::check_func_body_non_func_records_error_instead_of_panicking ... ok
+test checker::unreachable_guard_tests::collect_func_non_func_records_error_instead_of_panicking ... ok
+test checker::unreachable_guard_tests::collect_struct_non_struct_records_error_instead_of_panicking ... ok
+test checker::unreachable_guard_tests::func_name_returns_unknown_for_non_func ... ok
+test checker::span_scope_tests::same_span_different_functions_keep_types ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/proptest.rs (target/debug/build/zz_checker/45e944391c06f2ba/out/proptest-45e944391c06f2ba)
+
+running 3 tests
+test unifier_reflexivity ... ok
+test parser_never_errors_simple_expr ... ok
+test type_checker_no_panic_simple_expr ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/type_check_tests.rs (target/debug/build/zz_checker/4b8eb4be6882d933/out/type_check_tests-4b8eb4be6882d933)
+
+running 408 tests
+test annotation_mismatch_errors ... ok
+test ambiguous_named_param_offers_choices ... ok
+test all_paths_diverge_accepted ... ok
+test all_paths_return_without_tail_ok ... ok
+test annotation_unifies ... ok
+test array_annotation_unifies_with_union ... ok
+test arg_mismatch_names_parameter ... ok
+test annotation_mismatch_names_fix_direction ... ok
+test array_explicit_decl ... ok
+test array_index_type ... ok
+test array_literal_infers ... ok
+test array_literal_constant_index_out_of_bounds_errors ... ok
+test array_literal_merges_distinct_into_union ... ok
+test array_literal_merges_repeated_element_types ... ok
+test array_literal_negative_index_in_bounds_is_ok ... ok
+test array_mixed_types_form_union ... ok
+test array_slice_type ... ok
+test array_type_mismatch_errors ... ok
+test array_union_member_accepted ... ok
+test array_variant_annotation_accepts_bare_none ... ok
+test assignment_to_undefined_errors ... ok
+test bare_none_with_binding_has_no_fixit ... ok
+test bare_none_with_wildcard_suggests_fixit ... ok
+test bare_destructure_binds_names ... ok
+test array_variant_payload_var_merges ... ok
+test binding_shadowing_imported_namespace_warns ... ok
+test bitwise_bool_operand_errors ... ok
+test bitwise_result_flows_into_int_context ... ok
+test bitwise_float_operand_errors ... ok
+test bare_variant_constructor_keeps_outer_type_in_span_map ... ok
+test bool_ops_require_bool ... ok
+test bitwise_ops_require_int_operands ... ok
+test break_inside_loop_ok ... ok
+test branch_unit_tail_is_fine ... ok
+test break_inside_while_ok ... ok
+test branch_trailing_call_reports_at_call_not_cond ... ok
+test break_outside_loop_errors ... ok
+test builtin_pattern_constrains_uninferred_scrutinee ... ok
+test call_on_named_type_suggests_function ... ok
+test call_in_match_guard_errors_loudly ... ok
+test branch_trailing_call_bound_is_fine ... ok
+test can_reassign_mutable ... ok
+test cannot_reassign_const ... ok
+test calling_closure ... ok
+test closure_ambiguous_errors ... ok
+test closure_inference ... ok
+test cannot_reassign_const_explicit ... ok
+test closure_tail_result_is_a_value_not_a_discard ... ok
+test comparison_requires_same_type ... ok
+test compound_assign_rejects_const ... ok
+test compound_assign_matches_binary_op_rules ... ok
+test const_can_be_read ... ok
+test compound_assign_field_and_index ... ok
+test const_decl_type_checks ... ok
+test const_closure_capture ... ok
+test const_error_has_secondary_label ... ok
+test const_explicit_type_checks ... ok
+test const_error_has_hint ... ok
+test const_in_function_scope ... ok
+test const_shadowed_by_const_still_immutable ... ok
+test continue_outside_loop_errors ... ok
+test compound_assign_valid_combinations ... ok
+test conversion_sigs ... ok
+test conversion_any_value ... ok
+test cross_family_arm_after_inference_errors ... ok
+test cross_module_inferred_ret_resolves_on_export ... ok
+test dead_arm_after_wildcard_warns ... ok
+test cross_module_nonunit_block_still_rejected ... ok
+test dead_mutation_local_scratch_silent ... ok
+test dead_mutation_of_array_param_warns ... ok
+test dead_mutation_of_bytes_param_warns ... ok
+test dead_mutation_of_dict_param_warns ... ok
+test dead_mutation_passed_to_call_silent ... ok
+test dead_mutation_rebinding_is_not_a_store ... ok
+test dead_mutation_returned_param_silent ... ok
+test dead_mutation_scalar_param_silent ... ok
+test dead_mutation_shadowed_param_silent ... ok
+test dead_mutation_struct_field_warns ... ok
+test deferred_result_warns ... ok
+test dict_explicit_decl ... ok
+test dict_index_assign_ok ... ok
+test dict_index_type ... ok
+test dict_literal_infers ... ok
+test dict_key_mismatch_errors ... ok
+test dict_union_value_type ... ok
+test discard_assign_type_is_unit ... ok
+test discard_assign_discards_result_type ... ok
+test discard_assign_checks_cleanly ... ok
+test discarded_match_bare_arms_warn ... ok
+test duplicate_func_errors ... ok
+test empty_array_deferred_inference ... ok
+test divergent_arms_do_not_constrain_siblings ... ok
+test empty_array_literal_index_hint_says_empty ... ok
+test empty_dict_deferred_inference ... ok
+test enum_duplicate_reports ... ok
+test enum_generic_arity_reports ... ok
+test enum_construction_and_match ... ok
+test enum_generic_inference ... ok
+test enum_generic_mismatch_reports ... ok
+test enum_generic_pattern_binds_payload ... ok
+test enum_impl_method_resolves ... ok
+test enum_nonexhaustive_reports ... ok
+test enum_self_reference_resolves ... ok
+test enum_payload_arity_reports ... ok
+test enum_payload_type_mismatch_reports ... ok
+test error_cascade_index_must_be_int_suppressed ... ok
+test error_cascade_field_access_suppressed ... ok
+test enum_variant_typo_suggests ... ok
+test enum_unknown_variant_reports ... ok
+test error_cascade_index_suppressed ... ok
+test error_cascade_slice_suppressed ... ok
+test explicit_return_tail_ok ... ok
+test extern_invalid_c_identifier_errors ... ok
+test extern_duplicate_symbol_errors ... ok
+test explicit_return_type_no_implicit_warning ... ok
+test extern_unique_symbols_ok ... ok
+test fixit_structure_is_populated ... ok
+test field_access_on_error_type_does_not_cascade ... ok
+test float_division_by_zero_stays_legal ... ok
+test for_loop_var_scope_does_not_leak ... ok
+test for_loop_var_typed ... ok
+test for_over_array ... ok
+test for_over_non_iterable_errors ... ok
+test for_over_range ... ok
+test func_nested_in_loop_tail_does_not_warn ... ok
+test free_function_dot_form_still_resolves ... ok
+test func_return_type_inferred ... ok
+test func_wrong_return_type_errors ... ok
+test func_signature_and_body ... ok
+test free_function_still_reachable_by_name ... ok
+test generic_enum_no_payload_defaults_to_unit_safely ... ok
+test generic_distinct_params_reject_arith ... ok
+test generic_enum_concrete_payload_pins_generic ... ok
+test generic_call_site_bound_violation ... ok
+test generic_eq_bound_ok ... ok
+test generic_func_instantiates ... ok
+test generic_enum_untyped_payload_fails_loudly_not_silently ... ok
+test generic_func_monomorphic_fail ... ok
+test generic_identity_still_works ... ok
+test generic_mixed_int_float_still_rejects ... ok
+test generic_num_bound_arith_ok ... ok
+test generic_multi_bound_ok ... ok
+test generic_ord_bound_comparison_ok ... ok
+test generic_struct_annotation_checked ... ok
+test generic_struct_arity_errors ... ok
+test generic_struct_field_access_substitutes ... ok
+test generic_struct_impl_mismatch ... ok
+test generic_struct_infers_from_literal ... ok
+test generic_struct_multi_param ... ok
+test generic_unary_neg_needs_num ... ok
+test generic_struct_nested ... ok
+test generic_unbound_arith_errors_with_hint ... ok
+test generic_unary_neg_with_num_ok ... ok
+test generic_unbound_comparison_errors_with_hint ... ok
+test generic_struct_methods ... ok
+test guarded_catchall_does_not_kill_next_arm ... ok
+test generic_unbound_eq_errors_with_hint ... ok
+test handled_result_statement_does_not_warn ... ok
+test if_condition_glob_str_hint ... ok
+test if_condition_must_be_bool ... ok
+test http_request_unknown_field_errors ... ok
+test http_request_fields_typecheck ... ok
+test if_else_mismatch_errors ... ok
+test if_else_type_unify ... ok
+test if_let_binds ... ok
+test if_is_does_not_leak_narrowing_past_branch ... ok
+test if_is_narrows_variable_in_then_branch ... ok
+test if_let_constrains_uninferred_scrutinee ... ok
+test if_let_trailing_call_reports_at_call ... ok
+test impl_method_export_requires_pub ... ok
+test impl_method_outranks_free_function_on_field_callee ... ok
+test impl_method_outranks_same_named_free_function ... ok
+test implicit_return_type_no_warn_on_unit_tail ... ok
+test impl_method_wins_over_a_wider_free_signature ... ok
+test impl_method_wins_for_a_different_receiver_type ... ok
+test import_is_noop ... ok
+test implicit_return_type_warns_on_value_tail ... ok
+test import_non_std_module_head_no_warn ... ok
+test impl_method_without_pub_checkable ... ok
+test import_std_head_no_module_ns_no_warn ... ok
+test import_std_head_full_warns_with_fixit ... ok
+test import_std_head_selective_no_warn ... ok
+test import_std_module_head_with_alias_no_warn ... ok
+test import_std_module_head_shadows_warns ... ok
+test import_std_str_then_str_trim_warns_not ... ok
+test imported_std_module_wrong_member_suggests_member_not_import ... ok
+test index_assign_type_checked ... ok
+test index_assign_wrong_type_errors ... ok
+test index_non_indexable_errors ... ok
+test infers_float_from_promotion ... ok
+test infers_int_from_literal ... ok
+test index_non_int_errors ... ok
+test infinite_while_that_returns_does_not_fall_through ... ok
+test infinite_while_with_break_still_falls_through ... ok
+test literal_zero_remainder_is_check_error ... ok
+test literal_zero_divisor_is_check_error ... ok
+test local_print_binding_shadows_variadic_builtin ... ok
+test local_shadowing_module_name_warns ... ok
+test local_db_method_call_reads_as_method ... ok
+test loop_body_tail_result_warns ... ok
+test match_arm_binding_narrowing ... ok
+test match_arm_type_mismatch_errors ... ok
+test match_arm_empty_block_is_unit ... ok
+test match_arm_unit_literal_is_unit ... ok
+test match_bare_err_on_result_errors ... ok
+test match_bare_some_suggests_fixit ... ok
+test match_break_arm_body ... ok
+test match_break_outside_loop_errors ... ok
+test match_bare_ok_on_result_errors ... ok
+test match_on_int_requires_wildcard ... ok
+test match_nonexhaustive_errors ... ok
+test match_option ... ok
+test large_array_literal_dedups_without_blowup ... ok
+test match_or_pattern_bool_exhaustive ... ok
+test match_mismatch_binds_no_cascade ... ok
+test match_or_pattern_in_variant_arg ... ok
+test match_or_pattern_binding_mismatch_errors ... ok
+test match_or_pattern_literals ... ok
+test match_result ... ok
+test method_call_arg_mismatch_errors ... ok
+test method_call_namespaced_by_struct_type ... ok
+test match_return_in_if_accepted ... ok
+test method_call_type_checks ... ok
+test method_call_receiver_mismatch_errors ... ok
+test method_call_unknown_method_errors ... ok
+test mismatch_includes_variable_context ... ok
+test mismatch_without_context_still_works ... ok
+test mismatched_delimiter_in_parser ... ok
+test mismatch_includes_parameter_context ... ok
+test missing_return_offers_insertion_fixit ... ok
+test missing_return_points_at_tail_expression ... ok
+test missing_field_chain_does_not_cascade ... ok
+test missing_return_unit_tail_has_no_fixit ... ok
+test missing_return_without_else_has_no_unsafe_fixit ... ok
+test mutable_shadow_of_const_is_reassignable ... ok
+test negate_type_non_union_returns_original ... ok
+test negate_type_union_removes_all ... ok
+test named_fn_tail_expression_is_discarded ... ok
+test named_fn_tail_result_warns_unused_and_missing_return ... ok
+test negate_type_union_removes_member ... ok
+test opaque_handle_tag_mismatch_errors ... ok
+test opaque_handle_method_dispatch ... ok
+test nested_shadow_lookup_uses_innermost ... ok
+test nested_func_rejected ... ok
+test option_matched_with_ok_suggests_some ... ok
+test or_catchall_dead_arm_warns ... ok
+test outer_binding_in_match_guard_resolves ... ok
+test param_shadowing_module_name_warns ... ok
+test or_op_spacing_variants_stay_boolean_or ... ok
+test partial_results_on_broken_code ... ok
+test partially_bound_std_module_root_suggests_import ... ok
+test pipe_bare_name_type_checks ... ok
+test opaque_handle_types_resolve_in_annotations ... ok
+test pipe_chain_type_checks ... ok
+test pipe_type_checks ... ok
+test pipe_type_mismatch_errors ... ok
+test plain_struct_unaffected_by_generics ... ok
+test print_and_println_accept_multiple_arguments ... ok
+test print_and_println_accept_zero_arguments ... ok
+test print_bare_function_is_call_hint ... ok
+test print_variadic_checks_every_argument ... ok
+test print_qualified_function_is_call_hint ... ok
+test pub_before_impl_is_parse_error ... ok
+test pub_func_inside_impl_is_allowed ... ok
+test pub_struct_field_silent ... ok
+test println_accepts_named_arguments ... ok
+test pub_func_with_unresolved_ret_is_excluded_and_errors ... ok
+test range_bounds_must_be_int ... ok
+test pub_type_alias_silent ... ok
+test raw_strings_type_as_str ... ok
+test receiver_mismatch_without_method_still_errors ... ok
+test recursion_works ... ok
+test result_matched_with_some_suggests_ok ... ok
+test return_diverges_if_fallthrough_mismatch_rejected ... ok
+test return_diverges_match_fallthrough_mismatch_rejected ... ok
+test return_diverges_missing_else_rejected ... ok
+test return_diverges_annotated_let_rejected ... ok
+test return_outside_function_errors ... ok
+test return_if_expression_checks ... ok
+test return_match_expression_checks ... ok
+test scalar_match_guard_passes ... ok
+test return_value_still_checked ... ok
+test shadow_lint_needs_module_owner ... ok
+test return_in_match_arm_value_still_checked ... ok
+test shadowed_decl_closure_parameter_does_not_warn ... ok
+test shadowed_annotated_decl_warns_without_fix ... ok
+test shadowed_decl_reading_outer_binding_warns ... ok
+test shadowed_decl_plain_rebinding_does_not_warn ... ok
+test shadowed_lookup_restores_outer_after_inner_scope ... ok
+test shadowing_allowed ... ok
+test slice_non_sliceable_errors ... ok
+test shadowed_destructure_reading_outer_binding_warns ... ok
+test std_gate_needs_module_owner ... ok
+test std_gate_dedupes_per_path ... ok
+test std_path_other_module_still_errors ... ok
+test std_path_selective_import_ok ... ok
+test std_path_type_position_gated ... ok
+test std_path_without_import_errors ... ok
+test std_path_with_alias_import_ok ... ok
+test std_path_with_import_ok ... ok
+test str_concat ... ok
+test str_index_type ... ok
+test str_index_assign_errors ... ok
+test str_plus_int_errors ... ok
+test str_slice_type ... ok
+test struct_def_and_init ... ok
+test string_literal_in_match_guard_errors ... ok
+test struct_duplicate_definition_errors ... ok
+test struct_embedding_direct_field_shadows_promoted ... ok
+test struct_embedding_flat_init ... ok
+test struct_embedding_explicit_form_matches_shorthand ... ok
+test struct_embedding_direct_method_shadows_promoted ... ok
+test struct_embedding_flat_init_type_mismatch_errors ... ok
+test struct_embedding_flat_init_missing_leaf_errors ... ok
+test struct_embedding_init_conflict_errors ... ok
+test struct_embedding_promoted_mutation ... ok
+test struct_embedding_promotes_field ... ok
+test struct_embedding_shorthand_init ... ok
+test struct_embedding_promoted_method_call ... ok
+test struct_embedding_suggests_promoted_field ... ok
+test struct_field_access ... ok
+test struct_embedding_unknown_field_still_errors ... ok
+test struct_embedding_transitive_field ... ok
+test struct_field_mutation ... ok
+test struct_field_on_non_struct_errors ... ok
+test struct_field_mutation_type_mismatch_errors ... ok
+test struct_init_marks_import_used ... ok
+test struct_mutual_reference_resolves_in_either_order ... ok
+test struct_in_func_signature ... ok
+test struct_type_annotation_resolves ... ok
+test struct_self_reference_resolves ... ok
+test struct_unknown_type_errors ... ok
+test struct_unknown_field_in_init_errors ... ok
+test struct_unknown_field_errors ... ok
+test struct_wrong_arg_type_errors ... ok
+test try_on_option ... ok
+test try_error_type_mismatch ... ok
+test try_on_plain_int_errors ... ok
+test try_outside_function_errors ... ok
+test trailing_if_in_else_accepted ... ok
+test tuple_dynamic_index_errors_with_hint ... ok
+test try_propagates_result ... ok
+test tuple_index_reads_element_types ... ok
+test tuple_index_out_of_bounds_errors ... ok
+test tuple_index_write_checks_element_type ... ok
+test tuple_negative_index_counts_from_end ... ok
+test tuple_oob_hint_names_valid_range ... ok
+test type_mismatch_arithmetic ... ok
+test type_annotation_errors_are_deduped ... ok
+test typo_suggestion_variable ... ok
+test typo_suggestion_struct_field ... ok
+test unannotated_fallthrough_stays_unit ... ok
+test typo_suggestion_dotted_path ... ok
+test unclosed_paren_in_parser ... ok
+test typeof_any_value ... ok
+test undefined_variable_errors ... ok
+test underscore_prefixed_no_warning ... ok
+test underscore_enum_variant_silent ... ok
+test underscore_struct_field_silent ... ok
+test unimported_std_module_still_suggests_import ... ok
+test underscore_type_alias_silent ... ok
+test unimported_std_module_suggests_import ... ok
+test union_annotation_accepts_member ... ok
+test union_mismatch_errors ... ok
+test unknown_type_no_suggestion_when_far ... ok
+test unknown_type_levenshtein_suggests_str ... ok
+test unknown_named_param_suggests_fixit ... ok
+test unknown_type_suggests_str_for_string ... ok
+test unknown_root_gets_no_import_suggestion ... ok
+test unknown_type_used_twice_reports_once ... ok
+test unreachable_after_return_warns ... ok
+test unrelated_names_do_not_shadow_warn ... ok
+test unused_closure_param_no_warning ... ok
+test unused_enum_variant_warns ... ok
+test unused_inner_shadow_warns_with_outer_use ... ok
+test unused_local_warns_despite_same_name_used_elsewhere ... ok
+test unused_for_loop_var_span_points_at_binding ... ok
+test unused_option_statement_warns ... ok
+test unused_named_param_still_warns ... ok
+test unused_private_function_main_silent ... ok
+test unused_private_function_extern_silent ... ok
+test unused_private_function_main_unused_helper_warns ... ok
+test unused_private_function_method_silent ... ok
+test unused_private_function_pub_silent ... ok
+test unused_private_function_underscore_silent ... ok
+test unused_private_function_recursive_silent ... ok
+test unused_private_function_warns ... ok
+test unused_private_function_used_as_value_silent ... ok
+test unused_result_statement_warns ... ok
+test unused_struct_field_warns ... ok
+test unused_self_receiver_silent ... ok
+test unused_self_receiver_used_silent ... ok
+test unused_type_alias_warns ... ok
+test unused_variable_warning ... ok
+test unused_tuple_binding_span_points_at_binding ... ok
+test unused_warnings_emit_in_source_order ... ok
+test unwrapped_result_at_return_suggests_fixes ... ok
+test used_enum_variant_pattern_silent ... ok
+test used_closure_param_no_warning ... ok
+test used_match_bare_arms_do_not_warn ... ok
+test used_struct_field_silent ... ok
+test used_type_alias_silent ... ok
+test used_variable_no_warning ... ok
+test while_condition_must_be_bool ... ok
+test variant_type_inference ... ok
+test wrong_arg_count_errors ... ok
+test wrong_arg_type_errors ... ok
+test zero_arg_closure_no_space ... ok
+
+test result: ok. 408 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running unittests src/lib.rs (target/debug/build/zz_checker_core/5760828a742a500d/out/zz_checker_core-5760828a742a500d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/build/zz_chunk/9a7526f42c0d19d1/out/zz_chunk-9a7526f42c0d19d1)
+
+running 5 tests
+test condfuse_tests::interior_jump_target_blocks ... ok
+test condfuse_tests::jump_terminators_fuse ... ok
+test condfuse_tests::non_int_operands_and_ops_do_not_fuse ... ok
+test condfuse_tests::while_slot_const_fuses ... ok
+test condfuse_tests::while_slot_slot_fuses ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/build/zz_cli/bb48a0b100c9c56f/out/zz_cli-bb48a0b100c9c56f)
+
+running 5 tests
+test fixture_meta::tests::milestone_subsets_use_valid_tags ... ok
+test fixture_meta::tests::parse_single_and_multi_line_headers ... ok
+test fixture_meta::tests::subset_gating ... ok
+test fixture_meta::tests::vocabulary_is_sorted_unique_and_kebab ... ok
+test fixture_meta::tests::all_fixtures_declare_valid_tags ... FAILED
+
+failures:
+
+---- fixture_meta::tests::all_fixtures_declare_valid_tags stdout ----
+
+thread 'fixture_meta::tests::all_fixtures_declare_valid_tags' (212689) panicked at crates/zz_cli/src/fixture_meta.rs:291:9:
+1 fixture tag problem(s):
+/home/zaid/Projects/zz/crates/zz_cli/../../tests/fixtures/stdlib/state_d2_dict_set.zz: unknown tag `std-dict`
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    fixture_meta::tests::all_fixtures_declare_valid_tags
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `-p zz_cli --lib`

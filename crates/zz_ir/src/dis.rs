@@ -331,6 +331,8 @@ fn op_text(module: &Module, op: &Op) -> String {
             format!("rmwstate {} {op:?}", str_text(module, *name))
         }
         Op::Atomic { body } => format!("atomic f{}", body.0),
+        Op::StateBatchBegin => "statebatchbegin".to_string(),
+        Op::StateBatchEnd => "statebatchend".to_string(),
     }
 }
 

@@ -721,6 +721,8 @@ impl<'a> Raiser<'a> {
                     span: VmSpan::default(),
                 })
             }
+            Op::StateBatchBegin => Ok(VmOp::StateBatchBegin(VmSpan::default())),
+            Op::StateBatchEnd => Ok(VmOp::StateBatchEnd(VmSpan::default())),
         }
     }
 

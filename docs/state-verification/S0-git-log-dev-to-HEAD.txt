@@ -1,0 +1,62 @@
+5f534598 revert(parser): remove unknown_bound_suggests_known fix-it (out of scope)
+cd9a5d0f fix(lowerer): route state reads through emit_state_read for atomic multi-state reads
+c9e78001 fix(parser): atomic { } always locks under contention regardless of whitespace
+e2787a1d feat(state): Task 2 ergonomics, Task 3 perf, Task 4 plugin elision
+2cb93f05 fix(state): lock-safety loader fix + parser matrix + AOT proof
+0c537d1e fix(state): atomic { } always locks under contention
+f68010a8 feat(state): Task C Z0017 reachability + Task D/E/F/G analysis
+2429c2eb feat(state): strengthen lock proof + D2 whitelist regression
+af6beee2 feat(docs): document shared mutable state feature
+9e7d6119 feat(test): add state fixtures, e2e, parity, and batch registrations
+2f9d152c feat(core): implement shared mutable state D1-D10 checker/runtime
+bfa72df1 fix(parity): skip non-deterministic net_write_after_close_test
+9542ecb3 fix(codegen): clone match-payload before bare closure return Bare-body closures returned return {val}; without cloning. The val (result_tmp) carries cleanup(zz_release), so the refcounted value was freed right after the return struct was copied — a use-after-free for strings/dicts/etc. Only surfaced when a match-bound Err payload flowed into string concat/fstring in a closure tail position (e.g. http.header's Err arm), where native emitted the HttpResponse default Content-Type instead of the concatenated result. Also drop now-stale known-divergence tags from clone_test and concurrency_batch_test (bugs fixed by prior sweeps), remove http_request_response from known_native_failures() (native now matches VM), and convert its strict-parity test back to strict parity.
+766d2ead test(chunk_aot_diff): reap stale temp dirs + parallelize fixtures
+bb71e30e fix(build,codegen): honor ZZ_TEMP_DIR for heavy temp artifacts
+0f921456 fix(parity): resolve 24 unexpected results in dual_engine_parity sweep
+4101597d test: list remaining pre-existing parity failures as known
+ffe74e94 chore: remove temporary dump test file
+8d1f671f fix: resolve 4 dual-engine parity failures
+879f426e fix(runtime): zero-init dup memo inline store to avoid infinite loop
+4ffc7c37 fix: c_plugin_vm_and_aot_agree — remove redundant semicolon in TOY_ZZI fixture
+e23d2d2f fix: resolve remaining bytecode_parity_all failure
+37c0149c fix(http_lint): suppress duplicate-route diagnostic for OPTIONS * catch-all
+afc66559 fix(vm): support multi-field tuple payloads in CallPath enum construction fallback
+e0180687 fix(checker): defer type-inference errors; force system clang for PGO
+544b5add fix(checker): register c_runtime_b fixtures in batch parity inventory
+ee71505e fix(checker): order Pass 2 by dependency to resolve imports and return types before use
+d249af3f feat(shared-state): add state_atomic_locals fixture and VM regression tests
+006f3907 fix(shared-state): promote outer locals used inside atomic blocks
+4ebf0135 chore(shared-state): remove debug output from callgraph.rs
+addfd69f fix(shared-state): decrement state_lock_depth when popping atomic frames
+52517951 fix(shared-state): fix R2 state detection, break/continue in atomic, AOT struct state
+227cb20c chore: fix clippy and fmt issues
+eb7da870 feat(shared-state): add state_identifiers fixture
+85024ef5 feat(shared-state): add state_init_order fixture
+ac86e963 feat(shared-state): add pub state + closure rejected fixtures
+72410ab0 feat(shared-state): add state_closure_rejected fixture (Z0012)
+a10ad5dc feat(shared-state): R2 plain globals vs tasks + fixes
+f9d98de1 feat(shared-state): R1 check-then-act detection + blocking-in-atomic fix
+64790a5a fix(shared-state): block natives inside atomic even without state ref
+c677a3bb feat(shared-state): add state_early_control fixture + VM break/continue/return fixes
+cf894ec4 fix(shared-state): break/continue/atomic inside loops
+4e63ee9f feat(shared-state): add state_nested_atomic fixture and registrations
+695bdd17 feat(shared-state): add state_field_index fixture and registrations
+acae7bd2 fix(shared-state): resolve state field/index access in VM and AOT
+488bde02 feat(shared-state): fix AOT atomic block emission and VM atomic execution
+ada6d038 feat(shared-state): add state_simple fixture and test registrations
+f652c86b fix(shared-state): gate state RMW on state_names in VM compiler
+8627937b fix(shared-state): resolve state before functions in both checkers
+2c546a3f feat(shared-state): D1 read-before-init abort + D8 lock elision
+f79dc382 fix(shared-state): fix R2 soundness hole in call-graph expansion
+b65d4f5e fix(shared-state): remove DEBUG prints + make VM RmwState single-lock atomic
+b0d3f7a9 remove example files
+52d5fe21 not complete for now the shared mutable state
+c9ebc329 feat(shared-state): add state_counter fixture + test registration
+93ae901e feat(shared-state): R2 namespace handling + immutable-exception
+0d5f78f4 feat(shared-state): wire error codes Z0011-Z0017 at emission sites
+63df99f3 feat(shared-state): AOT IR ops + codec + lowering for state/atomic
+4fff1011 feat(shared-state): VM compiler emits state ops
+8bd3e1e7 feat(shared-state): VM state registry, ops, and runtime
+dd000a4b feat(shared-state): checker rules D2-D5
+5b9df1a2 feat(shared-state): add state/atomic AST, parser, and checker foundations

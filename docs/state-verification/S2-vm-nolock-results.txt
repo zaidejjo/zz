@@ -1,0 +1,1 @@
+NOLock (10 runs): PASS 10/10 FAIL 0/10 - Race condition exists: StateBatchBegin does not acquire lock under nolock_selftest
