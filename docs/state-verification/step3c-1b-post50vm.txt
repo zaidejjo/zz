@@ -1,0 +1,71 @@
+# Step 3c Item B — 3c.1 post-fix VM sweep, 50 runs, lock ENABLED
+
+## Step 1.1 — Command
+
+```
+for i in $(seq 1 50); do
+  ./target/debug/zz run tests/fixtures/stdlib/state_multiread_all.zz
+done | tee /tmp/opencode/step3c-post50vm.out
+```
+
+Build used: `./target/debug/zz` (default/lock-enabled build) on branch `feat/shared-mutable-state`.
+
+## Step 1.2 — Full unedited output (50 runs)
+
+```
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+```
+
+## Result
+
+- 50/50 runs produced all zeros for V1–V7 under the lock-enabled VM engine.
+- Meets spec target: 0 violations in 50/50 runs for all 7 variants.

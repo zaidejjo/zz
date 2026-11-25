@@ -1,0 +1,78 @@
+# Step 3c Item C — nolock_selftest lock-removal proof (VM + AOT)
+
+## Prerequisite (per spec): prove nolock removes the lock for BOTH atomic writers AND batched readers, in BOTH engines, BEFORE running the nolock sweep.
+
+## VM — `crates/zz_runtime/src/vm/runtime.rs`
+
+`Op::StateBatchBegin` (L1141): under `nolock_selftest` does NOT acquire the state lock.
+```
+#[cfg(not(feature = "nolock_selftest"))]
+if self.state_batch_depth == 0 {
+    reg.acquire();
+}
+self.state_batch_depth += 1;
+```
+
+`Op::StateBatchEnd` (L1155): under `nolock_selftest` does NOT release.
+```
+#[cfg(not(feature = "nolock_selftest"))]
+if self.state_batch_depth == 0 {
+    reg.release();
+}
+```
+
+`state_lock_held()` (L226): under nolock, batch depth is ignored (only `atomic` depth counts).
+```
+fn state_lock_held(&self) -> bool {
+    if self.state_lock_depth > 0 { return true; }
+    #[cfg(not(feature = "nolock_selftest"))]
+    { if self.state_batch_depth > 0 { return true; } }
+    false
+}
+```
+
+`Op::Atomic` (L1099): under nolock does NOT acquire / increment depth.
+```
+if !cfg!(feature = "nolock_selftest") {
+    reg.acquire();
+    self.state_lock_depth += 1;
+}
+```
+
+`leave_atomic` (L534): under nolock does NOT release / decrement.
+```
+if !cfg!(feature = "nolock_selftest") {
+    self.state_lock_depth -= 1;
+    reg.release();
+}
+```
+
+`LoadState`/`StoreState` (L1034/L1062): under nolock always use `reg.get`/`reg.set` (registry internal lock) — never lock-free unsynchronized access.
+
+Result VM: under `nolock_selftest`, atomic writers run lock-free AND batched readers run lock-free (batch depth tracked but no lock acquired/released). `state_lock_held()` returns false for batch regions, so safepoint yields are permitted → writers can interleave mid-read.
+
+## AOT — `crates/zz_lower/src/context.rs`
+
+`needs_state_lock()` (L1099): returns `false` under `nolock_selftest`.
+```
+pub(crate) fn needs_state_lock(&self) -> bool {
+    if cfg!(feature = "nolock_selftest") {
+        return false;
+    }
+    self.needs_safepoint()
+}
+```
+
+Consequence (expr.rs `emit_expr` L317, stmt.rs L859/L1965): every state read/write compiles to plain `zz_state_load_checked`/`zz_clone` with NO `zz_state_lock`/`zz_state_unlock` — for both batched readers AND atomic writers.
+
+`needs_safepoint()` (L1066): under nolock keeps cooperative safepoints on so task scheduling still works (tasks interleave).
+
+Result AOT: under `nolock_selftest`, `zz_state_lock`/`zz_state_unlock` calls are absent from generated code (verified: grep count = 0 outside inline helper defs), for both batched readers and atomic writers. Safepoints remain on so writers interleave.
+
+## Plumbing
+
+`nolock_selftest` propagates `zz_cli → zz_codegen → zz_lower → zz_runtime` (all four crates declare/propagate the feature; see each crate's Cargo.toml).
+
+## Conclusion
+
+The lock is removed for BOTH atomic writers AND batched readers in BOTH VM and AOT under `nolock_selftest`. The nolock experiment is valid: any tears observed under nolock are due to missing batching/atomic protection, not a one-sided lock removal.

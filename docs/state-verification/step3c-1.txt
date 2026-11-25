@@ -69,6 +69,24 @@ V1 (expected 0) = 0 ✓. V2–V5, V7 (expected > 0 pre-fix, now 0 post-fix) = 0 
 Same fixture compiled natively (`zz build --native`) and run: all 7 variants
 = 0 violations, matching the VM (dual_engine_parity test passes).
 
+## Post-fix 50-run confirmation (Phase 1, lock ENABLED)
+
+Engine: `zz run` bytecode VM, lock enabled (default build, branch `feat/shared-mutable-state`).
+Command: `for i in $(seq 1 50); do ./target/debug/zz run tests/fixtures/stdlib/state_multiread_all.zz; done`
+50 consecutive runs, every run produced `V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0`.
+Full unedited output: `docs/state-verification/step3c-1b-post50vm.txt`.
+
+Engine: AOT native (`zz build --native`), lock enabled, 5 runs.
+Command: `./target/release/zz build --native tests/fixtures/stdlib/state_multiread_all.zz` then run binary 5×.
+Every run produced `V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0`.
+Full unedited output: `docs/state-verification/step3c-1b-post50aot.txt`.
+
+Result: 0 violations in 50/50 VM runs and 5/5 AOT runs for all 7 variants, matching the VM.
+Meets spec target: 0 violations in 50/50 runs (lock enabled).
+
 ## Evidence files referenced
 - `docs/state-verification/step3b-rootcause.txt` — committed pre-fix baseline (V2 427/763, atomic control 0, root cause).
 - `docs/state-verification/step3b-batch_probe.zz.txt` — pre-fix probe bytecode (two regions per `[a,b]`).
+- `docs/state-verification/step3c-phase0-build.txt` — Phase 0 branch/tree confirmation + fresh build output.
+- `docs/state-verification/step3c-1b-post50vm.txt` — 50-run VM post-fix sweep, full unedited output.
+- `docs/state-verification/step3c-1b-post50aot.txt` — 5-run AOT post-fix parity, full unedited output.
