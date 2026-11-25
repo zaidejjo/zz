@@ -1531,7 +1531,7 @@ e2e_error_test!(
 );
 e2e_success_test!(
     e2e_stdlib_state_z0019_negative,
-    "errors",
+    "stdlib",
     "state_z0019_negative.zz"
 );
 // M0 edge corpus: both engines fail (messages differ; error parity only
