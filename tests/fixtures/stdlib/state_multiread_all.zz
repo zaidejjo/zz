@@ -125,9 +125,10 @@ func v5(m: int) -> int {
 func v6(m: int) -> int {
     v := 0
     for i in 0..m {
-        if a > 0 && b >= 0 {
-            x := a + b
-            if x != 100 { v += 1 }
+        x := a + b              // always read both states → tear is always detectable
+        if x != 100 { v += 1 }  // always checked, regardless of the guarded body
+        if a > 0 && b >= 0 {    // still tests `&&` as one pure region
+            // guarded body (intentionally empty — violation counted above)
         }
     }
     return v
