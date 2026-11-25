@@ -1635,7 +1635,6 @@ fn z0019_stmt(checker: &Checker, stmt: &Stmt, errors: &mut Vec<zz_diag_core::Raw
             name: _,
             params: _,
             body,
-            generics: _,
             ..
         } => {
             // Each function body is its own statement unit (closures are
@@ -1648,7 +1647,6 @@ fn z0019_stmt(checker: &Checker, stmt: &Stmt, errors: &mut Vec<zz_diag_core::Raw
                     name: _,
                     params: _,
                     body,
-                    generics: _,
                     ..
                 } = m
                 {
