@@ -5083,6 +5083,15 @@ impl Lowerer {
                                     .is_some_and(|t| t.starts_with("zz_struct_"));
                                 if is_raw {
                                     cid
+                                } else if is_builtin_type {
+                                    // Builtin scalar types (`int`, `float`,
+                                    // `bool`) are passed as boxed `zz_value`
+                                    // in the args array, not as raw C
+                                    // scalars. `names.lookup_type` returns
+                                    // `int64_t`/`double`/`bool`, so
+                                    // `auto_box` wraps with `zz_int` /
+                                    // `zz_float` / `zz_bool`.
+                                    auto_box(&cid, names.lookup_type(name))
                                 } else {
                                     let raw = unbox_tmp(&cid, names, out);
                                     // Only unboxed (raw-struct) receivers need
