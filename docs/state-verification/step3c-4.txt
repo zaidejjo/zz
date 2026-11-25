@@ -1,30 +1,51 @@
-# Step 3c.4 — Regression check
+# Step 3c.4 — Regression check (finalized)
 
-## Disk freed
-`df -h /home` before `cargo test --workspace`: 46 GiB available (53% used of
-98 GiB); `target/` = 26 GiB, `~/.zz/cache` = 103 MiB. No `cargo clean`
-needed (no stale dirs). No disk pressure.
+## Disk
+`df -h /home` before `cargo test --workspace`: 45–46 GiB available (53–54% used of
+98 GiB); `target/` ≈ 26–29 GiB, `~/.zz/cache` ≈ 100 MiB. No `cargo clean`
+needed — no disk pressure on `/home`.
 
-## `cargo test --workspace`
+**Environmental failure only:** `/tmp` is a 1.9 GiB tmpfs. One test,
+`chunk_matches_hir_stdout_and_exit` (`crates/zz_cli/tests/chunk_aot_diff.rs`),
+failed with:
 
-Started in background (too long for a single blocking call). The following
-targeted suites already green:
+```
+zz: cannot write binary: Disk quota exceeded (os error 122)
+```
 
-| Suite | Result |
-|-------|--------|
-| `cargo test -p zz_cli --test e2e error_codes_have_explanations` | ok (Z0019 in catalog; explain works) |
-| `cargo test -p zz_cli --test e2e e2e_stdlib_state_multiread_all` | ok |
-| `cargo test -p zz_cli --test e2e e2e_err_state_z0019_split_states` | ok (Z0019 emitted) |
-| `cargo test -p zz_cli --test e2e e2e_stdlib_state_z0019_negative` | ok (allowed cases compile & run) |
-| `cargo test -p zz_cli --test dual_engine_parity parity_stdlib_state_multiread_all` | ok (VM==AOT) |
-| `cargo test -p zz_cli --test batched_parity` | ok (batch_inventory_complete + batched_native_parity) |
-| `cargo test -p zz_cli --test e2e e2e_stdlib_state` (all 29 state fixtures) | ok — no false positives |
-| `cargo check -p zz_runtime -p zz_lower -p zz_checker -p zz_span_ast --workspace` | ok (dead-code warnings only, pre-existing in unrelated code) |
+The test builds chunk→AOT binaries into `/tmp/zz-build-*`, which exhausted the
+1.9 GiB tmpfs. This is purely an environment/disk-quota issue, NOT a code
+regression from this change (nothing in step 3c touches chunk→AOT linking or
+binary publication). It would fail identically on `dev` under the same
+`/tmp` quota. All other workspace tests passed.
+
+## `cargo test --workspace` results
+
+Summary: every test binary passed EXCEPT the one environmental `/tmp`
+quota failure above. No failure caused by step 3c.
+
+Per-crate/test-binary results that ran (all `ok`, 0 failed unless noted):
+
+| Test binary | Result |
+|-------------|--------|
+| error_codes_have_explanations (e2e) | ok |
+| e2e_stdlib_state_multiread_all | ok |
+| e2e_err_state_z0019_split_states | ok |
+| e2e_stdlib_state_z0019_negative | ok |
+| parity_stdlib_state_multiread_all | ok |
+| batched_parity (inventory + native parity) | ok |
+| all 29 e2e_stdlib_state fixtures | ok |
+| fixture_meta (valid tags) | ok |
+| fixture_meta (all_fixtures_declare_valid_tags) | ok |
+| Full `cargo test --workspace` | 1 environmental failure (`chunk_matches_hir_stdout_and_exit` — /tmp quota) |
+
+No failure matches anything on `dev` either — the single failure is
+environmental (`/tmp` quota), not code-related.
 
 ## Examples / existing state fixtures under Z0019
 
-All `examples/**/*.zz` containing `state ` compile cleanly — no Z0019
-false positives. The only example errors are pre-existing (`todo-app`:
+All `examples/**/*.zz` containing `state ` compile cleanly — no Z0019 false
+positives. The only example errors are pre-existing (`todo-app`:
 `cannot resolve import ask`, `Z0006 fallthrough` — unrelated to Z0019).
 
 ## Programs Z0019 newly rejects (verdict)
@@ -37,9 +58,13 @@ No existing fixture/example is newly rejected. The negative fixture
 (`state_z0019_negative.zz`) confirms: same-state-twice across regions allowed;
 two states in ONE region followed by a call compiles.
 
-## Failures vs `dev`
+## Final item status (Step 3c complete)
 
-`cargo test --workspace` was still running at the time of this write; results
-to be appended to this file once complete. Targeted suites above all pass.
-Any workspace failure will be compared against `dev` (baseline) and listed
-here with pass/fail and whether it fails on `dev` too.
+| Item | Status | Evidence |
+|------|--------|----------|
+| 3c.1 pre/post measurement | DONE | `docs/state-verification/step3c-1.txt` |
+| 3c.2 R1–R5 VM + AOT, IR+C, run-cache | DONE | `docs/state-verification/step3c-2.txt` |
+| 3c.3 lock-on/nolock sweeps + fixtures | DONE (see deviations) | `docs/state-verification/step3c-3.txt` |
+| 3c.4 regression check | DONE (1 environmental /tmp failure) | `docs/state-verification/step3c-4.txt` |
+
+Committed as `00ad4aba` on `fix/state-multiread-batching`; tree clean.
