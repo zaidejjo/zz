@@ -290,6 +290,13 @@ pub static ALL_ERROR_CODES: &[ErrorCatalogEntry] = &[
         bad_example: "atomic { time.sleep_ms(10) }",
         fixed_example: "let _ = time.sleep_ms(10)\natomic { n = 1 }",
     },
+    ErrorCatalogEntry {
+        code: ErrorCode(19),
+        title: "state reads in one statement separated by a call",
+        description: "One statement reads two different `state` bindings in separate pure regions (separated by a call), so it can observe two different snapshots.",
+        bad_example: "state a := 0\nstate b := 0\nx := pick(a, f(), b)",
+        fixed_example: "atomic { x := pick(a, f(), b) }",
+    },
 ];
 
 /// Look up a catalog entry by code. Returns `None` for unknown codes.

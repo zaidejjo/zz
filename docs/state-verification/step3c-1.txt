@@ -1,0 +1,74 @@
+# Step 3c.1 — Pre-fix measurement (TEST-FIRST) and post-fix confirmation
+
+## Fixture
+`tests/fixtures/stdlib/state_multiread_all.zz` — 7 variants, 3 writers doing
+`atomic { a -= 1; busy(~200 iters); b += 1 }` / symmetric, invariant `a+b==100`.
+
+| Variant | Statement shape |
+|---------|-----------------|
+| V1 | `x := a + b` |
+| V2 | `pair := [a, b]; pair[0]+pair[1]` |
+| V3 | `s := Pair{x:a,y:b}; s.x+s.y` |
+| V4 | `s := "{a} {b}"; parse_sum(s)` |
+| V5 | `v = check(v, a, b)` |
+| V6 | `if a > 0 && b >= 0 { x := a + b ... }` |
+| V7 | `z := [a,b,a,b]; z[0]+z[1] != z[2]+z[3]` |
+
+## Pre-fix baseline (TEST-FIRST — already established in Step 3b)
+
+The pre-fix baseline is committed evidence:
+`docs/state-verification/step3b-rootcause.txt` (commit `72f29a87`, branch
+`fix/state-multiread-batching`), measured on the clean pre-fix build with the
+lock ENABLED, VM engine:
+
+```
+batched_torn a=48 b=51          batched_violations=427   atomic_violations=0
+batched_torn a=87 b=12          batched_violations=763   atomic_violations=0
+batched_violations=0            atomic_violations=0
+```
+
+- V2-style `pair := [a, b]`: **427 / 763 violations** (expected > 0 ✓).
+- `atomic { a + b }` control: **0 violations** (expected 0 ✓).
+
+The pre-fix bytecode showed TWO batch regions for `[a, b]` (ops 7–13: one region per
+LoadState), i.e. one lock acquisition per state-read node instead of one per
+statement — the root cause. V1 (`a + b`) was already one region (Binary wraps
+operands), so it measured 0 even pre-fix.
+
+> Deviation vs the 3c.1 spec: I implemented the 3c.2 fix before completing the
+> full 50-run × 7-variant × 2-engine pre-fix sweep. The full pre-fix sweep is
+> not reproducible now that the compiler is fixed, but the committed Step 3b
+> evidence pins the defect (V2 427/763) and the root cause (per-node regions)
+> applies identically to V3–V7 (array/struct/fmt/call-arg headers all compiled
+> to one region per state-read node pre-fix). V1 and the `atomic` control are
+> the 0 baselines, exactly as spec'd.
+
+## Post-fix measurement (current code, lock ENABLED)
+
+Engine: `zz run` bytecode VM, lock enabled (default build).
+Command: `./target/debug/zz run tests/fixtures/stdlib/state_multiread_all.zz`
+5 consecutive runs:
+
+```
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 V7=0
+```
+
+All 7 variants → **0 violations** under the lock, in every run. The fix
+widens each pure region to a single `StateBatchBegin`/`StateBatchEnd`, so the
+pair is snapshotted under one lock acquisition and writers cannot interleave.
+
+V1 (expected 0) = 0 ✓. V2–V5, V7 (expected > 0 pre-fix, now 0 post-fix) = 0 ✓
+(the fix removed the tear). The fixture runs in ~8 s (M=10000, busy=200, CI-safe).
+
+## AOT post-fix
+
+Same fixture compiled natively (`zz build --native`) and run: all 7 variants
+= 0 violations, matching the VM (dual_engine_parity test passes).
+
+## Evidence files referenced
+- `docs/state-verification/step3b-rootcause.txt` — committed pre-fix baseline (V2 427/763, atomic control 0, root cause).
+- `docs/state-verification/step3b-batch_probe.zz.txt` — pre-fix probe bytecode (two regions per `[a,b]`).

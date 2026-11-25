@@ -1093,6 +1093,11 @@ e2e_success_test!(
     "state_r2_read_only_task.zz"
 );
 e2e_success_test!(
+    e2e_stdlib_state_multiread_all,
+    "stdlib",
+    "state_multiread_all.zz"
+);
+e2e_success_test!(
     e2e_stdlib_state_r2_state_ok,
     "stdlib",
     "state_r2_state_ok.zz"
@@ -1519,6 +1524,15 @@ e2e_error_test!(e2e_err_state_z0013_self_init, "state_z0013_self_init.zz");
 e2e_error_test!(
     e2e_err_state_z0013_before_decl,
     "state_z0013_before_decl.zz"
+);
+e2e_error_test!(
+    e2e_err_state_z0019_split_states,
+    "state_z0019_split_states.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_z0019_negative,
+    "errors",
+    "state_z0019_negative.zz"
 );
 // M0 edge corpus: both engines fail (messages differ; error parity only
 // requires failure on both sides).

@@ -1986,6 +1986,11 @@ parity_strict!(parity_stdlib_cell_test, "stdlib", "cell_test.zz");
 parity_strict!(parity_stdlib_state_counter, "stdlib", "state_counter.zz");
 parity_strict!(parity_stdlib_state_simple, "stdlib", "state_simple.zz");
 parity_strict!(
+    parity_stdlib_state_multiread_all,
+    "stdlib",
+    "state_multiread_all.zz"
+);
+parity_strict!(
     parity_stdlib_state_field_index,
     "stdlib",
     "state_field_index.zz"

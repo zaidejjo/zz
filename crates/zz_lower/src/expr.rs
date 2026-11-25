@@ -309,7 +309,24 @@ impl Lowerer {
         }
     }
 
+    /// Compile `e`, wrapping each maximal pure region that reads `state` in
+    /// one `zz_state_lock`/`zz_state_unlock` pair (R1/R2). A call's cell
+    /// (receiver + arguments) is the region; the returned call expression is
+    /// used by the caller only after the unlock statement in `out`, so the
+    /// call itself runs outside the lock.
     pub(crate) fn emit_expr(&self, e: &Expr, names: &mut NameCtx, out: &mut String) -> String {
+        if self.state_region_pure(e) {
+            self.state_read_batch_depth.set(1);
+            out.push_str("    zz_state_lock();\n");
+            let v = self.emit_expr_inner(e, names, out);
+            out.push_str("    zz_state_unlock();\n");
+            self.state_read_batch_depth.set(0);
+            return v;
+        }
+        self.emit_expr_inner(e, names, out)
+    }
+
+    fn emit_expr_inner(&self, e: &Expr, names: &mut NameCtx, out: &mut String) -> String {
         // Statement-direct flag: true when this expression is the
         // outermost value of a statement-level position (set by the
         // statement lowerer). Consumed here so only the direct child

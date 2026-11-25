@@ -10,7 +10,7 @@ use super::expr::intern_tag;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use zz_frontend::ast::{Block, Expr, FmtPart, ImportItem, Pattern, Stmt};
+use zz_frontend::ast::{Expr, ImportItem, Pattern, Stmt};
 
 use zz_codegen_types::{demangle, mangle};
 
@@ -1064,11 +1064,15 @@ impl Lowerer {
     /// any extern "C" plugin linked, since plugin code runs on
     /// arbitrary OS threads and can touch state through the C-ABI).
     pub(crate) fn needs_safepoint(&self) -> bool {
-        // nolock_selftest feature: always require the state lock so that
-        // state accesses never elide the lock, allowing self-testing of
-        // locking correctness with `cargo build --features nolock_selftest`.
+        // nolock_selftest feature: keep cooperative safepoints on so task
+        // scheduling still works, but disable the state lock itself via
+        // needs_state_lock() (state accesses run lock-free in the selftest).
         if cfg!(feature = "nolock_selftest") {
-            return true;
+            return self.has_extern_plugin
+                || self
+                    .reachable_natives
+                    .iter()
+                    .any(|n| n.contains("task") || n.contains("chan") || n.contains("spawn"));
         }
         self.has_extern_plugin
             || self
@@ -1088,7 +1092,14 @@ impl Lowerer {
     /// When no `task`/`chan`/`spawn` native is reachable in the whole program
     /// (`needs_safepoint() == false`), state compiles to a plain static with
     /// no lock and no atomics (D8 lock elision).
+    ///
+    /// Under `nolock_selftest` the lock is disabled entirely (selftest only):
+    // state accesses run lock-free so that batching is verified to be
+    // required for atomicity (readers should observe torn snapshots).
     pub(crate) fn needs_state_lock(&self) -> bool {
+        if cfg!(feature = "nolock_selftest") {
+            return false;
+        }
         self.needs_safepoint()
     }
 
@@ -1133,8 +1144,25 @@ impl Lowerer {
         }
     }
 
+    /// True when `e` itself (not its bodies) reads any `state` binding,
+    /// using the shared pure-region analysis so the AOT lowering agrees with
+    /// the checker (Z0019) and the VM (`StateBatchBegin`/`End`).
+    pub(crate) fn expr_reads_state_direct(&self, e: &Expr) -> bool {
+        !zz_frontend::ast::expr_state_reads(e, &|n| self.state_set.contains(n)).is_empty()
+    }
+
+    /// True when `e` is a pure region that reads state: the whole expression
+    /// (or call cell) can be evaluated under one lock acquisition.
+    pub(crate) fn state_region_pure(&self, e: &Expr) -> bool {
+        if self.state_read_batch_depth.get() > 0 || !self.needs_state_lock() {
+            return false;
+        }
+        (zz_frontend::ast::expr_is_pure(e) || zz_frontend::ast::call_cell_is_pure(e))
+            && self.expr_reads_state_direct(e)
+    }
+
     /// Emit `e`, wrapping all state reads in a single lock acquisition so that
-    /// multiple state reads within one expression are atomic (no yield
+    /// multiple state reads within one pure region are atomic (no yield
     /// between them). Returns the C expression string for `e`.
     pub(crate) fn emit_expr_stateful(
         &self,
@@ -1142,96 +1170,10 @@ impl Lowerer {
         names: &mut NameCtx,
         out: &mut String,
     ) -> String {
-        let already_batch = self.state_read_batch_depth.get() > 0;
-        if !already_batch && self.expr_reads_state(e) {
-            self.state_read_batch_depth.set(1);
-            out.push_str("    zz_state_lock();\n");
-        }
-        let val = self.emit_expr(e, names, out);
-        if !already_batch && self.state_read_batch_depth.get() > 0 {
-            out.push_str("    zz_state_unlock();\n");
-            self.state_read_batch_depth.set(0);
-        }
-        val
-    }
-
-    /// True when expression `e` reads any `state` binding. Used to decide
-    /// whether to wrap statement-level expression evaluation in a single
-    /// state-lock acquisition so multiple state reads in one expression are
-    /// atomic (no yield between them).
-    pub(crate) fn expr_reads_state(&self, e: &Expr) -> bool {
-        use Expr;
-        match e {
-            Expr::Ident { name, .. } => self.state_set.contains(name),
-            Expr::Path { parts, .. } => parts.iter().any(|p| self.state_set.contains(p)),
-            Expr::Binary { left, right, .. } => {
-                self.expr_reads_state(left) || self.expr_reads_state(right)
-            }
-            Expr::Unary { expr, .. } => self.expr_reads_state(expr),
-            Expr::Try { expr, .. } => self.expr_reads_state(expr),
-            Expr::Call {
-                callee,
-                args,
-                named,
-                ..
-            } => {
-                self.expr_reads_state(callee)
-                    || args.iter().any(|a| self.expr_reads_state(a))
-                    || named.iter().any(|(_, v)| self.expr_reads_state(v))
-            }
-            Expr::Closure { .. } => false, // closures capture, don't directly read
-            Expr::Block(b) => b.stmts.iter().any(|s| self.stmt_reads_state(s)),
-            Expr::If {
-                cond, then, els, ..
-            } => {
-                self.expr_reads_state(cond)
-                    || self.stmt_reads_any(then)
-                    || els.iter().any(|e| self.expr_reads_state(e))
-            }
-            Expr::While { cond, body, .. } => {
-                self.expr_reads_state(cond) || self.stmt_reads_any(body)
-            }
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                self.expr_reads_state(scrutinee)
-                    || arms.iter().any(|a| self.expr_reads_state(&a.body))
-            }
-            Expr::Array { elems, .. } => elems.iter().any(|e| self.expr_reads_state(e)),
-            Expr::Dict { entries, .. } => entries
-                .iter()
-                .any(|(k, v)| self.expr_reads_state(k) || self.expr_reads_state(v)),
-            Expr::Fmt { parts, .. } => parts
-                .iter()
-                .any(|p| matches!(p, FmtPart::Expr(e, _) if self.expr_reads_state(e))),
-            Expr::Paren { expr, .. } => self.expr_reads_state(expr),
-            Expr::Tuple { items, .. } => items.iter().any(|e| self.expr_reads_state(e)),
-            _ => false,
-        }
-    }
-
-    /// True when any statement in `block` reads state.
-    fn stmt_reads_any(&self, b: &Block) -> bool {
-        b.stmts.iter().any(|s| self.stmt_reads_state(s))
-    }
-
-    /// True when statement `s` reads state (used to decide whether to batch
-    /// state reads under a single lock acquisition).
-    pub(crate) fn stmt_reads_state(&self, s: &Stmt) -> bool {
-        use Stmt;
-        match s {
-            Stmt::Expr(e) => self.expr_reads_state(e),
-            Stmt::Assign { target, value, .. } => {
-                self.expr_reads_state(target) || self.expr_reads_state(value)
-            }
-            Stmt::CompoundAssign { target, value, .. } => {
-                self.expr_reads_state(target) || self.expr_reads_state(value)
-            }
-            Stmt::Decl { value, .. } => self.expr_reads_state(value),
-            Stmt::Return { value, .. } => value.iter().any(|e| self.expr_reads_state(e)),
-            Stmt::Defer { expr, .. } => self.expr_reads_state(expr),
-            _ => false,
-        }
+        // The per-region wrapper in `emit_expr` owns the lock discipline now
+        // (R1/R2); a statement-level expression is just a sequence of
+        // regions.
+        self.emit_expr(e, names, out)
     }
 
     /// Split a dotted reference whose root is a `state` binding into the

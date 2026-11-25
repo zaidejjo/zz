@@ -119,6 +119,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "state_identifiers.zz", true),
     ("stdlib", "state_r2_local_only.zz", true),
     ("stdlib", "state_r2_read_only_task.zz", true),
+    ("stdlib", "state_multiread_all.zz", true),
     ("stdlib", "state_r2_state_ok.zz", true),
     ("stdlib", "state_d2_math_ok.zz", true),
     ("stdlib", "state_d2_str_ok.zz", true),

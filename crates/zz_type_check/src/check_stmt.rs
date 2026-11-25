@@ -1582,3 +1582,289 @@ fn expr_refers_to_name_block(checker: &Checker, b: &zz_span_ast::ast::Block, nam
         _ => false,
     })
 }
+
+// --- Z0019: state reads split across pure regions -----------------------
+
+/// One statement's header expression is split into pure regions at every
+/// call (R1/R2). If two different `state` bindings are read in two or more
+/// regions, the statement can observe two different snapshots: reject it
+/// unless the user wraps it in `atomic { }` or folds the reads into one
+/// expression (R3).
+///
+/// Bodies (`if`/`while`/`for`/`match` arms) are separate statement units and
+/// are checked independently. `atomic { }` bodies are skipped entirely: the
+/// block already holds the lock (R4).
+pub fn check_z0019_in_block(
+    checker: &Checker,
+    block: &zz_span_ast::ast::Block,
+) -> Vec<zz_diag_core::RawDiag> {
+    let mut errors = Vec::new();
+    z0019_block(checker, block, &mut errors);
+    errors
+}
+
+fn z0019_block(
+    checker: &Checker,
+    block: &zz_span_ast::ast::Block,
+    errors: &mut Vec<zz_diag_core::RawDiag>,
+) {
+    for stmt in &block.stmts {
+        z0019_stmt(checker, stmt, errors);
+    }
+}
+
+fn z0019_stmt(checker: &Checker, stmt: &Stmt, errors: &mut Vec<zz_diag_core::RawDiag>) {
+    match stmt {
+        Stmt::Decl { value, .. } => z0019_exprs(checker, &[value], stmt.span(), errors),
+        Stmt::Assign { target, value, .. } | Stmt::CompoundAssign { target, value, .. } => {
+            z0019_exprs(checker, &[target, value], stmt.span(), errors)
+        }
+        Stmt::Destructure { value, .. } => z0019_exprs(checker, &[value], stmt.span(), errors),
+        Stmt::Return {
+            value: Some(value), ..
+        } => z0019_exprs(checker, &[value], stmt.span(), errors),
+        Stmt::Defer { expr, .. } => z0019_exprs(checker, &[expr], stmt.span(), errors),
+        Stmt::For { iter, body, .. } => {
+            z0019_exprs(checker, &[iter], stmt.span(), errors);
+            z0019_block(checker, body, errors);
+        }
+        // The whole block holds one lock: no regions inside (R4).
+        Stmt::Atomic { .. } => {}
+        Stmt::Expr(e) => z0019_stmt_expr(checker, e, errors),
+        Stmt::Func {
+            name: _,
+            params: _,
+            body,
+            generics: _,
+            ..
+        } => {
+            // Each function body is its own statement unit (closures are
+            // checked at their own body sites).
+            z0019_block(checker, body, errors);
+        }
+        Stmt::Impl { methods, .. } => {
+            for m in methods {
+                if let Stmt::Func {
+                    name: _,
+                    params: _,
+                    body,
+                    generics: _,
+                    ..
+                } = m
+                {
+                    z0019_block(checker, body, errors);
+                }
+            }
+        }
+        // Functions/impls are checked at their own body sites.
+        _ => {}
+    }
+}
+
+/// Check the region split of the given header expressions, then walk their
+/// nested bodies as independent statement units.
+fn z0019_exprs(
+    checker: &Checker,
+    exprs: &[&Expr],
+    span: Span,
+    errors: &mut Vec<zz_diag_core::RawDiag>,
+) {
+    let is_state = |n: &str| checker.state_names.contains(n);
+    let mut regions: Vec<std::collections::BTreeSet<String>> = Vec::new();
+    for e in exprs {
+        regions.extend(zz_span_ast::ast::expr_regions(e, &is_state));
+    }
+    if regions.len() >= 2 {
+        let mut distinct: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for r in &regions {
+            distinct.extend(r.iter().cloned());
+        }
+        // Reads of a single state in several regions are allowed (R3).
+        if distinct.len() >= 2 {
+            let names = distinct.into_iter().collect::<Vec<_>>().join("`, `");
+            errors.push(
+                error_at(
+                    format!(
+                        "state reads in one statement are separated by a call and may \
+                         observe different snapshots (`{names}`); wrap the statement in \
+                         atomic {{ }} or read them in one expression"
+                    ),
+                    span,
+                )
+                .with_code(ErrorCode(19)),
+            );
+        }
+    }
+    for e in exprs {
+        z0019_bodies(checker, e, errors);
+    }
+}
+
+/// Walk nested bodies (blocks, if/while/match/if-let branches, closures are
+/// their own function units) of an expression.
+fn z0019_bodies(checker: &Checker, e: &Expr, errors: &mut Vec<zz_diag_core::RawDiag>) {
+    match e {
+        Expr::If { then, els, .. } => {
+            z0019_block(checker, then, errors);
+            if let Some(els) = els {
+                z0019_stmt_expr(checker, els, errors);
+            }
+        }
+        Expr::While { body, .. } => z0019_block(checker, body, errors),
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            z0019_bodies(checker, scrutinee, errors);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    z0019_exprs(checker, &[guard], guard.span(), errors);
+                }
+                z0019_stmt_expr(checker, &arm.body, errors);
+            }
+        }
+        Expr::IfLet {
+            value, then, els, ..
+        } => {
+            z0019_bodies(checker, value, errors);
+            z0019_block(checker, then, errors);
+            if let Some(els) = els {
+                z0019_stmt_expr(checker, els, errors);
+            }
+        }
+        Expr::Block(b) => z0019_block(checker, b, errors),
+        Expr::Fmt { parts, .. } => {
+            for p in parts {
+                if let zz_span_ast::ast::FmtPart::Expr(e, _) = p {
+                    z0019_bodies(checker, e, errors);
+                }
+            }
+        }
+        Expr::Paren { expr, .. }
+        | Expr::Unary { expr, .. }
+        | Expr::Field { obj: expr, .. }
+        | Expr::Is { expr, .. }
+        | Expr::Try { expr, .. } => z0019_bodies(checker, expr, errors),
+        Expr::Tuple { items, .. } | Expr::Array { elems: items, .. } => {
+            for e in items {
+                z0019_bodies(checker, e, errors);
+            }
+        }
+        Expr::Binary { left, right, .. }
+        | Expr::Range {
+            start: left,
+            end: right,
+            ..
+        } => {
+            z0019_bodies(checker, left, errors);
+            z0019_bodies(checker, right, errors);
+        }
+        Expr::Dict { entries, .. } => {
+            for (k, v) in entries {
+                z0019_bodies(checker, k, errors);
+                z0019_bodies(checker, v, errors);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, v) in fields {
+                z0019_bodies(checker, v, errors);
+            }
+        }
+        Expr::Index { obj, index, .. } => {
+            z0019_bodies(checker, obj, errors);
+            z0019_bodies(checker, index, errors);
+        }
+        Expr::Slice {
+            obj, start, end, ..
+        } => {
+            z0019_bodies(checker, obj, errors);
+            if let Some(e) = start {
+                z0019_bodies(checker, e, errors);
+            }
+            if let Some(e) = end {
+                z0019_bodies(checker, e, errors);
+            }
+        }
+        Expr::Variant { arg, .. } => {
+            if let Some(e) = arg {
+                z0019_bodies(checker, e, errors);
+            }
+        }
+        Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            z0019_bodies(checker, callee, errors);
+            for a in args {
+                z0019_bodies(checker, a, errors);
+            }
+            for (_, v) in named {
+                z0019_bodies(checker, v, errors);
+            }
+        }
+        Expr::ListComp {
+            body, iter, filter, ..
+        } => {
+            z0019_bodies(checker, iter, errors);
+            z0019_bodies(checker, body, errors);
+            if let Some(f) = filter {
+                z0019_bodies(checker, f, errors);
+            }
+        }
+        Expr::Closure { body, .. } => match body.as_ref() {
+            Expr::Block(b) => z0019_block(checker, b, errors),
+            e => z0019_stmt_expr(checker, e, errors),
+        },
+        Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Str { .. }
+        | Expr::Bool { .. }
+        | Expr::Ident { .. }
+        | Expr::Path { .. }
+        | Expr::Break { .. }
+        | Expr::Continue { .. } => {}
+    }
+}
+
+/// Statement-position expression: its own header is one statement unit; its
+/// bodies are separate units.
+fn z0019_stmt_expr(checker: &Checker, e: &Expr, errors: &mut Vec<zz_diag_core::RawDiag>) {
+    match e {
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            z0019_exprs(checker, &[cond], cond.span(), errors);
+            z0019_block(checker, then, errors);
+            if let Some(els) = els {
+                z0019_stmt_expr(checker, els, errors);
+            }
+        }
+        Expr::While { cond, body, .. } => {
+            z0019_exprs(checker, &[cond], cond.span(), errors);
+            z0019_block(checker, body, errors);
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            z0019_exprs(checker, &[scrutinee], scrutinee.span(), errors);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    z0019_exprs(checker, &[guard], guard.span(), errors);
+                }
+                z0019_stmt_expr(checker, &arm.body, errors);
+            }
+        }
+        Expr::IfLet {
+            value, then, els, ..
+        } => {
+            z0019_exprs(checker, &[value], value.span(), errors);
+            z0019_block(checker, then, errors);
+            if let Some(els) = els {
+                z0019_stmt_expr(checker, els, errors);
+            }
+        }
+        Expr::Block(b) => z0019_block(checker, b, errors),
+        _ => z0019_exprs(checker, &[e], e.span(), errors),
+    }
+}

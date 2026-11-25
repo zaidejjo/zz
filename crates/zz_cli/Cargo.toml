@@ -8,7 +8,7 @@ license.workspace = true
 # When enabled, forces zz_lower's needs_safepoint() to return true, disabling
 # lock elision (D8) so state accesses always go through the process-global
 # lock. Used for self-testing locking correctness (nolock builds).
-nolock_selftest = ["zz_codegen/nolock_selftest"]
+nolock_selftest = ["zz_codegen/nolock_selftest", "zz_runtime/nolock_selftest"]
 
 [[bin]]
 name = "zz"

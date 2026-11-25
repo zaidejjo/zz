@@ -1,0 +1,30 @@
+// features: int-arith, locals, print, state, func-call
+// Step 3c.3 Z0019 negative fixture:
+// - Reads of the SAME single `state` binding in separate regions are ALLOWED.
+// - Two states read in ONE pure region with a call AFTER them must compile.
+state n := 0
+state m := 0
+
+func f(x: int) -> int { return x }
+
+func ok_same_state_twice() -> int {
+    // `n` read before `f()` and `n` read as `f`'s argument: two regions, but
+    // only one distinct state -> allowed (R3).
+    x := n + f(n)
+    return x
+}
+
+func ok_two_states_one_region_then_call() -> int {
+    // `n` and `m` read in one pure region, then `f()` called after (separate
+    // region, but no state read in it) -> compiles.
+    x := n + m
+    y := f(x)
+    return x + y
+}
+
+func main() -> Result<int, str> {
+    a := ok_same_state_twice()
+    b := ok_two_states_one_region_then_call()
+    println("neg_ok {a} {b}")
+    return .ok(0)
+}

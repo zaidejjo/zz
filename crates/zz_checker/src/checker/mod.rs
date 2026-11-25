@@ -1022,6 +1022,15 @@ fn check_program_impl(
             }
         }
     }
+    // Z0019 (R3): top-level statements whose header expression splits two
+    // different `state` reads across pure regions.
+    let top_block = zz_span_ast::ast::Block {
+        stmts: program.stmts.clone(),
+        span: program.span,
+    };
+    let z19 = zz_type_check::check_z0019_in_block(&checker, &top_block);
+    checker.errors.extend(z19);
+
     // Z0013: state read before its declaration (earlier top-level statement).
     let mut state_decl_idx: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();

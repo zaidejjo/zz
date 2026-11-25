@@ -160,6 +160,10 @@ pub struct Compiler {
     /// Nesting depth of state-batch regions being compiled. When > 0,
     /// nested state reads skip batch begin/end to avoid nested lock regions.
     in_batch_depth: u32,
+    /// Set while compiling the cell (receiver + arguments) of a call whose
+    /// evaluation is one pure region (R2). The matching call op closes the
+    /// region before it runs; `StateBatchEnd` is emitted from `emit`.
+    pending_call_region: bool,
 }
 
 enum JumpKind {
@@ -221,6 +225,7 @@ impl Compiler {
             impl_methods: std::collections::HashSet::new(),
             in_atomic_depth: 0,
             in_batch_depth: 0,
+            pending_call_region: false,
             type_scope: zz_checker::TOP_SCOPE.to_string(),
         }
     }
@@ -606,10 +611,33 @@ impl Compiler {
             _ => Span::default(),
         };
         let effect = Self::stack_effect(&op);
+        // R2/R5: a call executes outside the pure region that evaluated its
+        // cell. Close that region immediately before the call op runs, so the
+        // call (user code, I/O, blocking) never holds the state lock.
+        if self.pending_call_region && Self::is_call_op(&op) {
+            self.pending_call_region = false;
+            self.in_batch_depth = self.in_batch_depth.saturating_sub(1);
+            self.chunk.spans.push(span);
+            self.chunk.code.push(Op::StateBatchEnd(span));
+        }
         self.stack_height = self.stack_height.saturating_add_signed(effect as isize);
 
         self.chunk.spans.push(span);
         self.chunk.code.push(op);
+    }
+
+    /// Ops that execute arbitrary code: they must not run while a state
+    /// batch region holds the lock (R2).
+    fn is_call_op(op: &Op) -> bool {
+        matches!(
+            op,
+            Op::Call { .. }
+                | Op::CallPath { .. }
+                | Op::CallMethod { .. }
+                | Op::CallNative { .. }
+                | Op::SpawnClosure { .. }
+                | Op::DbQuery { .. }
+        )
     }
 
     /// Net stack effect of an instruction (values pushed minus popped).
@@ -2836,7 +2864,22 @@ impl Compiler {
     /// value (it emits `Op::Pop` for `StmtValue::Discard`): a value-producing
     /// statement can then skip bookkeeping nothing reads. See the
     /// `Stmt::For` arm.
+    /// Compile one statement. R5: every path out of a batch region closes
+    /// it; assert the depth is zero at every statement boundary.
     fn compile_stmt(&mut self, stmt: &Stmt, value_discarded: bool) -> StmtValue {
+        let v = self.compile_stmt_inner(stmt, value_discarded);
+        debug_assert_eq!(
+            self.in_batch_depth, 0,
+            "state batch region leaked out of statement"
+        );
+        debug_assert!(
+            !self.pending_call_region,
+            "call-cell region leaked out of statement"
+        );
+        v
+    }
+
+    fn compile_stmt_inner(&mut self, stmt: &Stmt, value_discarded: bool) -> StmtValue {
         match stmt {
             Stmt::Decl {
                 name,
@@ -4323,87 +4366,50 @@ impl Compiler {
         Arc::new(sub.chunk)
     }
 
-    /// True when expression `e` reads any `state` binding. Used to decide
-    /// whether to wrap expression evaluation in a batched state-read region
-    /// so multiple state reads in one expression are atomic under a single
-    /// lock acquisition.
-    fn expr_reads_state(&self, e: &Expr) -> bool {
-        use zz_frontend::ast::Expr;
-        match e {
-            Expr::Ident { name, .. } => self.state_names.contains(name),
-            Expr::Path { parts, .. } => parts.iter().any(|p| {
-                self.state_names.contains(p) || self.state_names.contains(&parts.join("."))
-            }),
-            Expr::Binary { left, right, .. } => {
-                self.expr_reads_state(left) || self.expr_reads_state(right)
-            }
-            Expr::Unary { expr, .. } => self.expr_reads_state(expr),
-            Expr::Try { expr, .. } => self.expr_reads_state(expr),
-            Expr::Call {
-                callee,
-                args,
-                named,
-                ..
-            } => {
-                self.expr_reads_state(callee)
-                    || args.iter().any(|a| self.expr_reads_state(a))
-                    || named.iter().any(|(_, v)| self.expr_reads_state(v))
-            }
-            Expr::Closure { .. } => false, // closures capture, don't directly read state
-            Expr::Block(b) => b.stmts.iter().any(|s| self.stmt_reads_state(s)),
-            Expr::If {
-                cond, then, els, ..
-            } => {
-                self.expr_reads_state(cond)
-                    || self.block_reads_state(then)
-                    || els.iter().any(|e| self.expr_reads_state(e))
-            }
-            Expr::While { cond, body, .. } => {
-                self.expr_reads_state(cond) || self.block_reads_state(body)
-            }
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                self.expr_reads_state(scrutinee)
-                    || arms.iter().any(|a| self.expr_reads_state(&a.body))
-            }
-            Expr::Array { elems, .. } => elems.iter().any(|e| self.expr_reads_state(e)),
-            Expr::Dict { entries, .. } => entries
-                .iter()
-                .any(|(k, v)| self.expr_reads_state(k) || self.expr_reads_state(v)),
-            Expr::Fmt { parts, .. } => parts.iter().any(
-                |p| matches!(p, zz_frontend::ast::FmtPart::Expr(e, _) if self.expr_reads_state(e)),
-            ),
-            Expr::Paren { expr, .. } => self.expr_reads_state(expr),
-            Expr::Tuple { items, .. } => items.iter().any(|e| self.expr_reads_state(e)),
-            _ => false,
-        }
-    }
-
-    /// True when statement `s` reads state.
-    fn stmt_reads_state(&self, s: &zz_frontend::ast::Stmt) -> bool {
-        use zz_frontend::ast::Stmt;
-        match s {
-            Stmt::Expr(e) => self.expr_reads_state(e),
-            Stmt::Assign { target, value, .. } => {
-                self.expr_reads_state(target) || self.expr_reads_state(value)
-            }
-            Stmt::CompoundAssign { target, value, .. } => {
-                self.expr_reads_state(target) || self.expr_reads_state(value)
-            }
-            Stmt::Decl { value, .. } => self.expr_reads_state(value),
-            Stmt::Return { value, .. } => value.iter().any(|e| self.expr_reads_state(e)),
-            Stmt::Defer { expr, .. } => self.expr_reads_state(expr),
-            _ => false,
-        }
-    }
-
-    /// True when any statement in `block` reads state.
-    fn block_reads_state(&self, b: &zz_frontend::ast::Block) -> bool {
-        b.stmts.iter().any(|s| self.stmt_reads_state(s))
-    }
-
+    /// Compile `expr`, wrapping each maximal pure region that reads `state`
+    /// in one `StateBatchBegin`/`StateBatchEnd` (one lock acquisition).
+    ///
+    /// R1: a pure region is a maximal subexpression with no call of any kind.
+    /// R2: for a call, the cell (receiver + arguments) is the region, and the
+    /// call op closes it before running. R4: inside `atomic { }` the block
+    /// already holds the lock, so no batch is emitted.
     fn compile_expr(&mut self, expr: &Expr) {
+        if self.in_atomic_depth == 0 && self.in_batch_depth == 0 {
+            let reads = self.expr_reads_state_direct(expr);
+            if zz_frontend::ast::call_cell_is_pure(expr) && reads {
+                // R2: one region for the whole call cell; `emit` closes it
+                // immediately before the call op.
+                self.in_batch_depth += 1;
+                self.pending_call_region = true;
+                self.emit(Op::StateBatchBegin(expr.span()));
+                self.compile_expr_inner(expr);
+                if self.pending_call_region {
+                    // No call op was emitted (e.g. enum construction).
+                    self.pending_call_region = false;
+                    self.in_batch_depth -= 1;
+                    self.emit(Op::StateBatchEnd(expr.span()));
+                }
+                return;
+            }
+            if zz_frontend::ast::expr_is_pure(expr) && reads {
+                self.in_batch_depth += 1;
+                self.emit(Op::StateBatchBegin(expr.span()));
+                self.compile_expr_inner(expr);
+                self.in_batch_depth -= 1;
+                self.emit(Op::StateBatchEnd(expr.span()));
+                return;
+            }
+        }
+        self.compile_expr_inner(expr);
+    }
+
+    /// State names read directly by `expr` (no bodies), matching the shared
+    /// pure-region analysis used by the checker and the AOT lowering.
+    fn expr_reads_state_direct(&self, expr: &Expr) -> bool {
+        !zz_frontend::ast::expr_state_reads(expr, &|n| self.state_names.contains(n)).is_empty()
+    }
+
+    fn compile_expr_inner(&mut self, expr: &Expr) {
         // Take-restore `len(s.f)` (#242): no container or field clone.
         if self.try_emit_len_field(expr) {
             return;
@@ -4445,15 +4451,20 @@ impl Compiler {
                     Resolved::Slot(slot) => self.emit(Op::LoadSlot(slot as u16)),
                     Resolved::Env => self.emit(Op::LoadVar(name.clone(), *span)),
                     Resolved::State => {
-                        self.in_batch_depth += 1;
-                        if self.in_batch_depth == 1 {
-                            self.emit(Op::StateBatchBegin(*span));
+                        if self.in_atomic_depth > 0 {
+                            // R4: the `atomic { }` frame holds the lock.
+                            self.emit(Op::LoadState(name.clone(), *span));
+                        } else {
+                            self.in_batch_depth += 1;
+                            if self.in_batch_depth == 1 {
+                                self.emit(Op::StateBatchBegin(*span));
+                            }
+                            self.emit(Op::LoadState(name.clone(), *span));
+                            if self.in_batch_depth == 1 {
+                                self.emit(Op::StateBatchEnd(*span));
+                            }
+                            self.in_batch_depth -= 1;
                         }
-                        self.emit(Op::LoadState(name.clone(), *span));
-                        if self.in_batch_depth == 1 {
-                            self.emit(Op::StateBatchEnd(*span));
-                        }
-                        self.in_batch_depth -= 1;
                     }
                 }
             }
@@ -4559,23 +4570,12 @@ impl Compiler {
                             }
                         }
                     } else {
-                        let reads_state =
-                            self.expr_reads_state(left) || self.expr_reads_state(right);
-                        if reads_state {
-                            self.in_batch_depth += 1;
-                            if self.in_batch_depth == 1 {
-                                self.emit(Op::StateBatchBegin(*span));
-                            }
-                        }
+                        // Pure regions are opened by `compile_expr`; an
+                        // impure binary (a call on either side) splits at the
+                        // call, which closes its own argument region (R2/R3).
                         self.compile_expr(left);
                         self.compile_expr(right);
                         self.emit(Op::BinOp(*op, *span));
-                        if reads_state {
-                            if self.in_batch_depth == 1 {
-                                self.emit(Op::StateBatchEnd(*span));
-                            }
-                            self.in_batch_depth -= 1;
-                        }
                     }
                 }
             },

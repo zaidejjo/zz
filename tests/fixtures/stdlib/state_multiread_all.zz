@@ -1,0 +1,170 @@
+// features: int-arith, locals, print, state, std-str, std-task, short-circuit
+// Step 3c.3 fixture: multi-state reads in one statement. Locked build:
+// every variant = 0 violations. Nolock build: V1-V3 tear reliably; V4-V7
+// tear in isolation (green-thread scheduling makes combined-run tearing
+// probabilistic — documented deviation in docs/state-verification/step3c-3.txt).
+import std.task
+import std.str
+
+state a := 100
+state b := 0
+state stop := 0
+
+struct Pair { x: int, y: int }
+
+func busy() {
+    acc := 0
+    for i in 0..200 {
+        acc = (acc + i * 7) % 1009
+    }
+    if acc < 0 { println("unreachable") }
+}
+
+func writer_fwd() {
+    n := 0
+    while stop == 0 && n < 10000 {
+        atomic {
+            a -= 1
+            busy()
+            b += 1
+        }
+        n += 1
+    }
+}
+
+func writer_back() {
+    n := 0
+    while stop == 0 && n < 10000 {
+        atomic {
+            b -= 1
+            busy()
+            a += 1
+        }
+        n += 1
+    }
+}
+
+func parse_sum(s: str) -> int {
+    bytes := std.str.bytes(s)
+    total := 0
+    cur := 0
+    sign := 1
+    started := 0
+    seen := 0
+    for i in 0..len(bytes) {
+        c := bytes[i]
+        if c == 45 {
+            sign = 0 - 1
+        } else if c >= 48 && c <= 57 {
+            cur = cur * 10 + (c - 48)
+            started = 1
+        } else {
+            if started == 1 {
+                total += sign * cur
+                cur = 0
+                sign = 1
+                seen += 1
+                started = 0
+            }
+        }
+    }
+    if started == 1 { total += sign * cur; seen += 1 }
+    if seen != 2 { return 0 - 1 }
+    return total
+}
+
+func check(sink: int, ax: int, bx: int) -> int {
+    if ax + bx != 100 { return sink + 1 }
+    return sink
+}
+
+func v1(m: int) -> int {
+    v := 0
+    for i in 0..m {
+        x := a + b
+        if x != 100 { v += 1 }
+    }
+    return v
+}
+
+func v2(m: int) -> int {
+    v := 0
+    for i in 0..m {
+        pair := [a, b]
+        if pair[0] + pair[1] != 100 { v += 1 }
+    }
+    return v
+}
+
+func v3(m: int) -> int {
+    v := 0
+    for i in 0..m {
+        s := Pair { x: a, y: b }
+        if s.x + s.y != 100 { v += 1 }
+    }
+    return v
+}
+
+func v4(m: int) -> int {
+    v := 0
+    for i in 0..m {
+        s := "{a} {b}"
+        if parse_sum(s) != 100 { v += 1 }
+    }
+    return v
+}
+
+func v5(m: int) -> int {
+    v := 0
+    for i in 0..m {
+        v = check(v, a, b)
+    }
+    return v
+}
+
+func v6(m: int) -> int {
+    v := 0
+    for i in 0..m {
+        if a > 0 && b >= 0 {
+            x := a + b
+            if x != 100 { v += 1 }
+        }
+    }
+    return v
+}
+
+func v7(m: int) -> int {
+    v := 0
+    for i in 0..m {
+        z := [a, b, a, b]
+        if z[0] + z[1] != z[2] + z[3] { v += 1 }
+    }
+    return v
+}
+
+func main() -> Result<int, str> {
+    m := 10000
+    h0 := task.spawn(|_| { writer_fwd() })
+    h1 := task.spawn(|_| { writer_back() })
+    c1 := task.spawn(|_| { v1(m) })
+    n1: int = task.join(c1)
+    c2 := task.spawn(|_| { v2(m) })
+    n2: int = task.join(c2)
+    c3 := task.spawn(|_| { v3(m) })
+    n3: int = task.join(c3)
+    c4 := task.spawn(|_| { v4(m) })
+    n4: int = task.join(c4)
+    c5 := task.spawn(|_| { v5(m) })
+    n5: int = task.join(c5)
+    c6 := task.spawn(|_| { v6(m) })
+    n6: int = task.join(c6)
+    c7 := task.spawn(|_| { v7(m) })
+    n7: int = task.join(c7)
+
+    atomic { stop = 1 }
+    task.join(h0)
+    task.join(h1)
+
+    println("V1={n1} V2={n2} V3={n3} V4={n4} V5={n5} V6={n6} V7={n7}")
+    return .ok(0)
+}

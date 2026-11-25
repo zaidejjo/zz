@@ -207,6 +207,24 @@ Do NOT weaken it (`crates/zz_runtime/src/value.rs:400-415`). Document in a
 comment how `state` access preserves it (all cross-thread state goes through
 the single lock; snapshots are frozen before crossing thread boundaries).
 
+## R1–R5 — Multi-state read batching (fix for torn multi-state reads)
+
+A statement's header expression (the expression in a `decl`, the target and
+value of an assignment/compound-assignment, the condition of `if`/`while`/`match`-scrutinee/`range()`, the parts of string interpolation, the fields of composite literals, and the arguments of a call) is split into **maximal PURE regions**: subexpressions with no call of any kind (no user function, no closure, no native — whitelisted or not — no I/O, no blocking call). The `&&`/`||` short-circuit expression is one region; binary operands, array/struct literals, string interpolation, and comparisons are each one region when pure.
+
+- **R1 (one region = one lock):** all `state` reads inside one pure region run inside a single `StateBatchBegin`/`StateBatchEnd` (VM) / `zz_state_lock`/`zz_state_unlock` (AOT) — one lock acquisition for the whole region. Nothing else runs inside the region.
+- **R2 (call cell):** for a call, argument evaluation (receiver + arguments) is one region: emit `BatchBegin`, evaluate all args, `BatchEnd`, THEN the `Call`. The call itself (user code / I/O) never runs inside the batch.
+- **R3 (split reads → Z0019):** if one statement reads `state` in two or more different pure regions (reads separated by a call, e.g. `foo(a, f(), b)` or `g(a) + h(b)`), it can observe two different snapshots → compile error **Z0019**: "state reads in one statement are separated by a call and may observe different snapshots; wrap the statement in `atomic { }` or read them in one expression". Reads of a single `state` in several regions are allowed; only two or more *different* states split across regions are rejected.
+- **R4 (atomic / loops):** inside `atomic { }` no batch is emitted (the block already holds the lock). A `while` condition opens and closes its batch on every evaluation. Each `if`/`else-if` condition is its own region; `match` guards likewise.
+- **R5 (boundaries):** every path out of a batch region closes it (short-circuit jumps included; `?`/error cannot occur inside a pure region — asserted). A debug assertion checks batch depth is 0 at every statement boundary.
+
+The VM compile path (`crates/zz_runtime/src/vm/compiler.rs`) and the AOT lowering
+(`crates/zz_lower/src/context.rs`, `expr.rs`, `stmt.rs`) share the pure-region
+decomposition in `crates/zz_span_ast/src/ast/regions.rs` so all three layers
+agree. `Op::StateBatchBegin`/`StateBatchEnd` already cross every layer
+(IR, run cache, `zz_chunk`, AOT), so the fix widens existing regions — no new
+ops, no temporaries.
+
 ## Out of scope
 
 Lazy init-once globals, task-local state, effect/purity system, per-state
@@ -225,6 +243,7 @@ as an expression, changing channel/cell semantics.
 | Z0016 | R1 check-then-act (state read then write across statements) |
 | Z0017 | R2 plain global reachable from a task |
 | Z0018 | runtime: yield/block while atomic depth > 0 |
+| Z0019 | R3 state reads in one statement separated by a call (torn-snapshot risk) |
 
 Each gets an `ERROR_CATALOG` entry in `crates/zz_diag_core/src/lib.rs` plus
 `.with_code(ErrorCode(N))` at emission sites, and `zz explain ZNNNN`

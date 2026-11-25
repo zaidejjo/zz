@@ -531,9 +531,13 @@ impl Vm {
     /// from every path that pops an atomic frame (normal exit, `break` /
     /// `continue` unwinding, and `return` unwinding).
     fn leave_atomic(&mut self, interp: &mut Interp) {
-        self.state_lock_depth -= 1;
-        if let Some(reg) = interp.state_registry.as_ref() {
-            reg.release();
+        // Under `nolock_selftest` the lock is disabled; `Op::Atomic` did not
+        // acquire, so do not release here either (keep depth balanced).
+        if !cfg!(feature = "nolock_selftest") {
+            self.state_lock_depth -= 1;
+            if let Some(reg) = interp.state_registry.as_ref() {
+                reg.release();
+            }
         }
     }
 
@@ -1027,7 +1031,9 @@ impl Vm {
                         .state_registry
                         .as_ref()
                         .ok_or_else(|| self.error("state registry not available", *span))?;
-                    let v = if self.state_lock_depth > 0 || self.state_batch_depth > 0 {
+                    let v = if cfg!(not(feature = "nolock_selftest"))
+                        && (self.state_lock_depth > 0 || self.state_batch_depth > 0)
+                    {
                         // Inside `atomic { }` or a batched read: we hold the
                         // lock, direct access.
                         unsafe { reg.map_mut().get(name).cloned() }
@@ -1053,7 +1059,9 @@ impl Vm {
                         .state_registry
                         .as_ref()
                         .ok_or_else(|| self.error("state registry not available", *span))?;
-                    if self.state_lock_depth > 0 || self.state_batch_depth > 0 {
+                    if cfg!(not(feature = "nolock_selftest"))
+                        && (self.state_lock_depth > 0 || self.state_batch_depth > 0)
+                    {
                         unsafe {
                             reg.map_mut().insert(name.clone(), v);
                         }
@@ -1089,15 +1097,17 @@ impl Vm {
                     }
                 }
                 Op::Atomic { body, span } => {
-                    let reg = match interp.state_registry.as_ref() {
-                        Some(r) => Arc::clone(r),
-                        None => return Err(self.error("state registry not available", *span)),
-                    };
-                    // Acquire the state lock for the whole body (D3). The
-                    // frame exit releases it; `state_lock_depth` makes nested
-                    // ops bypass the lock (same thread, reentrant).
-                    reg.acquire();
-                    self.state_lock_depth += 1;
+                    // Under `nolock_selftest` the lock is disabled so atomic
+                    // bodies run lock-free (selftest only); the registry is
+                    // still used by the body's state ops via internal locking.
+                    if !cfg!(feature = "nolock_selftest") {
+                        let reg = match interp.state_registry.as_ref() {
+                            Some(r) => Arc::clone(r),
+                            None => return Err(self.error("state registry not available", *span)),
+                        };
+                        reg.acquire();
+                        self.state_lock_depth += 1;
+                    }
                     // Push a frame for the atomic body so it can access outer
                     // locals (function parameters, etc.) via the outer Vm's
                     // stack, and so return/break/continue propagate out of

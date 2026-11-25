@@ -560,16 +560,8 @@ impl Lowerer {
                     Some(ref sname) => self.emit_boxed_value(sname, value, names, out),
                     None => {
                         self.flat_comp_ok.set(flat_comp);
-                        let v = if self.expr_reads_state(value) {
-                            self.state_read_batch_depth.set(1);
-                            out.push_str("    zz_state_lock();\n");
-                            let v = self.emit_expr_stateful(value, names, out);
-                            out.push_str("    zz_state_unlock();\n");
-                            self.state_read_batch_depth.set(0);
-                            v
-                        } else {
-                            self.emit_expr(value, names, out)
-                        };
+                        // Pure-region locking is owned by `emit_expr` (R1/R2).
+                        let v = self.emit_expr(value, names, out);
                         self.flat_comp_ok.set(false);
                         v
                     }
@@ -861,7 +853,10 @@ impl Lowerer {
                 // value in state-storage form (unboxed structs are boxed
                 // into runtime objects) and write it under the state lock.
                 if let Some((cid, flag)) = self.state_target_ids(target) {
-                    let val = if self.expr_reads_state(value) {
+                    // The RHS is one pure region when it has no calls;
+                    // otherwise `emit_state_value`'s children lock their own
+                    // regions through `emit_expr` (R1/R2).
+                    let val = if self.state_region_pure(value) {
                         self.state_read_batch_depth.set(1);
                         out.push_str("    zz_state_lock();\n");
                         let val = self.emit_state_value(value, names, out);
@@ -874,16 +869,7 @@ impl Lowerer {
                     self.emit_state_write(&cid, &flag, &val, out);
                     return;
                 }
-                let val = if self.expr_reads_state(value) {
-                    self.state_read_batch_depth.set(1);
-                    out.push_str("    zz_state_lock();\n");
-                    let val = self.emit_expr(value, names, out);
-                    out.push_str("    zz_state_unlock();\n");
-                    self.state_read_batch_depth.set(0);
-                    val
-                } else {
-                    self.emit_expr(value, names, out)
-                };
+                let val = self.emit_expr(value, names, out);
                 // If the RHS expression was already lowered to a raw
                 // scalar (int64_t/double/bool), don't try to extract
                 // .i/.f/.b — just assign directly. Otherwise the boxed
