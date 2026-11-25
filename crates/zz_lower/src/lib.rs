@@ -329,11 +329,19 @@ impl Lowerer {
         let Some((_, first)) = sig.params.first() else {
             return false;
         };
-        let zz_checker::Type::Struct(sname, _) = first else {
-            return false;
+        // The receiver type may be a user struct (`Type::Struct`) or a
+        // builtin type (`str`, `int`, `float`, `bool`). In either case the
+        // first param is `self` and the method name is the fname suffix.
+        let type_key = match first {
+            zz_checker::Type::Struct(sname, _) => sname.clone(),
+            zz_checker::Type::Str => "str".to_string(),
+            zz_checker::Type::Int => "int".to_string(),
+            zz_checker::Type::Float => "float".to_string(),
+            zz_checker::Type::Bool => "bool".to_string(),
+            _ => return false,
         };
         let method = fname.rsplit('.').next().unwrap_or(fname);
-        fname == format!("{sname}.{method}")
+        fname == format!("{type_key}.{method}")
     }
 
     pub fn lower(&self) -> LoweredC {
@@ -647,7 +655,15 @@ impl Lowerer {
         // checked (a free function taking a struct first is NOT a method).
         let mut forward_decls = String::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for fname in &self.reachable_funcs {
+        // Iterate over all functions defined in the program (tp.funcs), not
+        // just reachable ones. A function like `str.shout` (an impl method on
+        // a builtin type) may be callable via method-call syntax
+        // (`"hi".shout()`) even though the callgraph doesn't edge to it from
+        // `TOP` (resolve_methods doesn't add edges for method calls on
+        // literal receivers). Iterating over tp.funcs ensures every
+        // user-defined function gets a forward declaration so call sites
+        // can reference it.
+        for fname in self.tp.funcs.keys() {
             if !seen.insert(fname.clone()) {
                 continue;
             }

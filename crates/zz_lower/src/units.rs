@@ -148,7 +148,16 @@ impl Lowerer {
                     ..
                 } => {
                     let fname = name.join(".");
-                    if !self.reachable_funcs.contains(&fname) {
+                    // Include functions that are reachable OR have a body
+                    // definition. A function like `str.shout` (impl method on
+                    // a builtin type) may be callable via method-call syntax
+                    // (`"hi".shout()`) even though the callgraph doesn't edge
+                    // to it from `TOP`. Including it here emits both its body
+                    // and (below) its forward declaration so call sites can
+                    // reference it.
+                    if !self.reachable_funcs.contains(&fname)
+                        && self.find_func_def(&fname).is_none()
+                    {
                         continue;
                     }
                     let ns = ns_of(&fname).to_string();
@@ -181,7 +190,9 @@ impl Lowerer {
                         } = m
                         {
                             let fname = format!("{tname}.{}", mname.join("."));
-                            if !self.reachable_funcs.contains(&fname) {
+                            if !self.reachable_funcs.contains(&fname)
+                                && self.find_func_def(&fname).is_none()
+                            {
                                 continue;
                             }
                             if !is_stdlib_fn(&fname) && !is_pkg_fn(&fname) {
@@ -412,7 +423,17 @@ impl Lowerer {
         let mut seen: HashSet<String> = HashSet::new();
         // Deterministic proto order: sorted (single-TU path keeps its
         // HashSet order for byte-identity; units are order-free).
+        // Include functions that are reachable OR have a body definition.
+        // A function like `str.shout` (impl method on a builtin type) may
+        // be callable via method-call syntax even though the callgraph
+        // doesn't edge to it from `TOP`. Including it here emits its
+        // forward declaration so call sites can reference it.
         let mut rfuncs: Vec<&String> = self.reachable_funcs.iter().collect();
+        for fname in self.tp.funcs.keys() {
+            if !self.reachable_funcs.contains(fname) && self.find_func_def(fname).is_some() {
+                rfuncs.push(fname);
+            }
+        }
         rfuncs.sort();
         for fname in rfuncs {
             if !seen.insert(fname.clone()) {

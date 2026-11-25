@@ -523,13 +523,27 @@ impl Lowerer {
                         }
                     }
                     None => {
+                        // Bare selective-import consts (`import std.math(PI)`
+                        // then `PI`, or `PI as pi`) lower to float literals.
+                        // Resolve through the import-alias map first (`pi` →
+                        // `std.math.PI`), then consult the math-constant table.
+                        if let Some(lit) = math_const_c_literal(name).or_else(|| {
+                            self.import_fn_aliases
+                                .get(name)
+                                .and_then(|c| math_const_c_literal(c))
+                        }) {
+                            return lit;
+                        }
                         // First-class reference to a named function
-                        // (`f := add`): box the static function when it
+                        // (`f := join`): box the static function when it
                         // resolves (selective-import canonical first, then
-                        // the bare spelling). Bare selective-import consts
-                        // (`import std.math(PI)` then `PI`, or `PI as pi`)
-                        // lower to float literals — the checker only lets valid
-                        // consts reach here unresolved. Anything else unknown
+                        // the bare spelling).
+                        if let Some(fv) = self.static_func_value_ident(name) {
+                            return fv;
+                        }
+                        // Anything else unknown: fall back to a clone of the
+                        // name (checker should have rejected invalid names
+                        // upstream).
                         format!("zz_clone({name})")
                     }
                 }
@@ -3809,9 +3823,22 @@ impl Lowerer {
                 // (same route as the Path arms above).
                 if self.is_func_field_callee(callee, names) {
                     (Self::FUNC_FIELD_CNAME.to_string(), None)
-                } else if let Some(zzty) = self.ty_at(names, obj.span()) {
+                } else {
+                    // Get the receiver type from the type table, falling back to
+                    // inferring it from literal expressions (string literals,
+                    // int literals, etc. may not have span type entries).
+                    let zzty: Option<zz_checker::Type> = self
+                        .ty_at(names, obj.span())
+                        .cloned()
+                        .or_else(|| match obj.as_ref() {
+                            Expr::Str { .. } => Some(zz_checker::Type::Str),
+                            Expr::Int { .. } => Some(zz_checker::Type::Int),
+                            Expr::Float { .. } => Some(zz_checker::Type::Float),
+                            Expr::Bool { .. } => Some(zz_checker::Type::Bool),
+                            _ => None,
+                        });
                     match zzty {
-                        zz_checker::Type::Enum(ename, _) => {
+                        Some(zz_checker::Type::Enum(ename, _)) => {
                             // Enum values erase to boxed objects: methods
                             // take the boxed receiver (same convention as
                             // boxed structs — no `&` unboxed form).
@@ -3833,14 +3860,14 @@ impl Lowerer {
                                 (method.clone(), None)
                             }
                         }
-                        zz_checker::Type::Struct(sname, _) => {
+                        Some(zz_checker::Type::Struct(sname, _)) => {
                             // Impl methods keep the direct-form convention
                             // (struct-pointer receiver); promotion included
                             // for embedded methods. The receiver is kept so
                             // the impl call site can pass `&recv` — including
                             // non-Ident receivers like `arr[0]` (boxed at
                             // runtime, unboxed into a temp at the call site).
-                            if let Some((target, _)) = self.struct_method_target(sname, method) {
+                            if let Some((target, _)) = self.struct_method_target(&sname, method) {
                                 (target, Some(*obj.clone()))
                             } else {
                                 // Free function on a non-Ident receiver
@@ -3858,8 +3885,10 @@ impl Lowerer {
                         }
                         // Canonical `sqlz.*`; `db.*` alias resolves to the
                         // same runtime fn via native_impl.
-                        zz_checker::Type::Db => (format!("sqlz.{method}"), Some(*obj.clone())),
-                        _ => {
+                        Some(zz_checker::Type::Db) => {
+                            (format!("sqlz.{method}"), Some(*obj.clone()))
+                        }
+                        Some(zzty) => {
                             // Type-based namespace table. Must mirror the
                             // Path-callee arm above (TcpStream→net etc.):
                             // a missing entry drops Typed receivers into
@@ -3886,7 +3915,7 @@ impl Lowerer {
                                 zz_checker::Type::Json => "json",
                                 zz_checker::Type::Bytes => "bytes",
                                 zz_checker::Type::Chan => "chan",
-                                zz_checker::Type::Opaque(tag) => intern_tag(tag),
+                                zz_checker::Type::Opaque(tag) => intern_tag(&tag),
                                 _ => "",
                             };
                             if !ns.is_empty() {
@@ -3906,14 +3935,15 @@ impl Lowerer {
                                 }
                             }
                         }
-                    }
-                } else {
-                    // No recorded receiver type at all: same free-function
-                    // fallback with the receiver kept.
-                    let receiver = *obj.clone();
-                    match self.field_free_target(method, None) {
-                        Some(t) => (t, Some(receiver)),
-                        None => (method.clone(), None),
+                        None => {
+                            // No recorded receiver type at all: same
+                            // free-function fallback with the receiver kept.
+                            let receiver = *obj.clone();
+                            match self.field_free_target(method, None) {
+                                Some(t) => (t, Some(receiver)),
+                                None => (method.clone(), None),
+                            }
+                        }
                     }
                 }
             }
@@ -4991,7 +5021,8 @@ impl Lowerer {
         };
 
         if !shadowed
-            && self.reachable_funcs.contains(&cname_for_native)
+            && (self.reachable_funcs.contains(&cname_for_native)
+                || self.tp.funcs.contains_key(&cname_for_native))
             && (self.tp.funcs.contains_key(&cname_for_native)
                 || self.find_func_def(&cname_for_native).is_some()
                 || self.is_impl_method(&cname_for_native))
@@ -5010,6 +5041,15 @@ impl Lowerer {
                     let sname: Option<String> = cname_for_native
                         .rsplit_once('.')
                         .map(|(s, _)| s.to_string());
+                    // Builtin types (`str`, `int`, `float`, `bool`) use the
+                    // regular function-call convention:
+                    // `zz_fn_X(zz_value *args, size_t argc)` — receiver passed
+                    // as first element of args array. User structs use the
+                    // pointer-receiver convention:
+                    // `zz_fn_X(<struct>* self, zz_value* args, size_t argc)`.
+                    let is_builtin_type = sname
+                        .as_deref()
+                        .is_some_and(|s| matches!(s, "str" | "int" | "float" | "bool"));
                     let unboxed = sname.as_deref().is_some_and(|s| self.is_unboxed_struct(s));
                     // Unbox a boxed `zz_value` temp into a raw struct temp
                     // for unboxed-receiver methods. Boxed-receiver methods
@@ -5086,7 +5126,18 @@ impl Lowerer {
                     };
                     let rest_args: Vec<String> = arg_items.into_iter().skip(1).collect();
                     let rest_n = rest_args.len();
-                    let call = if rest_n == 0 {
+                    let call = if is_builtin_type {
+                        // Builtin types: `zz_fn_X(zz_value *args, size_t argc)`
+                        // — receiver passed as first element of args array.
+                        let all_args: Vec<String> =
+                            std::iter::once(recv_val.clone()).chain(rest_args).collect();
+                        let n = all_args.len();
+                        format!(
+                            "{cf}((zz_value[]){{ {joined} }}, {n})",
+                            joined = all_args.join(", "),
+                            n = n
+                        )
+                    } else if rest_n == 0 {
                         format!("{cf}(&{recv_val}, NULL, 0)")
                     } else {
                         format!(

@@ -98,7 +98,25 @@ impl Lowerer {
             .get(fname)
             .map(|sig| sig.params.iter().map(|(_, t)| t.clone()).collect())
             .unwrap_or_else(|| params.iter().map(|_| zz_checker::Type::Unit).collect());
-        let arg_offset: usize = if is_impl_method { 1 } else { 0 };
+        // Builtin types (`str`, `int`, `float`, `bool`) use the regular
+        // function-call convention: `zz_fn_X(zz_value *args, size_t argc)`
+        // where the receiver lives in `args[0]`, not as a `*self` pointer.
+        // User structs use `zz_fn_X(<struct>* self, zz_value*, size_t)`.
+        let is_builtin_impl_method = is_impl_method
+            && matches!(
+                param_types.first(),
+                Some(
+                    zz_checker::Type::Str
+                        | zz_checker::Type::Int
+                        | zz_checker::Type::Float
+                        | zz_checker::Type::Bool
+                )
+            );
+        let arg_offset: usize = if is_impl_method && !is_builtin_impl_method {
+            1
+        } else {
+            0
+        };
         for (i, p) in params.iter().enumerate() {
             let pt = param_types
                 .get(i)
@@ -107,9 +125,10 @@ impl Lowerer {
             // Track checker types for method dispatch on params (e.g.
             // boxed-struct receivers inside function bodies).
             names.checker_types.insert(p.name.name.clone(), pt.clone());
-            // The first param of an impl method is the struct receiver
-            // (passed as `*self`); the remaining params live in `args`.
-            if is_impl_method && i == 0 {
+            // The first param of an impl method is the receiver. For user
+            // structs it is passed as `*self` pointer; for builtin types it
+            // lives in `args[0]` as a `zz_value`.
+            if is_impl_method && i == 0 && !is_builtin_impl_method {
                 let ctype = self.type_to_c(&pt);
                 if names.capture_set.contains(&p.name.name) {
                     // Captured receiver: heap cell so closures share it.

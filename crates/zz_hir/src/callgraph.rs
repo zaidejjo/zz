@@ -35,7 +35,14 @@ fn canon(name: String) -> String {
 
 fn resolve_methods(tp: &TypedProgram, caller: &str, recv: &Expr, method: &str) -> Vec<String> {
     match tp.type_at(caller, recv.span()) {
-        Some(Type::Str) => vec![canon(format!("str.{method}"))],
+        // Builtin types (`str`, `int`, `float`, `bool`): method names are
+        // `"{type}.{method}"` without a `std.` prefix, e.g. `str.shout`.
+        // `canonical_std_name` would incorrectly map `str.shout` to
+        // `std.str.shout`, which doesn't exist in `tp.funcs`.
+        Some(Type::Str) => vec![format!("str.{method}")],
+        Some(Type::Int) => vec![format!("int.{method}")],
+        Some(Type::Float) => vec![format!("float.{method}")],
+        Some(Type::Bool) => vec![format!("bool.{method}")],
         Some(Type::Array(_)) => vec![canon(format!("vec.{method}"))],
         Some(Type::Bytes) => vec![canon(format!("bytes.{method}"))],
         Some(Type::Option(_)) => vec![canon(format!("option.{method}"))],
@@ -50,14 +57,25 @@ fn resolve_methods(tp: &TypedProgram, caller: &str, recv: &Expr, method: &str) -
         Some(Type::Opaque(tag)) => vec![canon(format!("{tag}.{method}"))],
         Some(Type::Struct(s, _)) => {
             let fq = format!("{s}.{method}");
+            // First check the impl method form: `Type.method`.
             if tp.funcs.contains_key(&fq) {
                 vec![fq]
-            } else if let Some(promoted) = find_promoted_method(tp, s, method) {
-                // Embedded promotion: `u.area()` on `User` (embedding
-                // `Base`) dispatches to `Base.area`.
-                vec![promoted]
             } else {
-                vec![method.to_string()]
+                // Also check for free functions in the same module that take
+                // the struct as their first parameter. Free functions like
+                // `func bump(p: Pt)` can be called with method syntax
+                // `p.bump()`, so the callgraph must edge to them.
+                let module = s.split('.').next().unwrap_or(s);
+                let free_fn = format!("{module}.{method}");
+                if tp.funcs.contains_key(&free_fn) {
+                    vec![free_fn]
+                } else if let Some(promoted) = find_promoted_method(tp, s, method) {
+                    // Embedded promotion: `u.area()` on `User` (embedding
+                    // `Base`) dispatches to `Base.area`.
+                    vec![promoted]
+                } else {
+                    vec![method.to_string()]
+                }
             }
         }
         // Unknown/Var receiver: keep every candidate method conservatively.
