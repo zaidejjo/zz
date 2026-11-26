@@ -64,6 +64,21 @@ println("log10(100): {math.log10(100)}")
 println("exp(0): {math.exp(0)}")
 println("exp(1): {math.exp(1)}")
 
+// ── exp precision (round-trip through log) ──
+println("exp(log(2)) = {math.exp(math.log(2.0))}   (expect ~2.0)")
+println("exp(log(100)) = {math.exp(math.log(100.0))}   (expect ~100.0)")
+println("exp(log(1000)) = {math.exp(math.log(1000.0))}   (expect ~1000.0)")
+println("exp(log(0.001)) = {math.exp(math.log(0.001))}   (expect ~0.001)")
+println("exp(log(1e-10)) = {math.exp(math.log(0.0000000001))}   (expect ~1e-10)")
+
+// exp of large values (e^700 ≈ 1e304, well within f64 max ≈ 1.8e308)
+println("exp(10) = {math.exp(10.0)}")
+println("exp(100) = {math.exp(100.0)}")
+println("exp(700) = {math.exp(700.0)}   (expect ~1.014e304, finite)")
+println("exp(701) = {math.exp(701.0)}   (expect ~2.76e304, finite)")
+println("exp(709) = {math.exp(709.0)}   (expect ~8.2e307, near f64 max)")
+println("exp(710) = {math.exp(710.0)}   (expect inf, above f64 max)")
+
 // ── Power (integer & fractional exponents) ──
 println("pow(2, 10): {math.pow(2.0, 10.0)}")
 println("pow(3, 3): {math.pow(3.0, 3.0)}")

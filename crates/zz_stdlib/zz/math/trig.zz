@@ -12,10 +12,18 @@ func math.sin(x: float) -> float {
     pi := math.PI
     two_pi := 2.0 * pi
     xx := x
-    while xx > pi {
+    // Fast range reduction: subtract whole periods at once instead of
+    // one-at-a-time subtraction (which is O(x) and hangs for large x).
+    match int(xx / two_pi) {
+        .some(k) => {
+            xx = xx - float(k) * two_pi
+        }
+        .none => {}
+    }
+    if xx > pi {
         xx = xx - two_pi
     }
-    while xx < -pi {
+    if xx < -pi {
         xx = xx + two_pi
     }
     // Taylor series: sin(x) = x - x³/3! + x⁵/5! - x⁷/7! + ...
