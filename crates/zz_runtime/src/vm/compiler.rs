@@ -925,12 +925,12 @@ impl Compiler {
         if *binop != zz_frontend::ast::BinOp::Add {
             return None;
         }
-        // Type guard: both operands must be Int.
-        if !matches!(self.type_of(left.span()), Some(zz_checker::Type::Int))
-            || !matches!(self.type_of(right.span()), Some(zz_checker::Type::Int))
-        {
-            return None;
-        }
+        // NOTE: no static type guard here. The VM's `SlotAddInt` already has a
+        // safe slow path (`eval_binary`) for non-Int operands, so emitting the
+        // fused op for any slot-resolvable operands is correct — it just pays
+        // one extra tag check on the slow path when the static type is unknown
+        // or non-Int. This lets fusion fire even when the checker didn't
+        // annotate a given span (the common case for loop-carried locals).
         let dst = match self.resolve(target) {
             Resolved::Slot(slot) => slot as u16,
             Resolved::Env => return None,
@@ -1908,16 +1908,16 @@ impl Compiler {
             op: binop,
             left,
             right,
-            span,
             ..
         } = value
         else {
             return None;
         };
-        // Type guard: the binary expression must produce Int.
-        if !matches!(self.type_of(*span), Some(zz_checker::Type::Int)) {
-            return None;
-        }
+        // NOTE: no static type guard on the result span. The fused slot ops
+        // (SlotAddInt, SlotBinaryInt, SlotCmpIntSlot, …) each have a safe VM
+        // slow path that falls back to `eval_binary` for non-Int operands, so
+        // emitting them for any slot-resolvable operands is correct. This lets
+        // fusion fire even when the checker didn't annotate the result span.
         let dst = match self.resolve(target) {
             Resolved::Slot(slot) => slot as u16,
             Resolved::Env => return None,
@@ -2143,16 +2143,17 @@ impl Compiler {
             op: binop,
             left,
             right,
-            span,
             ..
         } = value
         else {
             return None;
         };
-        // Type guard: the binary expression must produce Int.
-        if !matches!(self.type_of(*span), Some(zz_checker::Type::Int)) {
-            return None;
-        }
+        // NOTE: no static type guard on the result span. The fused slot ops
+        // (SlotInc, SlotAddIntImm, SlotAddInt) each have a safe VM slow path
+        // that falls back to `eval_binary` for non-Int operands, so emitting
+        // them for any slot-resolvable operands is correct. This lets fusion
+        // fire for module-qualified top-level targets (`ns.x = ns.x + y`),
+        // whose binary span the checker doesn't annotate.
         let full = target_parts.join(".");
         let dst = match self.resolve(&full) {
             Resolved::Slot(slot) => slot as u16,
