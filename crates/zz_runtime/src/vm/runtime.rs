@@ -2580,20 +2580,33 @@ impl Vm {
                     idx,
                     dst,
                     span,
+                    safe,
                 } => {
                     let ov = self.stack[cached_base + *arr as usize].clone();
                     let iv = self.stack[cached_base + *idx as usize].clone();
                     let v = match (&ov, &iv) {
                         (Value::Array(items), Value::Int(i)) => {
-                            let ix = normalize_index(*i, items.len(), *span)?;
+                            let ix = if *safe {
+                                *i as usize
+                            } else {
+                                normalize_index(*i, items.len(), *span)?
+                            };
                             items[ix].clone()
                         }
                         (Value::Tuple(items), Value::Int(i)) => {
-                            let ix = normalize_index(*i, items.len(), *span)?;
+                            let ix = if *safe {
+                                *i as usize
+                            } else {
+                                normalize_index(*i, items.len(), *span)?
+                            };
                             items[ix].clone()
                         }
                         (Value::Bytes(b), Value::Int(i)) => {
-                            let ix = normalize_index(*i, b.len(), *span)?;
+                            let ix = if *safe {
+                                *i as usize
+                            } else {
+                                normalize_index(*i, b.len(), *span)?
+                            };
                             Value::Int(b.as_slice()[ix] as i64)
                         }
                         (Value::Dict(dict), key) => match dict.get_cloned(key) {
@@ -2606,13 +2619,21 @@ impl Vm {
                         },
                         (Value::Str(s), Value::Int(i)) => {
                             if s.is_ascii() {
-                                let ix = normalize_index(*i, s.len(), *span)?;
+                                let ix = if *safe {
+                                    *i as usize
+                                } else {
+                                    normalize_index(*i, s.len(), *span)?
+                                };
                                 Value::Str(std::sync::Arc::clone(
                                     &crate::runtime::ops::ascii_chars()[s.as_bytes()[ix] as usize],
                                 ))
                             } else {
                                 let chars: Vec<char> = s.chars().collect();
-                                let ix = normalize_index(*i, chars.len(), *span)?;
+                                let ix = if *safe {
+                                    *i as usize
+                                } else {
+                                    normalize_index(*i, chars.len(), *span)?
+                                };
                                 Value::Str(chars[ix].to_string().into())
                             }
                         }

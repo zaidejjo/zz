@@ -417,10 +417,16 @@ impl<'a> Raiser<'a> {
                 dst: *dst,
                 span: VmSpan::default(),
             }),
-            Op::IndexIntSlot { arr, idx, dst } => Ok(VmOp::IndexIntSlot {
+            Op::IndexIntSlot {
+                arr,
+                idx,
+                dst,
+                safe,
+            } => Ok(VmOp::IndexIntSlot {
                 arr: *arr,
                 idx: *idx,
                 dst: *dst,
+                safe: *safe,
                 span: VmSpan::default(),
             }),
             Op::IndexDictInt { dict, key, dst } => Ok(VmOp::IndexDictInt {

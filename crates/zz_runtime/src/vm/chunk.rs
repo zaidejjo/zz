@@ -54,6 +54,11 @@ pub struct Chunk {
     /// VM resolves by name). Lets AOT loop peels write the shadow slot
     /// directly instead of re-deriving positions.
     pub fornext_slots: Vec<Vec<u16>>,
+    /// `true` when every parameter and the return type are scalar (`Int`
+    /// or `Float`) — no `Value`-boxed params, no closures, no objects.
+    /// AOT backends can compile such chunks to raw C functions without
+    /// `Value` allocation/refcounting. Behavior-neutral: the VM ignores it.
+    pub is_scalar: bool,
 }
 
 /// Structural equality, [`Chunk::id`] excluded: `Value`/`Op` derive
@@ -71,6 +76,7 @@ impl PartialEq for Chunk {
             && self.toplevel_slots == other.toplevel_slots
             && self.slot_types == other.slot_types
             && self.fornext_slots == other.fornext_slots
+            && self.is_scalar == other.is_scalar
     }
 }
 
@@ -89,6 +95,7 @@ impl Chunk {
             toplevel_slots: Vec::new(),
             slot_types: Vec::new(),
             fornext_slots: Vec::new(),
+            is_scalar: false,
         }
     }
 

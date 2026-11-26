@@ -170,10 +170,14 @@ pub enum Op {
     },
     /// Read `array[idx]` where both operands are slots: single bounds
     /// check, no tag loop. Result written to `dst`.
+    /// When `safe` is `true`, the index is proven in bounds (e.g. a loop
+    /// variable in `for i in 0..arr.len()`), so the VM skips bounds
+    /// checking and indexes directly.
     IndexIntSlot {
         arr: u16,
         idx: u16,
         dst: u16,
+        safe: bool,
     },
     /// Read `dict[key]` where key is an int slot: probes DictData.
     /// Result written to `dst`.
