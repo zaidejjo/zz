@@ -13,7 +13,7 @@ use zz_sigs::enums::EnumOps;
 use zz_span_ast::ast::{Expr, Ident};
 use zz_span_ast::span::Span;
 use zz_structs::StructOps;
-use zz_suggest::suggest_all;
+use zz_suggest::suggest_top3;
 use zz_types::Type;
 use zz_unify::{Unifier, UnifyError};
 
@@ -545,29 +545,29 @@ pub(crate) fn check_call_unknown_suggestion(
         })
         .collect();
     let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
-    let all = suggest_all(name, &refs);
-    if all.is_empty() {
+    let top = suggest_top3(name, &refs);
+    if top.is_empty() {
         return None;
     }
-    let is_unambiguous = all.len() == 1 && all[0].1 <= 1;
     let callee_span = match callee {
         Expr::Path { span, .. } => *span,
         _ => span,
     };
-    if is_unambiguous {
+    if top.len() == 1 {
         checker.errors.push(
             error_at(format!("unknown function `{name}`"), callee_span)
-                .with_note(format!("did you mean `{}`?", all[0].0))
+                .with_note(format!("did you mean `{}`?", top[0]))
                 .with_fixit(FixIt::safe(
                     callee_span,
-                    all[0].0.to_string(),
+                    top[0].to_string(),
                     "replace with suggested function",
                 )),
         );
     } else {
+        let names: Vec<String> = top.iter().map(|s| s.to_string()).collect();
         checker.errors.push(
             error_at(format!("unknown function `{name}`"), callee_span)
-                .with_note(format!("did you mean `{}`?", all[0].0)),
+                .with_note(format!("did you mean `{}`?", names.join("`, `"))),
         );
     }
     Some(Type::Unit)
@@ -1128,10 +1128,17 @@ pub(crate) fn check_call_callee_type(
                     })
                     .collect();
                 let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
-                let all = suggest_all(&name, &refs);
-                if let Some((suggestion, _)) = all.first() {
+                let top = suggest_top3(&name, &refs);
+                if top.len() == 1 {
                     diag = diag.with_note(format!(
-                        "did you mean to call `{suggestion}` instead of calling a value of type `{name}`?"
+                        "did you mean to call `{}` instead of calling a value of type `{name}`?",
+                        top[0]
+                    ));
+                } else if !top.is_empty() {
+                    let names: Vec<String> = top.iter().map(|s| s.to_string()).collect();
+                    diag = diag.with_note(format!(
+                        "did you mean to call `{}` instead of calling a value of type `{name}`?",
+                        names.join("`, `")
                     ));
                 }
                 checker.errors.push(diag);

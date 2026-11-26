@@ -399,10 +399,20 @@ impl ScopeOps for Checker {
                 }
                 let mut diag =
                     error_at(format!("undefined variable `{name}`"), span).with_code(ErrorCode(1));
-                // Single best suggestion only — a missing hint is better than a wrong one.
-                if let Some(best) = suggest_top3(name, &candidates).first() {
-                    diag = diag.with_note(format!("did you mean `{best}`?"));
-                    diag = diag.with_fixit(FixIt::safe(span, best.to_string(), "replace variable"));
+                // Suggest up to 3 closest matches when ambiguous; a missing
+                // hint is better than a wrong one.
+                let top = suggest_top3(name, &candidates);
+                match top.len() {
+                    0 => {}
+                    1 => {
+                        diag = diag
+                            .with_note(format!("did you mean `{}`?", top[0]))
+                            .with_fixit(FixIt::safe(span, top[0].to_string(), "replace variable"));
+                    }
+                    _ => {
+                        let names: Vec<String> = top.iter().map(|s| s.to_string()).collect();
+                        diag = diag.with_note(format!("did you mean `{}`?", names.join("`, `")));
+                    }
                 }
 
                 // If the name looks like `module.func` and matches a known
