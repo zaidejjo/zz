@@ -1,0 +1,24 @@
+// S3: d6_log_buffer — PASS (single-run)
+// NOTE: record() writes state log OUTSIDE atomic {}. Under concurrent
+// record() calls from multiple tasks, pushes could interleave (UE).
+// This fixture matches the original d6 program; see S3-classification.txt.
+import std.task
+import std.vec
+
+state log := []
+
+func record(msg: str) {
+    log = vec.push(log, msg)
+}
+
+func main() -> int {
+    hs := []
+    for i in 0..4 {
+        hs = vec.push(hs, task.spawn(|_| { record("event") }))
+    }
+    for h in hs {
+        task.join(h)
+    }
+    println("log_len={len(log)}")
+    return 0
+}

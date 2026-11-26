@@ -1229,6 +1229,31 @@ e2e_success_test!(
     "state_matrix_named_struct_func.zz"
 );
 e2e_success_test!(
+    e2e_stdlib_state_d2_id_generator,
+    "stdlib",
+    "state_d2_id_generator.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d4_rate_limiter_fixed,
+    "stdlib",
+    "state_d4_rate_limiter_fixed.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d5_bank_transfer,
+    "stdlib",
+    "state_d5_bank_transfer.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d6_log_buffer,
+    "stdlib",
+    "state_d6_log_buffer.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d8_config_reload_fixed,
+    "stdlib",
+    "state_d8_config_reload_fixed.zz"
+);
+e2e_success_test!(
     e2e_stdlib_option_result_unwrap_test,
     "stdlib",
     "option_result_unwrap_test.zz"

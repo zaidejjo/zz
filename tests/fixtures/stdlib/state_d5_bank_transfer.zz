@@ -1,0 +1,27 @@
+// S3: d5_bank_transfer — PASS
+// state alice/bob accessed inside atomic { }. Invariant alice+bob == 200 preserved.
+import std.task
+
+state alice := 100
+state bob := 100
+
+func transfer(amount: int) {
+    atomic {
+        if alice >= amount {
+            alice = alice - amount
+            bob = bob + amount
+        }
+    }
+}
+
+func main() -> int {
+    hs := []
+    for i in 0..4 {
+        hs = vec.push(hs, task.spawn(|_| { transfer(10) }))
+    }
+    for h in hs {
+        task.join(h)
+    }
+    println("{alice} {bob}")
+    return 0
+}

@@ -1,0 +1,21 @@
+// S3 fixed d8_config_reload: state cfg written inside atomic { }
+// Original d8 wrote `state cfg` OUTSIDE atomic in reload() (race).
+// Fix: wrap state write in one atomic {} block.
+import std.task
+
+struct Config { timeout: int, retries: int }
+
+state cfg := Config { timeout: 30, retries: 3 }
+
+func reload(timeout: int) {
+    atomic {
+        cfg = Config { timeout: timeout, retries: 3 }
+    }
+}
+
+func main() -> int {
+    h := task.spawn(|_| { reload(60) })
+    task.join(h)
+    println("cfg_timeout={cfg.timeout}")
+    return 0
+}

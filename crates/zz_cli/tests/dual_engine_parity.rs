@@ -2149,6 +2149,31 @@ parity_strict!(
     "state_matrix_named_struct_func.zz"
 );
 parity_strict!(
+    parity_stdlib_state_d2_id_generator,
+    "stdlib",
+    "state_d2_id_generator.zz"
+);
+parity_strict!(
+    parity_stdlib_state_d4_rate_limiter_fixed,
+    "stdlib",
+    "state_d4_rate_limiter_fixed.zz"
+);
+parity_strict!(
+    parity_stdlib_state_d5_bank_transfer,
+    "stdlib",
+    "state_d5_bank_transfer.zz"
+);
+parity_strict!(
+    parity_stdlib_state_d6_log_buffer,
+    "stdlib",
+    "state_d6_log_buffer.zz"
+);
+parity_strict!(
+    parity_stdlib_state_d8_config_reload_fixed,
+    "stdlib",
+    "state_d8_config_reload_fixed.zz"
+);
+parity_strict!(
     parity_stdlib_state_d2_read_only_print,
     "stdlib",
     "state_d2_read_only_print.zz"
