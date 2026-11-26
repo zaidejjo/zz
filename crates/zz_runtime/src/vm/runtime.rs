@@ -1,3 +1,4 @@
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use zz_frontend::ast::types::{Ty, TyKind};
@@ -43,7 +44,7 @@ const SAFEPOINT_QUANTUM_MS: u128 = 1;
 /// The value currently in `slot` must be a scalar (`Int`, `Float`, `Bool` or
 /// `Unit`): nothing that needs dropping.
 #[inline(always)]
-unsafe fn overwrite_scalar(slot: &mut Value, v: Value) {
+pub(crate) unsafe fn overwrite_scalar(slot: &mut Value, v: Value) {
     debug_assert!(
         matches!(
             slot,
@@ -80,7 +81,7 @@ fn int_cmp(op: BinOp, a: i64, b: i64) -> Option<bool> {
 /// dynamic code can put a heap value there. The scalar match keeps the
 /// elision safe and costs one predictable branch.
 #[inline(always)]
-fn write_slot_checked(slot: &mut Value, v: Value) {
+pub(crate) fn write_slot_checked(slot: &mut Value, v: Value) {
     if matches!(
         slot,
         Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Unit
@@ -127,7 +128,7 @@ fn return_scratch_args(mut args: Vec<Value>) {
 }
 
 /// One active call frame.
-struct Frame {
+pub(crate) struct Frame {
     chunk: Arc<Chunk>,
     ip: usize,
     /// Environment to restore when this frame returns.
@@ -177,8 +178,8 @@ enum Unwind {
 /// A stack-based virtual machine. Executes compiled chunks against an
 /// [`Interp`], sharing its environment, function table, and native registry.
 pub struct Vm {
-    stack: Vec<Value>,
-    frames: Vec<Frame>,
+    pub(crate) stack: Vec<Value>,
+    pub(crate) frames: Vec<Frame>,
     loops: Vec<LoopInfo>,
     /// Deferred closures for the current frame. `DeferRecord` pushes here;
     /// `Return` and frame-end pop and execute in LIFO order.
@@ -205,6 +206,28 @@ pub struct Vm {
     /// Memoized `CallPath` resolution, indexed by `(chunk, ip)` — see
     /// [`Vm::direct_call_hit`].
     call_cache: Vec<Option<CachedDirect>>,
+    /// Inline cache for dict key lookups (`dict[key]`). Each entry caches
+    /// (dict pointer, key hash) → cloned value. Invalidated wholesale on
+    /// any dict mutation via the generation counter.
+    inline_cache: [InlineCacheEntry; INLINE_CACHE_SIZE],
+    inline_cache_gen: u64,
+}
+
+/// Number of inline cache entries for dict lookups.
+const INLINE_CACHE_SIZE: usize = 8;
+
+/// One inline cache entry for a dict key lookup.
+#[derive(Clone, Debug)]
+struct InlineCacheEntry {
+    /// Pointer to the `DictData` inner allocation (identity of the dict).
+    dict_ptr: usize,
+    /// Hash of the key.
+    key_hash: u64,
+    /// Cached value (cloned on hit).
+    value: Value,
+    /// Generation when this entry was cached; entries from older
+    /// generations are treated as empty.
+    gen: u64,
 }
 
 /// One memoized `CallPath` resolution.
@@ -258,6 +281,69 @@ impl Vm {
             slice_start: None,
             debug: None,
             call_cache: (0..CALL_CACHE_LEN).map(|_| None).collect(),
+            inline_cache: std::array::from_fn(|_| InlineCacheEntry {
+                dict_ptr: 0,
+                key_hash: 0,
+                value: Value::Unit,
+                gen: 0,
+            }),
+            inline_cache_gen: 0,
+        }
+    }
+
+    /// Stack base of the current (top) frame: the offset into `self.stack`
+    /// where this frame's locals begin.
+    pub(crate) fn current_base(&self) -> usize {
+        self.frames.last().map(|f| f.stack_base).unwrap_or(0)
+    }
+
+    /// Look up a dict key in the inline cache. Returns `Some(cloned value)`
+    /// on a hit, `None` on a miss (caller should do the full lookup and
+    /// then call [`Vm::inline_cache_store`]).
+    pub(crate) fn inline_cache_lookup(&self, dict_ptr: usize, key_hash: u64) -> Option<Value> {
+        if self.inline_cache_gen == 0 {
+            return None;
+        }
+        for entry in &self.inline_cache {
+            if entry.gen == self.inline_cache_gen
+                && entry.dict_ptr == dict_ptr
+                && entry.key_hash == key_hash
+            {
+                return Some(entry.value.clone());
+            }
+        }
+        None
+    }
+
+    /// Store a dict key lookup result in the inline cache.
+    pub(crate) fn inline_cache_store(&mut self, dict_ptr: usize, key_hash: u64, value: Value) {
+        // Bump the generation so stale entries are ignored.
+        self.inline_cache_gen = self.inline_cache_gen.wrapping_add(1);
+        if self.inline_cache_gen == 0 {
+            // Wrapped around: reset all entries.
+            for entry in &mut self.inline_cache {
+                entry.gen = 0;
+            }
+            self.inline_cache_gen = 1;
+        }
+        // Replace the oldest entry (simple round-robin via gen-based slot selection).
+        let slot = (self.inline_cache_gen - 1) as usize % INLINE_CACHE_SIZE;
+        self.inline_cache[slot] = InlineCacheEntry {
+            dict_ptr,
+            key_hash,
+            value,
+            gen: self.inline_cache_gen,
+        };
+    }
+
+    /// Invalidate all inline cache entries (called on any dict mutation).
+    pub(crate) fn inline_cache_invalidate(&mut self) {
+        self.inline_cache_gen = self.inline_cache_gen.wrapping_add(1);
+        if self.inline_cache_gen == 0 {
+            for entry in &mut self.inline_cache {
+                entry.gen = 0;
+            }
+            self.inline_cache_gen = 1;
         }
     }
 
@@ -840,6 +926,20 @@ impl Vm {
                         self.frames.last_mut().unwrap().ip = ip - 1;
                         return Ok(Flow::Yield(crate::value::YieldReason::DebugBreak { line }));
                     }
+                }
+            }
+
+            // Direct-threaded dispatch: try the hot-opcode table first.
+            // Handlers advance `ip` themselves and return `Continue` to
+            // proceed or `Break(flow)` to unwind. `None` means the opcode
+            // has no dedicated handler and falls through to the general
+            // match below.
+            if let Some(result) =
+                super::dispatch::dispatch_op(self, interp, &mut ip, code, constants, op)
+            {
+                match result? {
+                    ControlFlow::Continue(()) => continue,
+                    ControlFlow::Break(flow) => return Ok(flow),
                 }
             }
 
@@ -2559,6 +2659,10 @@ impl Vm {
                     let iv = self.stack.pop().unwrap();
                     let mut ov = self.stack.pop().unwrap();
                     set_index(&mut ov, &iv, value, *span)?;
+                    // Invalidate the inline dict cache if we mutated a dict.
+                    if matches!(ov, Value::Dict(_)) {
+                        self.inline_cache_invalidate();
+                    }
                     self.stack.push(ov);
                 }
                 Op::StoreIndexTake { home, span } => {
@@ -2585,8 +2689,12 @@ impl Vm {
                     // writes on success, so restoring the taken value puts
                     // back exactly the pre-op container on error and the
                     // updated one on success.
+                    let is_dict = matches!(ov, Value::Dict(_));
                     let res = set_index(&mut ov, &iv, value, *span);
                     Self::restore_home(self, interp, home, ov);
+                    if is_dict {
+                        self.inline_cache_invalidate();
+                    }
                     res?;
                 }
                 Op::CompoundIndexOp { op, span } => {
@@ -2596,6 +2704,9 @@ impl Vm {
                     let cur = get_index(&ov, &iv, *span)?;
                     let new = eval_binary(*op, cur, rhs, *span)?;
                     set_index(&mut ov, &iv, new, *span)?;
+                    if matches!(ov, Value::Dict(_)) {
+                        self.inline_cache_invalidate();
+                    }
                     self.stack.push(ov);
                 }
                 Op::CompoundIndexTake { home, op, span } => {
@@ -2625,7 +2736,11 @@ impl Vm {
                         let new = eval_binary(*op, cur, rhs, *span)?;
                         set_index(&mut ov, &iv, new, *span)
                     });
+                    let is_dict = matches!(ov, Value::Dict(_));
                     Self::restore_home(self, interp, home, ov);
+                    if is_dict {
+                        self.inline_cache_invalidate();
+                    }
                     res?;
                 }
                 Op::SliceOp(span) => {
@@ -4005,7 +4120,7 @@ impl Vm {
     }
 
     /// Create an EvalError with the current backtrace attached.
-    fn error(&self, message: impl Into<String>, span: Span) -> EvalError {
+    pub(crate) fn error(&self, message: impl Into<String>, span: Span) -> EvalError {
         EvalError::new(message, span).with_backtrace(self.backtrace())
     }
 
