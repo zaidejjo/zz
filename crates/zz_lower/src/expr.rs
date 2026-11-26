@@ -3046,7 +3046,116 @@ impl Lowerer {
         None
     }
 
-    /// Inline `map`/`filter` with a simple scalar closure: emit an inline loop
+    // ── Math native inlining with unboxing for boxed arguments ────────────
+
+    /// Map an embedded-C math native impl name to its libm twin + arg count.
+    /// Same as MATH_NATIVE_LIBM but for the boxed-argument variant.
+    const MATH_NATIVE_LIBM_BOXED: &[(&str, &str, usize)] = &[
+        ("zz_math_sin", "sin", 1),
+        ("zz_math_cos", "cos", 1),
+        ("zz_math_tan", "tan", 1),
+        ("zz_math_asin", "asin", 1),
+        ("zz_math_acos", "acos", 1),
+        ("zz_math_atan", "atan", 1),
+        ("zz_math_log", "log", 1),
+        ("zz_math_log10", "log10", 1),
+        ("zz_math_exp", "exp", 1),
+    ];
+
+    /// Try to emit a math native call as raw C, unboxing `zz_value` arguments
+    /// based on their ZZ-level types. This handles the common case where
+    /// local variables are `zz_value` at the C level but have a known ZZ type
+    /// (Float or Int) from the type checker.
+    ///
+    /// Returns `Some(c_expr)` producing a `zz_value`, `None` to fall through.
+    fn try_emit_math_native_raw_boxed(
+        &self,
+        effective_name: &str,
+        args: &[Expr],
+        names: &NameCtx,
+    ) -> Option<String> {
+        let (c_func, n_args) = Self::MATH_NATIVE_LIBM_BOXED
+            .iter()
+            .find(|(n, _, _)| *n == effective_name)
+            .map(|(_, f, n)| (*f, *n))?;
+
+        if args.len() != n_args {
+            return None;
+        }
+
+        let mut c_args = Vec::with_capacity(n_args);
+        for arg in args {
+            let zz_ty = match arg {
+                Expr::Ident { name, .. } => names.checker_types.get(name)?,
+                Expr::Path { parts, .. } => names.checker_types.get(&parts.join("."))?,
+                _ => return None,
+            };
+            let cid = match arg {
+                Expr::Ident { name, .. } => names.lookup(name)?,
+                Expr::Path { parts, .. } => names.lookup(&parts.join("."))?,
+                _ => return None,
+            };
+            let unboxed = match zz_ty {
+                zz_checker::Type::Float => format!("({cid}).f"),
+                zz_checker::Type::Int => format!("(double)({cid}).i"),
+                _ => return None,
+            };
+            c_args.push(unboxed);
+        }
+
+        // All math functions in this list return double. Box as zz_float.
+        Some(format!("zz_float({}({}))", c_func, c_args.join(", ")))
+    }
+
+    // ── Len native inlining: raw C field access ──────────────────────────
+
+    /// Try to emit `len(x)` as a raw C field access, bypassing the
+    /// `zz_call_native1(zz_len, ...)` box/unbox round-trip.
+    ///
+    /// Only fires when `x` is an `Expr::Ident` or `Expr::Path` whose ZZ type
+    /// is known at compile time (array, dict, bytes, str). Uses
+    /// `names.checker_types` (ZZ-level types) rather than
+    /// `names.lookup_type` (C-level types), since locals are always `zz_value`
+    /// at the C level.
+    ///
+    /// Returns `Some(c_expr)` on success, `None` to fall through.
+    fn try_emit_len_raw(&self, arg: &Expr, names: &NameCtx) -> Option<String> {
+        match arg {
+            Expr::Ident { name, .. } => {
+                let zz_ty = names.checker_types.get(name)?;
+                self.len_raw_for_zz_type(name, zz_ty, names)
+            }
+            Expr::Path { parts, .. } => {
+                let joined = parts.join(".");
+                let zz_ty = names.checker_types.get(&joined)?;
+                self.len_raw_for_zz_type(&joined, zz_ty, names)
+            }
+            _ => None,
+        }
+    }
+
+    /// Emit the raw C expression for `len(x)` given the resolved name and ZZ type.
+    fn len_raw_for_zz_type(
+        &self,
+        name: &str,
+        zz_ty: &zz_checker::Type,
+        names: &NameCtx,
+    ) -> Option<String> {
+        let cid = names.lookup(name)?;
+
+        match zz_ty {
+            zz_checker::Type::Array(_) | zz_checker::Type::Tuple(_) => {
+                Some(format!("(int64_t)({cid}).arr->len"))
+            }
+            zz_checker::Type::Dict(_, _) => Some(format!("(int64_t)({cid}).dict->len")),
+            zz_checker::Type::Bytes => Some(format!("(int64_t)({cid}).bytes->len")),
+            zz_checker::Type::Str => Some(format!("zz_int((int64_t)zz_str_char_len(({cid}).s))")),
+            _ => None,
+        }
+    }
+
+    // ── Cast inlining: `float(int)` → `(double)(x)`, `int(float)` → `(int64_t)(x)` ──
+
     /// applying the closure body directly to each element, avoiding the
     /// per-element indirect closure call via `zz_iter_map`/`zz_iter_filter`.
     ///
@@ -4773,9 +4882,27 @@ impl Lowerer {
                     }
                 }
             }
+            // ── Len native inlining: raw C field access ──────────────────
+            // Bypass zz_call_native1(zz_len, ...) box/unbox round-trip for
+            // `len(arr)`, `len(s)`, `len(d)`, `len(bytes)` where the argument
+            // type is known at compile time.
+            if matches!(
+                effective_name,
+                "zz_len" | "zz_vec_len" | "std.vec.len" | "std.len"
+            ) && args.len() == 1
+            {
+                if let Some(c_expr) = self.try_emit_len_raw(&args[0], names) {
+                    return c_expr;
+                }
+            }
             // Math native inlining: raw libm calls on unboxed doubles,
             // bypassing the zz_value box/unbox round-trip through zz_call_nativeN.
             if let Some(c_expr) = Self::try_emit_math_native_raw(effective_name, args, names) {
+                return c_expr;
+            }
+            // Boxed-argument variant: unbox zz_value args based on ZZ type,
+            // call libm directly, rebox as zz_float.
+            if let Some(c_expr) = self.try_emit_math_native_raw_boxed(effective_name, args, names) {
                 return c_expr;
             }
             // Cast inlining: `float(int)` → `(double)(x)`, `int(float)` →
