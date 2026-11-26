@@ -65,22 +65,25 @@ func math.log10(x: float) -> float {
 // ── Exponential ────────────────────────────────────────────────────────────
 
 func math.exp(x: float) -> float {
-    if x > 700.0 {
+    // f64 max ≈ 1.8e308; e^709 ≈ 8.2e307 fits, e^710 ≈ 2.2e308 overflows.
+    if x > 709.0 {
         return 1.0 / 0.0 // Inf
         
     }
-    if x < -700.0 {
+    if x < -745.0 {
         return 0.0
     }
     // Taylor series: e^x = sum x^n / n!
-    // Range reduction: e^x = (e^(x/k))^k for integer k
-    k := 16
+    // Range reduction: e^x = (e^(x/k))^k for integer k.
+    // k must be large enough that |y| = |x|/k is small enough for the Taylor
+    // terms to converge fully within the term limit.
+    k := 128
     y := x / float(k)
-    // Taylor series for e^y (|y| < 44, converges well)
+    // Taylor series for e^y (|y| <= 5.47 for x in [-700, 700], terms peak near n=5).
     term := 1.0
     sum := 1.0
     n := 1
-    while n < 30 {
+    while n < 50 {
         term = term * y / float(n)
         sum = sum + term
         n = n + 1
