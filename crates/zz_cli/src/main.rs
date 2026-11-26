@@ -115,7 +115,8 @@ FLAGS:
     --check, -c        with fmt ONLY, check formatting without writing (exit 1 if changed)
     --stdin            with fmt, read source from stdin and write formatted to stdout
     --fix, -f          apply safe auto-fixes (typo replacements, field corrections)
-    --hard             with --fix, apply ALL fixes including ambiguous ones (no prompts)
+    --hard             with --fix, apply ALL fixes including ambiguous ones (no prompts);
+                       with --check, warnings also fail the check
     --interactive, -i  with --fix, prompt for ambiguous fixes interactively
     --native           with run/test, use the native AOT compiler instead of the VM
                          (test: per-file dev build, one process per test)
@@ -3399,6 +3400,7 @@ pub(crate) fn check_or_fix_path(
 
     let mut total_errors = 0u32;
     let mut total_fixes = 0u32;
+    let mut total_warnings = 0u32;
     let mut any_safe_fixits = false;
     let mut any_ambiguous = false;
     // --stats accumulators (#248).
@@ -3449,13 +3451,24 @@ pub(crate) fn check_or_fix_path(
             );
         }
 
-        // Any error-severity diagnostic fails the check (#292): fixable
-        // errors are still errors (warnings alone stay exit 0). Compute this
-        // before cross-entry dedupe so a repeated error still fails the run.
+        // Any error-severity diagnostic fails the check (#292). With
+        // `--hard`, warnings also fail the check so CI can treat them as
+        // errors. Compute this before cross-entry dedupe so a repeated
+        // diagnostic still fails the run.
         let has_errors = loaded
             .errors
             .iter()
             .any(|e| e.diags.iter().any(|d| d.severity == Severity::Error));
+        let file_warnings = if force {
+            loaded
+                .errors
+                .iter()
+                .filter(|e| e.diags.iter().any(|d| d.severity == Severity::Warning))
+                .count()
+        } else {
+            0
+        };
+        total_warnings += file_warnings as u32;
         let mut loaded = loaded;
         if !do_fix {
             for e in &mut loaded.errors {
@@ -3674,8 +3687,15 @@ pub(crate) fn check_or_fix_path(
         }
     }
 
-    if !do_fix && total_errors > 0 {
-        return Err(format!("{total_errors} file(s) failed type-check"));
+    if !do_fix && (total_errors > 0 || (force && total_warnings > 0)) {
+        return Err(format!(
+            "{total_errors} file(s) failed type-check{}",
+            if force && total_warnings > 0 {
+                format!(" ({total_warnings} with warnings as errors via --hard)")
+            } else {
+                String::new()
+            }
+        ));
     }
 
     if do_fix && total_fixes == 0 {
