@@ -127,28 +127,33 @@ func math.pow(x: float, y: float) -> float {
     // For integer exponents, use repeated multiplication (exact)
     match int(y) {
         .some(ni) => {
-            if ni >= 0 {
-                result := 1.0
-                i := 0
-                while i < ni {
-                    result = result * x
-                    i = i + 1
+            if float(ni) == y {
+                // y is truly integral: use exact repeated multiplication.
+                if ni >= 0 {
+                    result := 1.0
+                    i := 0
+                    while i < ni {
+                        result = result * x
+                        i = i + 1
+                    }
+                    return result
+                } else {
+                    // Negative exponent: 1 / x^(-y)
+                    ni_abs := -ni
+                    result := 1.0
+                    i := 0
+                    while i < ni_abs {
+                        result = result * x
+                        i = i + 1
+                    }
+                    return 1.0 / result
                 }
-                return result
-            } else {
-                // Negative exponent: 1 / x^(-y)
-                ni_abs := -ni
-                result := 1.0
-                i := 0
-                while i < ni_abs {
-                    result = result * x
-                    i = i + 1
-                }
-                return 1.0 / result
             }
         }
-        .none => return math.exp(y * math.log(x))
+        .none => {}
     }
+    // Fractional exponent: exp(y * log(x))
+    return math.exp(y * math.log(x))
 }
 
 // ── Hypotenuse ─────────────────────────────────────────────────────────────
