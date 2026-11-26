@@ -1,0 +1,37 @@
+// S1 Parser matrix: `state := 1` (state as identifier) under contention.
+// A local variable named `state`, then state keyword block.
+// 4 tasks x 1000 increments = 4000 total.
+import std.task
+
+state hits := 0
+
+func inc(n: int) {
+    for _ in 0..n {
+        atomic {
+            hits = hits + 1
+        }
+    }
+}
+
+func main() -> Result<int, str> {
+    hits = 0
+    // `state` used as an identifier (local var)
+    state := 0
+    _ = state
+    n := 1000
+    h0 := task.spawn(|_| { inc(n) })
+    h1 := task.spawn(|_| { inc(n) })
+    h2 := task.spawn(|_| { inc(n) })
+    h3 := task.spawn(|_| { inc(n) })
+    task.join(h0)
+    task.join(h1)
+    task.join(h2)
+    task.join(h3)
+    x := hits
+    // 4 tasks x 1000 = 4000
+    if x != 4000 {
+        return .err("mismatch: {x}")
+    }
+    println("state_matrix_as_ident_ok")
+    return .ok(0)
+}

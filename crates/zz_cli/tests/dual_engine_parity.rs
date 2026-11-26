@@ -2109,6 +2109,46 @@ parity_strict!(
     "atomic_semicolon.zz"
 );
 parity_strict!(
+    parity_stdlib_atomic_matrix_whitespace,
+    "stdlib",
+    "atomic_matrix_whitespace.zz"
+);
+parity_strict!(
+    parity_stdlib_atomic_matrix_var_then_block,
+    "stdlib",
+    "atomic_matrix_var_then_block.zz"
+);
+parity_strict!(
+    parity_stdlib_state_matrix_toplevel,
+    "stdlib",
+    "state_matrix_toplevel.zz"
+);
+parity_strict!(
+    parity_stdlib_state_matrix_pub,
+    "stdlib",
+    "state_matrix_pub.zz"
+);
+parity_strict!(
+    parity_stdlib_state_matrix_after_comment,
+    "stdlib",
+    "state_matrix_after_comment.zz"
+);
+parity_strict!(
+    parity_stdlib_state_matrix_as_ident,
+    "stdlib",
+    "state_matrix_as_ident.zz"
+);
+parity_strict!(
+    parity_stdlib_state_matrix_field_access,
+    "stdlib",
+    "state_matrix_field_access.zz"
+);
+parity_strict!(
+    parity_stdlib_state_matrix_named_struct_func,
+    "stdlib",
+    "state_matrix_named_struct_func.zz"
+);
+parity_strict!(
     parity_stdlib_state_d2_read_only_print,
     "stdlib",
     "state_d2_read_only_print.zz"

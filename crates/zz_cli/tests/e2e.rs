@@ -1193,6 +1193,42 @@ e2e_success_test!(
 e2e_success_test!(e2e_stdlib_atomic_positions, "stdlib", "atomic_positions.zz");
 e2e_success_test!(e2e_stdlib_atomic_semicolon, "stdlib", "atomic_semicolon.zz");
 e2e_success_test!(
+    e2e_stdlib_atomic_matrix_whitespace,
+    "stdlib",
+    "atomic_matrix_whitespace.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_atomic_matrix_var_then_block,
+    "stdlib",
+    "atomic_matrix_var_then_block.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_matrix_toplevel,
+    "stdlib",
+    "state_matrix_toplevel.zz"
+);
+e2e_success_test!(e2e_stdlib_state_matrix_pub, "stdlib", "state_matrix_pub.zz");
+e2e_success_test!(
+    e2e_stdlib_state_matrix_after_comment,
+    "stdlib",
+    "state_matrix_after_comment.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_matrix_as_ident,
+    "stdlib",
+    "state_matrix_as_ident.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_matrix_field_access,
+    "stdlib",
+    "state_matrix_field_access.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_matrix_named_struct_func,
+    "stdlib",
+    "state_matrix_named_struct_func.zz"
+);
+e2e_success_test!(
     e2e_stdlib_option_result_unwrap_test,
     "stdlib",
     "option_result_unwrap_test.zz"

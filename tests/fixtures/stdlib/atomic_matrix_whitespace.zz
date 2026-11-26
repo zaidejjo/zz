@@ -1,0 +1,51 @@
+// S1 Parser matrix: atomic { } whitespace independence under contention.
+// Tests: `atomic { }`, `atomic{ }`, `atomic\n{ }` all lock under contention.
+// 4 tasks x 1000 increments per variant = 12000 total.
+import std.task
+
+state hits := 0
+
+func variant_space(n: int) {
+    for _ in 0..n {
+        atomic {
+            hits += 1
+        }
+    }
+}
+
+func variant_nospace(n: int) {
+    for _ in 0..n {
+        atomic{
+            hits += 1
+        }
+    }
+}
+
+func variant_newline(n: int) {
+    for _ in 0..n {
+        atomic
+        {
+            hits += 1
+        }
+    }
+}
+
+func main() -> Result<int, str> {
+    hits = 0
+    n := 1000
+    h0 := task.spawn(|_| { variant_space(n); variant_nospace(n); variant_newline(n) })
+    h1 := task.spawn(|_| { variant_space(n); variant_nospace(n); variant_newline(n) })
+    h2 := task.spawn(|_| { variant_space(n); variant_nospace(n); variant_newline(n) })
+    h3 := task.spawn(|_| { variant_space(n); variant_nospace(n); variant_newline(n) })
+    task.join(h0)
+    task.join(h1)
+    task.join(h2)
+    task.join(h3)
+    x := hits
+    // 4 tasks x 1000 x 3 variants = 12000
+    if x != 12000 {
+        return .err("mismatch: {x}")
+    }
+    println("atomic_matrix_whitespace_ok")
+    return .ok(0)
+}
