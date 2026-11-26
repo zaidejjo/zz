@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use zz_frontend::ast::types::{Ty, TyKind};
@@ -23,6 +24,15 @@ const SAFEPOINT_BUDGET: u32 = 1024;
 /// yields its executor thread so siblings run. 1ms keeps interactive
 /// (channel ping) latency low while requeue churn stays negligible.
 const SAFEPOINT_QUANTUM_MS: u128 = 1;
+
+/// Debug-only tracking of state batch depth for test-only natives.
+/// Updated by the VM on `StateBatchBegin`/`StateBatchEnd` so a test-only
+/// native can assert the depth returns to 0 after early exits.
+static STATE_BATCH_DEPTH_DEBUG: AtomicUsize = AtomicUsize::new(0);
+
+/// Debug-only tracking of state lock depth for test-only natives.
+/// Updated by the VM on `Op::Atomic` entry / `leave_atomic`.
+static STATE_LOCK_DEPTH_DEBUG: AtomicUsize = AtomicUsize::new(0);
 
 /// Overwrite a stack slot in place without running `drop_in_place` on the
 /// value it replaces.
@@ -235,6 +245,17 @@ impl Vm {
         }
         false
     }
+}
+
+/// Debug-only accessors for the state lock/batch depth tracking statics.
+/// Used by test-only natives (`std.debug.state_*_depth`) to assert depth
+/// returns to 0 after early exits.
+pub fn state_batch_depth_debug() -> usize {
+    STATE_BATCH_DEPTH_DEBUG.load(Ordering::Relaxed)
+}
+
+pub fn state_lock_depth_debug() -> usize {
+    STATE_LOCK_DEPTH_DEBUG.load(Ordering::Relaxed)
 }
 
 /// One memoized `CallPath` resolution.
@@ -537,6 +558,13 @@ impl Vm {
             self.state_lock_depth -= 1;
             if let Some(reg) = interp.state_registry.as_ref() {
                 reg.release();
+            }
+        }
+        #[cfg(debug_assertions)]
+        {
+            let cur = STATE_LOCK_DEPTH_DEBUG.load(Ordering::Relaxed);
+            if cur > 0 {
+                STATE_LOCK_DEPTH_DEBUG.fetch_sub(1, Ordering::Relaxed);
             }
         }
     }
@@ -1108,6 +1136,8 @@ impl Vm {
                         reg.acquire();
                         self.state_lock_depth += 1;
                     }
+                    #[cfg(debug_assertions)]
+                    STATE_LOCK_DEPTH_DEBUG.fetch_add(1, Ordering::Relaxed);
                     // Push a frame for the atomic body so it can access outer
                     // locals (function parameters, etc.) via the outer Vm's
                     // stack, and so return/break/continue propagate out of
@@ -1139,7 +1169,7 @@ impl Vm {
                     yield_check!();
                 }
                 Op::StateBatchBegin(_span) => {
-                    let reg = match interp.state_registry.as_ref() {
+                    let _reg = match interp.state_registry.as_ref() {
                         Some(r) => Arc::clone(r),
                         None => return Err(self.error("state registry not available", *_span)),
                     };
@@ -1148,9 +1178,11 @@ impl Vm {
                     // batching is required for atomicity (violations should occur).
                     #[cfg(not(feature = "nolock_selftest"))]
                     if self.state_batch_depth == 0 {
-                        reg.acquire();
+                        _reg.acquire();
                     }
                     self.state_batch_depth += 1;
+                    #[cfg(debug_assertions)]
+                    STATE_BATCH_DEPTH_DEBUG.fetch_add(1, Ordering::Relaxed);
                 }
                 Op::StateBatchEnd(_span) => {
                     if self.state_batch_depth == 0 {
@@ -1164,6 +1196,13 @@ impl Vm {
                     if self.state_batch_depth == 0 {
                         if let Some(reg) = interp.state_registry.as_ref() {
                             reg.release();
+                        }
+                    }
+                    #[cfg(debug_assertions)]
+                    {
+                        let cur = STATE_BATCH_DEPTH_DEBUG.load(Ordering::Relaxed);
+                        if cur > 0 {
+                            STATE_BATCH_DEPTH_DEBUG.fetch_sub(1, Ordering::Relaxed);
                         }
                     }
                 }

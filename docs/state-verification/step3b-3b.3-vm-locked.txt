@@ -1,3 +1,7 @@
+# Step 3b.3 — Post-fix rerun, lock ENABLED (VM)
+# Command: for i in $(seq 1 50); do ./target/debug/zz run tests/fixtures/stdlib/state_multiread_atomicity.zz; done
+# All 50 runs: V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 — 0 violations in 50/50 for all 6 variants.
+
 === RUN 1 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
 === RUN 2 ===

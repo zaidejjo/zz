@@ -1128,6 +1128,11 @@ e2e_success_test!(
     "step3b_4d_lock_leak.zz"
 );
 e2e_success_test!(
+    e2e_stdlib_step3b_4d_lock_leak_aot,
+    "stdlib",
+    "step3b_4d_lock_leak_aot.zz"
+);
+e2e_success_test!(
     e2e_stdlib_state_r2_state_ok,
     "stdlib",
     "state_r2_state_ok.zz"

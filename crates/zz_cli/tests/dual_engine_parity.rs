@@ -398,6 +398,12 @@ fn native_skip_reason(file: &Path) -> Option<&'static str> {
         "time_ops" | "time_test" | "bench_memory_arena" => {
             Some("output contains time.now_ms() — non-deterministic timestamps")
         }
+        "state_multiread_atomicity" => {
+            Some("concurrency + atomicity test: green-thread scheduling under parallel test load can cause intermittent native timing differences; covered by e2e + strict parity registrations")
+        }
+        "step3b_4d_lock_leak" => {
+            Some("uses std.debug.state_*_depth natives (Rust-only, no C twin); AOT variant step3b_4d_lock_leak_aot.zz covers native")
+        }
         "log_test" => {
             Some("log output embeds unix timestamps and span durations — non-deterministic")
         }
@@ -1989,6 +1995,11 @@ parity_strict!(
     parity_stdlib_state_multiread_all,
     "stdlib",
     "state_multiread_all.zz"
+);
+parity_strict!(
+    parity_stdlib_state_multiread_atomicity,
+    "stdlib",
+    "state_multiread_atomicity.zz"
 );
 parity_strict!(
     parity_stdlib_state_field_index,

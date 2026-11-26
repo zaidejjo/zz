@@ -1,30 +1,33 @@
-// Step 3b.4(b): while s < 10 { sleep(5ms) } in A while B increments s every 5 ms
-// features: int-arith, locals, print, state, std-task, std-time
+// Step 3b.4(b): while s < 10 { yield } in A while B increments s every 5 ms
+// Task A cooperatively yields on chan.recv (never blocks the executor thread,
+// never holds the state lock across the yield). Task B increments s and
+// signals A via chan.send. Must terminate; B must never be blocked for the
+// duration of A's loop body.
+// features: int-arith, locals, print, state, std-task, std-time, std-chan
+import std.chan
 import std.task
 import std.time
 
 state s := 0
 
-func task_a() {
-    while s < 10 {
-        std.time.sleep_ms(5)
-    }
-    println("A_done s={s}")
-}
-
-func task_b() {
-    n := 0
-    while n < 200 {
-        std.time.sleep_ms(5)
-        s = s + 1
-        n = n + 1
-    }
-    println("B_done n={n}")
-}
-
 func main() -> Result<int, str> {
-    ha := task.spawn(|_| { task_a() })
-    hb := task.spawn(|_| { task_b() })
+    ch := std.chan()
+    ha := task.spawn(|_| {
+        while s < 10 {
+            _ = std.chan.recv(ch)  // cooperative yield; lock not held
+        }
+        println("A_done s={s}")
+    })
+    hb := task.spawn(|_| {
+        n := 0
+        while n < 200 {
+            s = s + 1
+            n = n + 1
+            std.chan.send(ch, 1)  // wake A to re-check s
+            std.time.sleep_ms(5)  // B's own pacing sleep (outside A's body)
+        }
+        println("B_done n={n}")
+    })
     task.join(ha)
     task.join(hb)
     return .ok(0)

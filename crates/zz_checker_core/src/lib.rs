@@ -1009,6 +1009,7 @@ pub const STD_MODULES: &[&str] = &[
     "colors",
     "term",
     "test",
+    "debug",
     "map",
     "set",
     "dec",

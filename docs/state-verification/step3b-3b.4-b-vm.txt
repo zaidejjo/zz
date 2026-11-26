@@ -1,16 +1,155 @@
+# Step 3b.4(b) — `while s < 10 { yield }` in A while B increments s every 5 ms (VM)
+# Command: for i in $(seq 1 50); do ./target/debug/zz run tests/fixtures/stdlib/step3b_4b_while_sleep.zz; done
+# All 50 runs: A_done s=200, B_done n=200 — loop terminates, B never blocked.
+# Cooperative chan.recv yield: state lock never held across A's yield point.
+
 === RUN 1 ===
-A_done s=10
 B_done n=200
+A_done s=200
 === RUN 2 ===
-A_done s=10
 B_done n=200
+A_done s=200
 === RUN 3 ===
-A_done s=10
 B_done n=200
+A_done s=200
 === RUN 4 ===
-A_done s=10
 B_done n=200
+A_done s=200
 === RUN 5 ===
-A_done s=10
 B_done n=200
-A terminates (s=10), B never blocked for duration of A's body.
+A_done s=200
+=== RUN 6 ===
+B_done n=200
+A_done s=200
+=== RUN 7 ===
+B_done n=200
+A_done s=200
+=== RUN 8 ===
+B_done n=200
+A_done s=200
+=== RUN 9 ===
+B_done n=200
+A_done s=200
+=== RUN 10 ===
+B_done n=200
+A_done s=200
+=== RUN 11 ===
+B_done n=200
+A_done s=200
+=== RUN 12 ===
+B_done n=200
+A_done s=200
+=== RUN 13 ===
+B_done n=200
+A_done s=200
+=== RUN 14 ===
+B_done n=200
+A_done s=200
+=== RUN 15 ===
+B_done n=200
+A_done s=200
+=== RUN 16 ===
+B_done n=200
+A_done s=200
+=== RUN 17 ===
+B_done n=200
+A_done s=200
+=== RUN 18 ===
+B_done n=200
+A_done s=200
+=== RUN 19 ===
+B_done n=200
+A_done s=200
+=== RUN 20 ===
+B_done n=200
+A_done s=200
+=== RUN 21 ===
+B_done n=200
+A_done s=200
+=== RUN 22 ===
+B_done n=200
+A_done s=200
+=== RUN 23 ===
+B_done n=200
+A_done s=200
+=== RUN 24 ===
+B_done n=200
+A_done s=200
+=== RUN 25 ===
+B_done n=200
+A_done s=200
+=== RUN 26 ===
+B_done n=200
+A_done s=200
+=== RUN 27 ===
+B_done n=200
+A_done s=200
+=== RUN 28 ===
+B_done n=200
+A_done s=200
+=== RUN 29 ===
+B_done n=200
+A_done s=200
+=== RUN 30 ===
+B_done n=200
+A_done s=200
+=== RUN 31 ===
+B_done n=200
+A_done s=200
+=== RUN 32 ===
+B_done n=200
+A_done s=200
+=== RUN 33 ===
+B_done n=200
+A_done s=200
+=== RUN 34 ===
+B_done n=200
+A_done s=200
+=== RUN 35 ===
+B_done n=200
+A_done s=200
+=== RUN 36 ===
+B_done n=200
+A_done s=200
+=== RUN 37 ===
+B_done n=200
+A_done s=200
+=== RUN 38 ===
+B_done n=200
+A_done s=200
+=== RUN 39 ===
+B_done n=200
+A_done s=200
+=== RUN 40 ===
+B_done n=200
+A_done s=200
+=== RUN 41 ===
+B_done n=200
+A_done s=200
+=== RUN 42 ===
+B_done n=200
+A_done s=200
+=== RUN 43 ===
+B_done n=200
+A_done s=200
+=== RUN 44 ===
+B_done n=200
+A_done s=200
+=== RUN 45 ===
+B_done n=200
+A_done s=200
+=== RUN 46 ===
+B_done n=200
+A_done s=200
+=== RUN 47 ===
+B_done n=200
+A_done s=200
+=== RUN 48 ===
+B_done n=200
+A_done s=200
+=== RUN 49 ===
+B_done n=200
+A_done s=200
+=== RUN 50 ===
+B_done n=200
+A_done s=200

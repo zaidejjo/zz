@@ -1,7 +1,6 @@
 // Step 3b.4(c): println("{a} {b}") in a loop while another task spins on atomic { ... }
-// features: int-arith, locals, print, state, std-task, std-time
+// features: int-arith, locals, print, state, std-task
 import std.task
-import std.time
 
 state a := 100
 state b := 0

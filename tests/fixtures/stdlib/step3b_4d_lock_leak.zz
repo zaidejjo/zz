@@ -1,6 +1,7 @@
 // Step 3b.4(d): lock-leak regression - early return/break/continue/? inside nested state reads
-// features: int-arith, locals, print, state, std-task
-import std.task
+// After stress(1000) completes, batch_depth and lock_depth must both be 0.
+// features: int-arith, locals, print, state
+import std.debug
 
 state x := 0
 state y := 0
@@ -61,7 +62,14 @@ func stress(n: int) -> int {
 
 func main() -> Result<int, str> {
     r := stress(1000)
+    bd := std.debug.state_batch_depth()
+    ld := std.debug.state_lock_depth()
     println("stress_result={r}")
-    println("batch_depth=0 lock_depth=0 no_leak")
+    println("batch_depth={bd} lock_depth={ld}")
+    if bd != 0 || ld != 0 {
+        println("FAIL: lock/batch depth leaked (bd={bd} ld={ld})")
+    } else {
+        println("PASS: no lock/batch leak after 1000 stress iterations")
+    }
     return .ok(0)
 }

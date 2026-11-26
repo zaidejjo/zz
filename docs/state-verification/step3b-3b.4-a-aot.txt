@@ -1,0 +1,209 @@
+# Step 3b.4(a) — task B elapsed < 100 ms while A runs x := slow(s) (AOT)
+# Command: for i in $(seq 1 50); do ./target/debug/zz run --native tests/fixtures/stdlib/step3b_4a_task_b_elapsed.zz; done
+# All 50 runs: B_elapsed_ms between 0 and 2 ms (well under 100 ms threshold).
+# No deadlock, no Z0018 abort, no "FAIL" marker in any run.
+
+=== RUN 1 ===
+B_elapsed_ms=1
+PASS: task B not blocked (elapsed=1 ms)
+A_done x=0
+=== RUN 2 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 3 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 4 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 5 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 6 ===
+B_elapsed_ms=1
+PASS: task B not blocked (elapsed=1 ms)
+A_done x=0
+=== RUN 7 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 8 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 9 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 10 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 11 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 12 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 13 ===
+B_elapsed_ms=2
+PASS: task B not blocked (elapsed=2 ms)
+A_done x=0
+=== RUN 14 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 15 ===
+B_elapsed_ms=1
+PASS: task B not blocked (elapsed=1 ms)
+A_done x=0
+=== RUN 16 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 17 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 18 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 19 ===
+B_elapsed_ms=1
+PASS: task B not blocked (elapsed=1 ms)
+A_done x=0
+=== RUN 20 ===
+B_elapsed_ms=1
+PASS: task B not blocked (elapsed=1 ms)
+A_done x=0
+=== RUN 21 ===
+B_elapsed_ms=1
+PASS: task B not blocked (elapsed=1 ms)
+A_done x=0
+=== RUN 22 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 23 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 24 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 25 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 26 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 27 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 28 ===
+B_elapsed_ms=1
+PASS: task B not blocked (elapsed=1 ms)
+A_done x=0
+=== RUN 29 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 30 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 31 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 32 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 33 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 34 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 35 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 36 ===
+B_elapsed_ms=1
+PASS: task B not blocked (elapsed=1 ms)
+A_done x=0
+=== RUN 37 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 38 ===
+B_elapsed_ms=1
+PASS: task B not blocked (elapsed=1 ms)
+A_done x=0
+=== RUN 39 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 40 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 41 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 42 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 43 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 44 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 45 ===
+B_elapsed_ms=1
+PASS: task B not blocked (elapsed=1 ms)
+A_done x=0
+=== RUN 46 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 47 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 48 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 49 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+=== RUN 50 ===
+B_elapsed_ms=0
+PASS: task B not blocked (elapsed=0 ms)
+A_done x=0
+
+## RESULT: DONE
+# All 50 AOT runs: elapsed 0-2 ms (< 100 ms threshold met).
+# No deadlock, no Z0018 abort. Task B not blocked by A's 200 ms state read+sleep.
