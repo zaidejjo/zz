@@ -1,6 +1,6 @@
 first module that broke: <path> <path>
 
-error: struct `unknown_field.Point` has no field `z`
+error: Z0010: struct `unknown_field.Point` has no field `z`
 
 --> <path>
 |

@@ -1,6 +1,6 @@
 first module that broke: <path> <path>
 
-error: integer division by zero (divisor is literal `0`)
+error: Z0007: integer division by zero (divisor is literal `0`)
 
 --> <path>
 |
