@@ -41,6 +41,16 @@ match math.factorial(-1) {
     .ok(v) => println("factorial(-1): {v}")
     .err(e) => println("factorial(-1) err: {e}")
 }
+println("factorial_f(0): {math.factorial_f(0)}")
+println("factorial_f(5): {math.factorial_f(5)}")
+println("factorial_f(20): {math.factorial_f(20)}")
+println("factorial_f(21): {math.factorial_f(21)}")
+println("factorial_f(50): {math.factorial_f(50)}")
+println("factorial_f(100): {math.factorial_f(100)}")
+println("factorial_f(170): {math.factorial_f(170)}")
+println("factorial_f(171): {math.factorial_f(171)}")
+println("factorial_f(-1): {math.factorial_f(-1)}")
+
 println("gcd(12, 8): {math.gcd(12, 8)}")
 println("lcm(4, 6): {math.lcm(4, 6)}")
 

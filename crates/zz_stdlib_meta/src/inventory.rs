@@ -103,6 +103,7 @@ pub const PURE_ZZ: &[&str] = &[
     "std.math.rand_range",
     // PNSA: precompiled native stdlib number theory.
     "std.math.factorial",
+    "std.math.factorial_f",
     "std.math.gcd",
     "std.math.lcm",
     "std.math.isqrt",
@@ -124,6 +125,7 @@ pub const PURE_ZZ: &[&str] = &[
     "math.mean_f",
     "math.median_f",
     "math.factorial",
+    "math.factorial_f",
     "math.gcd",
     "math.lcm",
     // vec helpers

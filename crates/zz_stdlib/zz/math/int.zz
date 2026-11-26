@@ -92,6 +92,22 @@ func math.factorial(n: int) -> Result<int, str> {
     return .ok(result)
 }
 
+// ── Factorial as float (good to ~170! before f64 overflow) ───────────────────
+
+func math.factorial_f(n: int) -> float {
+    if n < 0 {
+        return 0.0 / 0.0 // NaN
+        
+    }
+    result := 1.0
+    i := 2
+    while i <= n {
+        result = result * float(i)
+        i = i + 1
+    }
+    return result
+}
+
 func math.isqrt(n: int) -> Result<int, str> {
     if n < 0 {
         return .err("isqrt: negative input")
