@@ -1103,7 +1103,7 @@ impl Lowerer {
 
     /// Find a top-level function body by ZZ name (impl methods live under
     /// `Impl` items and are never specialized, so only `Func` items count).
-    fn find_body(
+    pub(crate) fn find_body(
         &self,
         fname: &str,
     ) -> Option<(&[zz_frontend::ast::Param], &zz_frontend::ast::Block)> {
