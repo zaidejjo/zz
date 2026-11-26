@@ -404,6 +404,15 @@ fn native_skip_reason(file: &Path) -> Option<&'static str> {
         "step3b_4d_lock_leak" => {
             Some("uses std.debug.state_*_depth natives (Rust-only, no C twin); AOT variant step3b_4d_lock_leak_aot.zz covers native")
         }
+        "step3b_4a_task_b_elapsed" => {
+            Some("concurrency timing test: elapsed-ms output differs between VM and native engines; lock-safety assertion is inside the fixture itself")
+        }
+        "step3b_4b_while_sleep" => {
+            Some("concurrency scheduling test: final s value depends on green-thread scheduling order; lock-safety property verified by e2e exit 0 on both engines")
+        }
+        "step3b_4c_print_vs_atomic" => {
+            Some("concurrency output-interleaving test: print/spinner_done order differs between VM and native; no-deadlock/no-Z0018 verified by e2e exit 0")
+        }
         "log_test" => {
             Some("log output embeds unix timestamps and span durations — non-deterministic")
         }
