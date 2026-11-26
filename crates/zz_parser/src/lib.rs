@@ -77,6 +77,7 @@ pub fn parse(source: &str) -> Parsed {
         pending_gt: 0,
         no_union: false,
         aborted: false,
+        source,
     };
     let program = parser.parse_program();
     let mut errors = parser.errors;
@@ -121,6 +122,10 @@ struct Parser<'a> {
     toks: Vec<Token<'a>>,
     pos: usize,
     errors: Vec<RawDiag>,
+    /// Original source text, retained so parser diagnostics can reflect the
+    /// user's actual code (e.g. dynamic `let x := ...` hints instead of
+    /// static placeholder text).
+    source: &'a str,
     /// Block nesting depth: only the top-level statement list pre-sizes
     /// from the token stream (see `parse_stmt_list`).
     block_depth: usize,

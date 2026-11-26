@@ -282,7 +282,7 @@ fn report_ambiguous_trait_method(
     };
     let mut providers: Vec<String> = Vec::new();
     for bound in checker.current_bounds.get(gen).into_iter().flatten() {
-        let zz_span_ast::ast::TraitBound::User(tname) = bound else {
+        let zz_span_ast::ast::TraitBound::User(tname, _) = bound else {
             continue;
         };
         if checker

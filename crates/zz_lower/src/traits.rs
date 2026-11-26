@@ -179,7 +179,7 @@ impl Lowerer {
         let sig = self.tp.funcs.get(&names.current_scope)?;
         let (_, bounds) = sig.bounds.iter().find(|(name, _)| name == generic)?;
         bounds.iter().find_map(|bound| {
-            let TraitBound::User(trait_name) = bound else {
+            let TraitBound::User(trait_name, _) = bound else {
                 return None;
             };
             let tsig = self.tp.traits.get(trait_name)?;

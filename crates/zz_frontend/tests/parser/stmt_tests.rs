@@ -178,10 +178,8 @@ fn parses_generic_func_with_user_bound() {
     let p = parse_ok("func f<T: Foo>(x: T) -> T { return x }");
     match &p.stmts[0] {
         zz_frontend::ast::Stmt::Func { generics, .. } => {
-            assert_eq!(
-                generics[0].bounds,
-                vec![zz_frontend::ast::TraitBound::User("Foo".to_string())]
-            );
+            assert_eq!(generics[0].bounds.len(), 1);
+            assert_eq!(generics[0].bounds[0].name(), "Foo");
         }
         other => panic!("unexpected: {other:?}"),
     }

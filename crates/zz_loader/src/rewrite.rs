@@ -130,7 +130,7 @@ impl<'a> Rewriter<'a> {
                 for g in generics.iter_mut() {
                     self.declare(&g.name.name);
                     for bound in g.bounds.iter_mut() {
-                        if let zz_frontend::ast::TraitBound::User(tname) = bound {
+                        if let zz_frontend::ast::TraitBound::User(tname, _) = bound {
                             if !tname.contains('.') && self.top.contains(tname.as_str()) {
                                 *tname = format!("{}.{}", self.ns, tname);
                             }

@@ -10,6 +10,10 @@ use zz_span_ast::Span;
 
 use super::Parser;
 
+/// Built-in operator bounds the parser can suggest by prefix fallback when a
+/// user mistypes one (e.g. `Number` → `Num`).
+const BUILTIN_BOUNDS: &[&str] = &["Num", "Ord", "Eq", "Display"];
+
 impl<'a> Parser<'a> {
     // --- statements -------------------------------------------------------
 
@@ -201,6 +205,10 @@ impl<'a> Parser<'a> {
             // `let x := 5` or `let x = 5` — `let` is not a ZZ keyword; use `:=`
             TokenKind::Ident if self.peek().text == "let" => {
                 let let_tok = self.advance();
+                // Reserve the error slot so this diagnostic stays first
+                // (matching the original push-then-recover order); refine the
+                // note below once we know what the user actually wrote.
+                let err_idx = self.errors.len();
                 self.push_error(
                     error_at(
                         "unexpected `let` — ZZ does not use `let` declarations",
@@ -213,11 +221,21 @@ impl<'a> Parser<'a> {
                         "remove `let`",
                     )),
                 );
-                self.parse_stmt()
+                let pos_before = self.pos;
+                let stmt = self.parse_stmt();
+                if let Some((full, after)) =
+                    self.consumed_body_since(let_tok.span.start, pos_before)
+                {
+                    if let Some(diag) = self.errors.get_mut(err_idx) {
+                        diag.notes = vec![format!("write `{after}` instead of `{full}`")];
+                    }
+                }
+                stmt
             }
             // `var x := 5` — `var` is not a ZZ keyword; use `:=`
             TokenKind::Ident if self.peek().text == "var" => {
                 let var_tok = self.advance();
+                let err_idx = self.errors.len();
                 self.push_error(
                     error_at(
                         "unexpected `var` — ZZ does not use `var` declarations",
@@ -230,7 +248,16 @@ impl<'a> Parser<'a> {
                         "remove `var`",
                     )),
                 );
-                self.parse_stmt()
+                let pos_before = self.pos;
+                let stmt = self.parse_stmt();
+                if let Some((full, after)) =
+                    self.consumed_body_since(var_tok.span.start, pos_before)
+                {
+                    if let Some(diag) = self.errors.get_mut(err_idx) {
+                        diag.notes = vec![format!("write `{after}` instead of `{full}`")];
+                    }
+                }
+                stmt
             }
             // `end` — ZZ uses `}` to close blocks, not `end`
             TokenKind::Ident if self.peek().text == "end" => {
@@ -483,6 +510,41 @@ impl<'a> Parser<'a> {
                 Stmt::Expr(expr)
             }
         }
+    }
+
+    /// Recover the verbatim source text of the statement just parsed after a
+    /// rejected keyword (e.g. `let`/`var`), so the hint can mirror the user's
+    /// real code instead of a static placeholder.
+    ///
+    /// `keyword_start` is the byte offset of the rejected keyword itself, so
+    /// the "instead of" part covers the whole original construct (including
+    /// any whitespace between the keyword and the rest of the statement).
+    /// `pos_before` is the cursor right after the keyword was consumed.
+    /// `parse_stmt` must already have run (consuming the rest of the
+    /// statement). Returns `None` when nothing was consumed after the keyword
+    /// (keyword at EOF or followed only by a terminator), in which case a
+    /// static hint is used.
+    ///
+    /// Returns `(full, after)` where `full` spans from the keyword to the end
+    /// of the consumed statement and `after` spans from right after the
+    /// keyword to the end of the consumed statement.
+    fn consumed_body_since(
+        &mut self,
+        keyword_start: u32,
+        pos_before: usize,
+    ) -> Option<(String, String)> {
+        if self.pos <= pos_before {
+            return None;
+        }
+        let full_start = keyword_start as usize;
+        let after_start = self.toks[pos_before].span.start as usize;
+        // `self.pos` sits on the terminator after the consumed statement, so
+        // the last consumed token is at `self.pos - 1`.
+        let end = self.toks[self.pos - 1].span.end as usize;
+        Some((
+            self.source[full_start..end].to_string(),
+            self.source[after_start..end].to_string(),
+        ))
     }
 
     /// True when the upcoming tokens form a `@link` directive rather than a
@@ -1600,9 +1662,28 @@ impl<'a> Parser<'a> {
                         "Eq" => bounds.push(TraitBound::Eq),
                         "Display" => bounds.push(TraitBound::Display),
                         // Any other name is a user trait. Single-file parsing
-                        // cannot see the trait table, so the checker validates
-                        // it (with a suggestion) against its registered traits.
-                        other => bounds.push(TraitBound::User(other.to_string())),
+                        // cannot see the trait table, but it can catch typos of
+                        // the built-in bounds via prefix fallback (`Number` →
+                        // `Num`) and suggest a fix right here.
+                        other => {
+                            let suggestion = BUILTIN_BOUNDS.iter().find(|b| other.starts_with(*b));
+                            if let Some(sugg) = suggestion {
+                                self.push_error(
+                                    error_at(
+                                        format!(
+                                            "unknown trait bound `{other}` (expected `Num`, `Ord`, `Eq`, `Display`, or a declared trait)"
+                                        ),
+                                        id.span,
+                                    )
+                                    .with_fixit(FixIt::safe(
+                                        id.span,
+                                        sugg.to_string(),
+                                        format!("replace `{other}` with `{sugg}`"),
+                                    )),
+                                );
+                            }
+                            bounds.push(TraitBound::User(other.to_string(), id.span));
+                        }
                     }
                 }
                 if self.eat(TokenKind::Plus) {
