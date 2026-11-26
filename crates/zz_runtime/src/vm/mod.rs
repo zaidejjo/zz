@@ -18,6 +18,7 @@
 pub mod capture;
 pub mod chunk;
 pub mod compiler;
+pub mod dispatch;
 pub mod op;
 pub mod runtime;
 pub mod stats;
