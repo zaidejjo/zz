@@ -986,10 +986,10 @@ impl TypeCheckOps for Checker {
                                 Type::Dict(Box::new(Type::Str), Box::new(Type::Str))
                             }
                             _ => {
-                                self.errors.push(error_at(
-                                    format!("http.request has no field `{name}`"),
-                                    *span,
-                                ));
+                                self.errors.push(
+                                    error_at(format!("http.request has no field `{name}`"), *span)
+                                        .with_code(ErrorCode(10)),
+                                );
                                 Type::Unit
                             }
                         }
@@ -1113,10 +1113,13 @@ impl TypeCheckOps for Checker {
                         full.push(fname.clone());
                         given_paths.push(full);
                     } else {
-                        self.errors.push(error_at(
-                            format!("struct `{name}` has no field `{fname}`"),
-                            fval.span(),
-                        ));
+                        self.errors.push(
+                            error_at(
+                                format!("struct `{name}` has no field `{fname}`"),
+                                fval.span(),
+                            )
+                            .with_code(ErrorCode(10)),
+                        );
                     }
                 }
                 // An explicit embedded value and flattened leaves inside the
@@ -1878,10 +1881,13 @@ impl TypeCheckOps for Checker {
                         } else {
                             "remainder"
                         };
-                        self.errors.push(error_at(
-                            format!("integer {what} by zero (divisor is literal `0`)"),
-                            right.span(),
-                        ));
+                        self.errors.push(
+                            error_at(
+                                format!("integer {what} by zero (divisor is literal `0`)"),
+                                right.span(),
+                            )
+                            .with_code(ErrorCode(7)),
+                        );
                         return Type::Error;
                     }
                 }
@@ -2614,6 +2620,7 @@ impl TypeCheckOps for Checker {
                         "unreachable match arm — a previous arm matches everything",
                         arm.pat.span(),
                     )
+                    .with_code(ErrorCode(5))
                     .with_note("remove this arm or move it above the catch-all arm"),
                 );
             }

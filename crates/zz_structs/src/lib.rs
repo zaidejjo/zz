@@ -13,7 +13,7 @@
 //! so no AST flag is needed and all downstream passes keep working.
 
 use zz_checker_core::{Checker, FuncSig};
-use zz_diag_core::{error_at, FixIt};
+use zz_diag_core::{error_at, ErrorCode, FixIt};
 use zz_infer::InferOps;
 use zz_span_ast::ast::Stmt;
 use zz_span_ast::span::Span;
@@ -350,7 +350,8 @@ impl StructOps for Checker {
                         let visible = self.all_visible_fields(sname);
                         let field_names: Vec<&str> = visible.iter().map(|n| n.as_str()).collect();
                         let mut diag =
-                            error_at(format!("struct `{sname}` has no field `{name}`"), span);
+                            error_at(format!("struct `{sname}` has no field `{name}`"), span)
+                                .with_code(ErrorCode(10));
                         let all = suggest_all(name, &field_names);
                         if let Some((suggestion, _)) = all.first() {
                             diag = diag.with_note(format!("did you mean field `{suggestion}`?"));

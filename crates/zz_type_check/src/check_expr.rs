@@ -2,7 +2,7 @@
 //! Free functions following the `definite_assignment.rs` pattern.
 
 use zz_checker_core::Checker;
-use zz_diag_core::error_at;
+use zz_diag_core::{error_at, ErrorCode};
 use zz_infer::InferOps;
 use zz_span_ast::ast::{Block, Expr, FmtPart, Ident, Pattern};
 use zz_span_ast::span::Span;
@@ -151,10 +151,10 @@ fn check_expr_field(checker: &mut Checker, obj: &Expr, name: &str, span: Span) -
                     Type::Dict(Box::new(Type::Str), Box::new(Type::Str))
                 }
                 _ => {
-                    checker.errors.push(error_at(
-                        format!("http.request has no field `{name}`"),
-                        span,
-                    ));
+                    checker.errors.push(
+                        error_at(format!("http.request has no field `{name}`"), span)
+                            .with_code(ErrorCode(10)),
+                    );
                     Type::Unit
                 }
             }
@@ -262,10 +262,13 @@ fn check_expr_struct_init(
                 }
             }
             None => {
-                checker.errors.push(error_at(
-                    format!("struct `{name}` has no field `{fname}`"),
-                    fval.span(),
-                ));
+                checker.errors.push(
+                    error_at(
+                        format!("struct `{name}` has no field `{fname}`"),
+                        fval.span(),
+                    )
+                    .with_code(ErrorCode(10)),
+                );
             }
         }
         field_types.push(fvt);
