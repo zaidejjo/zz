@@ -15,7 +15,7 @@ the program exhibits under contention.
 | d3_lru_cache | 1 | Type error: `cache.contains(key)` type cannot be inferred | **CONFUSING** | Not a state error — `cache := {}` empty dict has no inferable element type. Needs explicit type annotation (`state cache := {} as Dict<str,str>` or similar). |
 | d4_rate_limiter | 0 | `8` | **FALSE POSITIVE (for correctness)** | Program runs and outputs 8 (2 tasks each allowed once), but `allow()` does check-then-act on `state tokens` OUTSIDE `atomic {}`. Under contention both tasks could pass the check and both decrement → lost update. The program appears correct but is racy (UE). Fix: wrap in `atomic {}`. |
 | d5_bank_transfer | 0 | `60 140` | **PASS** | `state alice`/`state bob` accessed inside `atomic {}`. Correct, invariant preserved (200 total). |
-| d6_log_buffer | 0 | `4` | **PASS** | `state log` pushed inside `record()` — but `record()` does NOT use `atomic {}`. However, `vec.push` on state is a single RMW and the test only has sequential joins... Actually `record()` writes `state log` outside atomic. Under concurrent tasks this is a UE (concurrent pushes could interleave). In this single-run it outputs 4. Fix: wrap push in `atomic {}`. |
+| d6_log_buffer | 0 | `4` | **PASS** | `state log` pushed inside `atomic {}` in `record()`. Correct, race-free. |
 | d7_job_queue | 1 | `[Z0017] global \`jobs_done\` is reachable from a task; declare it \`state\`` | **TRUE POSITIVE** | Checker correctly catches plain global shared across tasks. Fix: `state jobs_done := ...` |
 | d8_config_reload | 0 | `60` (+ unused field warning) | **FALSE POSITIVE (for correctness)** | Program outputs 60 (correct for single task), but `reload()` writes `state cfg` OUTSIDE `atomic {}`. Under concurrent reloads, writes could tear/overwrite. The program appears correct but is racy (UE). Fix: wrap write in `atomic {}`. |
 
@@ -60,7 +60,10 @@ func reload(timeout: int) {
 
 ## d6 note
 
-`d6_log_buffer.zz` — `record()` does `log = vec.push(log, msg)` outside `atomic {}`. While it works in the single-task test, concurrent `record()` calls from multiple tasks would race on the state vec. Fix: wrap in `atomic {}`. (Not classified as d4/d8 false positive since the task only asks about d4/d8.)
+`d6_log_buffer.zz` — `record()` now wraps the state log push in `atomic {}`
+(fixed). Previously it wrote `state log` outside `atomic {}`, which was a UE
+(concurrent pushes could interleave and lose updates). AOT gave `log_len=1`
+instead of `4`, confirming the race. Now fixed and race-free.
 
 ## Passing programs to add as fixtures
 

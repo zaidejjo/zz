@@ -1,15 +1,15 @@
 // features: imports, int-arith, locals, print, state, std-task, std-vec
-// S3: d6_log_buffer — PASS (single-run)
-// NOTE: record() writes state log OUTSIDE atomic {}. Under concurrent
-// record() calls from multiple tasks, pushes could interleave (UE).
-// This fixture matches the original d6 program; see S3-classification.txt.
+// S3: d6_log_buffer — PASS
+// state log pushed inside atomic {} — race-free under concurrent record() calls.
 import std.task
 import std.vec
 
 state log := []
 
 func record(msg: str) {
-    log = vec.push(log, msg)
+    atomic {
+        log = vec.push(log, msg)
+    }
 }
 
 func main() -> int {

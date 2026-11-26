@@ -201,8 +201,14 @@ fn run_zz_with_input_env(
     // NOTE: killing `zz run --native` may orphan its already-spawned
     // fixture binary (kill only reaches `zz`); that only happens on
     // timeout, i.e. for fixtures already failing as Unexpected/hangs.
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(ZZ_CHILD_TIMEOUT_SECS);
+    // VM legs (no clang compile) get the shorter 60s bound; native legs
+    // (clang compile + run) keep the generous 300s bound.
+    let timeout_secs = if args.contains(&"--native") {
+        ZZ_CHILD_TIMEOUT_SECS
+    } else {
+        vm_child_timeout_secs()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,

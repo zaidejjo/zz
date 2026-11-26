@@ -267,41 +267,66 @@ None found during implementation. All decisions D1–D10 are implemented as spec
 
 ## R4 — Benchmarks
 
-Methodology: release build (`cargo build --release -p zz_cli`), warm-up run,
-median of 7 timed runs, measured with `date +%s%N` nanosecond timestamps.
-All benchmarks run N iterations of a read-modify-write (RMW) on a single
-`state` variable inside a loop; `ns/op = total_ns / N`.
+Methodology: `zz bench` runs warm-up (1 iteration) then timed iterations
+(median of >=7), result consumed via `black_box()` to prevent dead-code
+elimination. N=1k/10k/100k for increment/vec benchmarks. Built with the
+debug profile (`cargo build -p zz_cli`); release build hangs on dependency
+compilation in this environment so release numbers are pending. AOT uses
+native compilation via clang.
 
-| Benchmark | N | Engine | Total ns | ns/op |
+| Benchmark | N | Engine | ms/iter | ns/op |
 |---|---|---|---|---|
-| `state_read_write` (`counter = counter + 1`) | 1,000 | AOT | 3,688,227 | 3,688 |
-| `state_read_write` | 10,000 | AOT | 4,745,131 | 474 |
-| `state_read_write` | 100,000 | AOT | 8,340,701 | 83 |
-| `state_vec_push` (`log = vec.push(log, "m")`) | 1,000 | AOT | 3,898,394 | 3,898 |
-| `state_vec_push` | 10,000 | AOT | 4,778,441 | 477 |
-| `state_vec_push` | 100,000 | AOT | 9,145,442 | 91 |
-| `local_read_write` (`s = s + 1`, plain local, baseline) | 1,000 | AOT | 4,948,429 | 4,948 |
-| `local_read_write` | 10,000 | AOT | 4,017,430 | 401 |
-| `local_read_write` | 100,000 | AOT | 4,226,872 | 42 |
-| `state_read_write` | 1,000 | VM | 16,973,878 | 16,973 |
-| `state_read_write` | 10,000 | VM | 38,287,212 | 3,828 |
-| `state_read_write` | 100,000 | VM | 248,795,075 | 2,487 |
-| `state_vec_push` | 1,000 | VM | 45,553,576 | 45,553 |
-| `state_vec_push` | 10,000 | VM | 2,521,179,721 | 252,117 |
-| `local_read_write` | 1,000 | VM | 14,950,239 | 14,950 |
-| `local_read_write` | 10,000 | VM | 15,442,687 | 1,544 |
+| `plain_global` (`requests = requests + 1`, baseline) | 1,000 | VM | 25.7 | 25,700 |
+| `plain_global` | 10,000 | VM | 255.5 | 25,550 |
+| `plain_global` | 100,000 | VM | 2,710 | 27,100 |
+| `state_inc` (`state c := 0; c = c + 1`) | 1,000 | VM | 6.8 | 6,800 |
+| `state_inc` | 10,000 | VM | 60.7 | 6,070 |
+| `state_inc` | 100,000 | VM | 656.6 | 6,566 |
+| `atomic_inc` (`atomic { c = c + 1 }`) | 1,000 | VM | 5.6 | 5,600 |
+| `atomic_inc` | 10,000 | VM | 64.7 | 6,470 |
+| `atomic_inc` | 100,000 | VM | 580.5 | 5,805 |
+| `local_vec_push` (`v = vec.push(v, i)`) | 1,000 | VM | 0.641 | 641 |
+| `local_vec_push` | 10,000 | VM | 6.8 | 680 |
+| `local_vec_push` | 100,000 | VM | 67.6 | 676 |
+| `state_vec_push` (`state log := []; log = vec.push(log, "m")`) | 1,000 | VM | 60.0 | 60,000 |
+| `state_vec_push` | 10,000 | VM | 5,220 | 522,000 |
+| `plain_global` | 1,000 | AOT | 3.0 | 3,000 |
+| `plain_global` | 10,000 | AOT | 12.4 | 1,240 |
+| `plain_global` | 100,000 | AOT | 139.3 | 1,393 |
+| `state_inc` | 1,000 | AOT | 1.8 | 1,800 |
+| `state_inc` | 10,000 | AOT | 22.0 | 2,200 |
+| `state_inc` | 100,000 | AOT | 302.7 | 3,027 |
+| `atomic_inc` | 1,000 | AOT | 1.5 | 1,500 |
+| `atomic_inc` | 10,000 | AOT | 49.3 | 4,930 |
+| `atomic_inc` | 100,000 | AOT | 219.2 | 2,192 |
+| `local_vec_push` | 1,000 | AOT | 0.394 | 394 |
+| `local_vec_push` | 10,000 | AOT | 1.8 | 180 |
+| `local_vec_push` | 100,000 | AOT | 28.5 | 285 |
+| `state_vec_push` | 1,000 | AOT | 4.3 | 4,300 |
+| `state_vec_push` | 10,000 | AOT | 41.2 | 4,120 |
+| `state_vec_push` | 100,000 | AOT | 242.8 | 2,428 |
+
+**Contended: 4 tasks x 100k increments (AOT debug)**
+
+| Benchmark | ms/iter | ops/sec (400k total) |
+|---|---|---|
+| `contended_state` (`atomic { contended = contended + 1 }`) | 313.3 | ~1,277,000 |
+| `contended_atomic` (same, inside `atomic { }`) | 239.5 | ~1,670,000 |
+
+**Scaling regression: 20k pushes < 5x time of 10k (AOT debug)**
+
+| Benchmark | 10k ms/iter | 20k ms/iter | Ratio | < 5x? |
+|---|---|---|---|---|
+| `state_vec_scaling` | 4.9 | 11.5 | 2.35 | YES |
+| `local_vec_scaling` | 1.8 | 6.6 | 3.67 | YES |
 
 Key observations:
 
-- **AOT `state` RMW at N=100,000 is 83 ns/op** — well within the same order of
-  magnitude as a plain local RMW (42 ns/op). The lock acquisition cost at AOT
-  scale is modest (~2x a plain local).
-- **AOT `state_vec_push` at N=100,000 is 91 ns/op** — the vec allocation
-  dominates, so the state-lock overhead is nearly invisible.
-- **VM is ~10-30x slower than AOT** — expected for an interpreter; the state
-  lock adds no extra asymptotic cost beyond the per-op interpreter dispatch.
-- At small N (1,000) the `zz` binary startup cost (~15ms) dominates, so
-  ns/op figures there are inflated relative to large-N.
+- **VM is ~5-20x slower than AOT** — expected for an interpreter.
+- **AOT `state_inc` at N=100k is 3,027 ns/op** vs plain local baseline 1,393 ns/op — ~2.2x, NOT indistinguishable from plain.
+- **Root cause of elision gap:** The benchmark file uses `std.task` in the contended benchmarks, making `task` native reachable module-wide. `needs_safepoint()` returns true for the whole compilation unit (`crates/zz_lower/src/context.rs:1066-1082`), which makes `needs_state_lock()` return true, preventing D8 lock elision for ALL state accesses in that file — even `bench_state_inc` which uses no tasks. To test true elision, non-contended benchmarks must be in a separate file with no task/chan/spawn reachability.
+- **Atomic inc is comparable to state inc** on AOT (2,192 vs 3,027 ns/op at 100k) — the lock overhead is modest at scale.
+- **Vec push dominates cost** — `state_vec_push` (2,428 ns/op) vs `local_vec_push` (285 ns/op) at 100k; the allocation dwarfs lock overhead.
 
 ## Choosing between `state`, `cell`, and `chan`
 
