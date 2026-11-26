@@ -112,6 +112,9 @@ fn check_stmt_decl(
                 ));
             }
             e.context = Some(format!("variable `{}`", name.name));
+            // Secondary label: point at the value expression ("found int here")
+            // so the user sees where the wrong type comes from.
+            e.left_span = Some(value.span());
             checker.report_mismatch_with_notes(e, ann.span, notes);
         } else {
             // Unification succeeded, but a heterogeneous literal may have
@@ -135,7 +138,7 @@ fn check_stmt_decl(
                     left: vt_r.to_string(),
                     right: at_r.to_string(),
                     context: Some(format!("variable `{}`", name.name)),
-                    left_span: None,
+                    left_span: Some(value.span()),
                     right_span: None,
                     left_ty: Box::new(vt_r),
                     right_ty: Box::new(at_r),
