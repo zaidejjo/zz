@@ -1,0 +1,23 @@
+// Gate: native `len()` calls — arrays, strings, dicts.
+// Measures the cost of the zz_call_nativeN dispatch + registry lookup
+// per len() call vs. direct inline (len of array/string/dict fields).
+import std.time
+
+func main() {
+    // Build containers outside the timed region.
+    arr := [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    s := "hello world this is a test string for len benchmarking"
+    d:{str: int} = {}
+    for i in 0..100 {
+        d["k{i}"] = i
+    }
+    t0 := time.now_ms()
+    total := 0
+    for i in 0..2000000 {
+        total = total + len(arr)
+        total = total + len(s)
+        total = total + len(d)
+    }
+    t1 := time.now_ms()
+    println("native_len: {t1 - t0}ms result={total}")
+}
