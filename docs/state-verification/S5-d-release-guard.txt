@@ -1,0 +1,63 @@
+# S5-d — nolock_selftest can NEVER be enabled by default or in release
+
+## Guard 1: compile_error! in crates/zz_cli/src/main.rs
+
+Added at the top of main.rs:
+
+```rust
+// nolock_selftest must NEVER be enabled in a release build. It disables the
+// state lock for self-testing; shipping it would break shared-state safety.
+#[cfg(all(feature = "nolock_selftest", not(debug_assertions)))]
+compile_error!(
+    "nolock_selftest must never be enabled in release builds (debug_assertions off)"
+);
+```
+
+**How it works:**
+- `not(debug_assertions)` is true in release builds (debug_assertions is off
+  by default in release).
+- `feature = "nolock_selftest"` is true when the feature is enabled.
+- When BOTH are true (release + nolock_selftest), `compile_error!` triggers
+  and compilation fails with a clear error message.
+
+**Verification:** The guard compiles successfully in debug mode with
+`nolock_selftest` (debug_assertions is on, so `not(debug_assertions)` is
+false → compile_error not triggered). It will fail in release mode with
+`nolock_selftest`.
+
+## Guard 2: Feature is opt-in only, not default
+
+**crates/zz_cli/Cargo.toml:11:**
+```toml
+[features]
+nolock_selftest = ["zz_codegen/nolock_selftest", "zz_runtime/nolock_selftest"]
+```
+
+The feature is NOT listed in `default = [...]`, so it is never enabled by
+default. It must be explicitly passed via `--features nolock_selftest`.
+
+**crates/zz_runtime/Cargo.toml:10** and **crates/zz_lower/Cargo.toml:12:**
+```toml
+[features]
+nolock_selftest = []
+```
+
+Same — no default, opt-in only.
+
+## Guard 3: Local-only build, never committed
+
+The nolock build is only used locally for self-testing (see plan Phase 3.4:
+"Build with --features nolock_selftest (local build only, never committed)").
+No CI job or release workflow enables this feature.
+
+## Summary
+
+| Scenario | nolock_selftest enabled? | Result |
+|---|---|---|
+| Default build (no --features) | No | Feature is opt-in, not default |
+| Debug + --features nolock_selftest | Yes | Compiles (debug_assertions on) |
+| Release + --features nolock_selftest | No | **compile_error!** triggers, build fails |
+| Release (default features) | No | Feature not enabled |
+
+The compile_error! guard guarantees nolock_selftest can never ship in a
+release build.

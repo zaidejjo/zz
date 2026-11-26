@@ -1,0 +1,48 @@
+# S5-a — needs_safepoint() controls safepoints/yield, NOT the lock
+
+**File:** crates/zz_lower/src/context.rs:1066-1082
+
+```rust
+pub(crate) fn needs_safepoint(&self) -> bool {
+    // nolock_selftest feature: keep cooperative safepoints on so task
+    // scheduling still works, but disable the state lock itself via
+    // needs_state_lock() (state accesses run lock-free in the selftest).
+    if cfg!(feature = "nolock_selftest") {
+        return self.has_extern_plugin
+            || self
+                .reachable_natives
+                .iter()
+                .any(|n| n.contains("task") || n.contains("chan") || n.contains("spawn"));
+    }
+    self.has_extern_plugin
+        || self
+            .reachable_natives
+            .iter()
+            .any(|n| n.contains("task") || n.contains("chan") || n.contains("spawn"))
+}
+```
+
+`needs_safepoint()` returns true when task/chan/spawn natives are reachable,
+regardless of `nolock_selftest`. This means safepoints/yield scheduling
+REMAIN ACTIVE under nolock — only the state lock is disabled.
+
+**Decoupling:** Already correct — no decoupling needed. `needs_safepoint()`
+and `needs_state_lock()` are separate functions:
+
+- `needs_safepoint()` → controls cooperative safepoints/yield (scheduling)
+- `needs_state_lock()` → controls `zz_state_lock`/`zz_state_unlock` emission
+
+Under nolock_selftest: `needs_safepoint()` stays true (scheduling works),
+`needs_state_lock()` returns false (lock disabled).
+
+**Proof from code structure:** The comment at lines 1067-1069 explicitly states
+the design intent: "keep cooperative safepoints on so task scheduling still
+works, but disable the state lock itself via needs_state_lock()". The two
+gates are independent — `needs_safepoint()` does not reference `needs_state_lock()`
+and vice versa.
+
+**VM side:** The VM's `yield_check!()` and safepoint mechanism
+(crates/zz_runtime/src/vm/runtime.rs) is independent of `state_lock_depth`.
+Under nolock, batch reads don't acquire the lock (runtime.rs:1179), but
+`yield_check!()` still runs independently. Safepoints are not gated on the
+state lock.

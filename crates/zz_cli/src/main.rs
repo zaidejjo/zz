@@ -7,6 +7,11 @@
 //! - `zz check <file>` → parse and type-check a `.zz` file without running it
 //! - `zz --help`     → usage
 
+// nolock_selftest must NEVER be enabled in a release build. It disables the
+// state lock for self-testing; shipping it would break shared-state safety.
+#[cfg(all(feature = "nolock_selftest", not(debug_assertions)))]
+compile_error!("nolock_selftest must never be enabled in release builds (debug_assertions off)");
+
 use std::collections::HashMap;
 use std::process::ExitCode;
 

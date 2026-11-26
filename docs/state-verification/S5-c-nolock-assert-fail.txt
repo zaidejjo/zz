@@ -1,0 +1,13 @@
+=== Building zz_cli with nolock_selftest ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.53s
+
+=== Running state_multiread_atomicity under nolock (expect violations > 0) ===
+V1=2969 V2=2922 V3=2896 V4=2952 V5=2947 V6=2977
+PASS: V1 has V1=2969 violations (> 0)
+PASS: V2 has V2=2922 violations (> 0)
+PASS: V3 has V3=2896 violations (> 0)
+PASS: V4 has V4=2952 violations (> 0)
+PASS: V5 has V5=2947 violations (> 0)
+PASS: V6 has V6=2977 violations (> 0)
+
+RESULT: nolock_selftest correctly disables lock (all variants show violations > 0)

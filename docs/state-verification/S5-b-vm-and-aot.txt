@@ -1,0 +1,71 @@
+# S5-b — nolock_selftest covers both VM (zz_runtime) and AOT (zz_lower)
+
+## Cargo feature chain
+
+**crates/zz_cli/Cargo.toml:11:**
+```toml
+nolock_selftest = ["zz_codegen/nolock_selftest", "zz_runtime/nolock_selftest"]
+```
+
+**crates/zz_codegen/Cargo.toml:11:**
+```toml
+nolock_selftest = ["zz_lower/nolock_selftest"]
+```
+
+**crates/zz_runtime/Cargo.toml:10:**
+```toml
+nolock_selftest = []
+```
+
+**crates/zz_lower/Cargo.toml:12:**
+```toml
+nolock_selftest = []
+```
+
+Enabling `nolock_selftest` on `zz_cli` propagates to `zz_codegen` → `zz_lower`
+(AOT) and `zz_runtime` (VM). Both crates have the feature defined.
+
+## VM coverage (zz_runtime)
+
+**crates/zz_runtime/src/vm/runtime.rs:**
+
+- `state_lock_held()` (lines 236-247): under nolock, `state_batch_depth > 0`
+  does NOT count as holding the lock. Only `state_lock_depth > 0` (atomic {})
+  counts.
+
+- `Op::Atomic` lock acquisition (lines 1127-1138): `reg.acquire()` and
+  `state_lock_depth += 1` are wrapped in `if !cfg!(feature = "nolock_selftest")`.
+  Atomic writers run lock-free.
+
+- `leave_atomic()` lock release (lines 555-562): release is also skipped
+  under nolock.
+
+- `Op::LoadState`/`Op::StoreState` (lines 1057-1098): under nolock, always
+  use `reg.get()`/`reg.set()` (lock-free per-access), never direct locked
+  map access.
+
+- `Op::StateBatchBegin`/`StateBatchEnd` (lines 1171-1200): acquire/release
+  are wrapped in `#[cfg(not(feature = "nolock_selftest"))]` — no lock
+  acquired/released for batched reads.
+
+## AOT coverage (zz_lower → zz_codegen → zz_cli)
+
+**crates/zz_lower/src/context.rs:**
+
+- `needs_state_lock()` (lines 1099-1104): under nolock, returns `false`
+  unconditionally. No `zz_state_lock`/`zz_state_unlock` emitted.
+
+- `emit_state_read()` (lines 1106+): calls `needs_state_lock()`; when false
+  (nolock), no lock calls emitted around batched state reads.
+
+- `needs_safepoint()` (lines 1066-1082): stays active under nolock for
+  task/chan/spawn reachability — scheduling works, lock disabled.
+
+## Conclusion
+
+Both VM and AOT are covered. The feature flag propagates through the full
+chain: `zz_cli` → `zz_codegen` → `zz_lower` (AOT) and `zz_cli` → `zz_runtime`
+(VM). Under nolock_selftest:
+- VM: atomic writers + batched readers run lock-free
+- AOT: `needs_state_lock()` returns false → no lock calls emitted
+- Both: safepoints/yield scheduling remain active
