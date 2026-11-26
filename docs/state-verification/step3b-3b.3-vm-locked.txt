@@ -1,104 +1,51 @@
-# Step 3b.3 — Post-fix rerun, lock ENABLED (VM)
-# Command: for i in $(seq 1 50); do ./target/debug/zz run tests/fixtures/stdlib/state_multiread_atomicity.zz; done
-# All 50 runs: V1=0 V2=0 V3=0 V4=0 V5=0 V6=0 — 0 violations in 50/50 for all 6 variants.
-
-=== RUN 1 ===
+=== S2 LOCK-ON VM 50 RUNS ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 2 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 3 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 4 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 5 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 6 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 7 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 8 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 9 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 10 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 11 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 12 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 13 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 14 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 15 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 16 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 17 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 18 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 19 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 20 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 21 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 22 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 23 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 24 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 25 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 26 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 27 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 28 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 29 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 30 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 31 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 32 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 33 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 34 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 35 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 36 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 37 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 38 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 39 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 40 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 41 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 42 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 43 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 44 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 45 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 46 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 47 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 48 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 49 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0
-=== RUN 50 ===
 V1=0 V2=0 V3=0 V4=0 V5=0 V6=0

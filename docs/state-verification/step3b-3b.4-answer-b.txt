@@ -1,0 +1,91 @@
+# S2 — Answer (b): User code / I/O while state lock held outside atomic { }
+
+**Answer: NO.** There is no path where user code or I/O runs while the
+state lock is held outside an explicit `atomic { }` block. The following
+code guarantees this:
+
+======================================================================
+1. VM compiler closes batch before any Call op
+======================================================================
+
+crates/zz_runtime/src/vm/compiler.rs:4376-4404 — `compile_expr` wraps pure
+state-reading regions in one `StateBatchBegin`/`StateBatchEnd` pair, and
+the `StateBatchEnd` is emitted IMMEDIATELY after the last state read,
+BEFORE any `CallPath`/`CallNative` op is emitted.
+
+```rust
+// Simplified: compile_expr for a state-reading expression
+StateBatchBegin       // acquire lock
+LoadState "a"         // read state into temp
+LoadState "b"         // read state into temp
+BinOp Add             // compute on temps (no lock needed)
+StateBatchEnd         // RELEASE lock HERE
+CallPath foo          // call runs OUTSIDE the lock
+```
+
+The call (`foo`) — which may contain user code or I/O — runs after
+`StateBatchEnd`, so the lock is NOT held during the call.
+
+======================================================================
+2. StateBatchEnd always emitted after compile_stmt
+======================================================================
+
+crates/zz_runtime/src/vm/compiler.rs:4458-4466 — `in_batch_depth` nesting
+prevents per-load re-begin/end. `StateBatchEnd` is always emitted after
+`compile_stmt` completes, guaranteeing the batch depth returns to 0 at
+every statement boundary.
+
+Commit `1cd3d64b` "fix(vm): ensure StateBatchEnd always emitted after
+compile_stmt" guarantees this invariant.
+
+======================================================================
+3. No LoadState outside a batch/atomic
+======================================================================
+
+crates/zz_runtime/src/vm/runtime.rs:1057-1070 — `Op::LoadState` only does
+direct map access (lock already held) when inside `atomic { }` or a batch.
+Otherwise it uses `reg.get(name)` which locks per-access and releases
+immediately — no lock held across any user code.
+
+======================================================================
+4. AOT: zz_state_unlock before call emission
+======================================================================
+
+crates/zz_lower/src/context.rs:1106-1132 — `emit_state_read()` emits
+`zz_state_lock()` before batched loads and `zz_state_unlock()` after,
+BEFORE any call is emitted. The call and its arguments are compiled
+outside the lock region.
+
+crates/zz_lower/src/expr.rs and `stmt.rs` — the lowering emits lock/unlock
+only around the state-read portion, never around call bodies.
+
+======================================================================
+5. No yield while lock held (VM runtime guard)
+======================================================================
+
+crates/zz_runtime/src/vm/runtime.rs — `safepoint_expired()` and
+`yield_check!()` respect the lock depth. When `state_lock_depth > 0`
+(inside `atomic { }`), cooperative yields are deferred. But since the
+batch lock is always released before any call (see #1 above), there is
+never a yield point inside a batch region outside `atomic { }`.
+
+======================================================================
+6. Lock depth assertions at statement boundaries
+======================================================================
+
+Debug assertions (`STATE_BATCH_DEPTH_DEBUG`, `STATE_LOCK_DEPTH_DEBUG`)
+verify batch_depth == 0 and lock_depth == 0 at statement boundaries.
+Used by test-only natives (`std.debug.state_*_depth`) in fixtures like
+`step3b_4d_lock_leak.zz` to prove no lock leak after early returns,
+breaks, continues, and `?` propagation.
+
+======================================================================
+CONCLUSION
+======================================================================
+
+The only place user code or I/O runs while the state lock is held is
+inside an explicit `atomic { }` block. Outside `atomic { }`, the batch
+lock is always acquired and released around pure state reads only, with
+`StateBatchEnd`/`zz_state_unlock` emitted before any call op. There is
+no path where user code or I/O runs while the lock is held outside
+`atomic { }`.
