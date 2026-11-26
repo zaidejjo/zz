@@ -1,0 +1,38 @@
+# Step 3b.3 — nolock_selftest lock-removal proof
+
+## Claim
+`--features nolock_selftest` removes the state lock for BOTH the atomic writers AND the batched readers, in BOTH the VM (zz_runtime) and the AOT runtime/codegen (zz_lower + zz_codegen_runtime).
+
+## VM (zz_runtime)
+
+Under `nolock_selftest`, every lock acquire/release path is gated by
+`cfg!(not(feature = "nolock_selftest"))`:
+
+- `Op::Atomic` body entry (leave_atomic): `crates/zz_runtime/src/vm/runtime.rs:536`
+  - "Under `nolock_selftest` the lock is disabled; `Op::Atomic` did not acquire, so do not release here either"
+- `Op::LoadState` direct-map access: `crates/zz_runtime/src/vm/runtime.rs:1034-1035`
+  - `if cfg!(not(feature = "nolock_selftest")) && (self.state_lock_depth > 0 || self.state_batch_depth > 0)` → unsafe direct map access; else `reg.get(name)` (lock-per-access)
+- `Op::StoreState`: `crates/zz_runtime/src/vm/runtime.rs:1062-1063`
+  - same gating
+- `Op::RmwState`: `crates/zz_runtime/src/vm/runtime.rs:1078`
+  - `if self.state_lock_depth > 0` → direct map; else `reg.with_lock(...)` (lock-per-access)
+- `state_lock_held()`: `crates/zz_runtime/src/vm/runtime.rs:226-232`
+  - checks `state_lock_depth > 0` and, under nolock, batch depth is ignored (`#[cfg(not(feature = "nolock_selftest"))]` on the batch-depth check at line 230)
+
+Consequence: under nolock, the VM never acquires the process-global state lock for any state access — neither writers (atomic { }) nor readers (batched loads) hold it. State reads/writes go through `reg.get`/`reg.set`/`reg.with_lock`, each locking per-access internally, but the process-global reentrant lock that batching wraps is never held across statement boundaries.
+
+## AOT (zz_lower + zz_codegen_runtime)
+
+- `needs_state_lock()`: `crates/zz_lower/src/context.rs:1099-1101`
+  - Under `nolock_selftest`: `return false;`
+- `emit_state_read`: `crates/zz_lower/src/context.rs:1110-1153`
+  - When `needs_state_lock()` is false, no `zz_state_lock()`/`zz_state_unlock()` is emitted around state reads (line 1157: `if self.state_read_batch_depth.get() > 0 || !self.needs_state_lock()` → skips lock)
+- `emit_state_write` / `emit_state_rmw`: same `needs_state_lock()` gating at lines 1127, 1240
+- `zz_state_lock()` / `zz_state_unlock()`: `crates/zz_codegen_runtime/src/runtime/core.h:190-198`
+  - These are only emitted into generated C when `needs_state_lock()` is true; under nolock they are never called, so no lock is taken
+
+Consequence: under nolock, AOT-generated C never calls `zz_state_lock`/`zz_state_unlock` for state reads or writes — neither writers (atomic { }) nor readers (batched loads). State is accessed as plain statics with no lock.
+
+## Validity of the experiment
+
+Because nolock disables the lock in BOTH layers (VM + AOT) for BOTH writers and readers, the nolock 3b.3 run is valid: readers observe torn snapshots (violations > 0) precisely because no batch holds the lock across multiple reads.

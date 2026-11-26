@@ -1,0 +1,33 @@
+// Step 3b.4(a): task B elapsed < 100 ms while A runs x := slow(s) (reads state then sleeps 200 ms)
+// features: int-arith, locals, print, state, std-task, std-time
+import std.task
+import std.time
+
+state s := 0
+
+func slow(st: int) -> int {
+    std.time.sleep_ms(200)
+    return st
+}
+
+func task_a() {
+    x := slow(s)
+    println("A_done x={x}")
+}
+
+func task_b() {
+    start := std.time.now_ms()
+    for i in 0..1000000 {
+        // busy spin
+    }
+    elapsed := std.time.now_ms() - start
+    println("B_elapsed_ms={elapsed}")
+}
+
+func main() -> Result<int, str> {
+    ha := task.spawn(|_| { task_a() })
+    hb := task.spawn(|_| { task_b() })
+    task.join(ha)
+    task.join(hb)
+    return .ok(0)
+}

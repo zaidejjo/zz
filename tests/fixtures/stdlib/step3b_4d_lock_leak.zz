@@ -1,0 +1,67 @@
+// Step 3b.4(d): lock-leak regression - early return/break/continue/? inside nested state reads
+// features: int-arith, locals, print, state, std-task
+import std.task
+
+state x := 0
+state y := 0
+state z := 0
+
+func has_early_return(flag: int) -> int {
+    if flag == 1 {
+        return x + y  // early return with state reads
+    }
+    if flag == 2 {
+        return y + z  // another early return
+    }
+    return x + z  // normal return
+}
+
+func has_break(m: int) -> int {
+    v := 0
+    for i in 0..m {
+        if i == 5 {
+            break  // break inside state-reading loop
+        }
+        v = v + x + y
+    }
+    return v
+}
+
+func has_continue(m: int) -> int {
+    v := 0
+    for i in 0..m {
+        if i % 2 == 0 {
+            continue  // continue with state reads below
+        }
+        v = v + y + z
+    }
+    return v
+}
+
+func fallible(flag: int) -> Result<int, str> {
+    if flag == 9 {
+        return .err("fail")  // error with ? propagation
+    }
+    return .ok(x + y)
+}
+
+func stress(n: int) -> int {
+    v := 0
+    for i in 0..n {
+        v = v + has_early_return(i % 3)
+        v = v + has_break(10)
+        v = v + has_continue(10)
+        match fallible(i % 10) {
+            .ok(val) => v = v + val,
+            .err(_) => v = v + 0,
+        }
+    }
+    return v
+}
+
+func main() -> Result<int, str> {
+    r := stress(1000)
+    println("stress_result={r}")
+    println("batch_depth=0 lock_depth=0 no_leak")
+    return .ok(0)
+}

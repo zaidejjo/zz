@@ -1,0 +1,36 @@
+// Step 3b.5(c): atomic { } on a NEW LINE after `}` of previous statement
+// Parses and runs under the lock (VM + AOT).
+// features: state, std-task
+import std.task
+
+state a := 100
+state b := 0
+state tear := 0
+
+func writer() {
+    n := 0
+    while n < 5000 {
+        atomic {
+            a -= 1
+            b += 1
+        }
+        n += 1
+    }
+}                                          // <-- `}` ends previous statement
+
+atomic {                                   // <-- `atomic { }` on NEW LINE after `}`
+    if a + b != 100 {
+        tear = 1
+    }
+}                                          // <-- `}` ends atomic block
+
+func main() -> Result<int, str> {
+    h := task.spawn(|_| { writer() })
+    task.join(h)
+    if tear == 1 {
+        println("newline_atomic_tear")
+        return .err("tear_detected")
+    }
+    println("newline_atomic_ok")
+    return .ok(0)
+}

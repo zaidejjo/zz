@@ -1098,6 +1098,36 @@ e2e_success_test!(
     "state_multiread_all.zz"
 );
 e2e_success_test!(
+    e2e_stdlib_state_multiread_atomicity,
+    "stdlib",
+    "state_multiread_atomicity.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_step3b_5c_newline_atomic,
+    "stdlib",
+    "step3b_5c_newline_atomic.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_step3b_4a_task_b_elapsed,
+    "stdlib",
+    "step3b_4a_task_b_elapsed.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_step3b_4b_while_sleep,
+    "stdlib",
+    "step3b_4b_while_sleep.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_step3b_4c_print_vs_atomic,
+    "stdlib",
+    "step3b_4c_print_vs_atomic.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_step3b_4d_lock_leak,
+    "stdlib",
+    "step3b_4d_lock_leak.zz"
+);
+e2e_success_test!(
     e2e_stdlib_state_r2_state_ok,
     "stdlib",
     "state_r2_state_ok.zz"

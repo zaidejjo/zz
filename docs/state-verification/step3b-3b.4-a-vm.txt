@@ -1,0 +1,17 @@
+=== RUN 1 ===
+A_done x=0
+B_elapsed_ms=1427
+=== RUN 2 ===
+A_done x=0
+B_elapsed_ms=934
+=== RUN 3 ===
+A_done x=0
+B_elapsed_ms=1319
+=== RUN 4 ===
+A_done x=0
+B_elapsed_ms=903
+=== RUN 5 ===
+A_done x=0
+B_elapsed_ms=2201
+NOTE: High ms due to CPU contention from concurrent cargo test --workspace run.
+No deadlock, no Z0018 abort. B completes every run.

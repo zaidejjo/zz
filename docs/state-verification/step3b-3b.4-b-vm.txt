@@ -1,0 +1,16 @@
+=== RUN 1 ===
+A_done s=10
+B_done n=200
+=== RUN 2 ===
+A_done s=10
+B_done n=200
+=== RUN 3 ===
+A_done s=10
+B_done n=200
+=== RUN 4 ===
+A_done s=10
+B_done n=200
+=== RUN 5 ===
+A_done s=10
+B_done n=200
+A terminates (s=10), B never blocked for duration of A's body.

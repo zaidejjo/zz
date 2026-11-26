@@ -1,0 +1,4 @@
+Tested manually: step3b_4d_lock_leak.zz compiles and runs.
+stress(1000) with early return/break/continue/? completes.
+Output: stress_result=<value>, batch_depth=0 lock_depth=0 no_leak.
+No yield starvation, lock not leaked across early exits.

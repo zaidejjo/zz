@@ -1,0 +1,3 @@
+Tested manually: step3b_4c_print_vs_atomic.zz compiles and runs.
+println("{a} {b}") loop vs spinner task spinning on atomic { }.
+No deadlock, no Z0018 abort observed.

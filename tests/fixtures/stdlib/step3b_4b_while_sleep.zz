@@ -1,0 +1,31 @@
+// Step 3b.4(b): while s < 10 { sleep(5ms) } in A while B increments s every 5 ms
+// features: int-arith, locals, print, state, std-task, std-time
+import std.task
+import std.time
+
+state s := 0
+
+func task_a() {
+    while s < 10 {
+        std.time.sleep_ms(5)
+    }
+    println("A_done s={s}")
+}
+
+func task_b() {
+    n := 0
+    while n < 200 {
+        std.time.sleep_ms(5)
+        s = s + 1
+        n = n + 1
+    }
+    println("B_done n={n}")
+}
+
+func main() -> Result<int, str> {
+    ha := task.spawn(|_| { task_a() })
+    hb := task.spawn(|_| { task_b() })
+    task.join(ha)
+    task.join(hb)
+    return .ok(0)
+}
