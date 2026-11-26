@@ -142,7 +142,7 @@ impl InferOps for Checker {
         known.sort();
         for (_, bs) in bounds {
             for b in bs {
-                let B::User(name) = b else { continue };
+                let B::User(name, _) = b else { continue };
                 if self.traits.contains_key(name) {
                     continue;
                 }
@@ -196,7 +196,7 @@ impl InferOps for Checker {
                 B::Ord => matches!(ty, Type::Int | Type::Float | Type::Str),
                 B::Eq => true,
                 B::Display => true,
-                B::User(trait_name) => {
+                B::User(trait_name, _) => {
                     // A bare bound naming an imported trait resolves through
                     // the import-alias map (`Draw` → `support.shapes.Draw`).
                     let name = self

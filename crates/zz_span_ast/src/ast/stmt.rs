@@ -24,7 +24,7 @@ pub enum TraitBound {
     /// accepts any identifier — single-file parsing cannot see the trait
     /// table — and the checker validates the name (with a suggestion)
     /// against its registered traits.
-    User(String),
+    User(String, Span),
 }
 
 impl TraitBound {
@@ -34,14 +34,14 @@ impl TraitBound {
             TraitBound::Ord => "Ord",
             TraitBound::Eq => "Eq",
             TraitBound::Display => "Display",
-            TraitBound::User(n) => n,
+            TraitBound::User(n, _) => n,
         }
     }
 
     /// True for the four built-in operator bounds (`Num`, `Ord`, `Eq`,
     /// `Display`); false for a user-declared trait.
     pub fn is_builtin(&self) -> bool {
-        !matches!(self, TraitBound::User(_))
+        !matches!(self, TraitBound::User(_, _))
     }
 }
 

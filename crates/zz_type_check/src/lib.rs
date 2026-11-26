@@ -2165,7 +2165,7 @@ impl TypeCheckOps for Checker {
             Type::Named(gen) => {
                 let mut found: Option<zz_checker_core::FuncSig> = None;
                 for bound in self.current_bounds.get(gen).into_iter().flatten() {
-                    let zz_span_ast::ast::TraitBound::User(tname) = bound else {
+                    let zz_span_ast::ast::TraitBound::User(tname, _) = bound else {
                         continue;
                     };
                     let Some(msig) = self.traits.get(tname).and_then(|t| t.methods.get(method))
