@@ -110,19 +110,21 @@ func math.pow(x: float, y: float) -> float {
     }
     if x < 0.0 {
         // Negative base: only defined for integer y
-        if y != float(int(y)) {
-            return 0.0 / 0.0 // NaN
-            
-        }
-        // x^y for negative x and integer y
-        result := math.exp(y * math.log(-x))
         match int(y) {
-            .some(ni) => if ni % 2 != 0 {
-                return -result
+            .some(ni) => {
+                if float(ni) != y {
+                    return 0.0 / 0.0 // NaN (fractional exponent)
+                    
+                }
+                // x^y for negative x and integer y
+                result := math.exp(y * math.log(-x))
+                if ni % 2 != 0 {
+                    return -result
+                }
+                return result
             }
             .none => return 0.0 / 0.0
         }
-        return result
     }
     // For integer exponents, use repeated multiplication (exact)
     match int(y) {
@@ -190,16 +192,21 @@ func math.root(x: float, n: float) -> float {
         return 0.0 / 0.0 // NaN
         
     }
+    if x == 0.0 {
+        return 0.0
+    }
     if x < 0.0 {
         // Negative root: only defined for odd integer n
-        if n != float(int(n)) {
-            return 0.0 / 0.0 // NaN
-            
-        }
         match int(n) {
-            .some(ni) => if ni % 2 == 0 {
-                return 0.0 / 0.0 // NaN (even root of negative)
-                
+            .some(ni) => {
+                if float(ni) != n {
+                    return 0.0 / 0.0 // NaN (fractional exponent)
+                    
+                }
+                if ni % 2 == 0 {
+                    return 0.0 / 0.0 // NaN (even root of negative)
+                    
+                }
             }
             .none => return 0.0 / 0.0
         }
