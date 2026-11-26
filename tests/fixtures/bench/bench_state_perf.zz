@@ -1,0 +1,204 @@
+// S4 Benchmarks — shared mutable state performance
+// Methodology: `zz bench` runs warmup then timed iterations; median of >=7.
+// Result consumed via black_box to prevent DCE.
+// Run VM:    zz bench tests/fixtures/bench/bench_state_perf.zz --engine vm
+// Run AOT:   zz bench tests/fixtures/bench/bench_state_perf.zz --engine native --release
+// features: int-arith, locals, print, state, std-task, std-vec, std-time, zz-bench
+
+// ── Plain global increment (baseline: no state, no lock) ──────────────
+requests_plain := 0
+
+func plain_inc() {
+    requests_plain = requests_plain + 1
+}
+
+@bench(iters: 7, warmup: 1)
+func bench_plain_global_1k() {
+    for _ in 0..1000 { plain_inc() }
+    black_box(requests_plain)
+}
+
+@bench(iters: 7, warmup: 1)
+func bench_plain_global_10k() {
+    for _ in 0..10000 { plain_inc() }
+    black_box(requests_plain)
+}
+
+@bench(iters: 7, warmup: 1)
+func bench_plain_global_100k() {
+    for _ in 0..100000 { plain_inc() }
+    black_box(requests_plain)
+}
+
+// ── State increment (state c := 0; c = c + 1 inside atomic) ───────────
+state c_state := 0
+
+func state_inc() {
+    atomic { c_state = c_state + 1 }
+}
+
+@bench(iters: 7, warmup: 1)
+func bench_state_inc_1k() {
+    for _ in 0..1000 { state_inc() }
+    black_box(c_state)
+}
+
+@bench(iters: 7, warmup: 1)
+func bench_state_inc_10k() {
+    for _ in 0..10000 { state_inc() }
+    black_box(c_state)
+}
+
+@bench(iters: 7, warmup: 1)
+func bench_state_inc_100k() {
+    for _ in 0..100000 { state_inc() }
+    black_box(c_state)
+}
+
+// ── Atomic increment (atomic { c = c + 1 }) ───────────────────────────
+state c_atomic := 0
+
+func atomic_inc() {
+    atomic { c_atomic = c_atomic + 1 }
+}
+
+@bench(iters: 7, warmup: 1)
+func bench_atomic_inc_1k() {
+    for _ in 0..1000 { atomic_inc() }
+    black_box(c_atomic)
+}
+
+@bench(iters: 7, warmup: 1)
+func bench_atomic_inc_10k() {
+    for _ in 0..10000 { atomic_inc() }
+    black_box(c_atomic)
+}
+
+@bench(iters: 7, warmup: 1)
+func bench_atomic_inc_100k() {
+    for _ in 0..100000 { atomic_inc() }
+    black_box(c_atomic)
+}
+
+// ── Local vec.push ────────────────────────────────────────────────────
+import std.vec
+
+@bench(iters: 7, warmup: 1)
+func bench_local_vec_push_1k() {
+    v := []
+    for i in 0..1000 { v = vec.push(v, i) }
+    black_box(len(v))
+}
+
+@bench(iters: 7, warmup: 1)
+func bench_local_vec_push_10k() {
+    v := []
+    for i in 0..10000 { v = vec.push(v, i) }
+    black_box(len(v))
+}
+
+@bench(iters: 7, warmup: 1)
+func bench_local_vec_push_100k() {
+    v := []
+    for i in 0..100000 { v = vec.push(v, i) }
+    black_box(len(v))
+}
+
+// ── State vec.push ────────────────────────────────────────────────────
+state log_state := []
+
+func state_vec_push() {
+    atomic { log_state = vec.push(log_state, "m") }
+}
+
+@bench(iters: 7, warmup: 1)
+func bench_state_vec_push_1k() {
+    atomic { log_state = [] }
+    for _ in 0..1000 { state_vec_push() }
+    black_box(len(log_state))
+}
+
+@bench(iters: 7, warmup: 1)
+func bench_state_vec_push_10k() {
+    atomic { log_state = [] }
+    for _ in 0..10000 { state_vec_push() }
+    black_box(len(log_state))
+}
+
+@bench(iters: 7, warmup: 1)
+func bench_state_vec_push_100k() {
+    atomic { log_state = [] }
+    for _ in 0..100000 { state_vec_push() }
+    black_box(len(log_state))
+}
+
+// ── Contended: 4 tasks x 100k increments, state ───────────────────────
+state contended := 0
+
+func contended_worker(n: int) {
+    for _ in 0..n {
+        atomic { contended = contended + 1 }
+    }
+}
+
+@bench(iters: 3, warmup: 1)
+func bench_contended_state_100k() {
+    contended = 0
+    h0 := task.spawn(|_| { contended_worker(100000) })
+    h1 := task.spawn(|_| { contended_worker(100000) })
+    h2 := task.spawn(|_| { contended_worker(100000) })
+    h3 := task.spawn(|_| { contended_worker(100000) })
+    task.join(h0); task.join(h1); task.join(h2); task.join(h3)
+    black_box(contended)
+}
+
+// ── Contended: 4 tasks x 100k increments, atomic ──────────────────────
+state contended_atomic := 0
+
+func contended_atomic_worker(n: int) {
+    for _ in 0..n {
+        atomic { contended_atomic = contended_atomic + 1 }
+    }
+}
+
+@bench(iters: 3, warmup: 1)
+func bench_contended_atomic_100k() {
+    contended_atomic = 0
+    h0 := task.spawn(|_| { contended_atomic_worker(100000) })
+    h1 := task.spawn(|_| { contended_atomic_worker(100000) })
+    h2 := task.spawn(|_| { contended_atomic_worker(100000) })
+    h3 := task.spawn(|_| { contended_atomic_worker(100000) })
+    task.join(h0); task.join(h1); task.join(h2); task.join(h3)
+    black_box(contended_atomic)
+}
+
+// ── Scaling regression: 20k pushes < 5x time of 10k ───────────────────
+state log_scale := []
+
+@bench(iters: 7, warmup: 1, tag: "state_vec_scaling")
+func bench_state_vec_10k() {
+    atomic { log_scale = [] }
+    for i in 0..10000 { log_scale = vec.push(log_scale, i) }
+    black_box(len(log_scale))
+}
+
+@bench(iters: 7, warmup: 1, tag: "state_vec_scaling")
+func bench_state_vec_20k() {
+    atomic { log_scale = [] }
+    for i in 0..20000 { log_scale = vec.push(log_scale, i) }
+    black_box(len(log_scale))
+}
+
+@bench(iters: 7, warmup: 1, tag: "local_vec_scaling")
+func bench_local_vec_10k() {
+    v := []
+    for i in 0..10000 { v = vec.push(v, i) }
+    black_box(len(v))
+}
+
+@bench(iters: 7, warmup: 1, tag: "local_vec_scaling")
+func bench_local_vec_20k() {
+    v := []
+    for i in 0..20000 { v = vec.push(v, i) }
+    black_box(len(v))
+}
