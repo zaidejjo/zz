@@ -2777,6 +2777,10 @@ pub fn build() -> HashMap<String, FuncSig> {
         ),
     );
     m.insert(
+        "std.math.factorial_f".into(),
+        sig(vec![("n", Type::Int)], Type::Float),
+    );
+    m.insert(
         "std.math.gcd".into(),
         sig(vec![("a", Type::Int), ("b", Type::Int)], Type::Int),
     );
