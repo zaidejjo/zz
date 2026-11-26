@@ -1,3 +1,4 @@
+// features: imports, int-arith, locals, print, state, std-task
 // S3: d2_id_generator — PASS
 // state next_id accessed inside atomic { }. Correct, race-free.
 import std.task

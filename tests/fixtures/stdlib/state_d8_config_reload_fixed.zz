@@ -1,3 +1,4 @@
+// features: imports, int-arith, locals, print, state, std-task, structs
 // S3 fixed d8_config_reload: state cfg written inside atomic { }
 // Original d8 wrote `state cfg` OUTSIDE atomic in reload() (race).
 // Fix: wrap state write in one atomic {} block.

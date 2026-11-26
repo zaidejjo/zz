@@ -1,3 +1,4 @@
+// features: imports, int-arith, locals, print, state, std-task
 // S3 fixed d4_rate_limiter: state tokens accessed inside atomic { }
 // Original d4 had check-then-act on `state tokens` OUTSIDE atomic (race).
 // Fix: wrap read+write in one atomic {} block.

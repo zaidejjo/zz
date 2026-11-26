@@ -1,3 +1,4 @@
+// features: imports, int-arith, locals, print, state, std-task
 // S1 Parser matrix: `state` at top level under contention.
 // State reads/writes inside atomic { } under lock.
 // 4 tasks x 1000 increments = 4000 total.

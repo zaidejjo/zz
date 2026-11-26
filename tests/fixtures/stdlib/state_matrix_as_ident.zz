@@ -1,3 +1,4 @@
+// features: imports, int-arith, locals, print, state, std-task
 // S1 Parser matrix: `state := 1` (state as identifier) under contention.
 // A local variable named `state`, then state keyword block.
 // 4 tasks x 1000 increments = 4000 total.

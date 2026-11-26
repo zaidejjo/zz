@@ -1,3 +1,4 @@
+// features: imports, int-arith, locals, print, state, std-task, std-vec
 // S3: d6_log_buffer — PASS (single-run)
 // NOTE: record() writes state log OUTSIDE atomic {}. Under concurrent
 // record() calls from multiple tasks, pushes could interleave (UE).

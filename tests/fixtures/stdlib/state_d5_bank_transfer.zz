@@ -1,3 +1,4 @@
+// features: imports, int-arith, locals, print, state, std-task
 // S3: d5_bank_transfer — PASS
 // state alice/bob accessed inside atomic { }. Invariant alice+bob == 200 preserved.
 import std.task

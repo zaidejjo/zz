@@ -1,3 +1,4 @@
+// features: imports, int-arith, locals, print, state, std-task, structs
 // S1 Parser matrix: `foo.state` (state as field name) under contention.
 // 4 tasks x 1000 increments = 4000 total.
 import std.task

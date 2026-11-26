@@ -1,3 +1,4 @@
+// features: imports, int-arith, locals, print, state, std-task
 // S1 Parser matrix: `atomic := 1` then `atomic { }` under contention.
 // `atomic` used as an identifier, then as a keyword block.
 // 4 tasks x 1000 increments = 4000 total.

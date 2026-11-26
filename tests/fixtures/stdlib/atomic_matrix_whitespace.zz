@@ -1,3 +1,4 @@
+// features: imports, int-arith, locals, print, state, std-task
 // S1 Parser matrix: atomic { } whitespace independence under contention.
 // Tests: `atomic { }`, `atomic{ }`, `atomic\n{ }` all lock under contention.
 // 4 tasks x 1000 increments per variant = 12000 total.
