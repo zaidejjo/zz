@@ -1,3 +1,20 @@
+ce6054fe fix(parity): skip concurrency timing fixtures from VM/AOT exact-output sweep
+03faaf84 fix(state): complete step 3b.3/3b.4 evidence and debug depth natives
+2a838ced fix(state): fix AOT nolock 3b.3 evidence - per-variant fixtures with busy writers
+f31369ec fix(state): complete step 3b multi-read atomicity evidence
+dbc48e43 fix(state): V6 nolock tear-rate; read a+b unconditionally so tear always detectable
+7bcb645c fix(state): complete step 3c measurement evidence (post-fix 50-run, nolock isolation, tmpquota)
+ea8ac6f9 fix(codegen): box builtin-scalar receiver in extension-method calls
+263a946f fix(clippy): remove unneeded wildcard patterns in check_stmt
+e95f4ffc fix(deps): remove unused crate dependencies
+988de856 fix: AOT native codegen for selective imports, extension methods, and method chains
+e2fb2ea1 fix(test): move z0019 negative fixture out of errors/; complete 50-run lock-on sweep
+664573fe docs(state): finalize step3c-4 with workspace test results
+00ad4aba fix(state): widen StateBatchBegin/End regions per statement (step 3c)
+72f29a87 docs(state): record root cause of multi-state read tearing (step 3b)
+b2d6f0b4 fix(clippy): eliminate unused variable warning from expr_reads_state
+1cd3d64b fix(vm): ensure StateBatchEnd always emitted after compile_stmt
+c3281343 fix(vm): batch state reads at statement level to prevent lock leak
 5f534598 revert(parser): remove unknown_bound_suggests_known fix-it (out of scope)
 cd9a5d0f fix(lowerer): route state reads through emit_state_read for atomic multi-state reads
 c9e78001 fix(parser): atomic { } always locks under contention regardless of whitespace
