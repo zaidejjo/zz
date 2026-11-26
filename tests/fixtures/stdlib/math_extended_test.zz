@@ -64,6 +64,15 @@ println("atan(1): {math.atan(1)}")
 println("sin_deg(90): {math.sin_deg(90)}")
 println("cos_deg(90): {math.cos_deg(90)}")
 println("tan_deg(45): {math.tan_deg(45)}")
+
+// ── tan_deg(90) and tan(PI/2) behavior ──
+// tan(90 deg) is undefined (vertical asymptote) -> +inf (correct IEEE 754).
+// cos_deg(180) == -1.0 exactly, so denom == 0.0 exactly -> inf.
+// tan(PI/2 radians) is a huge finite number instead of inf because
+// cos(PI/2) is ~6.1e-17 (not exactly 0 in f64). Radian/degree paths
+// are intentionally inconsistent here; tan_deg(90) = inf is correct.
+println("tan_deg(90): {math.tan_deg(90)}   (expect inf)")
+println("tan(PI/2): {math.tan(math.PI / 2)}   (expect huge finite, not inf)")
 println("to_radians(180): {math.to_radians(180)}")
 println("to_degrees(pi): {math.to_degrees(math.PI)}")
 
