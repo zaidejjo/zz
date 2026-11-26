@@ -178,8 +178,13 @@ fn op_text(module: &Module, op: &Op) -> String {
                 home_text(home_slot, home_var, module)
             )
         }
-        Op::IndexIntSlot { arr, idx, dst } => {
-            format!("indexintslot {arr} {idx} -> {dst}")
+        Op::IndexIntSlot {
+            arr,
+            idx,
+            dst,
+            safe,
+        } => {
+            format!("indexintslot {arr} {idx} -> {dst} safe={safe}")
         }
         Op::IndexDictInt { dict, key, dst } => {
             format!("indexdictint {dict} {key} -> {dst}")
