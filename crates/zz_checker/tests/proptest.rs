@@ -8,21 +8,36 @@ use std::collections::HashMap;
 use zz_checker::check_program;
 use zz_frontend::parse;
 
+/// Identifiers that are lexed as `TokenKind::Ident` but rejected by the
+/// parser in expression position (contextual keywords / reserved words).
+const RESERVED_IDENTS: &[&str] = &[
+    "atomic", "class", "end", "goto", "let", "new", "public", "state", "switch", "var",
+];
+
 /// A small subset of expressions that always parse and type-check without
 /// errors. Non-recursive to avoid strategy construction issues.
 fn simple_expr() -> BoxedStrategy<String> {
+    // Simple identifiers that parse in expression position (excludes
+    // contextual keywords / reserved words the parser rejects).
+    let simple_ident = "[a-z]+"
+        .prop_filter("not a reserved identifier", |s: &String| {
+            !RESERVED_IDENTS.contains(&s.as_str())
+        })
+        .prop_map(|s: String| s)
+        .boxed();
+
     prop_oneof![
         // Integer literals
         any::<i32>().prop_map(|n| n.to_string()),
         // Boolean literals
         prop_oneof![Just("true".to_string()), Just("false".to_string())],
-        // Variable references (simple identifiers)
-        "[a-z]+".prop_map(|s: String| s),
+        // Variable references
+        simple_ident.clone(),
         // Parenthesized atomic expressions
         prop_oneof![
             any::<i32>().prop_map(|n| n.to_string()),
             prop_oneof![Just("true".to_string()), Just("false".to_string())],
-            "[a-z]+".prop_map(|s: String| s),
+            simple_ident.clone(),
         ]
         .prop_map(|e| format!("({})", e)),
         // Binary addition of atomics
@@ -30,12 +45,12 @@ fn simple_expr() -> BoxedStrategy<String> {
             prop_oneof![
                 any::<i32>().prop_map(|n| n.to_string()),
                 prop_oneof![Just("true".to_string()), Just("false".to_string())],
-                "[a-z]+".prop_map(|s: String| s),
+                simple_ident.clone(),
             ],
             prop_oneof![
                 any::<i32>().prop_map(|n| n.to_string()),
                 prop_oneof![Just("true".to_string()), Just("false".to_string())],
-                "[a-z]+".prop_map(|s: String| s),
+                simple_ident,
             ],
         )
             .prop_map(|(a, b)| format!("{} + {}", a, b)),
