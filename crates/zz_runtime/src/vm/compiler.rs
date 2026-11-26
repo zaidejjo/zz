@@ -1913,6 +1913,16 @@ impl Compiler {
         else {
             return None;
         };
+        // `&&` / `||` / `??` short-circuit: they must stay on the
+        // jump-based path, which the fused slot ops cannot express.
+        if matches!(
+            binop,
+            zz_frontend::ast::BinOp::And
+                | zz_frontend::ast::BinOp::Or
+                | zz_frontend::ast::BinOp::Elvis
+        ) {
+            return None;
+        }
         // NOTE: no static type guard on the result span. The fused slot ops
         // (SlotAddInt, SlotBinaryInt, SlotCmpIntSlot, …) each have a safe VM
         // slow path that falls back to `eval_binary` for non-Int operands, so
