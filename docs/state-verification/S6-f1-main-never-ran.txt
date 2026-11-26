@@ -1,0 +1,97 @@
+# S6 — Leftovers
+
+## F1: How "main never ran" produces wrong totals instead of no output
+
+**The bug (fixed in commit 2cb93f05):** `load_file()` in `crates/zz_loader/src/lib.rs`
+treated ALL parsed diagnostics (including warnings like "redundant semicolon")
+as fatal. It would silently drop modules that had only warnings — no error,
+no warning shown, just silent module drop.
+
+**How this produces wrong totals:**
+1. Module A has `state x := 0` and module-level code `atomic { x = x + 1 }`
+   (with a redundant semicolon somewhere producing a warning)
+2. `load_file()` sees the warning, treats it as fatal, silently drops module A
+3. Module A's top-level code never runs — `x` stays at 0, the atomic block never executes
+4. Module B imports and reads `A.x`, expecting it to be 1 but gets 0
+5. Program produces wrong totals (0 instead of 1) instead of no output (error)
+
+**The fix:** `load_file()` now only aborts on `Severity::Error` (line 2420-2423 of
+`crates/zz_loader/src/lib.rs`). Warnings are still reported but don't prevent
+module loading. Same fix applied to `zz_dap check_parses`, `zz_fmt
+format_source/verify`, and `zz_hir build_source`.
+
+**Pre-fix output (what happened before the fix):**
+```
+$ zz run program.zz
+# No warning shown — module silently dropped
+# Program runs but produces wrong totals:
+result=0          # expected result=1 (state was never incremented)
+exit=0
+```
+
+**Post-fix output (current behavior):**
+```
+$ zz run program.zz
+warning: redundant semicolon — the newline already ends this statement
+  --> program.zz:10:21
+    |
+ 10 |     hits = hits + 1;;
+    |                     ^ help: remove this
+hits=2
+exit=0
+```
+
+The warning is shown, the module loads and runs, and the correct total is produced.
+
+## S6.2: Module with only a warning loads, runs, prints warning
+
+**Fixture:** `tests/fixtures/stdlib/s6_redundant_semicolon_warning.zz`
+- Has a redundant semicolon (`;;`) which produces a warning, not an error
+- Also has an unused import warning
+- Module must load, run, and still print the warning
+
+**Verified output:**
+
+```
+=== zz run ===
+warning: redundant semicolon — the newline already ends this statement
+  --> tests/fixtures/stdlib/s6_redundant_semicolon_warning.zz:10:21
+    |
+ 10 |     hits = hits + 1;;
+    |                     ^ help: remove this
+warning: unused import `task`
+hits=2
+exit=0
+
+=== zz check ===
+warning: redundant semicolon — the newline already ends this statement
+  --> tests/fixtures/stdlib/s6_redundant_semicolon_warning.zz:10:21
+    |
+ 10 |     hits = hits + 1;;
+    |                     ^ help: remove this
+warning: unused import `task`
+  --> .../s6_redundant_semicolon_warning.zz:5:1
+    |
+  5 | import std.task
+    | ^^^^^^^^^^^^^^^
+    = remove this import or use it in the program
+exit=0
+
+=== zz test ===
+warning: redundant semicolon — the newline already ends this statement
+  --> tests/fixtures/stdlib/s6_redundant_semicolon_warning.zz:10:21
+    |
+ 10 |     hits = hits + 1;;
+    |                     ^ help: remove this
+warning: unused import `task>
+warning: zz test: no tests found
+exit=0
+```
+
+All three commands (`zz run`, `zz check`, `zz test`) load the module, show
+the warning(s), and exit 0 — warnings do not prevent execution.
+
+**Fixture registered in:** `crates/zz_cli/tests/e2e.rs`
+(`e2e_stdlib_s6_redundant_semicolon_warning`)
+
+**Raw evidence:** docs/state-verification/S6-redundant-semicolon-warning.txt

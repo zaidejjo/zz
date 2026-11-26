@@ -1285,6 +1285,11 @@ e2e_success_test!(
     "test_black_box_test.zz"
 );
 e2e_success_test!(
+    e2e_stdlib_s6_redundant_semicolon_warning,
+    "stdlib",
+    "s6_redundant_semicolon_warning.zz"
+);
+e2e_success_test!(
     e2e_stdlib_range_display_test,
     "stdlib",
     "range_display_test.zz"
