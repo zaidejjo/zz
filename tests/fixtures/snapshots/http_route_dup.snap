@@ -6,4 +6,9 @@ error: duplicate route `GET <path>
 |
 8 | s = s.route("GET", <path> |_req| "dup")
 | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+--> <path>
+
+7 | s = s.route("GET", <path> |_req| "ok")
+| ----------------------------------------- first registered here
+
 zz: 1 file(s) failed type-check

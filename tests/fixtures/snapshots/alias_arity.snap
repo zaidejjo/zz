@@ -12,5 +12,10 @@ error: type mismatch: expected `int` for `variable `p``, found `str`
 |
 6 | p: Pair<int, str> = (1, "a")
 | ^^^^
+--> <path>
+
+6 | p: Pair<int, str> = (1, "a")
+| -------- found `str` here
+
 = to fix: change the annotation to `(int, str)` or convert the value
 zz: 1 file(s) failed type-check

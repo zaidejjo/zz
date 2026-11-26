@@ -390,6 +390,42 @@ pub fn render_to_string(
                     }
                 }
             }
+            // Secondary labels: point at related spans (e.g. "expected str here"
+            // at the type annotation, "found int here" at the value).
+            if !raw.secondary.is_empty() {
+                let _ = writeln!(out);
+                for sec in &raw.secondary {
+                    if let Ok(file) = files.get(file_id) {
+                        let name = file.name();
+                        let source: &str = file.source().as_ref();
+                        let start = sec.span.start as usize;
+                        let end = sec.span.end as usize;
+                        if start <= end
+                            && end <= source.len()
+                            && source.is_char_boundary(start)
+                            && source.is_char_boundary(end)
+                        {
+                            let (sln, scol) = line_col_for(source, start);
+                            let _ = writeln!(out, "  --> {name}:{sln}:{}", scol + 1);
+                            let slstart = line_start_for(source, start);
+                            let slend = line_end_for(source, start);
+                            let sl_text = &source[slstart..slend];
+                            let _ = write!(out, "\n {:>4} | {sl_text}", sln);
+                            let scol_off = start - slstart;
+                            let slen = (end - start).max(1);
+                            let _ = write!(out, "\n {:>4} |", "");
+                            let _ = write!(
+                                out,
+                                " {}{} {}",
+                                " ".repeat(scol_off),
+                                "-".repeat(slen),
+                                sec.message
+                            );
+                            let _ = writeln!(out);
+                        }
+                    }
+                }
+            }
             for note_text in &raw.notes {
                 let _ = write!(out, "\n    = {note_text}");
             }
