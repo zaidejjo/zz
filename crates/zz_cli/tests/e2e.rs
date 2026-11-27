@@ -2676,6 +2676,63 @@ fn e2e_fmt_help_prints_usage_and_rewrites_nothing() {
 }
 
 #[test]
+fn e2e_fmt_diff_prints_unified_diff_and_exits_zero() {
+    // `zz fmt --diff` prints a unified diff and exits 0 even when files
+    // need formatting.
+    let (dir, file) = make_help_project("fmt-diff");
+    std::fs::write(&file, "func add(a:int,b:int)->int{return a+b}\n").unwrap();
+
+    let (exit, stdout, stderr) = run_zz_in_dir(&dir, &["fmt", "--diff", &file.to_string_lossy()]);
+    assert_eq!(exit, 0, "`zz fmt --diff` should exit 0.\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("func add(a: int"),
+        "stdout should contain unified diff:\n{stdout}"
+    );
+    assert!(stderr.is_empty(), "stderr should be empty:\n{stderr}");
+    // File should not be modified by --diff.
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        after, "func add(a:int,b:int)->int{return a+b}\n",
+        "`zz fmt --diff` must not modify files"
+    );
+}
+
+#[test]
+fn e2e_fmt_diff_formatted_file_exits_zero() {
+    // `zz fmt --diff` on already-formatted code prints nothing and exits 0.
+    let (dir, file) = make_help_project("fmt-diff-formatted");
+    std::fs::write(
+        &file,
+        "func add(a: int, b: int) -> int {\n    return a + b\n}\n",
+    )
+    .unwrap();
+
+    let (exit, stdout, stderr) = run_zz_in_dir(&dir, &["fmt", "--diff", &file.to_string_lossy()]);
+    assert_eq!(exit, 0, "`zz fmt --diff` should exit 0.\nstderr:\n{stderr}");
+    assert!(stdout.is_empty(), "stdout should be empty:\n{stdout}");
+    assert!(stderr.is_empty(), "stderr should be empty:\n{stderr}");
+}
+
+#[test]
+fn e2e_fmt_diff_with_check_fails() {
+    // `zz fmt --diff --check` is not allowed; --diff is mutually exclusive
+    // with --check.
+    let (dir, file) = make_help_project("fmt-diff-check");
+    std::fs::write(&file, "func add(a:int,b:int)->int{return a+b}\n").unwrap();
+
+    let (exit, _stdout, stderr) =
+        run_zz_in_dir(&dir, &["fmt", "--diff", "--check", &file.to_string_lossy()]);
+    assert_eq!(
+        exit, 1,
+        "`zz fmt --diff --check` should exit 1.\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--diff"),
+        "error should mention --diff:\n{stderr}"
+    );
+}
+
+#[test]
 fn e2e_fix_report_uses_real_line_numbers() {
     // The fix report used to print the byte offset where a line number was
     // expected (`two.zz:56` for an 8-line file) — misleading when reviewing
