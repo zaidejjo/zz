@@ -615,7 +615,22 @@ impl Compiler {
             // Replace CallPath with the body's ops (minus the trailing Unit
             // if the body ends with PushConst(Unit), which is the implicit
             // return of a zero-arg function).
-            let body_ops: Vec<Op> = body.into_iter().collect();
+            //
+            // Each chunk owns its own constant pool, so a callee's
+            // `PushConst(i)` indexes `chunk.constants[i]`. Re-intern every
+            // pushed constant into the caller's pool so indices resolve to
+            // the same value across the splice.
+            let body_ops: Vec<Op> = body
+                .into_iter()
+                .map(|op| {
+                    if let Op::PushConst(i) = op {
+                        let value = chunk.constants[i as usize].clone();
+                        Op::PushConst(self.push_const(value))
+                    } else {
+                        op
+                    }
+                })
+                .collect();
             self.chunk.code.splice(i..i + 1, body_ops);
         }
     }
