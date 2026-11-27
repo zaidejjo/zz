@@ -4084,7 +4084,6 @@ dependencies = [
  "similar",
  "thiserror 1.0.69",
  "toml",
- "tracing",
  "zz_frontend",
 ]
 
