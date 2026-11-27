@@ -420,18 +420,22 @@ fn check_expr_list_comp(
 
 fn check_expr_break(checker: &mut Checker, span: Span) -> Type {
     if checker.loop_depth == 0 {
-        checker
-            .errors
-            .push(error_at("`break` outside of a loop", span).with_code(ErrorCode(14)));
+        checker.errors.push(
+            error_at("`break` outside of a loop", span)
+                .with_code(ErrorCode(14))
+                .with_note("wrap in `loop`, `while`, or `for`"),
+        );
     }
     Type::Unit
 }
 
 fn check_expr_continue(checker: &mut Checker, span: Span) -> Type {
     if checker.loop_depth == 0 {
-        checker
-            .errors
-            .push(error_at("`continue` outside of a loop", span).with_code(ErrorCode(14)));
+        checker.errors.push(
+            error_at("`continue` outside of a loop", span)
+                .with_code(ErrorCode(14))
+                .with_note("wrap in `loop`, `while`, or `for`"),
+        );
     }
     Type::Unit
 }

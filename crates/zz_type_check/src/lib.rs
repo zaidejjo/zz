@@ -634,7 +634,8 @@ impl TypeCheckOps for Checker {
                     Type::Str => {
                         self.errors.push(
                             error_at("cannot assign to an index of a string", *span)
-                                .with_code(ErrorCode(11)),
+                                .with_code(ErrorCode(11))
+                                .with_note("strings are not index-assignable; use an array or convert with `.to_string()`"),
                         );
                         Type::Unit
                     }
@@ -642,7 +643,8 @@ impl TypeCheckOps for Checker {
                     Type::Bytes => {
                         self.errors.push(
                             error_at("cannot assign to an index of bytes", *span)
-                                .with_code(ErrorCode(11)),
+                                .with_code(ErrorCode(11))
+                                .with_note("bytes are not index-assignable; use an array"),
                         );
                         Type::Unit
                     }
@@ -1611,15 +1613,21 @@ impl TypeCheckOps for Checker {
             }
             Expr::Break { span } => {
                 if self.loop_depth == 0 {
-                    self.errors
-                        .push(error_at("`break` outside of a loop", *span));
+                    self.errors.push(
+                        error_at("`break` outside of a loop", *span)
+                            .with_code(ErrorCode(14))
+                            .with_note("wrap in `loop`, `while`, or `for`"),
+                    );
                 }
                 Type::Unit
             }
             Expr::Continue { span } => {
                 if self.loop_depth == 0 {
-                    self.errors
-                        .push(error_at("`continue` outside of a loop", *span));
+                    self.errors.push(
+                        error_at("`continue` outside of a loop", *span)
+                            .with_code(ErrorCode(14))
+                            .with_note("wrap in `loop`, `while`, or `for`"),
+                    );
                 }
                 Type::Unit
             }
