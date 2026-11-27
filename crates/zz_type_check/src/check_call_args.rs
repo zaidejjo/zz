@@ -6,7 +6,7 @@ use zz_diag_core::{error_at, ErrorCode, FixIt};
 use zz_infer::InferOps;
 use zz_span_ast::ast::{Expr, Ident};
 use zz_span_ast::span::Span;
-use zz_suggest::suggest_all;
+use zz_suggest::suggest_top3;
 use zz_types::Type;
 use zz_unify::UnifyError;
 
@@ -137,21 +137,25 @@ pub(crate) fn check_named_args<'a>(
                 let mut diag = error_at(format!("unknown parameter `{}`", name.name), name.span)
                     .with_code(ErrorCode(19));
                 let refs: Vec<&str> = param_names.iter().map(|s| s.as_str()).collect();
-                let all = suggest_all(&name.name, &refs);
-                if let Some((suggestion, _)) = all.first() {
-                    diag = diag.with_note(format!("did you mean `{suggestion}`?"));
-                    let alts: Vec<String> = all.iter().map(|(s, _)| s.to_string()).collect();
-                    let fixit = if alts.len() == 1 {
-                        FixIt::safe(name.span, suggestion.to_string(), "replace parameter")
-                    } else {
-                        FixIt::ambiguous(
+                let top = suggest_top3(&name.name, &refs);
+                if top.len() == 1 {
+                    diag = diag
+                        .with_note(format!("did you mean `{}`?", top[0]))
+                        .with_fixit(FixIt::safe(
                             name.span,
-                            suggestion.to_string(),
+                            top[0].to_string(),
                             "replace parameter",
-                            alts,
-                        )
-                    };
-                    diag = diag.with_fixit(fixit);
+                        ));
+                } else if !top.is_empty() {
+                    let names: Vec<String> = top.iter().map(|s| s.to_string()).collect();
+                    diag = diag
+                        .with_note(format!("did you mean `{}`?", names.join("`, `")))
+                        .with_fixit(FixIt::ambiguous(
+                            name.span,
+                            top[0].to_string(),
+                            "replace parameter",
+                            names,
+                        ));
                 }
                 checker.errors.push(diag);
                 return true;
