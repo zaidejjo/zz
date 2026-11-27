@@ -723,6 +723,11 @@ pub struct Lowerer {
     /// skips individual lock/unlock and the outermost caller is responsible
     /// for emitting a single lock/unlock around the whole expression.
     pub(crate) state_read_batch_depth: std::cell::Cell<u32>,
+    /// Nesting depth of `atomic { }` blocks being emitted. Incremented
+    /// before the body and decremented after `zz_state_unlock()`, so `return`
+    /// inside an `atomic { }` can emit the matching unlock(s) before
+    /// transferring control (the post-body unlock is unreachable on that path).
+    pub(crate) atomic_depth: std::cell::Cell<u32>,
     /// When true, the generated C omits the embedded runtime sources
     /// (`RUNTIME_C`) and only includes headers (`RUNTIME_H`). The C runtime
     /// is linked from a precompiled static library (`libzz_rt.a`) instead.
@@ -858,6 +863,7 @@ impl Lowerer {
             fmt_borrow: std::cell::Cell::new(false),
             skip_flat_push_grow: std::cell::Cell::new(false),
             state_read_batch_depth: std::cell::Cell::new(0),
+            atomic_depth: std::cell::Cell::new(0),
             accumulated_names: std::cell::RefCell::new(std::collections::HashSet::new()),
         };
         lowerer.specialized = lowerer.compute_specialized();

@@ -147,6 +147,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "state_matrix_named_struct_func.zz", true),
     ("stdlib", "state_d2_id_generator.zz", true),
     ("stdlib", "state_d4_rate_limiter_fixed.zz", true),
+    ("stdlib", "state_return_in_atomic.zz", true),
     ("stdlib", "state_d5_bank_transfer.zz", true),
     ("stdlib", "state_d6_log_buffer.zz", true),
     ("stdlib", "state_d8_config_reload_fixed.zz", true),

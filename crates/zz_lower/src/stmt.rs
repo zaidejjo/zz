@@ -237,6 +237,20 @@ impl Lowerer {
         )
     }
 
+    /// Emit `zz_state_unlock()` once per enclosing `atomic { }` block, for
+    /// use before a `return` that escapes an `atomic { }` body (whose
+    /// post-body unlock is unreachable). `atomic { }` only locks when
+    /// `needs_state_lock()`, so `atomic_depth > 0` implies the lock is held.
+    /// Resets `atomic_depth` to zero because `return` unwinds every enclosing
+    /// atomic block and exits the function.
+    fn emit_atomic_unlocks(&self, out: &mut String) {
+        let n = self.atomic_depth.get() as usize;
+        if n > 0 {
+            out.push_str(&"    zz_state_unlock();\n".repeat(n));
+            self.atomic_depth.set(0);
+        }
+    }
+
     pub(crate) fn emit_stmt(
         &self,
         stmt: &Stmt,
@@ -1891,12 +1905,14 @@ impl Lowerer {
                         out.push_str(&format!("    *self = {lvalue};\n"));
                     }
                     let val = self.return_value(v, names, out);
+                    self.emit_atomic_unlocks(out);
                     out.push_str(&format!("    return {val};\n"));
                 }
                 None => {
                     if let Some(ref lvalue) = self.impl_self_lvalue.borrow().as_ref() {
                         out.push_str(&format!("    *self = {lvalue};\n"));
                     }
+                    self.emit_atomic_unlocks(out);
                     out.push_str(&format!("    return {};\n", self.ret_unit()));
                 }
             },
@@ -1967,11 +1983,18 @@ impl Lowerer {
                 // D8: only lock when concurrency is reachable.
                 if self.needs_state_lock() {
                     out.push_str("    zz_state_lock();\n");
+                    self.atomic_depth.set(self.atomic_depth.get() + 1);
                 }
                 for s in &body.stmts {
                     self.emit_stmt(s, names, out, false);
                 }
-                if self.needs_state_lock() {
+                // Decrement/undo the entry-side increment above. Gate on
+                // `atomic_depth > 0` (not `needs_state_lock()`): a `return`
+                // inside the body already emitted the matching unlock(s) and
+                // reset `atomic_depth` to zero, so the post-body unlock is
+                // unreachable and must not be emitted again.
+                if self.atomic_depth.get() > 0 {
+                    self.atomic_depth.set(self.atomic_depth.get() - 1);
                     out.push_str("    zz_state_unlock();\n");
                 }
             }

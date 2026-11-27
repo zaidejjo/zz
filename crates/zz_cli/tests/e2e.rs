@@ -1239,6 +1239,11 @@ e2e_success_test!(
     "state_d4_rate_limiter_fixed.zz"
 );
 e2e_success_test!(
+    e2e_stdlib_state_return_in_atomic,
+    "stdlib",
+    "state_return_in_atomic.zz"
+);
+e2e_success_test!(
     e2e_stdlib_state_d5_bank_transfer,
     "stdlib",
     "state_d5_bank_transfer.zz"

@@ -2164,6 +2164,11 @@ parity_strict!(
     "state_d4_rate_limiter_fixed.zz"
 );
 parity_strict!(
+    parity_stdlib_state_return_in_atomic,
+    "stdlib",
+    "state_return_in_atomic.zz"
+);
+parity_strict!(
     parity_stdlib_state_d5_bank_transfer,
     "stdlib",
     "state_d5_bank_transfer.zz"
