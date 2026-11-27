@@ -1124,6 +1124,7 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 name,
                 generics,
                 methods,
+                trait_name,
                 span,
                 ..
             } => {
@@ -1133,6 +1134,17 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 }
                 self.text("impl");
                 self.space();
+                // `impl Trait for Type` prints the trait before the `for`;
+                // inherent impls print just the type.
+                if let Some(t) = trait_name {
+                    for (i, n) in t.iter().enumerate() {
+                        if i > 0 {
+                            self.text(".");
+                        }
+                        self.text(n);
+                    }
+                    self.text(" for ");
+                }
                 for (i, n) in name.iter().enumerate() {
                     if i > 0 {
                         self.text(".");
@@ -2258,5 +2270,25 @@ mod tests {
         let s = crate::printer::render(&doc, 80, 4, Eol::Lf);
         let p2 = parse(&s).program;
         assert_eq!(p.stmts.len(), p2.stmts.len());
+    }
+
+    #[test]
+    fn lowers_trait_impl_with_trait_name() {
+        // `impl Trait for Type` must emit `for <Trait>` between `impl` and
+        // the type name. Without it, verification fails because the AST
+        // fingerprint loses the `for Trait` portion.
+        let src = "impl Counter for Boxed<{\n    func inc(self,) -> int {\n        return self.n;\n    }\n}\n";
+        let p = parse(src).program;
+        let (doc, eol) = lower_program(&p, src);
+        let out = crate::printer::render(&doc, 80, 4, eol);
+        let reparsed = parse(&out).program;
+        assert_eq!(p.stmts.len(), reparsed.stmts.len());
+
+        // The formatted output must contain `impl Counter for Boxed` — the
+        // `for <Trait>` portion must be present between `impl` and the type.
+        assert!(
+            out.contains("impl Counter for Boxed"),
+            "impl must include `for <Trait>`: {out}"
+        );
     }
 }
