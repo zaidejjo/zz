@@ -16,6 +16,7 @@ pub const VOCABULARY: &[&str] = &[
     "array-literal",
     "arrays",
     "assert",
+    "atomic",
     "bitwise",
     "bool",
     "bool-logic",
