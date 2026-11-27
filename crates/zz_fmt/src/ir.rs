@@ -8,7 +8,7 @@
 //! `{...}` is an f-string interpolation (tight), `{...}` is a
 //! function body (block with newlines), etc.
 
-use crate::config::{FmtConfig, LineEnding, TrailingComma};
+use crate::config::{FmtConfig, LineEnding, SemiStyle, TrailingComma};
 use crate::doc::Doc;
 use crate::printer::Eol;
 use crate::trivia::{classify, ClassifiedKind, ClassifiedTrivia};
@@ -817,6 +817,16 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     self.space();
                 }
                 self.emit_expr(value);
+                // semicolons policy: Always adds ";", Auto preserves source.
+                match self.config.semicolons {
+                    SemiStyle::Always => self.text(";"),
+                    SemiStyle::Auto => {
+                        if self.has_trailing_semicolon(value.span().end, span.end) {
+                            self.text(";");
+                        }
+                    }
+                    SemiStyle::Never => {}
+                }
             }
             Stmt::Assign { target, value, .. } => {
                 self.emit_expr(target);
@@ -824,6 +834,16 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 self.text("=");
                 self.space();
                 self.emit_expr(value);
+                // semicolons policy: Always adds ";", Auto preserves source.
+                match self.config.semicolons {
+                    SemiStyle::Always => self.text(";"),
+                    SemiStyle::Auto => {
+                        if self.has_trailing_semicolon(value.span().end, span.end) {
+                            self.text(";");
+                        }
+                    }
+                    SemiStyle::Never => {}
+                }
             }
             Stmt::CompoundAssign {
                 target, op, value, ..
