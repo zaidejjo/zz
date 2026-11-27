@@ -949,12 +949,17 @@ usage: zz fmt [FLAGS] [PATH]
 Format ZZ source files in place.
 
 FLAGS:
-  --check, -c        check formatting without writing (exit 1 if changed)
+  --check, -c        check formatting without writing (exit 1 if changed;
+                     read-only: never touches source files or the cache)
   --stdin            read source from stdin and write formatted to stdout
   -h, --help         show this help
 
 PATH can be a single .zz file or a directory (recursively formats all .zz files).
 Defaults to `.` (current directory) if omitted.
+
+With --check, unformatted files are reported as warnings (with a diff preview)
+and parse/verification failures as errors. Exit 0 iff every file is formatted
+and no errors occurred; exit 1 otherwise.
 "
         }
         "plugin" => {
@@ -3065,8 +3070,9 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
             Ok(formatted) => {
                 if formatted != source {
                     if check_only {
-                        // Emit the diff so callers can see what would change.
-                        let diff = zz_fmt::diff::unified_diff_plain("<stdin>", &source, &formatted)
+                        // Emit a colored unified diff so callers can see what
+                        // would change (red removals, green additions).
+                        let diff = zz_fmt::diff::unified_diff("<stdin>", &source, &formatted)
                             .unwrap_or_default();
                         eprint!("{diff}");
                     } else {
@@ -3074,7 +3080,11 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
                     }
                     Ok(true)
                 } else {
-                    zz_fmt::cache::mark_clean(&source, &config);
+                    // Check mode is strictly read-only: never record a clean
+                    // marker in the cache while --check is active.
+                    if !check_only {
+                        zz_fmt::cache::mark_clean(&source, &config);
+                    }
                     if !check_only {
                         print!("{formatted}");
                     }
@@ -3131,7 +3141,9 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
                 todo_pos += 1;
                 let r = todo_iter.next().expect("parallel results align");
                 if let Ok(formatted) = &r {
-                    if formatted == *src {
+                    if formatted == *src && !check_only {
+                        // Check mode is strictly read-only: never record a clean
+                        // marker in the cache while --check is active.
                         zz_fmt::cache::mark_clean(src, &config);
                     }
                 }
@@ -3142,14 +3154,14 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
         }
     }
 
-    let mut changed_any = false;
+    let mut needs_format = 0usize;
     let mut errors: Vec<String> = Vec::new();
 
     for (i, result) in results.into_iter().enumerate() {
         let formatted = match result {
             Ok(s) => s,
             Err(e) => {
-                errors.push(format!("{e}"));
+                errors.push(format!("error: {e}"));
                 continue;
             }
         };
@@ -3160,13 +3172,14 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
         if formatted == *original {
             continue;
         }
-        changed_any = true;
+        needs_format += 1;
 
         if check_only {
-            eprintln!("--- {path_str} (would reformat) ---");
-            let diff = zz_fmt::diff::unified_diff_plain(&path_str, original, &formatted)
-                .unwrap_or_default();
-            print!("{diff}");
+            eprintln!("\x1b[33mwarning:\x1b[0m {path_str} needs formatting");
+            // Colored unified diff: red removals, green additions.
+            let diff =
+                zz_fmt::diff::unified_diff(&path_str, original, &formatted).unwrap_or_default();
+            eprint!("{diff}");
         } else {
             if let Err(e) = std::fs::write(path, &formatted) {
                 errors.push(format!("cannot write `{path_str}`: {e}"));
@@ -3180,16 +3193,16 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
         return Err(errors.join("\n"));
     }
 
-    if check_only && changed_any {
+    if check_only && needs_format > 0 {
         eprintln!(
-            "\nzz: {} file(s) need formatting (run `zz fmt` to fix)",
-            files.len()
+            "\n\x1b[35mzz: {} file(s) need formatting (run `zz fmt` to fix)\x1b[0m",
+            needs_format
         );
-    } else if !changed_any && !check_only {
+    } else if needs_format == 0 && !check_only {
         eprintln!("zz: all files already formatted");
     }
 
-    Ok(changed_any)
+    Ok(needs_format > 0)
 }
 
 /// Parse, type-check, and optionally auto-fix files.

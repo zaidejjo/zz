@@ -130,7 +130,7 @@ fn fmt_check_unformatted_exits_1() {
         "zz fmt --check should exit 1 for unformatted code.\nstderr: {stderr}"
     );
     assert!(
-        stderr.contains("would reformat"),
+        stderr.contains("needs formatting"),
         "should indicate file needs formatting: {stderr}"
     );
 
@@ -283,7 +283,7 @@ fn fmt_directory_check_reports_multiple() {
         "zz fmt --check on unformatted dir should exit 1.\nstderr: {stderr}"
     );
     assert!(
-        stderr.contains("would reformat"),
+        stderr.contains("needs formatting"),
         "should report files needing formatting: {stderr}"
     );
 
