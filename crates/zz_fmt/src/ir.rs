@@ -691,49 +691,50 @@ impl<'src, 'a> Ctx<'src, 'a> {
     /// the source's choice of statement terminators.
     fn has_trailing_semicolon(&self, expr_end: u32, next_start: u32) -> bool {
         let s = expr_end as usize;
-        let e = next_start as usize;
-        if e > s && e <= self.source.len() {
-            let segment = &self.source[s..e];
-            // Strip comments, then check for `;`.
-            let mut stripped = String::new();
-            let mut in_line_comment = false;
-            let mut in_block_comment = false;
-            let mut i = 0;
-            let bytes = segment.as_bytes();
-            while i < bytes.len() {
-                if in_line_comment {
-                    if bytes[i] == b'\n' {
-                        in_line_comment = false;
-                    }
-                    i += 1;
-                    continue;
-                }
-                if in_block_comment {
-                    if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                        in_block_comment = false;
-                        i += 2;
-                        continue;
-                    }
-                    i += 1;
-                    continue;
-                }
-                if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
-                    in_line_comment = true;
-                    i += 2;
-                    continue;
-                }
-                if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-                    in_block_comment = true;
-                    i += 2;
-                    continue;
-                }
-                stripped.push(bytes[i] as char);
-                i += 1;
-            }
-            stripped.contains(';')
-        } else {
-            false
+        // Include the byte at `next_start` position: a `;` may sit directly
+        // after the value expression, at the same offset as `span.end`.
+        let e = (next_start as usize + 1).min(self.source.len());
+        if s >= self.source.len() || s >= e {
+            return false;
         }
+        let segment = &self.source[s..e];
+        // Strip comments, then check for `;`.
+        let mut stripped = String::new();
+        let mut in_line_comment = false;
+        let mut in_block_comment = false;
+        let mut i = 0;
+        let bytes = segment.as_bytes();
+        while i < bytes.len() {
+            if in_line_comment {
+                if bytes[i] == b'\n' {
+                    in_line_comment = false;
+                }
+                i += 1;
+                continue;
+            }
+            if in_block_comment {
+                if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    in_block_comment = false;
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                continue;
+            }
+            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+                in_line_comment = true;
+                i += 2;
+                continue;
+            }
+            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                in_block_comment = true;
+                i += 2;
+                continue;
+            }
+            stripped.push(bytes[i] as char);
+            i += 1;
+        }
+        stripped.contains(';')
     }
 
     /// Does `span` cover any `|>` pipeline operator? Pipeline chains are
@@ -2386,6 +2387,102 @@ mod tests {
         assert!(
             out.contains("impl Counter for Boxed"),
             "impl must include `for <Trait>`: {out}"
+        );
+    }
+
+    /// Helper: format source with a given config and return output string.
+    fn fmt_with_config(src: &str, config: &FmtConfig) -> String {
+        let p = parse(src).program;
+        let (doc, eol) = lower_program(&p, src, config);
+        crate::printer::render(&doc, 80, 4, eol, config.use_tabs)
+    }
+
+    #[test]
+    fn trailing_comma_always_adds_trailing_comma() {
+        let src = "[1, 2, 3]\n";
+        let cfg = FmtConfig {
+            trailing_comma: TrailingComma::Always,
+            ..FmtConfig::default()
+        };
+        let out = fmt_with_config(src, &cfg);
+        assert!(
+            out.contains("[1, 2, 3,]"),
+            "trailing_comma=always should add trailing comma: {out}"
+        );
+    }
+
+    #[test]
+    fn trailing_comma_never_removes_trailing_comma() {
+        let src = "[1, 2, 3,]\n";
+        let cfg = FmtConfig {
+            trailing_comma: TrailingComma::Never,
+            ..FmtConfig::default()
+        };
+        let out = fmt_with_config(src, &cfg);
+        assert!(
+            !out.contains("[1, 2, 3,]"),
+            "trailing_comma=never should remove trailing comma: {out}"
+        );
+        assert!(
+            out.contains("[1, 2, 3]"),
+            "trailing_comma=never should still format: {out}"
+        );
+    }
+
+    #[test]
+    fn semicolons_always_adds_semicolons() {
+        let src = "x := 1\ny: int = 2\n";
+        let cfg = FmtConfig {
+            semicolons: SemiStyle::Always,
+            ..FmtConfig::default()
+        };
+        let out = fmt_with_config(src, &cfg);
+        assert!(
+            out.contains("x := 1;"),
+            "semicolons=always should add semicolon after decl: {out}"
+        );
+        // Typed decls keep their existing spacing (no space after `:`)
+        assert!(
+            out.contains("y:int = 2;"),
+            "semicolons=always should add semicolon after typed decl: {out}"
+        );
+    }
+
+    #[test]
+    fn semicolons_never_removes_semicolons() {
+        let src = "x := 1;\ny: int = 2;\n";
+        let cfg = FmtConfig {
+            semicolons: SemiStyle::Never,
+            ..FmtConfig::default()
+        };
+        let out = fmt_with_config(src, &cfg);
+        assert!(
+            !out.contains("x := 1;"),
+            "semicolons=never should remove semicolon: {out}"
+        );
+        assert!(
+            !out.contains("y: int = 2;"),
+            "semicolons=never should remove semicolon from typed decl: {out}"
+        );
+    }
+
+    #[test]
+    fn semicolons_auto_preserves_source() {
+        // Source with semicolons keeps them.
+        let src_with = "x := 1;\n";
+        let cfg = FmtConfig::default(); // Auto is default
+        let out_with = fmt_with_config(src_with, &cfg);
+        assert!(
+            out_with.contains("x := 1;"),
+            "semicolons=auto should preserve source semicolon: {out_with}"
+        );
+
+        // Source without semicolons doesn't get them added.
+        let src_without = "x := 1\n";
+        let out_without = fmt_with_config(src_without, &cfg);
+        assert!(
+            !out_without.contains("x := 1;"),
+            "semicolons=auto should not add semicolon: {out_without}"
         );
     }
 }
