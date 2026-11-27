@@ -4,7 +4,7 @@ use zz_checker_core::{Checker, DefinedBinding};
 use zz_diag_core::{error_at, warning_at, ErrorCode, FixIt};
 use zz_span_ast::span::Span;
 use zz_structs::StructOps;
-use zz_suggest::{suggest_all, suggest_confident, suggest_dotted, suggest_top3};
+use zz_suggest::{suggest_all, suggest_dotted, suggest_top3};
 use zz_types::Type;
 
 // Import suggestions and canonical resolution derive from the single
@@ -709,7 +709,7 @@ impl ScopeOps for Checker {
                         .filter(|k| k.starts_with(&prefix) && !k[prefix.len()..].contains('.'))
                         .map(|k| k.strip_prefix(&prefix).unwrap())
                         .collect();
-                    if let Some(suggestion) = suggest_confident(&parts[1], &members) {
+                    if let Some(suggestion) = suggest_top3(&parts[1], &members).first() {
                         diag = diag.with_note(format!(
                             "`{mod_name}` is imported; did you mean `{mod_name}.{suggestion}`?"
                         ));

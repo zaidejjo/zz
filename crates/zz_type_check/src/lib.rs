@@ -8,6 +8,7 @@ use zz_sigs::enums::EnumOps;
 use zz_span_ast::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, Param, Pattern, Stmt, Ty, UnOp};
 use zz_span_ast::span::Span;
 use zz_structs::StructOps;
+use zz_suggest::suggest_top3;
 use zz_types::Type;
 
 mod check_call;
@@ -1006,10 +1007,29 @@ impl TypeCheckOps for Checker {
                                 Type::Dict(Box::new(Type::Str), Box::new(Type::Str))
                             }
                             _ => {
-                                self.errors.push(
+                                let candidates: Vec<&str> =
+                                    vec!["method", "path", "body", "headers", "query", "params"];
+                                let top = suggest_top3(name, &candidates);
+                                let mut diag =
                                     error_at(format!("http.request has no field `{name}`"), *span)
-                                        .with_code(ErrorCode(16)),
-                                );
+                                        .with_code(ErrorCode(16));
+                                if top.len() == 1 {
+                                    diag = diag
+                                        .with_note(format!("did you mean `{}`?", top[0]))
+                                        .with_fixit(FixIt::safe(
+                                            *span,
+                                            top[0].to_string(),
+                                            "replace field name",
+                                        ));
+                                } else if !top.is_empty() {
+                                    let names: Vec<String> =
+                                        top.iter().map(|s| s.to_string()).collect();
+                                    diag = diag.with_note(format!(
+                                        "did you mean `{}`?",
+                                        names.join("`, `")
+                                    ));
+                                }
+                                self.errors.push(diag);
                                 Type::Unit
                             }
                         }
@@ -1083,10 +1103,29 @@ impl TypeCheckOps for Checker {
                 // Messages keep the as-written name.
                 let cname = self.canonical_struct_name(name);
                 let Some(sig) = self.structs.get(&cname).cloned() else {
-                    self.errors.push(
-                        error_at(format!("unknown struct `{name}`"), *span)
-                            .with_code(ErrorCode(12)),
-                    );
+                    // Collect bare struct names (last segment after '.') for suggestions.
+                    let candidates: Vec<&str> = self
+                        .structs
+                        .keys()
+                        .filter_map(|k| k.rsplit('.').next())
+                        .collect();
+                    let top = suggest_top3(name, &candidates);
+                    let name_span = Span::new(span.start, span.start + name.len() as u32);
+                    let mut diag = error_at(format!("unknown struct `{name}`"), name_span)
+                        .with_code(ErrorCode(12));
+                    if top.len() == 1 {
+                        diag = diag
+                            .with_note(format!("did you mean `{}`?", top[0]))
+                            .with_fixit(FixIt::safe(
+                                name_span,
+                                top[0].to_string(),
+                                "replace struct name",
+                            ));
+                    } else if !top.is_empty() {
+                        let names: Vec<String> = top.iter().map(|s| s.to_string()).collect();
+                        diag = diag.with_note(format!("did you mean `{}`?", names.join("`, `")));
+                    }
+                    self.errors.push(diag);
                     return Type::Unit;
                 };
                 // Each given field maps to a concrete path: direct fields to
@@ -1616,8 +1655,25 @@ impl TypeCheckOps for Checker {
                         Type::Option(Box::new(self.unifier.fresh_var()))
                     }
                     (other, _) => {
-                        self.errors
-                            .push(error_at(format!("unknown variant `.{other}`"), *span));
+                        let candidates: Vec<&str> = vec!["ok", "err", "some", "none"];
+                        let top = suggest_top3(other, &candidates);
+                        let mut diag = error_at(format!("unknown variant `.{other}`"), *span)
+                            .with_code(ErrorCode(13));
+                        if top.len() == 1 {
+                            diag = diag
+                                .with_note(format!("did you mean `.{}`?", top[0]))
+                                .with_fixit(FixIt::safe(
+                                    *span,
+                                    format!(".{}", top[0]),
+                                    "replace variant name",
+                                ));
+                        } else if !top.is_empty() {
+                            let names: Vec<String> =
+                                top.iter().map(|s| format!(".{}", s)).collect();
+                            diag =
+                                diag.with_note(format!("did you mean `{}`?", names.join("`, `")));
+                        }
+                        self.errors.push(diag);
                         Type::Unit
                     }
                 }
