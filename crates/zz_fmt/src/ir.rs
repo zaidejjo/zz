@@ -676,6 +676,56 @@ impl<'src, 'a> Ctx<'src, 'a> {
         }
     }
 
+    /// Does the source between `expr_end` and `next_start` contain a `;`
+    /// (ignoring comments)? Used for `semicolons = "Auto"` to preserve
+    /// the source's choice of statement terminators.
+    fn has_trailing_semicolon(&self, expr_end: u32, next_start: u32) -> bool {
+        let s = expr_end as usize;
+        let e = next_start as usize;
+        if e > s && e <= self.source.len() {
+            let segment = &self.source[s..e];
+            // Strip comments, then check for `;`.
+            let mut stripped = String::new();
+            let mut in_line_comment = false;
+            let mut in_block_comment = false;
+            let mut i = 0;
+            let bytes = segment.as_bytes();
+            while i < bytes.len() {
+                if in_line_comment {
+                    if bytes[i] == b'\n' {
+                        in_line_comment = false;
+                    }
+                    i += 1;
+                    continue;
+                }
+                if in_block_comment {
+                    if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                        in_block_comment = false;
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    continue;
+                }
+                if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+                    in_line_comment = true;
+                    i += 2;
+                    continue;
+                }
+                if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                    in_block_comment = true;
+                    i += 2;
+                    continue;
+                }
+                stripped.push(bytes[i] as char);
+                i += 1;
+            }
+            stripped.contains(';')
+        } else {
+            false
+        }
+    }
+
     /// Does `span` cover any `|>` pipeline operator? Pipeline chains are
     /// desugared by the parser into nested `Call` nodes; re-emitting them
     /// structurally would lose the `|>` token, so the emitter renders
