@@ -1,6 +1,6 @@
 first module that broke: <path> <path>
 
-error: type mismatch: expected `[int]` for `variable `array_literal_type_mismatch.age``, found `[int | str]`
+error: Z0002: type mismatch: expected `[int]` for `variable `array_literal_type_mismatch.age``, found `[int | str]`
 
 --> <path>
 |

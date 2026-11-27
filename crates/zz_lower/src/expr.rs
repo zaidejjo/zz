@@ -5405,9 +5405,7 @@ impl Lowerer {
             return None;
         }
         // Find the function body.
-        let Some((params, body)) = self.find_body(name) else {
-            return None;
-        };
+        let (params, body) = self.find_body(name)?;
         // ≤ 3 params, arity must match.
         if params.len() > 3 || params.len() != args.len() {
             return None;
@@ -5461,7 +5459,7 @@ impl Lowerer {
                 }
                 false
             }
-            Expr::Field { obj, name: _, .. } => self.is_pure_expr(obj, names),
+            Expr::Field { obj, .. } => self.is_pure_expr(obj, names),
             Expr::Path { parts, .. } => {
                 // Path to a const/global is pure; path to a call is not.
                 // Conservative: only allow short ident chains that aren't

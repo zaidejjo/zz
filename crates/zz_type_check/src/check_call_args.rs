@@ -2,7 +2,7 @@
 //! Free functions following the `definite_assignment.rs` pattern.
 
 use zz_checker_core::Checker;
-use zz_diag_core::{error_at, FixIt};
+use zz_diag_core::{error_at, ErrorCode, FixIt};
 use zz_infer::InferOps;
 use zz_span_ast::ast::{Expr, Ident};
 use zz_span_ast::span::Span;
@@ -51,7 +51,8 @@ pub(crate) fn check_arg_count(
             Some(name) => format!("`{name}` {count}"),
             None => count,
         };
-        let mut diag = error_at(format!("{head} ({sig}), found {total_provided}"), span);
+        let mut diag = error_at(format!("{head} ({sig}), found {total_provided}"), span)
+            .with_code(ErrorCode(21));
         if total_provided < allowed_min {
             let missing: Vec<String> = param_names
                 .iter()
@@ -83,17 +84,23 @@ pub(crate) fn assign_positional_slots<'a>(
 ) -> bool {
     for (i, arg) in args.iter().enumerate() {
         if i >= total_params {
-            checker.errors.push(error_at(
-                format!("too many positional arguments (max {})", total_params),
-                arg.span(),
-            ));
+            checker.errors.push(
+                error_at(
+                    format!("too many positional arguments (max {})", total_params),
+                    arg.span(),
+                )
+                .with_code(ErrorCode(21)),
+            );
             return true;
         }
         if slots[i].is_some() {
-            checker.errors.push(error_at(
-                format!("positional argument `{}` conflicts with named argument", i),
-                arg.span(),
-            ));
+            checker.errors.push(
+                error_at(
+                    format!("positional argument `{}` conflicts with named argument", i),
+                    arg.span(),
+                )
+                .with_code(ErrorCode(19)),
+            );
             return true;
         }
         slots[i] = Some(arg);
@@ -115,16 +122,20 @@ pub(crate) fn check_named_args<'a>(
         match pos {
             Some(i) => {
                 if slots[i].is_some() {
-                    checker.errors.push(error_at(
-                        format!("argument `{}` already provided positionally", name.name),
-                        val.span(),
-                    ));
+                    checker.errors.push(
+                        error_at(
+                            format!("argument `{}` already provided positionally", name.name),
+                            val.span(),
+                        )
+                        .with_code(ErrorCode(19)),
+                    );
                     return true;
                 }
                 slots[i] = Some(val);
             }
             None => {
-                let mut diag = error_at(format!("unknown parameter `{}`", name.name), name.span);
+                let mut diag = error_at(format!("unknown parameter `{}`", name.name), name.span)
+                    .with_code(ErrorCode(19));
                 let refs: Vec<&str> = param_names.iter().map(|s| s.as_str()).collect();
                 let all = suggest_all(&name.name, &refs);
                 if let Some((suggestion, _)) = all.first() {

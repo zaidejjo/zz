@@ -1,6 +1,6 @@
 first module that broke: <path> <path>
 
-error: type mismatch: expected `func(_) -> _` for `f`, found `int`
+error: Z0002: type mismatch: expected `func(_) -> _` for `f`, found `int`
 
 --> <path>
 |

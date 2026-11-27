@@ -5,7 +5,7 @@ use crate::check_stmt::find_union_violation;
 use crate::ScopeOps as _;
 use crate::TypeCheckOps;
 use zz_checker_core::Checker;
-use zz_diag_core::{error_at, FixIt};
+use zz_diag_core::{error_at, ErrorCode, FixIt};
 use zz_http_routes::is_route_method;
 use zz_infer::{subst as infer_subst, InferOps};
 use zz_lints::http_lint::HttpLintOps;
@@ -34,10 +34,13 @@ pub(crate) fn check_call_math_const(
         for (_, val) in named {
             checker.check_expr(val);
         }
-        checker.errors.push(error_at(
-            format!("cannot call `{name}`: it is a numeric constant value, remove the `()`"),
-            span,
-        ));
+        checker.errors.push(
+            error_at(
+                format!("cannot call `{name}`: it is a numeric constant value, remove the `()`"),
+                span,
+            )
+            .with_code(ErrorCode(20)),
+        );
         return Some(Type::Float);
     }
     None
@@ -165,13 +168,16 @@ pub(crate) fn check_call_removed_api(
     for (_, val) in named {
         checker.check_expr(val);
     }
-    checker.errors.push(error_at(
-        format!(
-            "removed: `{name}` is gone — use {} instead",
-            api.replacement
-        ),
-        span,
-    ));
+    checker.errors.push(
+        error_at(
+            format!(
+                "removed: `{name}` is gone — use {} instead",
+                api.replacement
+            ),
+            span,
+        )
+        .with_code(ErrorCode(20)),
+    );
     Some(api.ret.to_type(&mut checker.unifier))
 }
 
@@ -252,7 +258,8 @@ pub(crate) fn check_call_print_builtin(
                 .first()
                 .map(|(ident, _)| ident.span)
                 .unwrap_or(Span::new(0, 0)),
-        );
+        )
+        .with_code(ErrorCode(19));
         diag = diag.with_note(format!(
             "use `{}={{{}}}` inside the string, e.g. `println(\"{}\")`",
             names.join(", "),
@@ -297,13 +304,16 @@ fn report_ambiguous_trait_method(
     if providers.len() <= 1 {
         return false;
     }
-    checker.errors.push(error_at(
-        format!(
+    checker.errors.push(
+        error_at(
+            format!(
             "method `{method}` is ambiguous for type parameter `{gen}`: provided by `{}` and `{}`",
             providers[0], providers[1]
         ),
-        span,
-    ));
+            span,
+        )
+        .with_code(ErrorCode(20)),
+    );
     true
 }
 
@@ -556,6 +566,7 @@ pub(crate) fn check_call_unknown_suggestion(
     if top.len() == 1 {
         checker.errors.push(
             error_at(format!("unknown function `{name}`"), callee_span)
+                .with_code(ErrorCode(20))
                 .with_note(format!("did you mean `{}`?", top[0]))
                 .with_fixit(FixIt::safe(
                     callee_span,
@@ -567,6 +578,7 @@ pub(crate) fn check_call_unknown_suggestion(
         let names: Vec<String> = top.iter().map(|s| s.to_string()).collect();
         checker.errors.push(
             error_at(format!("unknown function `{name}`"), callee_span)
+                .with_code(ErrorCode(20))
                 .with_note(format!("did you mean `{}`?", names.join("`, `"))),
         );
     }
@@ -738,10 +750,13 @@ fn check_call_path_variant_payload(
             span,
         }));
     }
-    checker.errors.push(error_at(
-        format!("unknown method `{method}` for enum `{canonical_head}`"),
-        span,
-    ));
+    checker.errors.push(
+        error_at(
+            format!("unknown method `{method}` for enum `{canonical_head}`"),
+            span,
+        )
+        .with_code(ErrorCode(20)),
+    );
     let (gen_vars, _) = checker.fresh_enum_vars(canonical_head);
     Some(Type::Enum(canonical_head.to_string(), gen_vars))
 }
@@ -1113,7 +1128,8 @@ pub(crate) fn check_call_callee_type(
             None => {
                 // Sherlock: suggest the closest known function so a typo
                 // (`lenght`, `get_var`) points at the fix instead of a dead end.
-                let mut diag = error_at(format!("unknown function `{name}`"), span);
+                let mut diag =
+                    error_at(format!("unknown function `{name}`"), span).with_code(ErrorCode(20));
                 let candidates: Vec<String> = checker
                     .funcs
                     .keys()

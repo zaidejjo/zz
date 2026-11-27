@@ -366,7 +366,8 @@ impl ScopeOps for Checker {
                                 "cannot use generic function `{name}` as a value; call it with arguments"
                             ),
                             span,
-                        ));
+                        )
+                        .with_code(ErrorCode(2)));
                         return Type::Error;
                     }
                 }
@@ -804,10 +805,10 @@ impl ScopeOps for Checker {
                             Type::Dict(Box::new(Type::Str), Box::new(Type::Str))
                         }
                         _ => {
-                            self.errors.push(error_at(
-                                format!("http.request has no field `{field}`"),
-                                span,
-                            ));
+                            self.errors.push(
+                                error_at(format!("http.request has no field `{field}`"), span)
+                                    .with_code(ErrorCode(16)),
+                            );
                             return Type::Error;
                         }
                     };
@@ -828,7 +829,8 @@ impl ScopeOps for Checker {
                     let mut diag = error_at(
                         format!("cannot access field `{field}` on a value of type `{other}`"),
                         span,
-                    );
+                    )
+                    .with_code(ErrorCode(18));
                     // Unimported-but-known std module root (`sqlz.open`
                     // without `import std.sqlz`): suggest the import even
                     // when the root name itself is bound to something else

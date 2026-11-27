@@ -3,7 +3,7 @@
 //! free functions can read/write them directly.
 
 use zz_checker_core::Checker;
-use zz_diag_core::error_at;
+use zz_diag_core::{error_at, ErrorCode};
 use zz_infer::{contains_var, default_variant_vars, InferOps};
 use zz_lints::http_lint::HttpLintOps;
 use zz_scope::ScopeOps;
@@ -183,13 +183,16 @@ fn check_stmt_decl(
                 Type::Dict(k, v) if matches!(k.as_ref(), Type::Var(_)) || matches!(v.as_ref(), Type::Var(_))
             );
             if !may_defer {
-                checker.errors.push(error_at(
-                    format!(
-                        "cannot infer the type of `{}`; add a type annotation",
-                        name.name
-                    ),
-                    name.span,
-                ));
+                checker.errors.push(
+                    error_at(
+                        format!(
+                            "cannot infer the type of `{}`; add a type annotation",
+                            name.name
+                        ),
+                        name.span,
+                    )
+                    .with_code(ErrorCode(2)),
+                );
             }
         } else {
             checker.define_var_at(&name.name, d.clone(), name.span, is_const);
@@ -304,9 +307,9 @@ fn check_stmt_func(checker: &mut Checker, stmt: &Stmt, span: Span) -> Type {
 
 fn check_stmt_link(checker: &mut Checker, lib: &str, span: Span) -> Type {
     if lib.trim().is_empty() {
-        checker
-            .errors
-            .push(error_at("`@link` requires a non-empty library name", span));
+        checker.errors.push(
+            error_at("`@link` requires a non-empty library name", span).with_code(ErrorCode(23)),
+        );
     } else if !checker.link_libs.iter().any(|l| l == lib) {
         checker.link_libs.push(lib.to_string());
     }
@@ -336,7 +339,7 @@ fn check_stmt_return(checker: &mut Checker, value: &Option<Expr>, span: Span) ->
         None => {
             checker
                 .errors
-                .push(error_at("`return` outside of a function", span));
+                .push(error_at("`return` outside of a function", span).with_code(ErrorCode(14)));
             return Type::Unit;
         }
     };
@@ -415,7 +418,7 @@ fn check_stmt_break(checker: &mut Checker, span: Span) -> Type {
     if checker.loop_depth == 0 {
         checker
             .errors
-            .push(error_at("`break` outside of a loop", span));
+            .push(error_at("`break` outside of a loop", span).with_code(ErrorCode(14)));
     }
     Type::Unit
 }
@@ -424,7 +427,7 @@ fn check_stmt_continue(checker: &mut Checker, span: Span) -> Type {
     if checker.loop_depth == 0 {
         checker
             .errors
-            .push(error_at("`continue` outside of a loop", span));
+            .push(error_at("`continue` outside of a loop", span).with_code(ErrorCode(14)));
     }
     Type::Unit
 }
@@ -433,7 +436,7 @@ fn check_stmt_defer(checker: &mut Checker, expr: &Expr, span: Span) -> Type {
     if checker.current_ret.is_none() {
         checker
             .errors
-            .push(error_at("`defer` outside of a function", span));
+            .push(error_at("`defer` outside of a function", span).with_code(ErrorCode(14)));
     }
     let prev_discard = std::mem::replace(
         &mut checker.direct_discard,
@@ -650,9 +653,9 @@ fn check_stmt_for(
     let it = checker.unifier.resolve(&it);
     match vars.len() {
         0 => {
-            checker
-                .errors
-                .push(error_at("internal: for-loop with no variables", span));
+            checker.errors.push(
+                error_at("internal: for-loop with no variables", span).with_code(ErrorCode(27)),
+            );
         }
         1 => check_for_single(checker, vars, it, body, span),
         2 => check_for_pair(checker, vars, it, body, span),
@@ -660,7 +663,8 @@ fn check_stmt_for(
             checker.errors.push(error_at(
                 "for loop supports at most 2 variables (e.g. `for k, v in dict` or `for i, x in xs.enumerate()`)",
                 span,
-            ));
+            )
+            .with_code(ErrorCode(27)));
         }
     }
     Type::Unit
@@ -682,17 +686,20 @@ fn check_for_single(
             *_k
         }
         Type::Var(_) => {
-            checker.errors.push(error_at(
-                "cannot iterate a value whose type could not be inferred",
-                span,
-            ));
+            checker.errors.push(
+                error_at(
+                    "cannot iterate a value whose type could not be inferred",
+                    span,
+                )
+                .with_code(ErrorCode(11)),
+            );
             Type::Unit
         }
         other => {
-            checker.errors.push(error_at(
-                format!("cannot iterate a value of type `{other}`"),
-                span,
-            ));
+            checker.errors.push(
+                error_at(format!("cannot iterate a value of type `{other}`"), span)
+                    .with_code(ErrorCode(11)),
+            );
             Type::Unit
         }
     };
@@ -752,7 +759,8 @@ fn check_for_pair(
                             "expected a dictionary or an array of tuples for `for k, v in ...`, got `{other}`"
                         ),
                         span,
-                    ));
+                    )
+                    .with_code(ErrorCode(11)));
                     checker.push_scope();
                     checker.define_binding_at(&vars[0].name, Type::Unit, vars[0].span, false);
                     checker.define_binding_at(&vars[1].name, Type::Unit, vars[1].span, false);
@@ -764,10 +772,13 @@ fn check_for_pair(
             }
         }
         Type::Var(_) => {
-            checker.errors.push(error_at(
-                "cannot iterate a value whose type could not be inferred",
-                span,
-            ));
+            checker.errors.push(
+                error_at(
+                    "cannot iterate a value whose type could not be inferred",
+                    span,
+                )
+                .with_code(ErrorCode(11)),
+            );
             checker.push_scope();
             checker.define_binding_at(&vars[0].name, Type::Unit, vars[0].span, false);
             checker.define_binding_at(&vars[1].name, Type::Unit, vars[1].span, false);
@@ -777,10 +788,13 @@ fn check_for_pair(
             checker.pop_scope();
         }
         other => {
-            checker.errors.push(error_at(
-                format!("expected a dictionary for `for k, v in ...`, got `{other}`"),
-                span,
-            ));
+            checker.errors.push(
+                error_at(
+                    format!("expected a dictionary for `for k, v in ...`, got `{other}`"),
+                    span,
+                )
+                .with_code(ErrorCode(11)),
+            );
             checker.push_scope();
             checker.define_binding_at(&vars[0].name, Type::Unit, vars[0].span, false);
             checker.define_binding_at(&vars[1].name, Type::Unit, vars[1].span, false);
