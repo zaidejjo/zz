@@ -1056,7 +1056,7 @@ fn check_program_impl(
                         ),
                         stmt.span(),
                     )
-                    .with_code(ErrorCode(13)),
+                    .with_code(ErrorCode(52)),
                 );
             }
         }

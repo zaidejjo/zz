@@ -118,7 +118,7 @@ fn check_stmt_decl(
                 ),
                 name.span,
             )
-            .with_code(ErrorCode(13)),
+            .with_code(ErrorCode(52)),
         );
     }
     // D1: `state` is module-level only in v1. At top level the env stack
@@ -131,7 +131,7 @@ fn check_stmt_decl(
              hint: move the declaration to the top level of the module",
                 name.span,
             )
-            .with_code(ErrorCode(11)),
+            .with_code(ErrorCode(50)),
         );
     }
     // D6: a `state` may not hold a closure/function value (or any type
@@ -150,7 +150,7 @@ fn check_stmt_decl(
                     ),
                     name.span,
                 )
-                .with_code(ErrorCode(12)),
+                .with_code(ErrorCode(51)),
             );
         }
         checker.state_names.insert(name.name.clone());
@@ -1097,7 +1097,7 @@ fn check_for_blocking_natives(checker: &mut Checker, expr: &Expr, span: Span) {
                         ),
                             *s,
                         )
-                        .with_code(ErrorCode(15)),
+                        .with_code(ErrorCode(54)),
                     );
                 }
             }
@@ -1252,7 +1252,7 @@ fn check_whitelist_only(checker: &mut Checker, expr: &Expr, span: Span) {
                             ),
                             *s,
                         )
-                        .with_code(ErrorCode(14)),
+                        .with_code(ErrorCode(53)),
                     );
                 }
             }
@@ -1414,7 +1414,7 @@ pub(crate) fn check_r1_in_block(checker: &mut Checker, block: &zz_span_ast::ast:
                                 ),
                                 rspan,
                             )
-                            .with_code(ErrorCode(16)),
+                            .with_code(ErrorCode(55)),
                         );
                     }
                 }
@@ -1871,7 +1871,7 @@ fn z0019_exprs(
                     ),
                     span,
                 )
-                .with_code(ErrorCode(19)),
+                .with_code(ErrorCode(58)),
             );
         }
     }
