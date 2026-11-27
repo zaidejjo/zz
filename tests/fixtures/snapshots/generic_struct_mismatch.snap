@@ -1,6 +1,6 @@
 first module that broke: <path> <path>
 
-error: type mismatch: expected `str` for `variable `generic_struct_mismatch.s``, found `int`
+error: Z0002: type mismatch: expected `str` for `variable `generic_struct_mismatch.s``, found `int`
 
 --> <path>
 |

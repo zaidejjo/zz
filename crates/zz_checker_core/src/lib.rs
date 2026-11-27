@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use zz_arena::Interner;
-use zz_diag_core::{error_at, RawDiag, SecondaryLabel};
+use zz_diag_core::{error_at, ErrorCode, RawDiag, SecondaryLabel};
 use zz_span_ast::ast::{Stmt, Ty};
 use zz_span_ast::span::Span;
 use zz_types::Type;
@@ -725,6 +725,15 @@ impl Checker {
             other => other.to_string(),
         };
         let mut diag = error_at(msg, span);
+        match err.message.as_str() {
+            "type mismatch" => {
+                diag = diag.with_code(ErrorCode(2));
+            }
+            "function arity mismatch" | "tuple arity mismatch" => {
+                diag = diag.with_code(ErrorCode(21));
+            }
+            _ => {}
+        }
         // Add secondary labels showing where each type came from, when we
         // have span info (e.g. "expected `int` because of this annotation
         // here", "found `str` at this variable declaration").
@@ -879,7 +888,8 @@ impl Checker {
                         "returning unwrapped `Result<{payload}, {err}>` where `{r}` is expected"
                     ),
                     span,
-                );
+                )
+                .with_code(ErrorCode(2));
                 diag = diag.with_note(format!(
                     "use `?` to propagate (needs `-> Result<{payload}, {err}>`)"
                 ));
@@ -898,7 +908,8 @@ impl Checker {
                 let mut diag = error_at(
                     format!("returning plain `{v}` where `Result<{payload}, {err}>` is expected"),
                     span,
-                );
+                )
+                .with_code(ErrorCode(2));
                 diag = diag.with_note("wrap the value: `.ok(value)`".to_string());
                 diag = diag.with_note("or propagate a fallible call with `?`".to_string());
                 self.errors.push(diag);
@@ -917,7 +928,8 @@ impl Checker {
             // Divergent condition: unreachable, vacuously fine.
             Type::Never => {}
             other => {
-                let mut diag = error_at(format!("expected `bool`, found `{other}`"), span);
+                let mut diag = error_at(format!("expected `bool`, found `{other}`"), span)
+                    .with_code(ErrorCode(15));
                 // A `str` that looks like a GLOB/pattern is a common mistake
                 // where the author meant a truthy check, not a boolean.
                 if matches!(other, Type::Str) {
@@ -955,10 +967,10 @@ impl Checker {
             // must not spawn a new "index must be `int`" diagnostic (#711).
             Type::Error => {}
             other => {
-                self.errors.push(error_at(
-                    format!("index must be `int`, found `{other}`"),
-                    span,
-                ));
+                self.errors.push(
+                    error_at(format!("index must be `int`, found `{other}`"), span)
+                        .with_code(ErrorCode(11)),
+                );
             }
         }
     }

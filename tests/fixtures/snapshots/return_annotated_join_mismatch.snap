@@ -1,6 +1,6 @@
 first module that broke: <path> <path>
 
-error: type mismatch: expected `int` for `variable `x``, found `str`
+error: Z0002: type mismatch: expected `int` for `variable `x``, found `str`
 
 --> <path>
 |
@@ -12,7 +12,7 @@ error: type mismatch: expected `int` for `variable `x``, found `str`
 | ------------------------------------------------------- found `str` here
 
 = to fix: change the annotation to `str` or convert the value
-error: type mismatch: expected `int`, found `str`
+error: Z0002: type mismatch: expected `int`, found `str`
 
 --> <path>
 |

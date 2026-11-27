@@ -1,6 +1,6 @@
 first module that broke: <path> <path>
 
-error: type mismatch: expected `chan` for `ch`, found `int`
+error: Z0002: type mismatch: expected `chan` for `ch`, found `int`
 
 --> <path>
 |

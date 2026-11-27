@@ -6,7 +6,7 @@ error: type alias `alias_arity.Pair` takes 1 type argument but 2 given
 |
 6 | p: Pair<int, str> = (1, "a")
 | ^^^^
-error: type mismatch: expected `int` for `variable `p``, found `str`
+error: Z0002: type mismatch: expected `int` for `variable `p``, found `str`
 
 --> <path>
 |

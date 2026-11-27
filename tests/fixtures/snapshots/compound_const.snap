@@ -1,6 +1,6 @@
 first module that broke: <path> <path>
 
-error: cannot assign to immutable variable `x`
+error: Z0017: cannot assign to immutable variable `x`
 
 --> <path>
 |

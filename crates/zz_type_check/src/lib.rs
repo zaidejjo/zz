@@ -566,6 +566,7 @@ impl TypeCheckOps for Checker {
                         format!("cannot assign to immutable variable `{}`", display),
                         target.span(),
                     )
+                    .with_code(ErrorCode(17))
                     .with_secondary(zz_diag_core::SecondaryLabel {
                         span: def_span,
                         message: "variable defined as immutable here".to_string(),
@@ -598,10 +599,15 @@ impl TypeCheckOps for Checker {
                         *v
                     }
                     other => {
-                        self.errors.push(error_at(
-                            format!("cannot assign to field `{name}` of a value of type `{other}`"),
-                            *span,
-                        ));
+                        self.errors.push(
+                            error_at(
+                                format!(
+                                    "cannot assign to field `{name}` of a value of type `{other}`"
+                                ),
+                                *span,
+                            )
+                            .with_code(ErrorCode(18)),
+                        );
                         Type::Unit
                     }
                 }
@@ -625,37 +631,45 @@ impl TypeCheckOps for Checker {
                         *v
                     }
                     Type::Str => {
-                        self.errors
-                            .push(error_at("cannot assign to an index of a string", *span));
+                        self.errors.push(
+                            error_at("cannot assign to an index of a string", *span)
+                                .with_code(ErrorCode(11)),
+                        );
                         Type::Unit
                     }
                     Type::Tuple(elems) => self.check_tuple_index(&elems, index),
                     Type::Bytes => {
-                        self.errors
-                            .push(error_at("cannot assign to an index of bytes", *span));
+                        self.errors.push(
+                            error_at("cannot assign to an index of bytes", *span)
+                                .with_code(ErrorCode(11)),
+                        );
                         Type::Unit
                     }
                     Type::Var(_) => {
                         self.errors.push(error_at(
                             "cannot assign to an index of a value whose type could not be inferred",
                             *span,
-                        ));
+                        )
+                        .with_code(ErrorCode(11)));
                         Type::Unit
                     }
                     other => {
-                        self.errors.push(error_at(
-                            format!("cannot assign to an index of a value of type `{other}`"),
-                            *span,
-                        ));
+                        self.errors.push(
+                            error_at(
+                                format!("cannot assign to an index of a value of type `{other}`"),
+                                *span,
+                            )
+                            .with_code(ErrorCode(11)),
+                        );
                         Type::Unit
                     }
                 }
             }
             other => {
-                self.errors.push(error_at(
-                    "cannot assign to this expression".to_string(),
-                    other.span(),
-                ));
+                self.errors.push(
+                    error_at("cannot assign to this expression".to_string(), other.span())
+                        .with_code(ErrorCode(11)),
+                );
                 Type::Unit
             }
         }
@@ -677,20 +691,26 @@ impl TypeCheckOps for Checker {
                 Expr::Int { value: 0, .. } => Some(0),
                 Expr::Int { value, .. } => elems.len().checked_sub(*value as usize),
                 _ => {
-                    self.errors.push(error_at(
-                        "tuple index must be an integer literal\n\
+                    self.errors.push(
+                        error_at(
+                            "tuple index must be an integer literal\n\
                          hint: destructure with `(a, b) := t` for dynamic access",
-                        index.span(),
-                    ));
+                            index.span(),
+                        )
+                        .with_code(ErrorCode(11)),
+                    );
                     return Type::Error;
                 }
             },
             _ => {
-                self.errors.push(error_at(
-                    "tuple index must be an integer literal\n\
+                self.errors.push(
+                    error_at(
+                        "tuple index must be an integer literal\n\
                      hint: destructure with `(a, b) := t` for dynamic access",
-                    index.span(),
-                ));
+                        index.span(),
+                    )
+                    .with_code(ErrorCode(11)),
+                );
                 return Type::Error;
             }
         };
@@ -988,7 +1008,7 @@ impl TypeCheckOps for Checker {
                             _ => {
                                 self.errors.push(
                                     error_at(format!("http.request has no field `{name}`"), *span)
-                                        .with_code(ErrorCode(10)),
+                                        .with_code(ErrorCode(16)),
                                 );
                                 Type::Unit
                             }
@@ -1063,8 +1083,10 @@ impl TypeCheckOps for Checker {
                 // Messages keep the as-written name.
                 let cname = self.canonical_struct_name(name);
                 let Some(sig) = self.structs.get(&cname).cloned() else {
-                    self.errors
-                        .push(error_at(format!("unknown struct `{name}`"), *span));
+                    self.errors.push(
+                        error_at(format!("unknown struct `{name}`"), *span)
+                            .with_code(ErrorCode(12)),
+                    );
                     return Type::Unit;
                 };
                 // Each given field maps to a concrete path: direct fields to

@@ -108,14 +108,17 @@ impl StructOps for Checker {
         let mut seen = std::collections::HashSet::new();
         for g in generics {
             if !seen.insert(g.name.clone()) {
-                self.errors.push(error_at(
-                    format!(
-                        "duplicate type parameter `{}` in struct `{}`",
-                        g.name,
-                        name.join(".")
-                    ),
-                    g.span,
-                ));
+                self.errors.push(
+                    error_at(
+                        format!(
+                            "duplicate type parameter `{}` in struct `{}`",
+                            g.name,
+                            name.join(".")
+                        ),
+                        g.span,
+                    )
+                    .with_code(ErrorCode(25)),
+                );
             }
         }
         let gen_names: Vec<String> = generics.iter().map(|g| g.name.clone()).collect();
@@ -379,8 +382,9 @@ impl StructOps for Checker {
                 },
             },
             None => {
-                self.errors
-                    .push(error_at(format!("unknown struct `{sname}`"), span));
+                self.errors.push(
+                    error_at(format!("unknown struct `{sname}`"), span).with_code(ErrorCode(12)),
+                );
                 Type::Unit
             }
         }

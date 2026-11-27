@@ -6,7 +6,7 @@ error: route handler must take exactly 2 argument(s) (the request and the socket
 |
 7 | s = http.hijack(s, <path> |req| "wrong-arity")
 | ^^^^^^^^^^^^^^^^^^^
-error: function arity mismatch
+error: Z0021: function arity mismatch
 
 --> <path>
 |

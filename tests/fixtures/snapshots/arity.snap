@@ -1,6 +1,6 @@
 first module that broke: <path> <path>
 
-error: `add` takes 2 arguments (a: int, b: int), found 1
+error: Z0021: `add` takes 2 arguments (a: int, b: int), found 1
 
 --> <path>
 |
