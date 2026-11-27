@@ -115,6 +115,7 @@ pub fn lower_program<'src>(
         pipe_starts,
         bang_starts,
         config,
+        skip_next: false,
         emitted_comments: std::collections::HashSet::new(),
         comments: collect_comments(&toks),
     };
@@ -233,6 +234,9 @@ struct Ctx<'src, 'a> {
     pipe_starts: Vec<u32>,
     bang_starts: Vec<u32>,
     config: &'a FmtConfig,
+    /// When true, the next statement should be emitted verbatim (not
+    /// structurally reformatted). Set by `// fmt: skip` comment.
+    skip_next: bool,
     /// Spans of comments already emitted. Import sorting reorders
     /// statements, so an attached-docs walk can rediscover comments the
     /// header gap already emitted — the set keeps each comment exactly
@@ -340,6 +344,7 @@ impl<'src, 'a> Ctx<'src, 'a> {
             // source slice. Never normalize spacing (`//hello` stays
             // `//hello`), never re-wrap block comments.
             ClassifiedKind::Line(_) | ClassifiedKind::Doc(_) | ClassifiedKind::Block(_) => {
+                self.check_fmt_skip(c);
                 self.emit_comment_trivia(c);
             }
         }
@@ -368,6 +373,26 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 self.out.push(Doc::text_owned(Cow::Owned(raw)));
                 self.consecutive_nls = 0;
             }
+        }
+        // Check if this is a `// fmt: skip` marker that should cause the
+        // next statement to be emitted verbatim.
+        self.check_fmt_skip(c);
+    }
+
+    /// Check if a comment is `// fmt: skip` and mark the next statement
+    /// to be emitted verbatim instead of structurally reformatted.
+    ///
+    /// Only line comments (`//`) are considered; `/* */` block comments
+    /// and doc comments (`///`) are ignored. The comment text must match
+    /// `// fmt: skip` after trimming leading `// ` and whitespace.
+    fn check_fmt_skip(&mut self, c: &ClassifiedTrivia) {
+        let ClassifiedKind::Line(text) = &c.kind else {
+            return;
+        };
+        // Strip the leading `// ` and any surrounding whitespace.
+        let trimmed = text.trim_start().strip_prefix("//").unwrap_or(text).trim();
+        if trimmed == "fmt: skip" {
+            self.skip_next = true;
         }
     }
 
@@ -767,6 +792,13 @@ impl<'src, 'a> Ctx<'src, 'a> {
     /// check to reject any drift.
     fn emit_stmt(&mut self, stmt: &Stmt) {
         let span = stmt.span();
+        // If `// fmt: skip` preceded this statement, emit it verbatim
+        // instead of structurally reformatting.
+        if self.skip_next {
+            self.skip_next = false;
+            self.emit_raw(span);
+            return;
+        }
         let mark = self.out.len();
         self.emit_stmt_inner(stmt);
         // Safety net: a comment inside the statement that the structural
@@ -2483,6 +2515,75 @@ mod tests {
         assert!(
             !out_without.contains("x := 1;"),
             "semicolons=auto should not add semicolon: {out_without}"
+        );
+    }
+
+    #[test]
+    fn fmt_skip_skips_next_statement() {
+        // `// fmt: skip` before a statement causes it to be emitted verbatim.
+        let src = "// fmt: skip\nfunc add(a:int,b:int)->int{return a+b}\n";
+        let cfg = FmtConfig::default();
+        let out = fmt_with_config(src, &cfg);
+        assert!(
+            out.contains("func add(a:int,b:int)->int{return a+b}"),
+            "skipped statement should be verbatim: {out}"
+        );
+    }
+
+    #[test]
+    fn fmt_skip_only_affects_next_statement() {
+        // `// fmt: skip` should only skip the immediately following statement.
+        let src = "// fmt: skip\nx:int=1\ny: int = 2\n";
+        let cfg = FmtConfig::default();
+        let out = fmt_with_config(src, &cfg);
+        assert!(
+            out.contains("x:int=1"),
+            "skipped statement should be verbatim: {out}"
+        );
+        assert!(
+            out.contains("y:int = 2"),
+            "next statement should be formatted normally: {out}"
+        );
+    }
+
+    #[test]
+    fn fmt_skip_inside_function_body() {
+        let src = "func main() -> int {\n    // fmt: skip\n    x:int=1\n    y: int = 2\n    return x + y\n}\n";
+        let cfg = FmtConfig::default();
+        let out = fmt_with_config(src, &cfg);
+        assert!(
+            out.contains("x:int=1"),
+            "skipped decl inside function should be verbatim: {out}"
+        );
+        assert!(
+            out.contains("y:int = 2"),
+            "next decl inside function should be formatted: {out}"
+        );
+    }
+
+    #[test]
+    fn fmt_skip_block_comment_not_recognized() {
+        // `/* fmt: skip */` is a block comment, not a line comment, so it
+        // should NOT trigger skipping.
+        let src = "/* fmt: skip */\nx:int=1\n";
+        let cfg = FmtConfig::default();
+        let out = fmt_with_config(src, &cfg);
+        assert!(
+            out.contains("x:int = 1"),
+            "block comment fmt: skip should not skip: {out}"
+        );
+    }
+
+    #[test]
+    fn fmt_skip_doc_comment_not_recognized() {
+        // `/// fmt: skip` is a doc comment, not a line comment, so it
+        // should NOT trigger skipping.
+        let src = "/// fmt: skip\nx:int=1\n";
+        let cfg = FmtConfig::default();
+        let out = fmt_with_config(src, &cfg);
+        assert!(
+            out.contains("x:int = 1"),
+            "doc comment fmt: skip should not skip: {out}"
         );
     }
 }
