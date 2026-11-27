@@ -215,23 +215,22 @@ fn run_zz_with_input_env(
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
-                    let output = child
-                        .wait_with_output()
-                        .unwrap_or_else(|e| panic!("failed to reap `zz {args:?} {file:?}`: {e}"));
-                    let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                    stderr = format!(
-                        "{stderr}\nPARITY TIMEOUT: `zz {args:?} {}` exceeded \
-                         {ZZ_CHILD_TIMEOUT_SECS}s and was killed",
-                        file.display()
-                    );
+                    // `wait_with_output` would block here: kill() only reaches `zz`, not its
+                    // grandchildren (e.g. `clang` spawned by a `--native` leg). An orphaned
+                    // clang inherits the piped stdout/stderr and holds the write-end open, so
+                    // `wait_with_output` waits forever for pipe EOF that never comes — wedging
+                    // the worker pool (`thread::scope` never joins) and hanging the whole test
+                    // binary forever. Reap without reading the pipes instead.
+                    let _ = child.wait();
                     if let Some(dir) = &native_tmp {
                         let _ = std::fs::remove_dir_all(dir);
                     }
-                    return (
-                        ZZ_CHILD_TIMEOUT_EXIT,
-                        String::from_utf8_lossy(&output.stdout).to_string(),
-                        stderr,
+                    let stderr = format!(
+                        "PARITY TIMEOUT: `zz {args:?} {}` exceeded \
+                         {ZZ_CHILD_TIMEOUT_SECS}s and was killed",
+                        file.display()
                     );
+                    return (ZZ_CHILD_TIMEOUT_EXIT, String::new(), stderr);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
@@ -2527,16 +2526,21 @@ fn run_quad_leg(
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
-                    let output = child.wait_with_output().expect("reap quad leg");
+                    // `wait_with_output` would block here: kill() only reaches `zz`, not its
+                    // grandchildren (e.g. `clang` spawned by a `--native` leg). An orphaned
+                    // clang inherits the piped stdout/stderr and holds the write-end open, so
+                    // `wait_with_output` waits forever for pipe EOF that never comes — wedging
+                    // the worker pool and hanging the whole test binary forever. Reap without
+                    // reading the pipes instead.
+                    let _ = child.wait();
                     if let Some(dir) = &native_tmp {
                         let _ = std::fs::remove_dir_all(dir);
                     }
                     return (
                         ZZ_CHILD_TIMEOUT_EXIT,
-                        String::from_utf8_lossy(&output.stdout).to_string(),
+                        String::new(),
                         format!(
-                            "{}\nQUAD TIMEOUT: {} exceeded {timeout_secs}s",
-                            String::from_utf8_lossy(&output.stderr),
+                            "\nQUAD TIMEOUT: {} exceeded {timeout_secs}s",
                             file.display()
                         ),
                     );
