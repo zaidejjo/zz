@@ -505,5 +505,4 @@ pub const EXCLUDED: &[(&str, &str)] = &[
         "stdlib/c_runtime_b11_handoff_inline_nest.zz",
         "spawn/timing-sensitive",
     ),
-    ),
 ];
