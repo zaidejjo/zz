@@ -475,4 +475,16 @@ pub const EXCLUDED: &[(&str, &str)] = &[
         "stdlib/signal_test.zz",
         "needs /dev/pts + signals (VM-only signal primitive)",
     ),
+    // State concurrency timing fixtures: 4 tasks x 50-100k increments under
+    // lock contention; output depends on green-thread scheduling, so not
+    // exact-output deterministic between VM and AOT. Covered by e2e exit-0
+    // where registered, and by the S0-S6 state-verification evidence docs.
+    (
+        "stdlib/state_atomic_int.zz",
+        "concurrency timing fixture (task.spawn/join + 50-run lock contention)",
+    ),
+    (
+        "stdlib/state_composite.zz",
+        "concurrency timing fixture (task.spawn/join + 50-run vec push under lock)",
+    ),
 ];

@@ -1,7 +1,8 @@
 # Shared Mutable State — `state` / `atomic { }`
 
 Status: implemented (VM + AOT). All decisions D1–D10 are implemented.
-Remaining: docs/tooling (LSP hover, benchmarks, test-isolation row).
+Follow-up (not blocking): LSP hover for `state`/`atomic`, release-profile
+benchmarks, test-isolation audit row.
 
 ## Problem
 

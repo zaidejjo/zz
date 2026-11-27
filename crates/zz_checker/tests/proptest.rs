@@ -11,7 +11,7 @@ use zz_frontend::parse;
 /// Identifiers that are lexed as `TokenKind::Ident` but rejected by the
 /// parser in expression position (contextual keywords / reserved words).
 const RESERVED_IDENTS: &[&str] = &[
-    "atomic", "class", "end", "goto", "let", "new", "public", "state", "switch", "var",
+    "atomic", "class", "end", "for", "goto", "in", "let", "new", "public", "state", "switch", "var",
 ];
 
 /// A small subset of expressions that always parse and type-check without
