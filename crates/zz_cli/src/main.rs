@@ -597,6 +597,7 @@ fn main_inner() -> ExitCode {
             // path/flag parsing so the values aren't mistaken for paths.
             let mut format_value: Option<String> = None;
             let mut range_value: Option<String> = None;
+            let mut diff_mode = false;
             let mut rest_filtered = Vec::with_capacity(rest.len());
             let mut rest_iter = rest.iter().peekable();
             while let Some(a) = rest_iter.next() {
@@ -614,6 +615,10 @@ fn main_inner() -> ExitCode {
                 }
                 if let Some(v) = a.strip_prefix("--range=") {
                     range_value = Some(v.to_string());
+                    continue;
+                }
+                if a == "--diff" {
+                    diff_mode = true;
                     continue;
                 }
                 rest_filtered.push(a.clone());
@@ -643,6 +648,14 @@ fn main_inner() -> ExitCode {
                 );
                 return ExitCode::FAILURE;
             }
+            // --diff prints unified diffs to stdout and exits 0.
+            let format_diff = diff_mode;
+            if format_diff && (check_only || stdin || format_json) {
+                eprintln!(
+                    "zz: `--diff` cannot be combined with --check, --stdin, or --format json"
+                );
+                return ExitCode::FAILURE;
+            }
             // --range start:end formats only lines start..=end (1-indexed).
             let mut range: Option<(usize, usize)> = None;
             if let Some(r) = &range_value {
@@ -659,7 +672,15 @@ fn main_inner() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             }
-            match fmt_command(path, check_only, stdin, &config, format_json, range) {
+            match fmt_command(
+                path,
+                check_only,
+                stdin,
+                &config,
+                format_json,
+                range,
+                format_diff,
+            ) {
                 Ok(changed) => {
                     if check_only && changed {
                         ExitCode::FAILURE
@@ -1018,6 +1039,7 @@ FLAGS:
   --format json      machine-readable --check output (JSON array on stdout)
   --range start:end  format only lines start..=end (1-indexed)
   --stdin            read source from stdin and write formatted to stdout
+  --diff             print unified diffs to stdout, exit 0 regardless
   -h, --help         show this help
 
 PATH can be a single .zz file or a directory (recursively formats all .zz files).
@@ -3143,6 +3165,7 @@ fn fmt_command(
     config: &zz_fmt::FmtConfig,
     format_json: bool,
     range: Option<(usize, usize)>,
+    format_diff: bool,
 ) -> Result<bool, String> {
     use std::io::Read;
 
@@ -3176,6 +3199,13 @@ fn fmt_command(
         return match zz_fmt::format_source(&source, config) {
             Ok(formatted) => {
                 if formatted != source {
+                    if format_diff {
+                        // --diff: print diff to stdout, exit 0 regardless.
+                        let diff = zz_fmt::diff::unified_diff("<stdin>", &source, &formatted)
+                            .unwrap_or_default();
+                        println!("{diff}");
+                        return Ok(false);
+                    }
                     if check_only {
                         if format_json {
                             let diff = zz_fmt::diff::unified_diff("<stdin>", &source, &formatted)
@@ -3211,6 +3241,11 @@ fn fmt_command(
                 }
             }
             Err(e) => {
+                if format_diff {
+                    // --diff: report format error to stderr, exit 1.
+                    eprintln!("format error: {e}");
+                    return Ok(true);
+                }
                 if format_json && check_only {
                     let result = FmtCheckResult {
                         path: "<stdin>".to_string(),
@@ -3318,19 +3353,16 @@ fn fmt_command(
         let path_str = path.display().to_string();
 
         if formatted == *original {
-            if format_json && check_only {
-                check_results.push(FmtCheckResult {
-                    path: path_str.clone(),
-                    needs_format: false,
-                    error: None,
-                    diff: None,
-                });
-            }
             continue;
         }
         needs_format += 1;
 
-        if check_only {
+        if format_diff {
+            // --diff: print unified diff to stdout, don't write.
+            let diff =
+                zz_fmt::diff::unified_diff(&path_str, original, &formatted).unwrap_or_default();
+            println!("{diff}");
+        } else if check_only {
             if format_json {
                 let diff =
                     zz_fmt::diff::unified_diff(&path_str, original, &formatted).unwrap_or_default();
@@ -3354,6 +3386,14 @@ fn fmt_command(
             }
             eprintln!("reformatted: {path_str}");
         }
+    }
+
+    if format_diff {
+        // --diff: exit 0 regardless (errors already reported above).
+        if !errors.is_empty() {
+            return Ok(true);
+        }
+        return Ok(false);
     }
 
     if format_json && check_only {
