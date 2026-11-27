@@ -8,6 +8,7 @@
 //! `{...}` is an f-string interpolation (tight), `{...}` is a
 //! function body (block with newlines), etc.
 
+use crate::config::{FmtConfig, LineEnding};
 use crate::doc::Doc;
 use crate::printer::Eol;
 use crate::trivia::{classify, ClassifiedKind, ClassifiedTrivia};
@@ -43,11 +44,17 @@ fn annotate(source: &str) -> Vec<Annotated> {
         .collect()
 }
 
-fn detect_eol(source: &str) -> Eol {
-    if source.contains("\r\n") {
-        Eol::Crlf
-    } else {
-        Eol::Lf
+fn detect_eol(source: &str, line_ending: LineEnding) -> Eol {
+    match line_ending {
+        LineEnding::Lf => Eol::Lf,
+        LineEnding::Crlf => Eol::Crlf,
+        LineEnding::Auto => {
+            if source.contains("\r\n") {
+                Eol::Crlf
+            } else {
+                Eol::Lf
+            }
+        }
     }
 }
 
@@ -81,9 +88,13 @@ fn collect_comments(toks: &[Annotated]) -> Vec<ClassifiedTrivia> {
     out
 }
 
-pub fn lower_program<'src>(program: &Program, source: &'src str) -> (Doc<'src>, Eol) {
+pub fn lower_program<'src>(
+    program: &Program,
+    source: &'src str,
+    config: &crate::config::FmtConfig,
+) -> (Doc<'src>, Eol) {
     let toks = annotate(source);
-    let eol = detect_eol(source);
+    let eol = detect_eol(source, config.line_ending);
     let pipe_starts: Vec<u32> = toks
         .iter()
         .filter(|t| t.kind == TokenKind::PipeGt)
@@ -103,6 +114,7 @@ pub fn lower_program<'src>(program: &Program, source: &'src str) -> (Doc<'src>, 
         consecutive_nls: 0,
         pipe_starts,
         bang_starts,
+        config,
         emitted_comments: std::collections::HashSet::new(),
         comments: collect_comments(&toks),
     };
@@ -220,6 +232,7 @@ struct Ctx<'src, 'a> {
     consecutive_nls: usize,
     pipe_starts: Vec<u32>,
     bang_starts: Vec<u32>,
+    config: &'a FmtConfig,
     /// Spans of comments already emitted. Import sorting reorders
     /// statements, so an attached-docs walk can rediscover comments the
     /// header gap already emitted — the set keeps each comment exactly
@@ -267,18 +280,20 @@ impl<'src, 'a> Ctx<'src, 'a> {
 
     fn hard_line(&mut self) {
         self.consecutive_nls += 1;
-        // Cap consecutive newlines at two (at most one blank line) — the
-        // canonical vertical rhythm.
-        if self.consecutive_nls <= 2 {
-            self.out.push(Doc::hard_line());
+        // When collapse_blank_lines is false, preserve all blank lines.
+        if self.config.collapse_blank_lines && self.consecutive_nls > 2 {
+            return;
         }
+        self.out.push(Doc::hard_line());
     }
 
     /// Push hard lines until exactly one blank line separates the previous
     /// output from the next statement.
     fn ensure_blank_line(&mut self) {
-        while self.consecutive_nls < 2 {
-            self.hard_line();
+        if self.config.collapse_blank_lines {
+            while self.consecutive_nls < 2 {
+                self.hard_line();
+            }
         }
     }
 
@@ -2266,8 +2281,9 @@ mod tests {
     fn lowers_minimal_program() {
         let src = "x := 1 + 2\n";
         let p = parse(src).program;
-        let (doc, _) = lower_program(&p, src);
-        let s = crate::printer::render(&doc, 80, 4, Eol::Lf);
+        let config = FmtConfig::default();
+        let (doc, _) = lower_program(&p, src, &config);
+        let s = crate::printer::render(&doc, 80, 4, Eol::Lf, false);
         let p2 = parse(&s).program;
         assert_eq!(p.stmts.len(), p2.stmts.len());
     }
@@ -2279,8 +2295,9 @@ mod tests {
         // fingerprint loses the `for Trait` portion.
         let src = "impl Counter for Boxed<{\n    func inc(self,) -> int {\n        return self.n;\n    }\n}\n";
         let p = parse(src).program;
-        let (doc, eol) = lower_program(&p, src);
-        let out = crate::printer::render(&doc, 80, 4, eol);
+        let config = FmtConfig::default();
+        let (doc, eol) = lower_program(&p, src, &config);
+        let out = crate::printer::render(&doc, 80, 4, eol, config.use_tabs);
         let reparsed = parse(&out).program;
         assert_eq!(p.stmts.len(), reparsed.stmts.len());
 

@@ -10,7 +10,7 @@
 use crate::config::FmtConfig;
 use crate::error::FmtError;
 use crate::ir;
-use crate::printer;
+use crate::printer::{self, Eol};
 use crate::verify;
 use std::path::{Path, PathBuf};
 use zz_frontend::parse;
@@ -58,10 +58,27 @@ pub fn format_source(source: &str, config: &FmtConfig) -> Result<String, FmtErro
             summary,
         });
     }
-    let (doc, eol) = ir::lower_program(&parsed.program, source);
-    let mut out = printer::render(&doc, config.line_width, config.indent_width, eol);
-    if config.trailing_newline && !out.ends_with('\n') {
-        out.push('\n');
+    let (doc, eol) = ir::lower_program(&parsed.program, source, config);
+    let mut out = printer::render(
+        &doc,
+        config.line_width,
+        config.indent_width,
+        eol,
+        config.use_tabs,
+    );
+    if config.trailing_newline {
+        match eol {
+            Eol::Lf => {
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            Eol::Crlf => {
+                if !out.ends_with("\r\n") {
+                    out.push_str("\r\n");
+                }
+            }
+        }
     }
     verify::verify(Path::new("<source>"), &parsed.program, source, &out)?;
     Ok(out)
