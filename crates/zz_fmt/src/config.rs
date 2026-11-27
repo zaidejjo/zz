@@ -128,15 +128,20 @@ pub fn load_config(start_path: &Path) -> FmtConfig {
 
     // 1. Dedicated zzfmt.toml, walking up the directory tree.
     if let Some(config_path) = find_config_upwards(&dir, FMT_CONFIG_FILENAME) {
-        if let Ok(cfg) = parse_config_file(&config_path) {
-            return cfg;
+        match parse_config_file(&config_path) {
+            Ok(cfg) => return cfg,
+            Err(e) => eprintln!("warning: failed to parse {}: {e}", config_path.display()),
         }
     }
 
     // 2. [fmt] table inside zz.toml, walking up the directory tree.
     if let Some(zz_toml) = find_config_upwards(&dir, "zz.toml") {
-        if let Ok(cfg) = parse_zz_toml_fmt_section(&zz_toml) {
-            return cfg;
+        match parse_zz_toml_fmt_section(&zz_toml) {
+            Ok(cfg) => return cfg,
+            Err(e) => eprintln!(
+                "warning: failed to parse [fmt] in {}: {e}",
+                zz_toml.display()
+            ),
         }
     }
 

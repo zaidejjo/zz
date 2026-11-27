@@ -45,17 +45,36 @@ enum Cmd {
     HardBreak { indent: usize },
     /// A soft break: nothing if the rest fits, newline+indent if not.
     SoftBreak { indent: usize },
+    /// Context-sensitive break: use `broken` if currently broken,
+    /// otherwise use `flat`.
+    IfBreak { flat: Vec<Cmd>, broken: Vec<Cmd> },
 }
 
 /// Render `doc` into a `String` using Wadler's best-fit algorithm.
 ///
 /// `line_width` is the maximum number of columns per line.
-/// `indent_width` is the number of spaces per indent level.
+/// `indent_width` is the number of spaces (or tabs) per indent level.
 /// `eol` is the end-of-line sequence.
-pub fn render<'src>(doc: &Doc<'src>, line_width: usize, indent_width: usize, eol: Eol) -> String {
+/// `use_tabs` indents with `\t` instead of spaces when true.
+pub fn render<'src>(
+    doc: &Doc<'src>,
+    line_width: usize,
+    indent_width: usize,
+    eol: Eol,
+    use_tabs: bool,
+) -> String {
     let mut out = String::new();
     let cmds = flatten_doc(doc);
-    best_fit(line_width, indent_width, eol, &cmds, line_width, &mut out);
+    let mut state = FitState {
+        line_width,
+        indent_width,
+        eol,
+        use_tabs,
+        broken: false,
+        remaining: line_width,
+        out: &mut out,
+    };
+    best_fit(&mut state, &cmds);
     out
 }
 
@@ -91,12 +110,15 @@ fn flatten_doc_into<'src>(doc: &Doc<'src>, cmds: &mut Vec<Cmd>, indent: usize) {
         Doc::Indent { contents } => {
             flatten_doc_into(contents, cmds, indent + 1);
         }
-        Doc::IfBreak { flat, broken: _ } => {
-            // IfBreak is context-dependent (depends on whether the
-            // enclosing group broke). Nothing currently produces it,
-            // so flatten as the flat branch.
-            // TODO: Handle IfBreak properly when it's used by the IR.
-            flatten_doc_into(flat, cmds, indent);
+        Doc::IfBreak { flat, broken } => {
+            let mut flat_cmds = Vec::new();
+            flatten_doc_into(flat, &mut flat_cmds, indent);
+            let mut broken_cmds = Vec::new();
+            flatten_doc_into(broken, &mut broken_cmds, indent);
+            cmds.push(Cmd::IfBreak {
+                flat: flat_cmds,
+                broken: broken_cmds,
+            });
         }
     }
 }
@@ -107,62 +129,138 @@ fn flatten_doc_into<'src>(doc: &Doc<'src>, cmds: &mut Vec<Cmd>, indent: usize) {
 /// At each `Break`, tries flat (a single space) first if the rest of the
 /// stream fits in the remaining width; otherwise breaks to a new line
 /// with the command's indent level.
-fn best_fit(
+/// State threaded through the best-fit render pass.
+struct FitState<'a> {
     line_width: usize,
     indent_width: usize,
     eol: Eol,
-    cmds: &[Cmd],
+    use_tabs: bool,
+    /// Whether we've already broken to a new line; once true, subsequent
+    /// breaks also break (matching group-level broken state).
+    broken: bool,
+    /// Remaining columns on the current line.
     remaining: usize,
-    out: &mut String,
-) {
+    out: &'a mut String,
+}
+
+/// Wadler best-fit: render `cmds` optimally using `state`.
+///
+/// At each `Break`, tries flat (a single space) first if the rest of the
+/// stream fits in the remaining width; otherwise breaks to a new line
+/// with the command's indent level.
+fn best_fit<'a>(state: &mut FitState<'a>, cmds: &[Cmd]) {
     match cmds {
         [] => {}
         [Cmd::Text(t), rest @ ..] => {
-            out.push_str(t);
-            let new_remaining = remaining.saturating_sub(t.len());
-            best_fit(line_width, indent_width, eol, rest, new_remaining, out);
+            state.out.push_str(t);
+            state.remaining = state.remaining.saturating_sub(t.len());
+            best_fit(state, rest);
         }
         [Cmd::Break { indent }, rest @ ..] => {
-            // Try flat: break as a single space.
-            if remaining > 0 && fits(remaining.saturating_sub(1), rest, indent_width, line_width) {
-                out.push(' ');
-                let new_remaining = remaining.saturating_sub(1);
-                best_fit(line_width, indent_width, eol, rest, new_remaining, out);
+            if state.broken {
+                // Already broken: break again.
+                state.out.push_str(state.eol.as_str());
+                write_indent(*indent, state.indent_width, state.use_tabs, state.out);
+                state.remaining = state
+                    .line_width
+                    .saturating_sub(*indent * state.indent_width);
+                state.broken = true;
+                best_fit(state, rest);
+            } else if state.remaining > 0
+                && fits(
+                    state.remaining.saturating_sub(1),
+                    rest,
+                    state.indent_width,
+                    state.line_width,
+                    state.broken,
+                )
+            {
+                // Try flat: break as a single space.
+                state.out.push(' ');
+                state.remaining = state.remaining.saturating_sub(1);
+                state.broken = false;
+                best_fit(state, rest);
             } else {
                 // Break: newline + indent.
-                out.push_str(eol.as_str());
-                write_indent(*indent, indent_width, out);
-                let new_remaining = line_width.saturating_sub(*indent * indent_width);
-                best_fit(line_width, indent_width, eol, rest, new_remaining, out);
+                state.out.push_str(state.eol.as_str());
+                write_indent(*indent, state.indent_width, state.use_tabs, state.out);
+                state.remaining = state
+                    .line_width
+                    .saturating_sub(*indent * state.indent_width);
+                state.broken = true;
+                best_fit(state, rest);
             }
         }
         [Cmd::HardBreak { indent }, rest @ ..] => {
-            out.push_str(eol.as_str());
-            write_indent(*indent, indent_width, out);
-            let new_remaining = line_width.saturating_sub(*indent * indent_width);
-            best_fit(line_width, indent_width, eol, rest, new_remaining, out);
+            state.out.push_str(state.eol.as_str());
+            write_indent(*indent, state.indent_width, state.use_tabs, state.out);
+            state.remaining = state
+                .line_width
+                .saturating_sub(*indent * state.indent_width);
+            state.broken = true;
+            best_fit(state, rest);
         }
         [Cmd::SoftBreak { indent }, rest @ ..] => {
-            // Try flat: break as nothing.
-            if fits(remaining, rest, indent_width, line_width) {
-                best_fit(line_width, indent_width, eol, rest, remaining, out);
+            if state.broken {
+                // Already broken: break.
+                state.out.push_str(state.eol.as_str());
+                write_indent(*indent, state.indent_width, state.use_tabs, state.out);
+                state.remaining = state
+                    .line_width
+                    .saturating_sub(*indent * state.indent_width);
+                state.broken = true;
+                best_fit(state, rest);
+            } else if fits(
+                state.remaining,
+                rest,
+                state.indent_width,
+                state.line_width,
+                state.broken,
+            ) {
+                // Try flat: break as nothing.
+                best_fit(state, rest);
             } else {
                 // Break: newline + indent.
-                out.push_str(eol.as_str());
-                write_indent(*indent, indent_width, out);
-                let new_remaining = line_width.saturating_sub(*indent * indent_width);
-                best_fit(line_width, indent_width, eol, rest, new_remaining, out);
+                state.out.push_str(state.eol.as_str());
+                write_indent(*indent, state.indent_width, state.use_tabs, state.out);
+                state.remaining = state
+                    .line_width
+                    .saturating_sub(*indent * state.indent_width);
+                state.broken = true;
+                best_fit(state, rest);
             }
+        }
+        [Cmd::IfBreak {
+            flat,
+            broken: broken_cmds,
+        }, rest @ ..] => {
+            let branch = if state.broken {
+                broken_cmds.as_slice()
+            } else {
+                flat.as_slice()
+            };
+            // Process the chosen branch, then continue with the rest.
+            let mut combined = Vec::with_capacity(branch.len() + rest.len());
+            combined.extend_from_slice(branch);
+            combined.extend_from_slice(rest);
+            best_fit(state, &combined);
         }
     }
 }
 
 /// Check if `cmds` can fit in `remaining` columns on the current line.
 ///
+/// `broken` tracks whether we're currently broken (used for `IfBreak`).
 /// Treats `Break` as a space (1 column) and `SoftBreak` as nothing
 /// (0 columns). `HardBreak` starts a new line, so the rest is checked
 /// against a fresh line width.
-fn fits(remaining: usize, cmds: &[Cmd], indent_width: usize, line_width: usize) -> bool {
+fn fits(
+    remaining: usize,
+    cmds: &[Cmd],
+    indent_width: usize,
+    line_width: usize,
+    broken: bool,
+) -> bool {
     match cmds {
         [] => true,
         [Cmd::Text(t), rest @ ..] => {
@@ -172,28 +270,55 @@ fn fits(remaining: usize, cmds: &[Cmd], indent_width: usize, line_width: usize) 
                     rest,
                     indent_width,
                     line_width,
+                    broken,
                 )
         }
         [Cmd::Break { .. }, rest @ ..] => {
             // Break as a space (1 column).
-            remaining > 0 && fits(remaining.saturating_sub(1), rest, indent_width, line_width)
+            remaining > 0
+                && fits(
+                    remaining.saturating_sub(1),
+                    rest,
+                    indent_width,
+                    line_width,
+                    broken,
+                )
         }
         [Cmd::HardBreak { indent }, rest @ ..] => {
             // Hard break starts a new line; check rest against fresh width.
             let new_remaining = line_width.saturating_sub(*indent * indent_width);
-            fits(new_remaining, rest, indent_width, line_width)
+            fits(new_remaining, rest, indent_width, line_width, true)
         }
         [Cmd::SoftBreak { .. }, rest @ ..] => {
             // Soft break as nothing (0 columns).
-            fits(remaining, rest, indent_width, line_width)
+            fits(remaining, rest, indent_width, line_width, broken)
+        }
+        [Cmd::IfBreak {
+            flat,
+            broken: broken_cmds,
+        }, rest @ ..] => {
+            let branch = if broken {
+                broken_cmds.as_slice()
+            } else {
+                flat.as_slice()
+            };
+            fits(remaining, branch, indent_width, line_width, broken)
+                && fits(remaining, rest, indent_width, line_width, broken)
         }
     }
 }
 
-/// Write `indent * indent_width` spaces to `out`.
-fn write_indent(indent: usize, indent_width: usize, out: &mut String) {
-    for _ in 0..indent * indent_width {
-        out.push(' ');
+/// Write `indent` levels of indentation to `out`, using tabs when
+/// `use_tabs` is true and spaces otherwise.
+fn write_indent(indent: usize, indent_width: usize, use_tabs: bool, out: &mut String) {
+    if use_tabs {
+        for _ in 0..indent {
+            out.push('\t');
+        }
+    } else {
+        for _ in 0..indent * indent_width {
+            out.push(' ');
+        }
     }
 }
 
@@ -203,13 +328,13 @@ mod tests {
 
     #[test]
     fn best_fit_empty_doc() {
-        let out = render(&Doc::Nil, 80, 4, Eol::Lf);
+        let out = render(&Doc::Nil, 80, 4, Eol::Lf, false);
         assert_eq!(out, "");
     }
 
     #[test]
     fn best_fit_plain_text() {
-        let out = render(&Doc::Text("hello world"), 80, 4, Eol::Lf);
+        let out = render(&Doc::Text("hello world"), 80, 4, Eol::Lf, false);
         assert_eq!(out, "hello world");
     }
 
@@ -220,7 +345,7 @@ mod tests {
             Doc::Text("x"),
             Doc::concat(Doc::Line, Doc::concat(Doc::Text("= 1 + 2"), Doc::HardLine)),
         );
-        let out = render(&doc, 80, 4, Eol::Lf);
+        let out = render(&doc, 80, 4, Eol::Lf, false);
         assert_eq!(out, "x = 1 + 2\n");
     }
 
@@ -229,7 +354,7 @@ mod tests {
         // A group that exceeds line width should break
         let long_text = "x".repeat(100);
         let doc = Doc::Text(&long_text);
-        let out = render(&doc, 80, 4, Eol::Lf);
+        let out = render(&doc, 80, 4, Eol::Lf, false);
         // Text can't be broken, so it overflows (same as first-fit)
         assert_eq!(out, long_text);
     }
@@ -240,7 +365,7 @@ mod tests {
             Doc::Text("line1"),
             Doc::concat(Doc::HardLine, Doc::Text("line2")),
         );
-        let out = render(&doc, 80, 4, Eol::Lf);
+        let out = render(&doc, 80, 4, Eol::Lf, false);
         assert_eq!(out, "line1\nline2");
     }
 
@@ -248,7 +373,7 @@ mod tests {
     fn best_fit_soft_line_disappears_when_flat() {
         // SoftLine between two short texts should disappear when flat
         let doc = Doc::concat(Doc::Text("a"), Doc::concat(Doc::SoftLine, Doc::Text("b")));
-        let out = render(&doc, 80, 4, Eol::Lf);
+        let out = render(&doc, 80, 4, Eol::Lf, false);
         assert_eq!(out, "ab");
     }
 
@@ -267,14 +392,14 @@ mod tests {
                 ),
             ),
         );
-        let out = render(&doc, 80, 4, Eol::Lf);
+        let out = render(&doc, 80, 4, Eol::Lf, false);
         assert_eq!(out, "func main() {\n    return 0;\n}");
     }
 
     #[test]
     fn best_fit_crlf_eol() {
         let doc = Doc::concat(Doc::Text("a"), Doc::concat(Doc::HardLine, Doc::Text("b")));
-        let out = render(&doc, 80, 4, Eol::Crlf);
+        let out = render(&doc, 80, 4, Eol::Crlf, false);
         assert_eq!(out, "a\r\nb");
     }
 
@@ -286,7 +411,7 @@ mod tests {
         for p in parts {
             doc = Doc::concat(doc, Doc::concat(Doc::Line, p));
         }
-        let out = render(&doc, 40, 4, Eol::Lf);
+        let out = render(&doc, 40, 4, Eol::Lf, false);
         // Each line should be at most 40 chars
         for line in out.lines() {
             assert!(
@@ -304,9 +429,51 @@ mod tests {
         let src =
             "func add(a:int,b:int)->int{return a+b}\nfunc main() -> int { return add(1, 2) }\n";
         let parsed = zz_frontend::parse(src);
-        let (doc, eol) = crate::ir::lower_program(&parsed.program, src);
-        let out = render(&doc, 80, 4, eol);
+        let config = crate::config::FmtConfig::default();
+        let (doc, eol) = crate::ir::lower_program(&parsed.program, src, &config);
+        let out = render(&doc, 80, 4, eol, config.use_tabs);
         let reparsed = zz_frontend::parse(&out);
         assert_eq!(parsed.program.stmts.len(), reparsed.program.stmts.len());
+    }
+
+    #[test]
+    fn best_fit_if_break_uses_flat_when_not_broken() {
+        // `IfBreak` with `broken` = `;` should use `flat` (`,`) when not broken.
+        let flat = Doc::Text(",");
+        let broken = Doc::Text(";");
+        let doc = Doc::concat(
+            Doc::Text("a"),
+            Doc::concat(
+                Doc::IfBreak {
+                    flat: Box::new(flat),
+                    broken: Box::new(broken),
+                },
+                Doc::Text("b"),
+            ),
+        );
+        let out = render(&doc, 80, 4, Eol::Lf, false);
+        assert_eq!(out, "a,b");
+    }
+
+    #[test]
+    fn best_fit_if_break_uses_broken_when_broken() {
+        // `IfBreak` should use `broken` branch after a HardBreak.
+        let flat = Doc::Text(",");
+        let broken = Doc::Text(";");
+        let doc = Doc::concat(
+            Doc::Text("a"),
+            Doc::concat(
+                Doc::HardLine,
+                Doc::concat(
+                    Doc::IfBreak {
+                        flat: Box::new(flat),
+                        broken: Box::new(broken),
+                    },
+                    Doc::Text("b"),
+                ),
+            ),
+        );
+        let out = render(&doc, 80, 4, Eol::Lf, false);
+        assert_eq!(out, "a\n;b");
     }
 }
