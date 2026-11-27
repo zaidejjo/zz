@@ -8,7 +8,7 @@
 //! `{...}` is an f-string interpolation (tight), `{...}` is a
 //! function body (block with newlines), etc.
 
-use crate::config::{FmtConfig, LineEnding};
+use crate::config::{FmtConfig, LineEnding, TrailingComma};
 use crate::doc::Doc;
 use crate::printer::Eol;
 use crate::trivia::{classify, ClassifiedKind, ClassifiedTrivia};
@@ -606,6 +606,10 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 }
                 emit_item(&mut *self, i);
             }
+            // trailing_comma = "Always" adds a trailing comma even on one line.
+            if self.config.trailing_comma == TrailingComma::Always {
+                self.text(",");
+            }
             return;
         }
 
@@ -614,7 +618,13 @@ impl<'src, 'a> Ctx<'src, 'a> {
         for c in &trailing[0] {
             self.emit_comment_trailing(c);
         }
-        let trailing_comma = self.has_trailing_comma(last_end, close_start);
+        let source_had_trailing_comma = self.has_trailing_comma(last_end, close_start);
+        // Effective trailing comma decision based on config policy.
+        let effective_trailing_comma = match self.config.trailing_comma {
+            TrailingComma::Never => false,
+            TrailingComma::MultiLineOnly => source_had_trailing_comma,
+            TrailingComma::Always => true,
+        };
         let saved = std::mem::take(&mut self.out);
         for i in 0..items.len() {
             if own_line[i].is_empty() {
@@ -625,7 +635,7 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 self.emit_comment_own_line(c);
             }
             emit_item(&mut *self, i);
-            if i + 1 < items.len() || trailing_comma {
+            if i + 1 < items.len() || effective_trailing_comma {
                 self.text(",");
             }
             for c in &trailing[i + 1] {
