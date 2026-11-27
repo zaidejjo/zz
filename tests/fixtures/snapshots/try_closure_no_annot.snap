@@ -6,13 +6,13 @@ error: closure must declare `-> Result<T, E>` to use `try`
 |
 7 | f := |x| try fetch()
 | ^^^^^^^^^^^
-error: type mismatch: expected `int`, found `Result<int, str>`
+error: Z0002: type mismatch: expected `int`, found `Result<int, str>`
 
 --> <path>
 |
 7 | f := |x| try fetch()
 | ^^^^^^^^^^^
-error: cannot infer the type of `try_closure_no_annot.f`; add a type annotation
+error: Z0002: cannot infer the type of `try_closure_no_annot.f`; add a type annotation
 
 --> <path>
 |

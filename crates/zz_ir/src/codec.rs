@@ -456,10 +456,16 @@ fn encode_op(v: &mut Vec<u8>, op: &Op) {
             put_u16(v, *idx);
             put_u16(v, *dst);
         }
-        Op::IndexIntSlot { arr, idx, dst } => {
+        Op::IndexIntSlot {
+            arr,
+            idx,
+            dst,
+            safe,
+        } => {
             put_u16(v, *arr);
             put_u16(v, *idx);
             put_u16(v, *dst);
+            put_u8(v, *safe as u8);
         }
         Op::IndexDictInt { dict, key, dst } => {
             put_u16(v, *dict);
@@ -1391,6 +1397,7 @@ fn decode_op(r: &mut Reader) -> Result<Op, IrError> {
             arr: r.u16()?,
             idx: r.u16()?,
             dst: r.u16()?,
+            safe: r.u8()? != 0,
         }),
         97 => Ok(Op::IndexDictInt {
             dict: r.u16()?,

@@ -4,7 +4,7 @@ use zz_checker_core::{Checker, DefinedBinding};
 use zz_diag_core::{error_at, warning_at, ErrorCode, FixIt};
 use zz_span_ast::span::Span;
 use zz_structs::StructOps;
-use zz_suggest::{suggest_all, suggest_confident, suggest_dotted, suggest_top3};
+use zz_suggest::{suggest_all, suggest_dotted, suggest_top3};
 use zz_types::Type;
 
 // Import suggestions and canonical resolution derive from the single
@@ -366,7 +366,8 @@ impl ScopeOps for Checker {
                                 "cannot use generic function `{name}` as a value; call it with arguments"
                             ),
                             span,
-                        ));
+                        )
+                        .with_code(ErrorCode(2)));
                         return Type::Error;
                     }
                 }
@@ -399,10 +400,20 @@ impl ScopeOps for Checker {
                 }
                 let mut diag =
                     error_at(format!("undefined variable `{name}`"), span).with_code(ErrorCode(1));
-                // Single best suggestion only — a missing hint is better than a wrong one.
-                if let Some(best) = suggest_top3(name, &candidates).first() {
-                    diag = diag.with_note(format!("did you mean `{best}`?"));
-                    diag = diag.with_fixit(FixIt::safe(span, best.to_string(), "replace variable"));
+                // Suggest up to 3 closest matches when ambiguous; a missing
+                // hint is better than a wrong one.
+                let top = suggest_top3(name, &candidates);
+                match top.len() {
+                    0 => {}
+                    1 => {
+                        diag = diag
+                            .with_note(format!("did you mean `{}`?", top[0]))
+                            .with_fixit(FixIt::safe(span, top[0].to_string(), "replace variable"));
+                    }
+                    _ => {
+                        let names: Vec<String> = top.iter().map(|s| s.to_string()).collect();
+                        diag = diag.with_note(format!("did you mean `{}`?", names.join("`, `")));
+                    }
                 }
 
                 // If the name looks like `module.func` and matches a known
@@ -713,7 +724,7 @@ impl ScopeOps for Checker {
                         .filter(|k| k.starts_with(&prefix) && !k[prefix.len()..].contains('.'))
                         .map(|k| k.strip_prefix(&prefix).unwrap())
                         .collect();
-                    if let Some(suggestion) = suggest_confident(&parts[1], &members) {
+                    if let Some(suggestion) = suggest_top3(&parts[1], &members).first() {
                         diag = diag.with_note(format!(
                             "`{mod_name}` is imported; did you mean `{mod_name}.{suggestion}`?"
                         ));
@@ -809,10 +820,10 @@ impl ScopeOps for Checker {
                             Type::Dict(Box::new(Type::Str), Box::new(Type::Str))
                         }
                         _ => {
-                            self.errors.push(error_at(
-                                format!("http.request has no field `{field}`"),
-                                span,
-                            ));
+                            self.errors.push(
+                                error_at(format!("http.request has no field `{field}`"), span)
+                                    .with_code(ErrorCode(16)),
+                            );
                             return Type::Error;
                         }
                     };
@@ -833,7 +844,8 @@ impl ScopeOps for Checker {
                     let mut diag = error_at(
                         format!("cannot access field `{field}` on a value of type `{other}`"),
                         span,
-                    );
+                    )
+                    .with_code(ErrorCode(18));
                     // Unimported-but-known std module root (`sqlz.open`
                     // without `import std.sqlz`): suggest the import even
                     // when the root name itself is bound to something else

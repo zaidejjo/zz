@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use zz_arena::Interner;
-use zz_diag_core::{error_at, RawDiag, SecondaryLabel};
+use zz_diag_core::{error_at, ErrorCode, RawDiag, SecondaryLabel};
 use zz_span_ast::ast::{Stmt, Ty};
 use zz_span_ast::span::Span;
 use zz_types::Type;
@@ -402,6 +402,10 @@ pub struct Checker {
     /// Used to avoid warning on unused stdlib functions that happen to
     /// not appear in `used_names`.
     pub local_funcs: std::collections::HashSet<String>,
+    /// Structs defined in the current program (not import-seeded).
+    /// Used to scope unused-field warnings to locally-owned structs;
+    /// imported pub structs may be used externally.
+    pub local_structs: std::collections::BTreeSet<String>,
     /// Names defined in the current scope with their spans — for unused
     /// variable warnings. Each scope level has its own map.
     pub defined_names: Vec<HashMap<String, DefinedBinding>>,
@@ -572,6 +576,7 @@ impl Checker {
             deferred_type_errors: Vec::new(),
             pub_names: std::collections::HashSet::new(),
             local_funcs: std::collections::HashSet::new(),
+            local_structs: std::collections::BTreeSet::new(),
             test_funcs: std::collections::HashSet::new(),
             defined_names: vec![HashMap::new()],
             had_undefined_var: false,
@@ -735,6 +740,15 @@ impl Checker {
             other => other.to_string(),
         };
         let mut diag = error_at(msg, span);
+        match err.message.as_str() {
+            "type mismatch" => {
+                diag = diag.with_code(ErrorCode(2));
+            }
+            "function arity mismatch" | "tuple arity mismatch" => {
+                diag = diag.with_code(ErrorCode(21));
+            }
+            _ => {}
+        }
         // Add secondary labels showing where each type came from, when we
         // have span info (e.g. "expected `int` because of this annotation
         // here", "found `str` at this variable declaration").
@@ -889,7 +903,8 @@ impl Checker {
                         "returning unwrapped `Result<{payload}, {err}>` where `{r}` is expected"
                     ),
                     span,
-                );
+                )
+                .with_code(ErrorCode(2));
                 diag = diag.with_note(format!(
                     "use `?` to propagate (needs `-> Result<{payload}, {err}>`)"
                 ));
@@ -908,7 +923,8 @@ impl Checker {
                 let mut diag = error_at(
                     format!("returning plain `{v}` where `Result<{payload}, {err}>` is expected"),
                     span,
-                );
+                )
+                .with_code(ErrorCode(2));
                 diag = diag.with_note("wrap the value: `.ok(value)`".to_string());
                 diag = diag.with_note("or propagate a fallible call with `?`".to_string());
                 self.errors.push(diag);
@@ -927,7 +943,8 @@ impl Checker {
             // Divergent condition: unreachable, vacuously fine.
             Type::Never => {}
             other => {
-                let mut diag = error_at(format!("expected `bool`, found `{other}`"), span);
+                let mut diag = error_at(format!("expected `bool`, found `{other}`"), span)
+                    .with_code(ErrorCode(15));
                 // A `str` that looks like a GLOB/pattern is a common mistake
                 // where the author meant a truthy check, not a boolean.
                 if matches!(other, Type::Str) {
@@ -965,10 +982,10 @@ impl Checker {
             // must not spawn a new "index must be `int`" diagnostic (#711).
             Type::Error => {}
             other => {
-                self.errors.push(error_at(
-                    format!("index must be `int`, found `{other}`"),
-                    span,
-                ));
+                self.errors.push(
+                    error_at(format!("index must be `int`, found `{other}`"), span)
+                        .with_code(ErrorCode(11)),
+                );
             }
         }
     }

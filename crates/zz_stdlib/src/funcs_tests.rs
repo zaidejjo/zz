@@ -340,7 +340,7 @@ fn has_all_modules() {
     ] {
         assert!(funcs.contains_key(name), "missing {name}");
     }
-    assert_eq!(funcs.len(), 700);
+    assert_eq!(funcs.len(), 699);
 }
 
 #[test]

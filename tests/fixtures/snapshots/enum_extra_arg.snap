@@ -6,4 +6,10 @@ error: variant `enum_extra_arg.Token.Eof` takes no arguments but 1 given
 |
 9 | t := Token.Eof(1)
 | ^^^^^^^^^^^^
+warning: unused enum variant `enum_extra_arg.Token.Eof`, consider prefixing with `_Eof` or removing it
+
+= variant is never constructed or pattern-matched
+warning: unused enum variant `enum_extra_arg.Token.IntLit`, consider prefixing with `_IntLit` or removing it
+
+= variant is never constructed or pattern-matched
 zz: 1 file(s) failed type-check

@@ -9,6 +9,7 @@
 func math.sqrt(v: float) -> float {
     if v < 0.0 {
         return 0.0 / 0.0 // NaN
+        
     }
     if v == 0.0 {
         return 0.0
@@ -28,6 +29,7 @@ func math.sqrt(v: float) -> float {
 func math.log(x: float) -> float {
     if x <= 0.0 {
         return 0.0 / 0.0 // NaN
+        
     }
     // log(x) = 2 * (z + z^3/3 + z^5/5 + ...), z = (x-1)/(x+1)
     // Range-reduce x to [1, 2): log(x) = log(x/2^k) + k*log(2)
@@ -63,22 +65,25 @@ func math.log10(x: float) -> float {
 // ── Exponential ────────────────────────────────────────────────────────────
 
 func math.exp(x: float) -> float {
-    if x > 700.0 {
+    // f64 max ≈ 1.8e308; e^709 ≈ 8.2e307 fits, e^710 ≈ 2.2e308 overflows.
+    if x > 709.0 {
         return 1.0 / 0.0 // Inf
         
     }
-    if x < -700.0 {
+    if x < -745.0 {
         return 0.0
     }
     // Taylor series: e^x = sum x^n / n!
-    // Range reduction: e^x = (e^(x/k))^k for integer k
-    k := 16
+    // Range reduction: e^x = (e^(x/k))^k for integer k.
+    // k must be large enough that |y| = |x|/k is small enough for the Taylor
+    // terms to converge fully within the term limit.
+    k := 128
     y := x / float(k)
-    // Taylor series for e^y (|y| < 44, converges well)
+    // Taylor series for e^y (|y| <= 5.47 for x in [-700, 700], terms peak near n=5).
     term := 1.0
     sum := 1.0
     n := 1
-    while n < 30 {
+    while n < 50 {
         term = term * y / float(n)
         sum = sum + term
         n = n + 1
@@ -108,45 +113,52 @@ func math.pow(x: float, y: float) -> float {
     }
     if x < 0.0 {
         // Negative base: only defined for integer y
-        if y != float(int(y)) {
-            return 0.0 / 0.0 // NaN
-            
-        }
-        // x^y for negative x and integer y
-        result := math.exp(y * math.log(-x))
         match int(y) {
-            .some(ni) => if ni % 2 != 0 {
-                return -result
+            .some(ni) => {
+                if float(ni) != y {
+                    return 0.0 / 0.0 // NaN (fractional exponent)
+                    
+                }
+                // x^y for negative x and integer y
+                result := math.exp(y * math.log(-x))
+                if ni % 2 != 0 {
+                    return -result
+                }
+                return result
             }
             .none => return 0.0 / 0.0
         }
-        return result
     }
     // For integer exponents, use repeated multiplication (exact)
     match int(y) {
         .some(ni) => {
-            if ni >= 0 {
-                result := 1.0
-                i := 0
-                while i < ni {
-                    result = result * x
-                    i = i + 1
+            if float(ni) == y {
+                // y is truly integral: use exact repeated multiplication.
+                if ni >= 0 {
+                    result := 1.0
+                    i := 0
+                    while i < ni {
+                        result = result * x
+                        i = i + 1
+                    }
+                    return result
+                } else {
+                    // Negative exponent: 1 / x^(-y)
+                    ni_abs := -ni
+                    result := 1.0
+                    i := 0
+                    while i < ni_abs {
+                        result = result * x
+                        i = i + 1
+                    }
+                    return 1.0 / result
                 }
-                return result
-            } else {
-                // Negative exponent: 1 / x^(-y)
-                ni_abs := -ni
-                result := 1.0
-                i := 0
-                while i < ni_abs {
-                    result = result * x
-                    i = i + 1
-                }
-                return 1.0 / result
             }
         }
-        .none => return math.exp(y * math.log(x))
+        .none => {}
     }
+    // Fractional exponent: exp(y * log(x))
+    return math.exp(y * math.log(x))
 }
 
 // ── Hypotenuse ─────────────────────────────────────────────────────────────
@@ -183,22 +195,40 @@ func math.root(x: float, n: float) -> float {
         return 0.0 / 0.0 // NaN
         
     }
+    if x == 0.0 {
+        return 0.0
+    }
     if x < 0.0 {
         // Negative root: only defined for odd integer n
-        if n != float(int(n)) {
-            return 0.0 / 0.0 // NaN
-            
-        }
         match int(n) {
-            .some(ni) => if ni % 2 == 0 {
-                return 0.0 / 0.0 // NaN (even root of negative)
-                
+            .some(ni) => {
+                if float(ni) != n {
+                    return 0.0 / 0.0 // NaN (fractional exponent)
+                    
+                }
+                if ni % 2 == 0 {
+                    return 0.0 / 0.0 // NaN (even root of negative)
+                    
+                }
             }
             .none => return 0.0 / 0.0
         }
-        return -math.exp(math.log(-x) / n)
+        // Negative root: solve z^n = -x, then negate. Newton-Raphson refines z.
+        neg_x := 0.0 - x
+        z := math.exp(math.log(neg_x) / n)
+        z_n := math.pow(z, n)
+        z_nm1 := math.pow(z, n - 1.0)
+        z = z - (z_n - neg_x) / (n * z_nm1)
+        return 0.0 - z
     }
-    return math.exp(math.log(x) / n)
+    result := math.exp(math.log(x) / n)
+    // Newton-Raphson refinement: solve y^n = x
+    // y_{k+1} = y_k - (y_k^n - x) / (n * y_k^(n-1))
+    y := result
+    y_n := math.pow(y, n)
+    y_nm1 := math.pow(y, n - 1.0)
+    y = y - (y_n - x) / (n * y_nm1)
+    return y
 }
 
 // ── NaN / Infinity ─────────────────────────────────────────────────────────
@@ -212,7 +242,6 @@ func math.is_inf(x: float) -> bool {
     return x == math.INF || x == -math.INF
 }
 
-// ── Random ─────────────────────────────────────────────────────────────────
 // ── Random ─────────────────────────────────────────────────────────────────
 
 func math.random() -> float {

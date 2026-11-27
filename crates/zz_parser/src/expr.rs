@@ -1523,12 +1523,16 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn parse_else(&mut self) -> Option<Box<Expr>> {
-        // `else` may appear on the line after the `if` block's `}`, so skip
-        // any StmtEnd/newline tokens to find it. But only consume them if
-        // `else` actually follows — otherwise leave the StmtEnd as the
-        // terminator for a bare `if` statement (parse_stmt_list expects it).
         let saved = self.pos;
-        self.skip_stmt_ends();
+        // `else` may fall on the line after the closing `}` (an `if/else`
+        // statement formatted across lines). Skip statement ends only when
+        // `else` actually follows, so the stmt-end that terminates the `if`
+        // statement itself isn't consumed when there is no `else`.
+        if self.at(TokenKind::Else)
+            || (self.at(TokenKind::StmtEnd) && self.peek_kind_at(1) == TokenKind::Else)
+        {
+            self.skip_stmt_ends();
+        }
         if !self.eat(TokenKind::Else) {
             self.pos = saved;
             return None;

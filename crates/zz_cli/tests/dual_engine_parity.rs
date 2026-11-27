@@ -1746,6 +1746,10 @@ parity_strict!(
     "concurrent_http_test.zz"
 );
 parity_strict_error!(parity_err_type_mismatch, "type_mismatch.zz");
+parity_strict_error!(
+    parity_err_array_literal_type_mismatch,
+    "array_literal_type_mismatch.zz"
+);
 parity_strict_error!(parity_err_alias_cycle, "alias_cycle.zz");
 parity_strict_error!(parity_err_alias_dup, "alias_dup.zz");
 parity_strict_error!(parity_err_alias_arity, "alias_arity.zz");
@@ -1915,6 +1919,11 @@ parity_strict!(
     parity_stdlib_matrix_mul_test,
     "stdlib",
     "matrix_mul_test.zz"
+);
+parity_strict!(
+    parity_stdlib_mini_matrix_return_test,
+    "stdlib",
+    "mini_matrix_return_test.zz"
 );
 parity_strict!(parity_stdlib_math_consts, "stdlib", "math_consts.zz");
 parity_strict!(
@@ -2456,7 +2465,7 @@ fn release_vm_bin() -> PathBuf {
 
 /// True when native legs must be skipped (Windows CI: no AOT backend).
 fn quad_skip_native() -> bool {
-    std::env::var("ZZ_SKIP_NATIVE").is_ok()
+    cfg!(windows) || std::env::var("ZZ_SKIP_NATIVE").is_ok()
 }
 
 /// One matrix leg outcome: (exit, stdout, stderr).

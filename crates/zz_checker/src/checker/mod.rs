@@ -361,8 +361,11 @@ fn check_program_impl(
             }
             checker.collect_struct(stmt);
             if *pub_ {
-                pub_structs_set.insert(full_name);
+                pub_structs_set.insert(full_name.clone());
             }
+            // Track locally-defined structs for unused-field warnings
+            // (separate from import-seeded structs in checker.structs).
+            checker.local_structs.insert(full_name.clone());
         }
     }
     // Convert raw targets now that every struct and alias name is known.
@@ -1181,7 +1184,12 @@ fn check_program_impl(
     // Emit unused struct field warnings. A field that is never read is
     // dead code. Only check structs defined in the current program — pub
     // structs may be used externally. Skip `_`-prefixed field names.
-    for (sname, ssig) in &checker.structs {
+    // Import-seeded structs (e.g. `lib.Point`) are owned by another module
+    // and must not trigger dead-field warnings here.
+    for sname in &checker.local_structs {
+        let Some(ssig) = checker.structs.get(sname) else {
+            continue;
+        };
         if checker.pub_names.contains(sname.as_str()) {
             continue;
         }
@@ -1189,7 +1197,7 @@ fn check_program_impl(
             if fname.starts_with('_')
                 || checker
                     .used_struct_fields
-                    .contains(&(sname.to_string(), fname.to_string()))
+                    .contains(&(sname.clone(), fname.to_string()))
             {
                 continue;
             }

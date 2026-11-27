@@ -13,4 +13,10 @@ warning: unused variable `p` is never read, consider prefixing with `_p`
 5 | p := Point{x: 1}
 | ^ help: replace with `_p`
 
+warning: unused struct field `missing_field.Point.x`, consider prefixing with `_x` or removing it
+
+= field is never read
+warning: unused struct field `missing_field.Point.y`, consider prefixing with `_y` or removing it
+
+= field is never read
 zz: 1 file(s) failed type-check

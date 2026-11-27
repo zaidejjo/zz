@@ -1,6 +1,6 @@
 first module that broke: <path> <path>
 
-error: struct `unknown_field.Point` has no field `z`
+error: Z0010: struct `unknown_field.Point` has no field `z`
 
 --> <path>
 |
@@ -8,4 +8,10 @@ error: struct `unknown_field.Point` has no field `z`
 | ^^^ help: replace with `x`
 
 = did you mean field `x`?
+warning: unused struct field `unknown_field.Point.x`, consider prefixing with `_x` or removing it
+
+= field is never read
+warning: unused struct field `unknown_field.Point.y`, consider prefixing with `_y` or removing it
+
+= field is never read
 zz: 1 file(s) failed type-check

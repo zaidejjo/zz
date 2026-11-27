@@ -14,7 +14,10 @@ func main() {
     println(str.reverse("abc"))
     println(str.is_empty(""))
     println(math.min(1, 2))
-    println(math.sum([1, 2, 3]))
+    match math.sum([1, 2, 3]) {
+        .some(v) => println(v)
+        .none => println("none")
+    }
     println(str.length("abc"))
     println("bare_purezz_call_ok")
 }

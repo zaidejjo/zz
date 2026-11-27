@@ -1,20 +1,20 @@
 first module that broke: <path> <path>
 
-error: type mismatch: expected `int`, found `str`
+error: Z0002: type mismatch: expected `int` for `f`, found `str`
 
 --> <path>
 |
 7 | @bad
 | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 = parameter `f` expects `func(int) -> int`
-error: type mismatch: expected `int`, found `str`
+error: Z0002: type mismatch: expected `int` for `_0`, found `str`
 
 --> <path>
 |
 8 | func hello(name: str) -> str {
 | ^^^^
 = parameter `_0` expects `int`
-error: type mismatch: expected `str`, found `int`
+error: Z0002: type mismatch: expected `str`, found `int`
 
 --> <path>
 |

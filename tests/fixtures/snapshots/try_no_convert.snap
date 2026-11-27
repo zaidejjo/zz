@@ -10,4 +10,10 @@ hint: add `impl try_no_convert.ErrA { func convert_to_try_no_convert.ErrB(self) 
 warning: unused private function `try_no_convert.load`, consider prefixing with `_try_no_convert.load` or removing it
 
 = function is never called or referenced
+warning: unused struct field `try_no_convert.ErrA.msg`, consider prefixing with `_msg` or removing it
+
+= field is never read
+warning: unused struct field `try_no_convert.ErrB.msg`, consider prefixing with `_msg` or removing it
+
+= field is never read
 zz: 1 file(s) failed type-check

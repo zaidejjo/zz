@@ -873,27 +873,14 @@ pub fn build_with(
 /// users of the bundled toolchain. Clang forwards `-Wl,` verbatim to
 /// whichever linker it drives; lld-link/link.exe spell the same request
 /// `/INCLUDE:<sym>`, which `zig cc` rejects, so zig always gets
-/// `-Wl,-u,<sym>` instead (lld-link understands it).
-pub(crate) fn force_undef_flag(symbol: &str, target: Option<&str>, zig: bool) -> Option<String> {
-    // On macOS, runtime symbols are declared `__attribute__((weak_import))`
-    // which allows them to be undefined at link time. `-Wl,-u` forces them
-    // to be required, which conflicts with weak_import and causes "undefined
-    // symbol" linker errors. Skip `-u` on macOS; normal reference resolution
-    // pulls in the archive members when the symbols are actually needed.
-    if zz_codegen_ffi::target_os(target) == zz_codegen_ffi::TargetOs::Macos {
-        return None;
-    }
+/// `-Wl,-u,<sym>` (lld-link understands it identically on every platform,
+/// including Windows). Windows has no weak symbols, so `zz_float_format_raw`
+/// is a strong reference in `strings.o` (pulled from libzz_rt.a) that must
+/// be resolved from zz_native_rt.lib. A bare `/INCLUDE:<sym>` would be read
+/// by clang as an input file path, not a linker flag, so it never works.
+pub(crate) fn force_undef_flag(symbol: &str, target: Option<&str>, _zig: bool) -> Option<String> {
     let sym = zz_codegen_ffi::force_undef_symbol(symbol, target);
-    // `zig cc` rejects the MSVC spelling outright ("unsupported linker
-    // arg: /INCLUDE:<sym>") even when it links for a Windows target,
-    // because its driver parses `-Wl,` itself and only maps GNU-style
-    // args. lld-link accepts `-u <sym>` identically, so zig always gets
-    // the GNU spelling; plain clang keeps `/INCLUDE:` for link.exe.
-    if !zig && zz_codegen_ffi::target_os(target) == zz_codegen_ffi::TargetOs::Windows {
-        Some(format!("-Wl,/INCLUDE:{sym}"))
-    } else {
-        Some(format!("-Wl,-u,{sym}"))
-    }
+    Some(format!("-Wl,-u,{sym}"))
 }
 
 /// Shared link inputs for single-TU and multi-TU builds: precompiled
@@ -938,7 +925,26 @@ fn push_link_inputs(
             // libzz_stdlib.a duplicates runtime symbols from libzz_rt.a
             // (each stdlib module object includes RUNTIME_C). Allow multiple
             // definitions — the first definition (libzz_rt.a) wins.
-            cmd.arg("-Wl,--allow-multiple-definition");
+            // GNU ld: `--allow-multiple-definition`. ld64 (macOS):
+            // `-Wl,-multiply_defined,suppress`. Windows linker: handled by
+            // COMDAT folding, no flag needed.
+            match zz_codegen_ffi::target_os(target) {
+                zz_codegen_ffi::TargetOs::Macos => {
+                    let _ = cmd.arg("-Wl,-multiply_defined,suppress");
+                }
+                zz_codegen_ffi::TargetOs::Windows => {}
+                _ => {
+                    // `--allow-multiple-definition` lets libzz_stdlib.a and
+                    // libzz_rt.a share runtime symbols (first definition wins).
+                    // GNU ld and lld accept it; zig cc (0.17.x) rejects it with
+                    // "unsupported linker arg". The prebuilt archives don't
+                    // actually define conflicting global symbols, so skip it
+                    // when driving the link through zig cc.
+                    if !clang.zig {
+                        let _ = cmd.arg("-Wl,--allow-multiple-definition");
+                    }
+                }
+            }
         }
     }
     // Unified Rust native runtime: link the static library providing FFI
@@ -1802,15 +1808,17 @@ mod tests {
             ),
             Some("-Wl,-u,zz_float_format_raw".to_string())
         );
-        // macOS: weak_import symbols conflict with `-u`, skip the flag.
+        // macOS: `zz_float_format_raw` is weak_import but `libzz_native_rt.a`
+        // is always linked for native builds, so `-Wl,-u` resolves it cleanly.
         assert_eq!(
             force_undef_flag("zz_float_format_raw", Some("aarch64-apple-darwin"), false),
-            None
+            Some("-Wl,-u,_zz_float_format_raw".to_string())
         );
-        // lld-link / link.exe spell it `/INCLUDE:<sym>`.
+        // lld-link (clang's default Windows linker) understands `-u` like
+        // GNU ld; a bare /INCLUDE:<sym> is read by clang as an input file.
         assert_eq!(
             force_undef_flag("zz_float_format_raw", Some("x86_64-pc-windows-msvc"), false),
-            Some("-Wl,/INCLUDE:zz_float_format_raw".to_string())
+            Some("-Wl,-u,zz_float_format_raw".to_string())
         );
         // Zig parses `-Wl,` itself and rejects the MSVC spelling even for
         // Windows targets ("unsupported linker arg: /INCLUDE:..."), so it
@@ -1825,16 +1833,20 @@ mod tests {
         );
         // Host builds (no explicit target) use the same passthrough form.
         if cfg!(windows) {
+            // lld-link understands `-u`; /INCLUDE:<sym> is an input file to clang.
             assert_eq!(
                 force_undef_flag("sym", None, false),
-                Some("-Wl,/INCLUDE:sym".to_string())
+                Some("-Wl,-u,sym".to_string())
             );
             assert_eq!(
                 force_undef_flag("sym", None, true),
                 Some("-Wl,-u,sym".to_string())
             );
         } else if cfg!(target_os = "macos") {
-            assert_eq!(force_undef_flag("sym", None, false), None);
+            assert_eq!(
+                force_undef_flag("sym", None, false),
+                Some("-Wl,-u,_sym".to_string())
+            );
         } else {
             assert_eq!(
                 force_undef_flag("sym", None, false),

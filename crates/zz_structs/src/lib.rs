@@ -13,7 +13,7 @@
 //! so no AST flag is needed and all downstream passes keep working.
 
 use zz_checker_core::{Checker, FuncSig};
-use zz_diag_core::{error_at, FixIt};
+use zz_diag_core::{error_at, ErrorCode, FixIt};
 use zz_infer::InferOps;
 use zz_span_ast::ast::Stmt;
 use zz_span_ast::span::Span;
@@ -108,14 +108,17 @@ impl StructOps for Checker {
         let mut seen = std::collections::HashSet::new();
         for g in generics {
             if !seen.insert(g.name.clone()) {
-                self.errors.push(error_at(
-                    format!(
-                        "duplicate type parameter `{}` in struct `{}`",
-                        g.name,
-                        name.join(".")
-                    ),
-                    g.span,
-                ));
+                self.errors.push(
+                    error_at(
+                        format!(
+                            "duplicate type parameter `{}` in struct `{}`",
+                            g.name,
+                            name.join(".")
+                        ),
+                        g.span,
+                    )
+                    .with_code(ErrorCode(25)),
+                );
             }
         }
         let gen_names: Vec<String> = generics.iter().map(|g| g.name.clone()).collect();
@@ -350,7 +353,8 @@ impl StructOps for Checker {
                         let visible = self.all_visible_fields(sname);
                         let field_names: Vec<&str> = visible.iter().map(|n| n.as_str()).collect();
                         let mut diag =
-                            error_at(format!("struct `{sname}` has no field `{name}`"), span);
+                            error_at(format!("struct `{sname}` has no field `{name}`"), span)
+                                .with_code(ErrorCode(10));
                         let all = suggest_all(name, &field_names);
                         if let Some((suggestion, _)) = all.first() {
                             diag = diag.with_note(format!("did you mean field `{suggestion}`?"));
@@ -378,8 +382,9 @@ impl StructOps for Checker {
                 },
             },
             None => {
-                self.errors
-                    .push(error_at(format!("unknown struct `{sname}`"), span));
+                self.errors.push(
+                    error_at(format!("unknown struct `{sname}`"), span).with_code(ErrorCode(12)),
+                );
                 Type::Unit
             }
         }

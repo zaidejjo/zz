@@ -44,22 +44,24 @@ pub(super) fn run(src: &str) -> Result<Value, String> {
     // Load pure-ZZ stdlib programs so PureZz functions (e.g. math.abs) are
     // available at runtime in the VM. Without this, calls to pure-ZZ stdlib
     // functions fail with "undefined variable" because the Rust native body
-    // has been removed.
-    match zz_stdlib_program_at(1) {
-        Ok(zz_prog) => {
-            if let Err(e) = interp.run_typed(
-                &zz_prog.program,
-                Arc::new(zz_prog.types.clone()),
-                HashMap::new(),
-                zz_prog.structs.clone(),
-                zz_prog.enums.clone(),
-            ) {
-                return Err(format!("math stdlib init error: {e:?}"));
+    // has been removed. `math` is now split across several programs
+    // (scalar/int/stats/linalg/rounding/log/trig), so load the whole closure.
+    for idx in super::stdlib_program_closure(&["math".to_string()]) {
+        match zz_stdlib_program_at(idx) {
+            Ok(zz_prog) => {
+                if let Err(e) = interp.run_typed(
+                    &zz_prog.program,
+                    Arc::new(zz_prog.types.clone()),
+                    zz_prog.symbol_map.clone(),
+                    zz_prog.structs.clone(),
+                    zz_prog.enums.clone(),
+                ) {
+                    return Err(format!("math stdlib init error: {e:?}"));
+                }
             }
+            Err(e) => return Err(format!("math stdlib compile error: {e}")),
         }
-        Err(e) => return Err(format!("math stdlib compile error: {e}")),
     }
-
     interp
         .run(&parsed.program)
         .map_err(|e| e.message.to_string())

@@ -347,6 +347,12 @@ struct zz_array {
     size_t len;
     size_t cap;
     zz_value *items;
+    bool arena_hdr;  // true when the header struct lives on a ZZ arena (bump-
+                     // allocated, freed in bulk at arena reset) and must NOT
+                     // be passed to free(). Only the items buffer may be
+                     // heap-allocated (malloc'd on arena→heap migration) and
+                     // freed individually. Set by the arena allocation paths;
+                     // false for heap-allocated arrays.
 };
 
 // Sentinel value for `zz_array::refs` indicating the array (and its items

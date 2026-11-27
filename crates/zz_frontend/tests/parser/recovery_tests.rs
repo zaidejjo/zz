@@ -363,3 +363,108 @@ fn pipe_lowest_precedence() {
         other => panic!("expected Call, got {other:?}"),
     }
 }
+
+// --- `let` / `var` dynamic fix-it hints -----------------------------------
+
+#[test]
+fn let_hint_mirrors_user_code() {
+    let parsed = zz_frontend::parse("func main() {\n    let x := add(3, 4)\n    println(x)\n}");
+    assert!(
+        !parsed.errors.is_empty(),
+        "expected a parse error, got none"
+    );
+    let diag = &parsed.errors[0];
+    assert!(
+        diag.message.contains("unexpected `let`"),
+        "unexpected message: {:?}",
+        diag.message
+    );
+    assert!(
+        diag.notes
+            .iter()
+            .any(|n| n.contains("write `x := add(3, 4)` instead of `let x := add(3, 4)`")),
+        "expected dynamic hint, got notes: {:?}",
+        diag.notes
+    );
+    // The safe fixit still deletes just the `let` keyword.
+    assert!(
+        diag.fixits
+            .iter()
+            .any(|f| f.replacement.is_empty() && f.message == "remove `let`"),
+        "expected remove-`let` fixit, got fixits: {:?}",
+        diag.fixits
+    );
+}
+
+#[test]
+fn var_hint_mirrors_user_code() {
+    let parsed = zz_frontend::parse("func main() {\n    var y := 10\n    println(y)\n}");
+    assert!(
+        !parsed.errors.is_empty(),
+        "expected a parse error, got none"
+    );
+    let diag = &parsed.errors[0];
+    assert!(
+        diag.message.contains("unexpected `var`"),
+        "unexpected message: {:?}",
+        diag.message
+    );
+    assert!(
+        diag.notes
+            .iter()
+            .any(|n| n.contains("write `y := 10` instead of `var y := 10`")),
+        "expected dynamic hint, got notes: {:?}",
+        diag.notes
+    );
+    assert!(
+        diag.fixits
+            .iter()
+            .any(|f| f.replacement.is_empty() && f.message == "remove `var`"),
+        "expected remove-`var` fixit, got fixits: {:?}",
+        diag.fixits
+    );
+}
+
+#[test]
+fn let_hint_preserves_whitespace() {
+    let parsed = zz_frontend::parse("let   x   :=   5");
+    let diag = &parsed.errors[0];
+    assert!(
+        diag.notes
+            .iter()
+            .any(|n| n.contains("write `x   :=   5` instead of `let   x   :=   5`")),
+        "expected whitespace-preserving hint, got notes: {:?}",
+        diag.notes
+    );
+}
+
+#[test]
+fn let_hint_covers_nested_initializer() {
+    let parsed = zz_frontend::parse("let x := if c { 1 } else { 2 }");
+    let diag = &parsed.errors[0];
+    assert!(
+        diag.notes.iter().any(|n| n.contains(
+            "write `x := if c { 1 } else { 2 }` instead of `let x := if c { 1 } else { 2 }`"
+        )),
+        "expected nested-initializer hint, got notes: {:?}",
+        diag.notes
+    );
+}
+
+#[test]
+fn let_hint_falls_back_to_static_at_eof() {
+    // `let` at end of input: nothing consumed, so the static placeholder is used.
+    let parsed = zz_frontend::parse("let");
+    assert!(
+        !parsed.errors.is_empty(),
+        "expected a parse error, got none"
+    );
+    let diag = &parsed.errors[0];
+    assert!(
+        diag.notes
+            .iter()
+            .any(|n| n.contains("write `x := 5` instead of `let x := 5`")),
+        "expected static fallback hint, got notes: {:?}",
+        diag.notes
+    );
+}

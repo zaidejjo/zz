@@ -950,14 +950,14 @@ const DICT_INDEX_THRESHOLD: usize = 8;
 /// itself — arrays, objects, funcs, ...) falls back to the linear scan
 /// with byte-identical `Value ==` semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum DictKey {
+pub(crate) enum DictKey {
     Int(i64),
     Bool(bool),
     Str(std::sync::Arc<String>),
 }
 
 impl DictKey {
-    fn of(key: &Value) -> Option<DictKey> {
+    pub(crate) fn of(key: &Value) -> Option<DictKey> {
         match key {
             Value::Int(i) => Some(DictKey::Int(*i)),
             Value::Bool(b) => Some(DictKey::Bool(*b)),

@@ -12,4 +12,7 @@ error: previous definition here
 |
 3 | type Tokens = [str]
 | ^^^^^^^^^^^^^^^^^^^
+warning: unused type alias `alias_dup.Tokens`, consider prefixing with `_alias_dup.Tokens` or removing it
+
+= type alias is never referenced
 zz: 1 file(s) failed type-check

@@ -2,7 +2,7 @@
 //! Free functions following the `definite_assignment.rs` pattern.
 
 use zz_checker_core::Checker;
-use zz_diag_core::error_at;
+use zz_diag_core::{error_at, ErrorCode};
 use zz_infer::InferOps;
 use zz_span_ast::ast::{Block, Expr, FmtPart, Ident, Pattern};
 use zz_span_ast::span::Span;
@@ -151,10 +151,10 @@ fn check_expr_field(checker: &mut Checker, obj: &Expr, name: &str, span: Span) -
                     Type::Dict(Box::new(Type::Str), Box::new(Type::Str))
                 }
                 _ => {
-                    checker.errors.push(error_at(
-                        format!("http.request has no field `{name}`"),
-                        span,
-                    ));
+                    checker.errors.push(
+                        error_at(format!("http.request has no field `{name}`"), span)
+                            .with_code(ErrorCode(16)),
+                    );
                     Type::Unit
                 }
             }
@@ -242,7 +242,7 @@ fn check_expr_struct_init(
         None => {
             checker
                 .errors
-                .push(error_at(format!("unknown struct `{name}`"), span));
+                .push(error_at(format!("unknown struct `{name}`"), span).with_code(ErrorCode(12)));
             return Type::Error;
         }
     };
@@ -262,10 +262,13 @@ fn check_expr_struct_init(
                 }
             }
             None => {
-                checker.errors.push(error_at(
-                    format!("struct `{name}` has no field `{fname}`"),
-                    fval.span(),
-                ));
+                checker.errors.push(
+                    error_at(
+                        format!("struct `{name}` has no field `{fname}`"),
+                        fval.span(),
+                    )
+                    .with_code(ErrorCode(10)),
+                );
             }
         }
         field_types.push(fvt);
@@ -300,28 +303,31 @@ fn check_expr_index(checker: &mut Checker, obj: &Expr, index: &Expr, span: Span)
         Type::Str => {
             checker
                 .errors
-                .push(error_at("cannot index into a string", span));
+                .push(error_at("cannot index into a string", span).with_code(ErrorCode(11)));
             Type::Unit
         }
         Type::Tuple(elems) => checker.check_tuple_index(&elems, index),
         Type::Bytes => {
             checker
                 .errors
-                .push(error_at("cannot index into bytes", span));
+                .push(error_at("cannot index into bytes", span).with_code(ErrorCode(11)));
             Type::Unit
         }
         Type::Var(_) => {
-            checker.errors.push(error_at(
-                "cannot index into a value whose type could not be inferred",
-                span,
-            ));
+            checker.errors.push(
+                error_at(
+                    "cannot index into a value whose type could not be inferred",
+                    span,
+                )
+                .with_code(ErrorCode(11)),
+            );
             Type::Unit
         }
         other => {
-            checker.errors.push(error_at(
-                format!("cannot index into a value of type `{other}`"),
-                span,
-            ));
+            checker.errors.push(
+                error_at(format!("cannot index into a value of type `{other}`"), span)
+                    .with_code(ErrorCode(11)),
+            );
             Type::Unit
         }
     }
@@ -414,18 +420,22 @@ fn check_expr_list_comp(
 
 fn check_expr_break(checker: &mut Checker, span: Span) -> Type {
     if checker.loop_depth == 0 {
-        checker
-            .errors
-            .push(error_at("`break` outside of a loop", span));
+        checker.errors.push(
+            error_at("`break` outside of a loop", span)
+                .with_code(ErrorCode(14))
+                .with_note("wrap in `loop`, `while`, or `for`"),
+        );
     }
     Type::Unit
 }
 
 fn check_expr_continue(checker: &mut Checker, span: Span) -> Type {
     if checker.loop_depth == 0 {
-        checker
-            .errors
-            .push(error_at("`continue` outside of a loop", span));
+        checker.errors.push(
+            error_at("`continue` outside of a loop", span)
+                .with_code(ErrorCode(14))
+                .with_note("wrap in `loop`, `while`, or `for`"),
+        );
     }
     Type::Unit
 }
@@ -442,34 +452,34 @@ fn check_expr_variant(
         ("ok", None) => {
             checker
                 .errors
-                .push(error_at("`.ok` requires an argument", span));
+                .push(error_at("`.ok` requires an argument", span).with_code(ErrorCode(22)));
             Type::Result(Box::new(Type::Unit), Box::new(checker.unifier.fresh_var()))
         }
         ("err", Some(e)) => Type::Result(Box::new(checker.unifier.fresh_var()), Box::new(e)),
         ("err", None) => {
             checker
                 .errors
-                .push(error_at("`.err` requires an argument", span));
+                .push(error_at("`.err` requires an argument", span).with_code(ErrorCode(22)));
             Type::Result(Box::new(checker.unifier.fresh_var()), Box::new(Type::Unit))
         }
         ("some", Some(t)) => Type::Option(Box::new(t)),
         ("some", None) => {
             checker
                 .errors
-                .push(error_at("`.some` requires an argument", span));
+                .push(error_at("`.some` requires an argument", span).with_code(ErrorCode(22)));
             Type::Option(Box::new(Type::Unit))
         }
         ("none", None) => Type::Option(Box::new(checker.unifier.fresh_var())),
         ("none", Some(_)) => {
             checker
                 .errors
-                .push(error_at("`.none` takes no argument", span));
+                .push(error_at("`.none` takes no argument", span).with_code(ErrorCode(22)));
             Type::Option(Box::new(checker.unifier.fresh_var()))
         }
         _ => {
-            checker
-                .errors
-                .push(error_at(format!("unknown variant `.{name}`"), span));
+            checker.errors.push(
+                error_at(format!("unknown variant `.{name}`"), span).with_code(ErrorCode(13)),
+            );
             Type::Unit
         }
     }
@@ -524,6 +534,7 @@ fn check_expr_if(
                                 ),
                                 tail,
                             )
+                            .with_code(ErrorCode(2))
                             .with_note(
                                 "assign the value or end the branch with a statement of type `unit`",
                             ),
@@ -584,6 +595,7 @@ fn check_expr_if_let(
                             ),
                             tail,
                         )
+                        .with_code(ErrorCode(2))
                         .with_note(
                             "assign the value or end the branch with a statement of type `unit`",
                         ),
@@ -613,18 +625,21 @@ fn check_expr_slice(
         Type::Bytes => Type::Bytes,
         Type::Str => Type::Str,
         Type::Var(_) => {
-            checker.errors.push(error_at(
-                "cannot slice a value whose type could not be inferred",
-                span,
-            ));
+            checker.errors.push(
+                error_at(
+                    "cannot slice a value whose type could not be inferred",
+                    span,
+                )
+                .with_code(ErrorCode(11)),
+            );
             Type::Unit
         }
         Type::Error => Type::Unit,
         other => {
-            checker.errors.push(error_at(
-                format!("cannot slice a value of type `{other}`"),
-                span,
-            ));
+            checker.errors.push(
+                error_at(format!("cannot slice a value of type `{other}`"), span)
+                    .with_code(ErrorCode(11)),
+            );
             Type::Unit
         }
     }

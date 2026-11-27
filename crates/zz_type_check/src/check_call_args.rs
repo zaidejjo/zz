@@ -2,13 +2,15 @@
 //! Free functions following the `definite_assignment.rs` pattern.
 
 use zz_checker_core::Checker;
-use zz_diag_core::{error_at, FixIt};
+use zz_diag_core::{error_at, ErrorCode, FixIt};
 use zz_infer::InferOps;
 use zz_span_ast::ast::{Expr, Ident};
 use zz_span_ast::span::Span;
-use zz_suggest::suggest_all;
+use zz_suggest::suggest_top3;
 use zz_types::Type;
+use zz_unify::UnifyError;
 
+use crate::check_stmt::find_union_violation;
 use crate::TypeCheckOps as _;
 
 /// Validate that the number of provided arguments falls within the
@@ -49,7 +51,8 @@ pub(crate) fn check_arg_count(
             Some(name) => format!("`{name}` {count}"),
             None => count,
         };
-        let mut diag = error_at(format!("{head} ({sig}), found {total_provided}"), span);
+        let mut diag = error_at(format!("{head} ({sig}), found {total_provided}"), span)
+            .with_code(ErrorCode(21));
         if total_provided < allowed_min {
             let missing: Vec<String> = param_names
                 .iter()
@@ -81,17 +84,23 @@ pub(crate) fn assign_positional_slots<'a>(
 ) -> bool {
     for (i, arg) in args.iter().enumerate() {
         if i >= total_params {
-            checker.errors.push(error_at(
-                format!("too many positional arguments (max {})", total_params),
-                arg.span(),
-            ));
+            checker.errors.push(
+                error_at(
+                    format!("too many positional arguments (max {})", total_params),
+                    arg.span(),
+                )
+                .with_code(ErrorCode(21)),
+            );
             return true;
         }
         if slots[i].is_some() {
-            checker.errors.push(error_at(
-                format!("positional argument `{}` conflicts with named argument", i),
-                arg.span(),
-            ));
+            checker.errors.push(
+                error_at(
+                    format!("positional argument `{}` conflicts with named argument", i),
+                    arg.span(),
+                )
+                .with_code(ErrorCode(19)),
+            );
             return true;
         }
         slots[i] = Some(arg);
@@ -113,32 +122,40 @@ pub(crate) fn check_named_args<'a>(
         match pos {
             Some(i) => {
                 if slots[i].is_some() {
-                    checker.errors.push(error_at(
-                        format!("argument `{}` already provided positionally", name.name),
-                        val.span(),
-                    ));
+                    checker.errors.push(
+                        error_at(
+                            format!("argument `{}` already provided positionally", name.name),
+                            val.span(),
+                        )
+                        .with_code(ErrorCode(19)),
+                    );
                     return true;
                 }
                 slots[i] = Some(val);
             }
             None => {
-                let mut diag = error_at(format!("unknown parameter `{}`", name.name), name.span);
+                let mut diag = error_at(format!("unknown parameter `{}`", name.name), name.span)
+                    .with_code(ErrorCode(19));
                 let refs: Vec<&str> = param_names.iter().map(|s| s.as_str()).collect();
-                let all = suggest_all(&name.name, &refs);
-                if let Some((suggestion, _)) = all.first() {
-                    diag = diag.with_note(format!("did you mean `{suggestion}`?"));
-                    let alts: Vec<String> = all.iter().map(|(s, _)| s.to_string()).collect();
-                    let fixit = if alts.len() == 1 {
-                        FixIt::safe(name.span, suggestion.to_string(), "replace parameter")
-                    } else {
-                        FixIt::ambiguous(
+                let top = suggest_top3(&name.name, &refs);
+                if top.len() == 1 {
+                    diag = diag
+                        .with_note(format!("did you mean `{}`?", top[0]))
+                        .with_fixit(FixIt::safe(
                             name.span,
-                            suggestion.to_string(),
+                            top[0].to_string(),
                             "replace parameter",
-                            alts,
-                        )
-                    };
-                    diag = diag.with_fixit(fixit);
+                        ));
+                } else if !top.is_empty() {
+                    let names: Vec<String> = top.iter().map(|s| s.to_string()).collect();
+                    diag = diag
+                        .with_note(format!("did you mean `{}`?", names.join("`, `")))
+                        .with_fixit(FixIt::ambiguous(
+                            name.span,
+                            top[0].to_string(),
+                            "replace parameter",
+                            names,
+                        ));
                 }
                 checker.errors.push(diag);
                 return true;
@@ -186,6 +203,28 @@ pub(crate) fn check_filled_slots(
                         arg.span(),
                         Checker::param_mismatch_notes(param_names, ps, i),
                     );
+                } else if let Some((member, expected)) = find_union_violation(checker, &at, &ps[i])
+                {
+                    let at_r = checker.unifier.resolve_deep(&at);
+                    let pt_r = checker.unifier.resolve_deep(&ps[i]);
+                    let mut notes = Vec::new();
+                    notes.push(format!(
+                        "argument element `{member}` does not fit expected type `{expected}`"
+                    ));
+                    notes.push(format!(
+                        "to fix: convert `{member}` to `{expected}`, or change the parameter type to `{at_r}`"
+                    ));
+                    let e = UnifyError {
+                        message: "type mismatch".into(),
+                        left: at_r.to_string(),
+                        right: pt_r.to_string(),
+                        context: None,
+                        left_span: None,
+                        right_span: None,
+                        left_ty: Box::new(at_r),
+                        right_ty: Box::new(pt_r),
+                    };
+                    checker.report_mismatch_with_notes(e, arg.span(), notes);
                 }
             } else {
                 let at = checker.check_expr(arg);
@@ -217,6 +256,29 @@ pub(crate) fn check_filled_slots(
                         arg.span(),
                         Checker::param_mismatch_notes(param_names, ps, i),
                     );
+                } else if let Some((member, expected)) =
+                    find_union_violation(checker, &at, &expected)
+                {
+                    let at_r = checker.unifier.resolve_deep(&at);
+                    let pt_r = checker.unifier.resolve_deep(&expected);
+                    let mut notes = Vec::new();
+                    notes.push(format!(
+                        "argument element `{member}` does not fit expected type `{expected}`"
+                    ));
+                    notes.push(format!(
+                        "to fix: convert `{member}` to `{expected}`, or change the parameter type to `{at_r}`"
+                    ));
+                    let e = UnifyError {
+                        message: "type mismatch".into(),
+                        left: at_r.to_string(),
+                        right: pt_r.to_string(),
+                        context: None,
+                        left_span: None,
+                        right_span: None,
+                        left_ty: Box::new(at_r),
+                        right_ty: Box::new(pt_r),
+                    };
+                    checker.report_mismatch_with_notes(e, arg.span(), notes);
                 }
             }
         }

@@ -4079,9 +4079,12 @@ version = "0.4.0"
 dependencies = [
  "ignore",
  "rayon",
+ "serde",
  "sha2",
  "similar",
  "thiserror 1.0.69",
+  "toml",
+  "tracing",
  "zz_frontend",
 ]
 
@@ -4398,6 +4401,7 @@ name = "zz_stdlib_meta"
 version = "0.4.0"
 dependencies = [
  "zz_checker",
+ "zz_span_ast",
 ]
 
 [[package]]

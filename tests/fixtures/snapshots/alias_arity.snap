@@ -6,11 +6,16 @@ error: type alias `alias_arity.Pair` takes 1 type argument but 2 given
 |
 6 | p: Pair<int, str> = (1, "a")
 | ^^^^
-error: type mismatch: expected `int`, found `str`
+error: Z0002: type mismatch: expected `int` for `variable `p``, found `str`
 
 --> <path>
 |
 6 | p: Pair<int, str> = (1, "a")
 | ^^^^
+--> <path>
+
+6 | p: Pair<int, str> = (1, "a")
+| -------- found `str` here
+
 = to fix: change the annotation to `(int, str)` or convert the value
 zz: 1 file(s) failed type-check

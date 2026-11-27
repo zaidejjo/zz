@@ -612,10 +612,17 @@ impl<'a> Lowerer<'a> {
                     dst: *dst,
                 }])
             }
-            VmOp::IndexIntSlot { arr, idx, dst, .. } => Ok(vec![Op::IndexIntSlot {
+            VmOp::IndexIntSlot {
+                arr,
+                idx,
+                dst,
+                safe,
+                span: _,
+            } => Ok(vec![Op::IndexIntSlot {
                 arr: *arr,
                 idx: *idx,
                 dst: *dst,
+                safe: *safe,
             }]),
             VmOp::IndexDictInt { dict, key, dst, .. } => Ok(vec![Op::IndexDictInt {
                 dict: *dict,

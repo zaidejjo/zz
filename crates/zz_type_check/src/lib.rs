@@ -8,6 +8,7 @@ use zz_sigs::enums::EnumOps;
 use zz_span_ast::ast::{BinOp, Block, Expr, FmtPart, Ident, Lit, Param, Pattern, Stmt, Ty, UnOp};
 use zz_span_ast::span::Span;
 use zz_structs::StructOps;
+use zz_suggest::suggest_top3;
 use zz_types::Type;
 
 mod check_call;
@@ -567,6 +568,7 @@ impl TypeCheckOps for Checker {
                         format!("cannot assign to immutable variable `{}`", display),
                         target.span(),
                     )
+                    .with_code(ErrorCode(17))
                     .with_secondary(zz_diag_core::SecondaryLabel {
                         span: def_span,
                         message: "variable defined as immutable here".to_string(),
@@ -599,10 +601,15 @@ impl TypeCheckOps for Checker {
                         *v
                     }
                     other => {
-                        self.errors.push(error_at(
-                            format!("cannot assign to field `{name}` of a value of type `{other}`"),
-                            *span,
-                        ));
+                        self.errors.push(
+                            error_at(
+                                format!(
+                                    "cannot assign to field `{name}` of a value of type `{other}`"
+                                ),
+                                *span,
+                            )
+                            .with_code(ErrorCode(18)),
+                        );
                         Type::Unit
                     }
                 }
@@ -626,37 +633,47 @@ impl TypeCheckOps for Checker {
                         *v
                     }
                     Type::Str => {
-                        self.errors
-                            .push(error_at("cannot assign to an index of a string", *span));
+                        self.errors.push(
+                            error_at("cannot assign to an index of a string", *span)
+                                .with_code(ErrorCode(11))
+                                .with_note("strings are not index-assignable; use an array or convert with `.to_string()`"),
+                        );
                         Type::Unit
                     }
                     Type::Tuple(elems) => self.check_tuple_index(&elems, index),
                     Type::Bytes => {
-                        self.errors
-                            .push(error_at("cannot assign to an index of bytes", *span));
+                        self.errors.push(
+                            error_at("cannot assign to an index of bytes", *span)
+                                .with_code(ErrorCode(11))
+                                .with_note("bytes are not index-assignable; use an array"),
+                        );
                         Type::Unit
                     }
                     Type::Var(_) => {
                         self.errors.push(error_at(
                             "cannot assign to an index of a value whose type could not be inferred",
                             *span,
-                        ));
+                        )
+                        .with_code(ErrorCode(11)));
                         Type::Unit
                     }
                     other => {
-                        self.errors.push(error_at(
-                            format!("cannot assign to an index of a value of type `{other}`"),
-                            *span,
-                        ));
+                        self.errors.push(
+                            error_at(
+                                format!("cannot assign to an index of a value of type `{other}`"),
+                                *span,
+                            )
+                            .with_code(ErrorCode(11)),
+                        );
                         Type::Unit
                     }
                 }
             }
             other => {
-                self.errors.push(error_at(
-                    "cannot assign to this expression".to_string(),
-                    other.span(),
-                ));
+                self.errors.push(
+                    error_at("cannot assign to this expression".to_string(), other.span())
+                        .with_code(ErrorCode(11)),
+                );
                 Type::Unit
             }
         }
@@ -678,20 +695,26 @@ impl TypeCheckOps for Checker {
                 Expr::Int { value: 0, .. } => Some(0),
                 Expr::Int { value, .. } => elems.len().checked_sub(*value as usize),
                 _ => {
-                    self.errors.push(error_at(
-                        "tuple index must be an integer literal\n\
+                    self.errors.push(
+                        error_at(
+                            "tuple index must be an integer literal\n\
                          hint: destructure with `(a, b) := t` for dynamic access",
-                        index.span(),
-                    ));
+                            index.span(),
+                        )
+                        .with_code(ErrorCode(11)),
+                    );
                     return Type::Error;
                 }
             },
             _ => {
-                self.errors.push(error_at(
-                    "tuple index must be an integer literal\n\
+                self.errors.push(
+                    error_at(
+                        "tuple index must be an integer literal\n\
                      hint: destructure with `(a, b) := t` for dynamic access",
-                    index.span(),
-                ));
+                        index.span(),
+                    )
+                    .with_code(ErrorCode(11)),
+                );
                 return Type::Error;
             }
         };
@@ -987,10 +1010,29 @@ impl TypeCheckOps for Checker {
                                 Type::Dict(Box::new(Type::Str), Box::new(Type::Str))
                             }
                             _ => {
-                                self.errors.push(error_at(
-                                    format!("http.request has no field `{name}`"),
-                                    *span,
-                                ));
+                                let candidates: Vec<&str> =
+                                    vec!["method", "path", "body", "headers", "query", "params"];
+                                let top = suggest_top3(name, &candidates);
+                                let mut diag =
+                                    error_at(format!("http.request has no field `{name}`"), *span)
+                                        .with_code(ErrorCode(16));
+                                if top.len() == 1 {
+                                    diag = diag
+                                        .with_note(format!("did you mean `{}`?", top[0]))
+                                        .with_fixit(FixIt::safe(
+                                            *span,
+                                            top[0].to_string(),
+                                            "replace field name",
+                                        ));
+                                } else if !top.is_empty() {
+                                    let names: Vec<String> =
+                                        top.iter().map(|s| s.to_string()).collect();
+                                    diag = diag.with_note(format!(
+                                        "did you mean `{}`?",
+                                        names.join("`, `")
+                                    ));
+                                }
+                                self.errors.push(diag);
                                 Type::Unit
                             }
                         }
@@ -1064,8 +1106,29 @@ impl TypeCheckOps for Checker {
                 // Messages keep the as-written name.
                 let cname = self.canonical_struct_name(name);
                 let Some(sig) = self.structs.get(&cname).cloned() else {
-                    self.errors
-                        .push(error_at(format!("unknown struct `{name}`"), *span));
+                    // Collect bare struct names (last segment after '.') for suggestions.
+                    let candidates: Vec<&str> = self
+                        .structs
+                        .keys()
+                        .filter_map(|k| k.rsplit('.').next())
+                        .collect();
+                    let top = suggest_top3(name, &candidates);
+                    let name_span = Span::new(span.start, span.start + name.len() as u32);
+                    let mut diag = error_at(format!("unknown struct `{name}`"), name_span)
+                        .with_code(ErrorCode(12));
+                    if top.len() == 1 {
+                        diag = diag
+                            .with_note(format!("did you mean `{}`?", top[0]))
+                            .with_fixit(FixIt::safe(
+                                name_span,
+                                top[0].to_string(),
+                                "replace struct name",
+                            ));
+                    } else if !top.is_empty() {
+                        let names: Vec<String> = top.iter().map(|s| s.to_string()).collect();
+                        diag = diag.with_note(format!("did you mean `{}`?", names.join("`, `")));
+                    }
+                    self.errors.push(diag);
                     return Type::Unit;
                 };
                 // Each given field maps to a concrete path: direct fields to
@@ -1114,10 +1177,13 @@ impl TypeCheckOps for Checker {
                         full.push(fname.clone());
                         given_paths.push(full);
                     } else {
-                        self.errors.push(error_at(
-                            format!("struct `{name}` has no field `{fname}`"),
-                            fval.span(),
-                        ));
+                        self.errors.push(
+                            error_at(
+                                format!("struct `{name}` has no field `{fname}`"),
+                                fval.span(),
+                            )
+                            .with_code(ErrorCode(10)),
+                        );
                     }
                 }
                 // An explicit embedded value and flattened leaves inside the
@@ -1548,15 +1614,21 @@ impl TypeCheckOps for Checker {
             }
             Expr::Break { span } => {
                 if self.loop_depth == 0 {
-                    self.errors
-                        .push(error_at("`break` outside of a loop", *span));
+                    self.errors.push(
+                        error_at("`break` outside of a loop", *span)
+                            .with_code(ErrorCode(14))
+                            .with_note("wrap in `loop`, `while`, or `for`"),
+                    );
                 }
                 Type::Unit
             }
             Expr::Continue { span } => {
                 if self.loop_depth == 0 {
-                    self.errors
-                        .push(error_at("`continue` outside of a loop", *span));
+                    self.errors.push(
+                        error_at("`continue` outside of a loop", *span)
+                            .with_code(ErrorCode(14))
+                            .with_note("wrap in `loop`, `while`, or `for`"),
+                    );
                 }
                 Type::Unit
             }
@@ -1592,8 +1664,25 @@ impl TypeCheckOps for Checker {
                         Type::Option(Box::new(self.unifier.fresh_var()))
                     }
                     (other, _) => {
-                        self.errors
-                            .push(error_at(format!("unknown variant `.{other}`"), *span));
+                        let candidates: Vec<&str> = vec!["ok", "err", "some", "none"];
+                        let top = suggest_top3(other, &candidates);
+                        let mut diag = error_at(format!("unknown variant `.{other}`"), *span)
+                            .with_code(ErrorCode(13));
+                        if top.len() == 1 {
+                            diag = diag
+                                .with_note(format!("did you mean `.{}`?", top[0]))
+                                .with_fixit(FixIt::safe(
+                                    *span,
+                                    format!(".{}", top[0]),
+                                    "replace variant name",
+                                ));
+                        } else if !top.is_empty() {
+                            let names: Vec<String> =
+                                top.iter().map(|s| format!(".{}", s)).collect();
+                            diag =
+                                diag.with_note(format!("did you mean `{}`?", names.join("`, `")));
+                        }
+                        self.errors.push(diag);
                         Type::Unit
                     }
                 }
@@ -1879,10 +1968,13 @@ impl TypeCheckOps for Checker {
                         } else {
                             "remainder"
                         };
-                        self.errors.push(error_at(
-                            format!("integer {what} by zero (divisor is literal `0`)"),
-                            right.span(),
-                        ));
+                        self.errors.push(
+                            error_at(
+                                format!("integer {what} by zero (divisor is literal `0`)"),
+                                right.span(),
+                            )
+                            .with_code(ErrorCode(7)),
+                        );
                         return Type::Error;
                     }
                 }
@@ -2166,7 +2258,7 @@ impl TypeCheckOps for Checker {
             Type::Named(gen) => {
                 let mut found: Option<zz_checker_core::FuncSig> = None;
                 for bound in self.current_bounds.get(gen).into_iter().flatten() {
-                    let zz_span_ast::ast::TraitBound::User(tname) = bound else {
+                    let zz_span_ast::ast::TraitBound::User(tname, _) = bound else {
                         continue;
                     };
                     let Some(msig) = self.traits.get(tname).and_then(|t| t.methods.get(method))
@@ -2621,6 +2713,7 @@ impl TypeCheckOps for Checker {
                         "unreachable match arm — a previous arm matches everything",
                         arm.pat.span(),
                     )
+                    .with_code(ErrorCode(5))
                     .with_note("remove this arm or move it above the catch-all arm"),
                 );
             }

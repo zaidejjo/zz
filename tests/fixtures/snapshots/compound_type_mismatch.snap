@@ -1,6 +1,6 @@
 first module that broke: <path> <path>
 
-error: type mismatch: expected `int`, found `float`
+error: Z0002: type mismatch: expected `int`, found `float`
 
 --> <path>
 |

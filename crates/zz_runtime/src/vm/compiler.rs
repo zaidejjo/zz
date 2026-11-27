@@ -554,7 +554,135 @@ impl Compiler {
         // engines); the untyped twin keeps last-value semantics for
         // REPL-style eval (pinned by eval/tests.rs).
         c.emit_const(Value::Unit);
+        // Mark scalar chunks: all params Int/Float and no non-scalar ops.
+        c.chunk.is_scalar = c.is_scalar_chunk();
+        // Inline zero-argument CallPath calls to small known functions.
+        // Replaces `CallPath { parts: ["ns", "f"], argc: 0, ... }` with the
+        // callee's body ops when the callee is ≤ 5 ops and has no `Return`.
+        c.inline_zero_arg_calls();
         c.chunk
+    }
+
+    /// Post-processing pass: inline zero-argument calls to known small
+    /// functions. Scans the chunk for `MakeFunc` definitions, then replaces
+    /// `CallPath { parts: [...], argc: 0, ... }` ops with the callee's body.
+    /// Only inlines when the callee body is ≤ 5 ops and contains no `Return`
+    /// (so no jump-target patching is needed). Behavior-preserving: if the
+    /// callee is too complex, the `CallPath` is left untouched.
+    fn inline_zero_arg_calls(&mut self) {
+        // Collect MakeFunc definitions: name → chunk.
+        let mut funcs: std::collections::HashMap<String, &Arc<Chunk>> =
+            std::collections::HashMap::new();
+        for op in &self.chunk.code {
+            if let Op::MakeFunc { name, chunk, .. } = op {
+                funcs.insert(name.clone(), chunk);
+            }
+        }
+        if funcs.is_empty() {
+            return;
+        }
+        // Find CallPath ops with argc == 0 that target a known small function.
+        let mut inline_sites: Vec<(usize, String, Arc<Chunk>)> = Vec::new();
+        for (i, op) in self.chunk.code.iter().enumerate() {
+            if let Op::CallPath { parts, argc, .. } = op {
+                if *argc == 0 {
+                    let name = parts.join(".");
+                    if let Some(chunk) = funcs.get(&name) {
+                        if chunk.code.len() <= 5
+                            && !chunk.code.iter().any(|o| matches!(o, Op::Return))
+                        {
+                            inline_sites.push((i, name, Arc::clone(chunk)));
+                        }
+                    }
+                }
+            }
+        }
+        // Apply inlining from last to first to preserve indices.
+        for (i, _, chunk) in inline_sites.into_iter().rev() {
+            let body = chunk.code.clone();
+            // The callee's body may reference slots that don't exist in the
+            // caller. Since zero-arg functions have no params, their body
+            // only uses slots 0..chunk.params.len() which are the callee's
+            // own params (none for zero-arg). Any slot references would be
+            // to the callee's own locals, which don't exist in the caller.
+            // Only inline if the body uses no slots (pure constant ops).
+            if body
+                .iter()
+                .any(|o| matches!(o, Op::LoadSlot(_) | Op::StoreSlot(_) | Op::TakeSlot(_)))
+            {
+                continue;
+            }
+            // Replace CallPath with the body's ops (minus the trailing Unit
+            // if the body ends with PushConst(Unit), which is the implicit
+            // return of a zero-arg function).
+            let body_ops: Vec<Op> = body.into_iter().collect();
+            self.chunk.code.splice(i..i + 1, body_ops);
+        }
+    }
+
+    /// Heuristic: `true` when every op in the chunk is scalar-safe
+    /// (integer/float arithmetic, comparisons, jumps, slot ops, returns).
+    /// Non-scalar ops (closures, arrays, dicts, structs, calls to non-native
+    /// functions) make the chunk non-scalar. Behavior-neutral: the VM
+    /// ignores this flag; AOT backends use it to skip `Value` boxing.
+    fn is_scalar_chunk(&self) -> bool {
+        for op in &self.chunk.code {
+            match op {
+                // Scalar-safe: arithmetic, comparisons, jumps, slot ops,
+                // returns, control flow.
+                Op::PushConst(_)
+                | Op::Pop
+                | Op::Swap
+                | Op::Truthy
+                | Op::LoadSlot(_)
+                | Op::StoreSlot(_)
+                | Op::TakeSlot(_)
+                | Op::IntAdd(_)
+                | Op::IntSub(_)
+                | Op::IntMul(_)
+                | Op::IntDiv(_)
+                | Op::IntRem(_)
+                | Op::IntNeg(_)
+                | Op::IntLt(_)
+                | Op::IntGt(_)
+                | Op::IntLe(_)
+                | Op::IntGe(_)
+                | Op::IntEq(_)
+                | Op::IntNe(_)
+                | Op::Jump(_)
+                | Op::JumpIfFalse(_)
+                | Op::JumpIfTrue(_)
+                | Op::JumpIfFalseBool(_, _)
+                | Op::Return
+                | Op::Break(_)
+                | Op::Continue(_)
+                | Op::SetLoopResult
+                | Op::Safepoint
+                | Op::SlotAddInt { .. }
+                | Op::SlotInc { .. }
+                | Op::SlotAddIntImm { .. }
+                | Op::SlotSubIntImm { .. }
+                | Op::SlotMulIntImm { .. }
+                | Op::SlotBinaryInt { .. }
+                | Op::SlotBinaryIntImm { .. }
+                | Op::SlotLessIntSlot { .. }
+                | Op::SlotLessIntImm { .. }
+                | Op::SlotCmpIntSlot { .. }
+                | Op::SlotCmpIntImm { .. }
+                | Op::SlotCmpConst { .. }
+                | Op::PushSlotIntImm { .. }
+                | Op::JumpIfFalseSlotCmpIntImm { .. }
+                | Op::JumpIfFalseSlotCmpIntSlot { .. }
+                | Op::EnterScope
+                | Op::ExitScope
+                | Op::PopN { .. }
+                | Op::DeferRecord => {}
+                // Non-scalar: anything that creates or manipulates
+                // boxed values, calls unknown functions, etc.
+                _ => return false,
+            }
+        }
+        true
     }
 
     fn emit(&mut self, op: Op) {
@@ -1009,12 +1137,12 @@ impl Compiler {
         if *binop != zz_frontend::ast::BinOp::Add {
             return None;
         }
-        // Type guard: both operands must be Int.
-        if !matches!(self.type_of(left.span()), Some(zz_checker::Type::Int))
-            || !matches!(self.type_of(right.span()), Some(zz_checker::Type::Int))
-        {
-            return None;
-        }
+        // NOTE: no static type guard here. The VM's `SlotAddInt` already has a
+        // safe slow path (`eval_binary`) for non-Int operands, so emitting the
+        // fused op for any slot-resolvable operands is correct — it just pays
+        // one extra tag check on the slow path when the static type is unknown
+        // or non-Int. This lets fusion fire even when the checker didn't
+        // annotate a given span (the common case for loop-carried locals).
         let dst = match self.resolve(target) {
             Resolved::Slot(slot) => slot as u16,
             Resolved::Env | Resolved::State => return None,
@@ -1798,6 +1926,7 @@ impl Compiler {
             idx: idx_slot,
             dst: dst_slot,
             span,
+            safe: false,
         })
     }
 
@@ -1992,16 +2121,26 @@ impl Compiler {
             op: binop,
             left,
             right,
-            span,
             ..
         } = value
         else {
             return None;
         };
-        // Type guard: the binary expression must produce Int.
-        if !matches!(self.type_of(*span), Some(zz_checker::Type::Int)) {
+        // `&&` / `||` / `??` short-circuit: they must stay on the
+        // jump-based path, which the fused slot ops cannot express.
+        if matches!(
+            binop,
+            zz_frontend::ast::BinOp::And
+                | zz_frontend::ast::BinOp::Or
+                | zz_frontend::ast::BinOp::Elvis
+        ) {
             return None;
         }
+        // NOTE: no static type guard on the result span. The fused slot ops
+        // (SlotAddInt, SlotBinaryInt, SlotCmpIntSlot, …) each have a safe VM
+        // slow path that falls back to `eval_binary` for non-Int operands, so
+        // emitting them for any slot-resolvable operands is correct. This lets
+        // fusion fire even when the checker didn't annotate the result span.
         let dst = match self.resolve(target) {
             Resolved::Slot(slot) => slot as u16,
             Resolved::Env | Resolved::State => return None,
@@ -2227,16 +2366,17 @@ impl Compiler {
             op: binop,
             left,
             right,
-            span,
             ..
         } = value
         else {
             return None;
         };
-        // Type guard: the binary expression must produce Int.
-        if !matches!(self.type_of(*span), Some(zz_checker::Type::Int)) {
-            return None;
-        }
+        // NOTE: no static type guard on the result span. The fused slot ops
+        // (SlotInc, SlotAddIntImm, SlotAddInt) each have a safe VM slow path
+        // that falls back to `eval_binary` for non-Int operands, so emitting
+        // them for any slot-resolvable operands is correct. This lets fusion
+        // fire for module-qualified top-level targets (`ns.x = ns.x + y`),
+        // whose binary span the checker doesn't annotate.
         let full = target_parts.join(".");
         let dst = match self.resolve(&full) {
             Resolved::Slot(slot) => slot as u16,
@@ -4089,6 +4229,8 @@ impl Compiler {
                     if needs_env {
                         sub.emit(Op::ExitScope);
                     }
+                    sub.chunk.is_scalar = sub.is_scalar_chunk();
+                    sub.inline_zero_arg_calls();
                     return Arc::new(sub.chunk);
                 }
             }
@@ -4349,6 +4491,8 @@ impl Compiler {
                         if needs_env {
                             sub.emit(Op::ExitScope);
                         }
+                        sub.chunk.is_scalar = sub.is_scalar_chunk();
+                        sub.inline_zero_arg_calls();
                         return Arc::new(sub.chunk);
                     }
                     Resolved::State => {}
@@ -4356,6 +4500,8 @@ impl Compiler {
                 if needs_env {
                     sub.emit(Op::ExitScope);
                 }
+                sub.chunk.is_scalar = sub.is_scalar_chunk();
+                sub.inline_zero_arg_calls();
                 return Arc::new(sub.chunk);
             }
         }
@@ -4363,6 +4509,8 @@ impl Compiler {
         if needs_env {
             sub.emit(Op::ExitScope);
         }
+        sub.chunk.is_scalar = sub.is_scalar_chunk();
+        sub.inline_zero_arg_calls();
         Arc::new(sub.chunk)
     }
 

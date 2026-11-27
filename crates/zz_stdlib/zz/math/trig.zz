@@ -12,10 +12,18 @@ func math.sin(x: float) -> float {
     pi := math.PI
     two_pi := 2.0 * pi
     xx := x
-    while xx > pi {
+    // Fast range reduction: subtract whole periods at once instead of
+    // one-at-a-time subtraction (which is O(x) and hangs for large x).
+    match int(xx / two_pi) {
+        .some(k) => {
+            xx = xx - float(k) * two_pi
+        }
+        .none => {}
+    }
+    if xx > pi {
         xx = xx - two_pi
     }
-    while xx < -pi {
+    if xx < -pi {
         xx = xx + two_pi
     }
     // Taylor series: sin(x) = x - x³/3! + x⁵/5! - x⁷/7! + ...
@@ -49,6 +57,7 @@ func math.tan(x: float) -> float {
 func math.asin(x: float) -> float {
     if x < -1.0 || x > 1.0 {
         return 0.0 / 0.0 // NaN
+        
     }
     if x == 1.0 {
         return math.PI / 2.0
@@ -126,13 +135,58 @@ func math.to_degrees(rad: float) -> float {
 // ── Degree variants ────────────────────────────────────────────────────────
 
 func math.sin_deg(x: float) -> float {
+    norm := x % 360.0
+    if norm < 0.0 {
+        norm = norm + 360.0
+    }
+    q := norm / 90.0
+    match int(q) {
+        .some(qi) => {
+            if q == float(qi) {
+                if qi == 1 {
+                    return 1.0
+                }
+                if qi == 3 {
+                    return -1.0
+                }
+                return 0.0
+            }
+        }
+        .none => {}
+    }
     return math.sin(math.to_radians(x))
 }
 
 func math.cos_deg(x: float) -> float {
+    norm := x % 360.0
+    if norm < 0.0 {
+        norm = norm + 360.0
+    }
+    q := norm / 90.0
+    match int(q) {
+        .some(qi) => {
+            if q == float(qi) {
+                if qi == 0 {
+                    return 1.0
+                }
+                if qi == 2 {
+                    return -1.0
+                }
+                return 0.0
+            }
+        }
+        .none => {}
+    }
     return math.cos(math.to_radians(x))
 }
 
 func math.tan_deg(x: float) -> float {
-    return math.tan(math.to_radians(x))
+    double := x * 2.0
+    s := math.sin_deg(double)
+    c := math.cos_deg(double)
+    denom := 1.0 + c
+    if denom == 0.0 {
+        return 1.0 / 0.0
+    }
+    return s / denom
 }

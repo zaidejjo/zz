@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+mod support;
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -82,8 +84,8 @@ fn fixture_checks_and_runs_in_vm() {
 
 #[test]
 fn fixture_runs_identically_in_aot() {
-    if std::env::var("ZZ_SKIP_NATIVE").is_ok() {
-        eprintln!("skip: native backend unsupported (ZZ_SKIP_NATIVE=1)");
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on Windows (ZZ_SKIP_NATIVE=1)");
         return;
     }
     let root = fixture_root();

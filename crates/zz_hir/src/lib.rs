@@ -249,14 +249,44 @@ pub fn merge_typed_programs(programs: Vec<TypedProgram>) -> TypedProgram {
     let mut try_converts: HashMap<Span, Option<String>> = HashMap::new();
     let mut module_origins: HashMap<String, String> = HashMap::new();
     let mut span: Span = Span::new(0, 0);
+    // Span types are keyed by `(interned scope, span)` and every program's
+    // interner restarts at 0, so local ids collide across programs. Re-intern
+    // by *scope name*: build a global name→id table and remap each program's
+    // keys to the global ids. Without this, `symbol_map` came out empty and
+    // every `type_at` lookup in the merged (AOT) program missed — scalar
+    // specialization then declared raw `int64_t`/`bool` locals as `zz_value`
+    // (`zz_value v1 = (int64_t)(v0 / 2);`) and clang rejected the C.
+    //
+    // `<top>` is deliberately excluded: every program shares that scope name
+    // but their top-level spans overlap (offsets restart per file), so merging
+    // it would let one module's type answer for another's. Top-level lowering
+    // already falls back safely when a type is unknown; a *wrong* type would
+    // miscompile, so drop those keys instead of merging them.
     let mut symbol_map: HashMap<String, u32> = HashMap::new();
+    let mut next_symbol: u32 = 0;
     for tp in programs {
         stmts.extend(tp.program.stmts);
-        types.extend(tp.types);
-        // Merge symbol maps so `TypedProgram::type_at` can resolve function
-        // names to symbol IDs after the merge. Later programs take precedence
-        // on collisions (user program overrides stdlib).
-        symbol_map.extend(tp.symbol_map.iter().map(|(k, v)| (k.clone(), *v)));
+        // program-local symbol id → global id (named, non-`<top>` scopes)
+        let mut remap: HashMap<u32, u32> = HashMap::new();
+        for (name, local_id) in &tp.symbol_map {
+            if name == TOP_SCOPE {
+                continue;
+            }
+            let global = *symbol_map.entry(name.clone()).or_insert_with(|| {
+                let id = next_symbol;
+                next_symbol += 1;
+                id
+            });
+            remap.entry(*local_id).or_insert(global);
+        }
+        for (key, ty) in tp.types {
+            // Unmapped scopes are `<top>` or a scope the checker never
+            // registered; drop rather than guess (matches pre-merge
+            // behavior for those keys).
+            if let Some(&global) = remap.get(&key.func.id()) {
+                types.insert(SpanKey::new(Symbol(global), key.span), ty);
+            }
+        }
         bindings.extend(tp.bindings);
         funcs.extend(tp.funcs);
         structs.extend(tp.structs);

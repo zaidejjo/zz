@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 
 use zz_checker_core::Checker;
-use zz_diag_core::error_at;
+use zz_diag_core::{error_at, ErrorCode};
 use zz_scope::ScopeOps;
 use zz_span_ast::ast::{Block, Expr, FmtPart, Pattern, Stmt};
 use zz_span_ast::span::Span;
@@ -336,6 +336,7 @@ fn report_use_before_init(
             ),
             span,
         )
+        .with_code(ErrorCode(9))
         .with_note("variable may not have been assigned on this path"),
     );
 }

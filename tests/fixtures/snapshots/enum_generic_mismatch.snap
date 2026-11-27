@@ -1,9 +1,12 @@
 first module that broke: <path> <path>
 
-error: type mismatch: expected `int`, found `str`
+error: Z0002: type mismatch: expected `int`, found `str`
 
 --> <path>
 |
 10 | println(a == s)
 | ^^^^^^
+warning: unused enum variant `enum_generic_mismatch.Box.V`, consider prefixing with `_V` or removing it
+
+= variant is never constructed or pattern-matched
 zz: 1 file(s) failed type-check

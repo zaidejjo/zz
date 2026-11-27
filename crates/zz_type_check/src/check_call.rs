@@ -1,10 +1,11 @@
 //! Call-expression type-checking helpers extracted from `check_call`.
 //! Free functions following the `definite_assignment.rs` pattern.
 
+use crate::check_stmt::find_union_violation;
 use crate::ScopeOps as _;
 use crate::TypeCheckOps;
 use zz_checker_core::Checker;
-use zz_diag_core::{error_at, FixIt};
+use zz_diag_core::{error_at, ErrorCode, FixIt};
 use zz_http_routes::is_route_method;
 use zz_infer::{subst as infer_subst, InferOps};
 use zz_lints::http_lint::HttpLintOps;
@@ -12,9 +13,9 @@ use zz_sigs::enums::EnumOps;
 use zz_span_ast::ast::{Expr, Ident};
 use zz_span_ast::span::Span;
 use zz_structs::StructOps;
-use zz_suggest::suggest_all;
+use zz_suggest::suggest_top3;
 use zz_types::Type;
-use zz_unify::Unifier;
+use zz_unify::{Unifier, UnifyError};
 
 /// Check math constants are values, not functions: `math.PI()` is always an
 /// error — use bare `math.PI`.
@@ -33,10 +34,13 @@ pub(crate) fn check_call_math_const(
         for (_, val) in named {
             checker.check_expr(val);
         }
-        checker.errors.push(error_at(
-            format!("cannot call `{name}`: it is a numeric constant value, remove the `()`"),
-            span,
-        ));
+        checker.errors.push(
+            error_at(
+                format!("cannot call `{name}`: it is a numeric constant value, remove the `()`"),
+                span,
+            )
+            .with_code(ErrorCode(20)),
+        );
         return Some(Type::Float);
     }
     None
@@ -164,13 +168,16 @@ pub(crate) fn check_call_removed_api(
     for (_, val) in named {
         checker.check_expr(val);
     }
-    checker.errors.push(error_at(
-        format!(
-            "removed: `{name}` is gone — use {} instead",
-            api.replacement
-        ),
-        span,
-    ));
+    checker.errors.push(
+        error_at(
+            format!(
+                "removed: `{name}` is gone — use {} instead",
+                api.replacement
+            ),
+            span,
+        )
+        .with_code(ErrorCode(20)),
+    );
     Some(api.ret.to_type(&mut checker.unifier))
 }
 
@@ -251,7 +258,8 @@ pub(crate) fn check_call_print_builtin(
                 .first()
                 .map(|(ident, _)| ident.span)
                 .unwrap_or(Span::new(0, 0)),
-        );
+        )
+        .with_code(ErrorCode(19));
         diag = diag.with_note(format!(
             "use `{}={{{}}}` inside the string, e.g. `println(\"{}\")`",
             names.join(", "),
@@ -281,7 +289,7 @@ fn report_ambiguous_trait_method(
     };
     let mut providers: Vec<String> = Vec::new();
     for bound in checker.current_bounds.get(gen).into_iter().flatten() {
-        let zz_span_ast::ast::TraitBound::User(tname) = bound else {
+        let zz_span_ast::ast::TraitBound::User(tname, _) = bound else {
             continue;
         };
         if checker
@@ -296,13 +304,16 @@ fn report_ambiguous_trait_method(
     if providers.len() <= 1 {
         return false;
     }
-    checker.errors.push(error_at(
-        format!(
+    checker.errors.push(
+        error_at(
+            format!(
             "method `{method}` is ambiguous for type parameter `{gen}`: provided by `{}` and `{}`",
             providers[0], providers[1]
         ),
-        span,
-    ));
+            span,
+        )
+        .with_code(ErrorCode(20)),
+    );
     true
 }
 
@@ -544,29 +555,31 @@ pub(crate) fn check_call_unknown_suggestion(
         })
         .collect();
     let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
-    let all = suggest_all(name, &refs);
-    if all.is_empty() {
+    let top = suggest_top3(name, &refs);
+    if top.is_empty() {
         return None;
     }
-    let is_unambiguous = all.len() == 1 && all[0].1 <= 1;
     let callee_span = match callee {
         Expr::Path { span, .. } => *span,
         _ => span,
     };
-    if is_unambiguous {
+    if top.len() == 1 {
         checker.errors.push(
             error_at(format!("unknown function `{name}`"), callee_span)
-                .with_note(format!("did you mean `{}`?", all[0].0))
+                .with_code(ErrorCode(20))
+                .with_note(format!("did you mean `{}`?", top[0]))
                 .with_fixit(FixIt::safe(
                     callee_span,
-                    all[0].0.to_string(),
+                    top[0].to_string(),
                     "replace with suggested function",
                 )),
         );
     } else {
+        let names: Vec<String> = top.iter().map(|s| s.to_string()).collect();
         checker.errors.push(
             error_at(format!("unknown function `{name}`"), callee_span)
-                .with_note(format!("did you mean `{}`?", all[0].0)),
+                .with_code(ErrorCode(20))
+                .with_note(format!("did you mean `{}`?", names.join("`, `"))),
         );
     }
     Some(Type::Unit)
@@ -737,10 +750,13 @@ fn check_call_path_variant_payload(
             span,
         }));
     }
-    checker.errors.push(error_at(
-        format!("unknown method `{method}` for enum `{canonical_head}`"),
-        span,
-    ));
+    checker.errors.push(
+        error_at(
+            format!("unknown method `{method}` for enum `{canonical_head}`"),
+            span,
+        )
+        .with_code(ErrorCode(20)),
+    );
     let (gen_vars, _) = checker.fresh_enum_vars(canonical_head);
     Some(Type::Enum(canonical_head.to_string(), gen_vars))
 }
@@ -1009,11 +1025,61 @@ fn check_call_path_sqlz_method(
                     let at = checker.check_closure(params, ret_ty.as_ref(), body, *cspan, ep);
                     if let Err(e) = checker.unifier.unify(&at, &ps[1 + i]) {
                         checker.report_mismatch(e, arg.span());
+                    } else {
+                        if let Some((member, expected)) =
+                            find_union_violation(checker, &at, &ps[1 + i])
+                        {
+                            let at_r = checker.unifier.resolve_deep(&at);
+                            let pt_r = checker.unifier.resolve_deep(&ps[1 + i]);
+                            let mut notes = Vec::new();
+                            notes.push(format!(
+                                "argument element `{member}` does not fit expected type `{expected}`"
+                            ));
+                            notes.push(format!(
+                                "to fix: convert `{member}` to `{expected}`, or change the parameter type to `{at_r}`"
+                            ));
+                            let e = UnifyError {
+                                message: "type mismatch".into(),
+                                left: at_r.to_string(),
+                                right: pt_r.to_string(),
+                                context: None,
+                                left_span: None,
+                                right_span: None,
+                                left_ty: Box::new(at_r),
+                                right_ty: Box::new(pt_r),
+                            };
+                            checker.report_mismatch_with_notes(e, arg.span(), notes);
+                        }
                     }
                 } else {
                     let at = checker.check_expr(arg);
                     if let Err(e) = checker.unifier.unify(&at, &ps[1 + i]) {
                         checker.report_mismatch(e, arg.span());
+                    } else {
+                        if let Some((member, expected)) =
+                            find_union_violation(checker, &at, &ps[1 + i])
+                        {
+                            let at_r = checker.unifier.resolve_deep(&at);
+                            let pt_r = checker.unifier.resolve_deep(&ps[1 + i]);
+                            let mut notes = Vec::new();
+                            notes.push(format!(
+                                "argument element `{member}` does not fit expected type `{expected}`"
+                            ));
+                            notes.push(format!(
+                                "to fix: convert `{member}` to `{expected}`, or change the parameter type to `{at_r}`"
+                            ));
+                            let e = UnifyError {
+                                message: "type mismatch".into(),
+                                left: at_r.to_string(),
+                                right: pt_r.to_string(),
+                                context: None,
+                                left_span: None,
+                                right_span: None,
+                                left_ty: Box::new(at_r),
+                                right_ty: Box::new(pt_r),
+                            };
+                            checker.report_mismatch_with_notes(e, arg.span(), notes);
+                        }
                     }
                 }
             }
@@ -1062,7 +1128,8 @@ pub(crate) fn check_call_callee_type(
             None => {
                 // Sherlock: suggest the closest known function so a typo
                 // (`lenght`, `get_var`) points at the fix instead of a dead end.
-                let mut diag = error_at(format!("unknown function `{name}`"), span);
+                let mut diag =
+                    error_at(format!("unknown function `{name}`"), span).with_code(ErrorCode(20));
                 let candidates: Vec<String> = checker
                     .funcs
                     .keys()
@@ -1077,10 +1144,17 @@ pub(crate) fn check_call_callee_type(
                     })
                     .collect();
                 let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
-                let all = suggest_all(&name, &refs);
-                if let Some((suggestion, _)) = all.first() {
+                let top = suggest_top3(&name, &refs);
+                if top.len() == 1 {
                     diag = diag.with_note(format!(
-                        "did you mean to call `{suggestion}` instead of calling a value of type `{name}`?"
+                        "did you mean to call `{}` instead of calling a value of type `{name}`?",
+                        top[0]
+                    ));
+                } else if !top.is_empty() {
+                    let names: Vec<String> = top.iter().map(|s| s.to_string()).collect();
+                    diag = diag.with_note(format!(
+                        "did you mean to call `{}` instead of calling a value of type `{name}`?",
+                        names.join("`, `")
                     ));
                 }
                 checker.errors.push(diag);

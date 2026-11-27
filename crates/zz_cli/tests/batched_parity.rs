@@ -36,7 +36,9 @@ fn zz_bin() -> PathBuf {
 
 fn vm_only() -> bool {
     // Mirrors dual_engine_parity: native backend unsupported here.
-    std::env::var("ZZ_SKIP_NATIVE").is_ok() || std::env::var("ZZ_PARITY_VM_ONLY").is_ok()
+    cfg!(windows)
+        || std::env::var("ZZ_SKIP_NATIVE").is_ok()
+        || std::env::var("ZZ_PARITY_VM_ONLY").is_ok()
 }
 
 fn batch_full() -> bool {
@@ -46,6 +48,8 @@ fn batch_full() -> bool {
 #[path = "batch_lists.rs"]
 mod batch_lists;
 use batch_lists::{ELIGIBLE, EXCLUDED};
+
+mod support;
 
 /// Every strict fixture outside the quad's scope must be batched or
 /// explicitly excluded — coverage cannot silently drift.
@@ -215,6 +219,11 @@ fn run_driver(driver: &Path, native: bool) -> (i32, String, String) {
     cmd.env("ZZ_RUN_CACHE", "0");
     if native {
         cmd.arg("run").arg("--native");
+        // Native builds can hit the build cache and skip typed_program_for_phased
+        // entirely, which would skip emitting frontend diagnostics/warnings.
+        // Disable it so native and VM always run the same frontend check pass,
+        // keeping stderr identical between the two legs (#511, dual_engine_parity).
+        cmd.env("ZZ_BUILD_CACHE", "0");
     } else {
         cmd.arg("run");
     }

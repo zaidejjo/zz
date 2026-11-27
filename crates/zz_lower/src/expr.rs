@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use zz_codegen_ffi::ffi_impl;
-use zz_frontend::ast::{Block, Decorator, Expr, FmtPart, Ident, MatchArm, Param, Pattern};
+use zz_frontend::ast::{Block, Decorator, Expr, FmtPart, Ident, MatchArm, Param, Pattern, Stmt};
 
 use super::green::GreenCtx;
 use super::*;
@@ -1139,7 +1139,14 @@ impl Lowerer {
                                     return format!("zz_binop({c_op}, {boxed_l}, {boxed_r})");
                                 };
                                 if matches!(op, zz_frontend::ast::BinOp::Rem) {
-                                    format!("(double)(fmod({l}, {r}))")
+                                    // fmod takes raw C `double`s, not boxed
+                                    // `zz_value`s: use the verified raw texts
+                                    // `lc`/`rc` (the `Div` arm above does the
+                                    // same). `{l}`/`{r}` are boxed emissions
+                                    // (e.g. `zz_float(360.0)`) and would fail
+                                    // to compile (zz_stdlib `math.mod`:
+                                    // `x % 360.0`).
+                                    format!("(double)(fmod({lc}, {rc}))")
                                 } else {
                                     format!("(double)({lc} {c_op} {rc})")
                                 }
@@ -1259,6 +1266,18 @@ impl Lowerer {
                             }
                         }
                     }
+                }
+                // ── Cross-function inlining (Phase 3) ───────────────────
+                // Inline small, pure user functions at call sites to
+                // eliminate call-frame overhead. Only fires for:
+                //   - Direct Ident callees to known user functions
+                //   - Functions with exactly 1 statement: `return <expr>`
+                //   - `<expr>` side-effect-free (literals, idents, scalar
+                //     binops, calls to scalar-specialized fns, field access)
+                //   - ≤ 3 params, arity matches, not recursive, not a method
+                //   - No named args
+                if let Some(inlined) = self.try_inline_user_func(callee, args, named, names) {
+                    return inlined;
                 }
                 self.emit_call(callee, args, named, names, out, stmt_direct)
             }
@@ -3101,7 +3120,116 @@ impl Lowerer {
         None
     }
 
-    /// Inline `map`/`filter` with a simple scalar closure: emit an inline loop
+    // ── Math native inlining with unboxing for boxed arguments ────────────
+
+    /// Map an embedded-C math native impl name to its libm twin + arg count.
+    /// Same as MATH_NATIVE_LIBM but for the boxed-argument variant.
+    const MATH_NATIVE_LIBM_BOXED: &[(&str, &str, usize)] = &[
+        ("zz_math_sin", "sin", 1),
+        ("zz_math_cos", "cos", 1),
+        ("zz_math_tan", "tan", 1),
+        ("zz_math_asin", "asin", 1),
+        ("zz_math_acos", "acos", 1),
+        ("zz_math_atan", "atan", 1),
+        ("zz_math_log", "log", 1),
+        ("zz_math_log10", "log10", 1),
+        ("zz_math_exp", "exp", 1),
+    ];
+
+    /// Try to emit a math native call as raw C, unboxing `zz_value` arguments
+    /// based on their ZZ-level types. This handles the common case where
+    /// local variables are `zz_value` at the C level but have a known ZZ type
+    /// (Float or Int) from the type checker.
+    ///
+    /// Returns `Some(c_expr)` producing a `zz_value`, `None` to fall through.
+    fn try_emit_math_native_raw_boxed(
+        &self,
+        effective_name: &str,
+        args: &[Expr],
+        names: &NameCtx,
+    ) -> Option<String> {
+        let (c_func, n_args) = Self::MATH_NATIVE_LIBM_BOXED
+            .iter()
+            .find(|(n, _, _)| *n == effective_name)
+            .map(|(_, f, n)| (*f, *n))?;
+
+        if args.len() != n_args {
+            return None;
+        }
+
+        let mut c_args = Vec::with_capacity(n_args);
+        for arg in args {
+            let zz_ty = match arg {
+                Expr::Ident { name, .. } => names.checker_types.get(name)?,
+                Expr::Path { parts, .. } => names.checker_types.get(&parts.join("."))?,
+                _ => return None,
+            };
+            let cid = match arg {
+                Expr::Ident { name, .. } => names.lookup(name)?,
+                Expr::Path { parts, .. } => names.lookup(&parts.join("."))?,
+                _ => return None,
+            };
+            let unboxed = match zz_ty {
+                zz_checker::Type::Float => format!("({cid}).f"),
+                zz_checker::Type::Int => format!("(double)({cid}).i"),
+                _ => return None,
+            };
+            c_args.push(unboxed);
+        }
+
+        // All math functions in this list return double. Box as zz_float.
+        Some(format!("zz_float({}({}))", c_func, c_args.join(", ")))
+    }
+
+    // ── Len native inlining: raw C field access ──────────────────────────
+
+    /// Try to emit `len(x)` as a raw C field access, bypassing the
+    /// `zz_call_native1(zz_len, ...)` box/unbox round-trip.
+    ///
+    /// Only fires when `x` is an `Expr::Ident` or `Expr::Path` whose ZZ type
+    /// is known at compile time (array, dict, bytes, str). Uses
+    /// `names.checker_types` (ZZ-level types) rather than
+    /// `names.lookup_type` (C-level types), since locals are always `zz_value`
+    /// at the C level.
+    ///
+    /// Returns `Some(c_expr)` on success, `None` to fall through.
+    fn try_emit_len_raw(&self, arg: &Expr, names: &NameCtx) -> Option<String> {
+        match arg {
+            Expr::Ident { name, .. } => {
+                let zz_ty = names.checker_types.get(name)?;
+                self.len_raw_for_zz_type(name, zz_ty, names)
+            }
+            Expr::Path { parts, .. } => {
+                let joined = parts.join(".");
+                let zz_ty = names.checker_types.get(&joined)?;
+                self.len_raw_for_zz_type(&joined, zz_ty, names)
+            }
+            _ => None,
+        }
+    }
+
+    /// Emit the raw C expression for `len(x)` given the resolved name and ZZ type.
+    fn len_raw_for_zz_type(
+        &self,
+        name: &str,
+        zz_ty: &zz_checker::Type,
+        names: &NameCtx,
+    ) -> Option<String> {
+        let cid = names.lookup(name)?;
+
+        match zz_ty {
+            zz_checker::Type::Array(_) | zz_checker::Type::Tuple(_) => {
+                Some(format!("(int64_t)({cid}).arr->len"))
+            }
+            zz_checker::Type::Dict(_, _) => Some(format!("(int64_t)({cid}).dict->len")),
+            zz_checker::Type::Bytes => Some(format!("(int64_t)({cid}).bytes->len")),
+            zz_checker::Type::Str => Some(format!("zz_int((int64_t)zz_str_char_len(({cid}).s))")),
+            _ => None,
+        }
+    }
+
+    // ── Cast inlining: `float(int)` → `(double)(x)`, `int(float)` → `(int64_t)(x)` ──
+
     /// applying the closure body directly to each element, avoiding the
     /// per-element indirect closure call via `zz_iter_map`/`zz_iter_filter`.
     ///
@@ -4844,9 +4972,27 @@ impl Lowerer {
                     }
                 }
             }
+            // ── Len native inlining: raw C field access ──────────────────
+            // Bypass zz_call_native1(zz_len, ...) box/unbox round-trip for
+            // `len(arr)`, `len(s)`, `len(d)`, `len(bytes)` where the argument
+            // type is known at compile time.
+            if matches!(
+                effective_name,
+                "zz_len" | "zz_vec_len" | "std.vec.len" | "std.len"
+            ) && args.len() == 1
+            {
+                if let Some(c_expr) = self.try_emit_len_raw(&args[0], names) {
+                    return c_expr;
+                }
+            }
             // Math native inlining: raw libm calls on unboxed doubles,
             // bypassing the zz_value box/unbox round-trip through zz_call_nativeN.
             if let Some(c_expr) = Self::try_emit_math_native_raw(effective_name, args, names) {
+                return c_expr;
+            }
+            // Boxed-argument variant: unbox zz_value args based on ZZ type,
+            // call libm directly, rebox as zz_float.
+            if let Some(c_expr) = self.try_emit_math_native_raw_boxed(effective_name, args, names) {
                 return c_expr;
             }
             // Cast inlining: `float(int)` → `(double)(x)`, `int(float)` →
@@ -5341,6 +5487,171 @@ impl Lowerer {
         }
 
         "zz_unit()".to_string()
+    }
+
+    // ── Cross-function inlining (Phase 3) ─────────────────────────────
+
+    /// Try to inline a call to a small, pure user function at the call site.
+    ///
+    /// Returns `Some(c_expr)` if the call was inlined into a pure C
+    /// expression, `None` to fall through to `emit_call`.
+    fn try_inline_user_func(
+        &self,
+        callee: &Expr,
+        args: &[Expr],
+        named: &[(Ident, Expr)],
+        names: &mut NameCtx,
+    ) -> Option<String> {
+        // Only direct Ident callees can be inlined (Path/method callees are
+        // either natives or indirect dispatch).
+        let Expr::Ident { name, .. } = callee else {
+            return None;
+        };
+        let name = name.as_str();
+        // No named args: substitution gets complicated.
+        if !named.is_empty() {
+            return None;
+        }
+        // Callee must not be shadowed by a local binding.
+        if names.lookup(name).is_some() {
+            return None;
+        }
+        // Must be a known user function.
+        if !self.reachable_funcs.contains(name) && !self.tp.funcs.contains_key(name) {
+            return None;
+        }
+        // Not an impl method (receiver handling too complex for simple inline).
+        if self.is_impl_method(name) {
+            return None;
+        }
+        // Find the function body.
+        let (params, body) = self.find_body(name)?;
+        // ≤ 3 params, arity must match.
+        if params.len() > 3 || params.len() != args.len() {
+            return None;
+        }
+        // Exactly 1 statement: `return <expr>`.
+        let [stmt] = body.stmts.as_slice() else {
+            return None;
+        };
+        let Stmt::Return {
+            value: Some(ret_expr),
+            ..
+        } = stmt
+        else {
+            return None;
+        };
+        // Return expr must be side-effect-free.
+        if !self.is_pure_expr(ret_expr, names) {
+            return None;
+        }
+        // Not recursive.
+        if mentions_ident(ret_expr, name) {
+            return None;
+        }
+        // Substitute params with args and emit.
+        let mut subst: std::collections::HashMap<String, Expr> = std::collections::HashMap::new();
+        for (p, a) in params.iter().zip(args.iter()) {
+            subst.insert(p.name.name.clone(), a.clone());
+        }
+        let substituted = self.substitute_expr(ret_expr, &subst);
+        Some(self.emit_expr(&substituted, names, &mut String::new()))
+    }
+
+    /// Check if an expression is side-effect-free (safe to inline).
+    ///
+    /// Conservative: returns `false` for anything that might have side
+    /// effects (calls to non-specialized functions, closures, match, etc.).
+    fn is_pure_expr(&self, e: &Expr, names: &NameCtx) -> bool {
+        match e {
+            Expr::Int { .. } | Expr::Float { .. } | Expr::Bool { .. } | Expr::Str { .. } => true,
+            Expr::Ident { .. } => true,
+            Expr::Paren { expr, .. } => self.is_pure_expr(expr, names),
+            Expr::Binary { left, right, .. } => {
+                self.is_pure_expr(left, names) && self.is_pure_expr(right, names)
+            }
+            Expr::Call { callee, args, .. } => {
+                // Calls to scalar-specialized functions are pure.
+                if let Expr::Ident { name, .. } = callee.as_ref() {
+                    if names.scalar_fn_sigs.contains_key(name.as_str()) {
+                        return args.iter().all(|a| self.is_pure_expr(a, names));
+                    }
+                }
+                false
+            }
+            Expr::Field { obj, .. } => self.is_pure_expr(obj, names),
+            Expr::Path { parts, .. } => {
+                // Path to a const/global is pure; path to a call is not.
+                // Conservative: only allow short ident chains that aren't
+                // bound locals (they're consts/globals).
+                parts.len() <= 2 && names.lookup(&parts.join(".")).is_none()
+            }
+            _ => false,
+        }
+    }
+
+    /// Substitute parameter names with argument expressions in an expression tree.
+    ///
+    /// Replaces `Expr::Ident { name: param_name }` nodes with the
+    /// corresponding argument `Expr`. Non-matching idents are left
+    /// unchanged (they'll be resolved by `emit_expr` against `names`).
+    fn substitute_expr(&self, e: &Expr, subst: &std::collections::HashMap<String, Expr>) -> Expr {
+        match e {
+            Expr::Ident { name, span: _ } => {
+                if let Some(replacement) = subst.get(name) {
+                    (*replacement).clone()
+                } else {
+                    e.clone()
+                }
+            }
+            Expr::Binary {
+                op,
+                left,
+                right,
+                span,
+            } => Expr::Binary {
+                op: *op,
+                left: Box::new(self.substitute_expr(left, subst)),
+                right: Box::new(self.substitute_expr(right, subst)),
+                span: *span,
+            },
+            Expr::Paren { expr, span } => Expr::Paren {
+                expr: Box::new(self.substitute_expr(expr, subst)),
+                span: *span,
+            },
+            Expr::Field { obj, name, span } => Expr::Field {
+                obj: Box::new(self.substitute_expr(obj, subst)),
+                name: name.clone(),
+                span: *span,
+            },
+            Expr::Path { parts, span } => Expr::Path {
+                parts: parts.clone(),
+                span: *span,
+            },
+            Expr::Call {
+                callee,
+                args,
+                named,
+                span,
+            } => Expr::Call {
+                callee: Box::new(self.substitute_expr(callee, subst)),
+                args: args
+                    .iter()
+                    .map(|a| self.substitute_expr(a, subst))
+                    .collect(),
+                named: named
+                    .iter()
+                    .map(|(i, v)| (i.clone(), self.substitute_expr(v, subst)))
+                    .collect(),
+                span: *span,
+            },
+            Expr::Unary { op, expr, span } => Expr::Unary {
+                op: *op,
+                expr: Box::new(self.substitute_expr(expr, subst)),
+                span: *span,
+            },
+            other => other.clone(),
+        }
     }
 
     /// Emit an expression in tail/return position as a `zz_value`.

@@ -1788,7 +1788,28 @@ impl Lowerer {
                         if self.green_active() {
                             self.stmt_direct.set(true);
                         }
-                        let val = self.emit_expr_stateful(e, names, out);
+                        // `vec.push`/`vec.append` mutate the receiver in
+                        // place. Even when the call appears in tail
+                        // (expression) position — e.g. a block-tail
+                        // `{ row.push(v) }` or a match-arm tail — the
+                        // receiver must be updated, mirroring the VM. Lower
+                        // such calls in void context so they emit in-place
+                        // `zz_vec_append` instead of copy-on-write
+                        // `zz_vec_push` on a cloned throwaway, which would
+                        // leave the receiver empty (matrix_mul native
+                        // SIGSEGV).
+                        let val = if let Expr::Call { callee, .. } = e {
+                            if callee_is_inplace_push(callee) {
+                                *self.void_context.borrow_mut() = true;
+                                let val = self.emit_expr(e, names, out);
+                                *self.void_context.borrow_mut() = false;
+                                val
+                            } else {
+                                self.emit_expr(e, names, out)
+                            }
+                        } else {
+                            self.emit_expr(e, names, out)
+                        };
                         // Box raw scalars for the `zz_value` temp: tail
                         // calls to specialized functions (and scalar
                         // temporaries generally) lower raw. Idempotent —

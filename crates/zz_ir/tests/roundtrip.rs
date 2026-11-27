@@ -598,6 +598,7 @@ fn lower_typed_spanmap(
         symbol_map,
         HashMap::new(),
         HashMap::new(),
+        HashMap::new(),
         Arc::new(std::collections::HashSet::new()),
     );
     zz_ir::lower::lower_typed(&chunk, sigs).expect("lower_typed failed")

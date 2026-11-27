@@ -15,6 +15,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+mod support;
+
 fn zz_bin() -> PathBuf {
     // `CARGO_BIN_EXE_zz` is the built binary for this test run and
     // carries the platform executable suffix (`zz.exe` on Windows).
@@ -73,8 +75,8 @@ fn harness_main_module_import_passes_both_engines() {
         "VM output missing pass marker:\n{text}"
     );
     // Native leg is the #401 regression (skipped without a backend).
-    if std::env::var("ZZ_SKIP_NATIVE").is_ok() {
-        eprintln!("skip: native leg (ZZ_SKIP_NATIVE=1)");
+    if support::native_unsupported() {
+        eprintln!("skip: native backend unsupported on Windows (ZZ_SKIP_NATIVE=1)");
         std::fs::remove_dir_all(&dir).ok();
         return;
     }

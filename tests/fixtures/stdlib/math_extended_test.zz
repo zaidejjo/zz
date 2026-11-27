@@ -41,6 +41,16 @@ match math.factorial(-1) {
     .ok(v) => println("factorial(-1): {v}")
     .err(e) => println("factorial(-1) err: {e}")
 }
+println("factorial_f(0): {math.factorial_f(0)}")
+println("factorial_f(5): {math.factorial_f(5)}")
+println("factorial_f(20): {math.factorial_f(20)}")
+println("factorial_f(21): {math.factorial_f(21)}")
+println("factorial_f(50): {math.factorial_f(50)}")
+println("factorial_f(100): {math.factorial_f(100)}")
+println("factorial_f(170): {math.factorial_f(170)}")
+println("factorial_f(171): {math.factorial_f(171)}")
+println("factorial_f(-1): {math.factorial_f(-1)}")
+
 println("gcd(12, 8): {math.gcd(12, 8)}")
 println("lcm(4, 6): {math.lcm(4, 6)}")
 
@@ -54,6 +64,15 @@ println("atan(1): {math.atan(1)}")
 println("sin_deg(90): {math.sin_deg(90)}")
 println("cos_deg(90): {math.cos_deg(90)}")
 println("tan_deg(45): {math.tan_deg(45)}")
+
+// ── tan_deg(90) and tan(PI/2) behavior ──
+// tan(90 deg) is undefined (vertical asymptote) -> +inf (correct IEEE 754).
+// cos_deg(180) == -1.0 exactly, so denom == 0.0 exactly -> inf.
+// tan(PI/2 radians) is a huge finite number instead of inf because
+// cos(PI/2) is ~6.1e-17 (not exactly 0 in f64). Radian/degree paths
+// are intentionally inconsistent here; tan_deg(90) = inf is correct.
+println("tan_deg(90): {math.tan_deg(90)}   (expect inf)")
+println("tan(PI/2): {math.tan(math.PI / 2)}   (expect huge finite, not inf)")
 println("to_radians(180): {math.to_radians(180)}")
 println("to_degrees(pi): {math.to_degrees(math.PI)}")
 
@@ -63,6 +82,30 @@ println("log(E): {math.log(math.E)}")
 println("log10(100): {math.log10(100)}")
 println("exp(0): {math.exp(0)}")
 println("exp(1): {math.exp(1)}")
+
+// ── exp precision (round-trip through log) ──
+println("exp(log(2)) = {math.exp(math.log(2.0))}   (expect ~2.0)")
+println("exp(log(100)) = {math.exp(math.log(100.0))}   (expect ~100.0)")
+println("exp(log(1000)) = {math.exp(math.log(1000.0))}   (expect ~1000.0)")
+println("exp(log(0.001)) = {math.exp(math.log(0.001))}   (expect ~0.001)")
+println("exp(log(1e-10)) = {math.exp(math.log(0.0000000001))}   (expect ~1e-10)")
+
+// exp of large values (e^700 ≈ 1e304, well within f64 max ≈ 1.8e308)
+println("exp(10) = {math.exp(10.0)}")
+println("exp(100) = {math.exp(100.0)}")
+println("exp(700) = {math.exp(700.0)}   (expect ~1.014e304, finite)")
+println("exp(701) = {math.exp(701.0)}   (expect ~2.76e304, finite)")
+println("exp(709) = {math.exp(709.0)}   (expect ~8.2e307, near f64 max)")
+println("exp(710) = {math.exp(710.0)}   (expect inf, above f64 max)")
+
+// ── Power (integer & fractional exponents) ──
+println("pow(2, 10): {math.pow(2.0, 10.0)}")
+println("pow(3, 3): {math.pow(3.0, 3.0)}")
+println("pow(2, 0.5): {math.pow(2.0, 0.5)}")
+println("pow(4, 0.5): {math.pow(4.0, 0.5)}")
+println("pow(8, 0.3333333333333333): {math.pow(8.0, 0.3333333333333333)}")
+println("pow(2, -0.5): {math.pow(2.0, -0.5)}")
+println("pow(2, -3): {math.pow(2.0, -3.0)}")
 
 // ── Linear algebra ──
 match math.dot_product([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]) {

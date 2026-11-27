@@ -1,0 +1,5 @@
+// features: error-case, array-literal
+// E2E: heterogeneous array literal rejected against concrete element type
+age: [int] = [1, 2, 3, 4, "ZAID"]
+
+println(age)

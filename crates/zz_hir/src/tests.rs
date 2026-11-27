@@ -658,3 +658,57 @@ func main() {
     let reach = reachable(tp, "main");
     assert!(!reach.funcs.contains("unused"), "unused must be pruned");
 }
+
+/// `merge_typed_programs` re-interns scope symbols: span types recorded under
+/// each program's local symbol ids must stay resolvable through the merged
+/// `symbol_map`. The AOT lowerer's scalar specialization reads `type_at` to
+/// decide whether a local is a raw `int64_t`/`bool` or a boxed `zz_value`;
+/// an empty merged map made it emit `zz_value v = (int64_t)(...)` (invalid C).
+#[test]
+fn merge_preserves_scoped_span_types() {
+    fn build(src: &str) -> crate::TypedProgram {
+        let parsed = zz_frontend::parse(src);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        crate::build_program(
+            &parsed.program,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .program
+    }
+
+    fn decl_value_span(src: &str) -> (String, crate::Span) {
+        let parsed = zz_frontend::parse(src);
+        for stmt in &parsed.program.stmts {
+            if let crate::Stmt::Func { name, body, .. } = stmt {
+                for s in &body.stmts {
+                    if let crate::Stmt::Decl { value, .. } = s {
+                        return (name.join("."), value.span());
+                    }
+                }
+            }
+        }
+        panic!("no func + decl found");
+    }
+
+    let src = "func f(n: int) -> int {\n    half := n / 2\n    return half\n}\n";
+    let (fname, span) = decl_value_span(src);
+    let tp = build(src);
+    assert_eq!(
+        tp.type_at(&fname, span),
+        Some(&Type::Int),
+        "pre-merge lookup should resolve the BinOp type"
+    );
+
+    let merged = crate::merge_typed_programs(vec![tp]);
+    assert_eq!(
+        merged.type_at(&fname, span),
+        Some(&Type::Int),
+        "merged lookup must survive symbol re-interning"
+    );
+}

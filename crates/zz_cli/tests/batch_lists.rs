@@ -99,6 +99,7 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "map_set.zz", true),
     ("stdlib", "math_ops.zz", false),
     ("stdlib", "matrix_mul_test.zz", true),
+    ("stdlib", "mini_matrix_return_test.zz", true),
     ("stdlib", "path_join.zz", true),
     ("stdlib", "time_date.zz", true),
     ("stdlib", "math_consts.zz", false),
@@ -230,6 +231,10 @@ pub const ELIGIBLE: &[(&str, &str, bool)] = &[
     ("stdlib", "concurrency_vartrip_test.zz", true),
     ("stdlib", "concurrency_panic_test.zz", true),
     ("stdlib", "concurrent_http_test.zz", false),
+    // Pure c_runtime edge tests (no spawn/net/fs/stdin): batchable.
+    ("stdlib", "c_runtime_b6_array_arena_migrate.zz", true),
+    ("stdlib", "c_runtime_b7_iter_filter.zz", true),
+    ("stdlib", "c_runtime_b13_str_append.zz", true),
 ];
 
 /// (category/file, reason). Everything strict outside regression/errors
@@ -487,5 +492,18 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     (
         "stdlib/state_composite.zz",
         "concurrency timing fixture (task.spawn/join + 50-run vec push under lock)",
+    ),
+    // c_runtime edge tests: added as parity_strict! but never registered in
+    // the batch lists. b1/b5/b11 spawn tasks (timing-sensitive in batch);
+    // b6/b7/b13 are pure and batchable — see ELIGIBLE below.
+    ("stdlib/c_runtime_b1_closures.zz", "spawn/timing-sensitive"),
+    (
+        "stdlib/c_runtime_b5_closure_cells.zz",
+        "spawn/timing-sensitive",
+    ),
+    (
+        "stdlib/c_runtime_b11_handoff_inline_nest.zz",
+        "spawn/timing-sensitive",
+    ),
     ),
 ];

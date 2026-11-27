@@ -162,11 +162,15 @@ pub enum Op {
     /// Read `array[idx]` where both are stack slots: single bounds check,
     /// no `normalize_index` call, no `Value` tag loop. Fused `a[i]` reads
     /// when both operands are slot-resolvable. Result written to `dst`.
+    /// When `safe` is `true`, the compiler has proven the index is always
+    /// in bounds (e.g. a `for i in 0..arr.len()` loop variable), so the VM
+    /// skips `normalize_index` and indexes directly.
     IndexIntSlot {
         arr: u16,
         idx: u16,
         dst: u16,
         span: Span,
+        safe: bool,
     },
     /// Read `dict[key]` where key is an int: probe DictData with a
     /// precomputed hash + open-addressed table. Fused int-keyed dict reads

@@ -1714,6 +1714,18 @@ pub fn build_release(
             .as_deref(),
         Some("1") | Some("true") | Some("yes") | Some("on")
     );
+    // Strip disable (`ZZ_NO_STRIP=1`): keep debug symbols in optimized
+    // builds for inspection/debugging (e.g. `ZZ_NO_STRIP=1 zz run --native`
+    // emits `-g` without `-s`). Mirrors `ZZ_NATIVE_DEV=1` which selects the
+    // whole Dev option set (`-O0 -g`, no strip, no LTO).
+    if std::env::var("ZZ_NO_STRIP")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+        == Some("1")
+    {
+        opts.strip = false;
+    }
     // PGO profile reuse (`ZZ_PGO_PROFILE=<profdata>`): ship a
     // profile-optimized binary without re-instrumenting. Opt-in via env;
     // default behavior unchanged. For `--full` builds keep full LTO and

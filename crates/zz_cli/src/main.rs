@@ -120,7 +120,8 @@ FLAGS:
     --check, -c        with fmt ONLY, check formatting without writing (exit 1 if changed)
     --stdin            with fmt, read source from stdin and write formatted to stdout
     --fix, -f          apply safe auto-fixes (typo replacements, field corrections)
-    --hard             with --fix, apply ALL fixes including ambiguous ones (no prompts)
+    --hard             with --fix, apply ALL fixes including ambiguous ones (no prompts);
+                       with --check, warnings also fail the check
     --interactive, -i  with --fix, prompt for ambiguous fixes interactively
     --native           with run/test, use the native AOT compiler instead of the VM
                          (test: per-file dev build, one process per test)
@@ -597,11 +598,73 @@ fn main_inner() -> ExitCode {
                 print_subcommand_help("fmt");
                 return ExitCode::SUCCESS;
             }
-            let (path, flags) = parse_path_and_flags(rest);
+            // Extract --format <value> and --range start:end before
+            // path/flag parsing so the values aren't mistaken for paths.
+            let mut format_value: Option<String> = None;
+            let mut range_value: Option<String> = None;
+            let mut rest_filtered = Vec::with_capacity(rest.len());
+            let mut rest_iter = rest.iter().peekable();
+            while let Some(a) = rest_iter.next() {
+                if a == "--format" {
+                    format_value = rest_iter.next().cloned();
+                    continue;
+                }
+                if let Some(v) = a.strip_prefix("--format=") {
+                    format_value = Some(v.to_string());
+                    continue;
+                }
+                if a == "--range" {
+                    range_value = rest_iter.next().cloned();
+                    continue;
+                }
+                if let Some(v) = a.strip_prefix("--range=") {
+                    range_value = Some(v.to_string());
+                    continue;
+                }
+                rest_filtered.push(a.clone());
+            }
+            let (path, flags) = parse_path_and_flags(&rest_filtered);
             let check_only =
                 flags.contains(&"--check".to_string()) || flags.contains(&"-c".to_string());
             let stdin = flags.contains(&"--stdin".to_string());
-            match fmt_command(path, check_only, stdin) {
+            // --config <path> overrides config file discovery; defaults to
+            // discovering zzfmt.toml / zz.toml [fmt] from the target path.
+            let config_path: Option<&str> = flags
+                .iter()
+                .find_map(|f| f.strip_prefix("--config="))
+                .or_else(|| {
+                    let idx = flags.iter().position(|f| f == "--config");
+                    idx.and_then(|i| flags.get(i + 1).map(|s| s.as_str()))
+                });
+            let start_path = config_path.or(path.as_deref()).unwrap_or(".");
+            let config = zz_fmt::config::load_config(std::path::Path::new(start_path));
+            // --format json for machine-readable --check output.
+            let format_json = matches!(format_value.as_deref(), Some("json"));
+            if format_value.is_some() && !format_json {
+                eprintln!(
+                    "zz: unknown `--format` value `{}` (expected `json`)\n\
+                     hint: run `zz fmt --format json <path>`",
+                    format_value.as_deref().unwrap_or_default()
+                );
+                return ExitCode::FAILURE;
+            }
+            // --range start:end formats only lines start..=end (1-indexed).
+            let mut range: Option<(usize, usize)> = None;
+            if let Some(r) = &range_value {
+                let parts: Vec<&str> = r.split(':').collect();
+                if parts.len() == 2 {
+                    if let (Ok(s), Ok(e)) = (parts[0].parse::<usize>(), parts[1].parse::<usize>()) {
+                        range = Some((s, e));
+                    }
+                }
+                if range.is_none() {
+                    eprintln!(
+                        "zz: invalid `--range` value `{r}` (expected `start:end`, e.g. `--range=5:10`)"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            }
+            match fmt_command(path, check_only, stdin, &config, format_json, range) {
                 Ok(changed) => {
                     if check_only && changed {
                         ExitCode::FAILURE
@@ -953,12 +1016,27 @@ usage: zz fmt [FLAGS] [PATH]
 Format ZZ source files in place.
 
 FLAGS:
-  --check, -c        check formatting without writing (exit 1 if changed)
+  --check, -c        check formatting without writing (exit 1 if changed;
+                     read-only: never touches source files or the cache)
+  --config <path>    path to zzfmt.toml (or directory containing one);
+                     defaults to discovering zzfmt.toml / zz.toml [fmt]
+  --format json      machine-readable --check output (JSON array on stdout)
+  --range start:end  format only lines start..=end (1-indexed)
   --stdin            read source from stdin and write formatted to stdout
   -h, --help         show this help
 
 PATH can be a single .zz file or a directory (recursively formats all .zz files).
 Defaults to `.` (current directory) if omitted.
+
+Configuration is loaded from `zzfmt.toml` (or `[fmt]` table in `zz.toml`)
+discovered by walking up from the target path. Supported keys:
+line_width, indent_width, use_tabs, line_ending (lf|crlf),
+trailing_comma (never|always|multiline), semicolons (auto|always|never),
+collapse_blank_lines, trailing_newline.
+
+With --check, unformatted files are reported as warnings (with a diff preview)
+and parse/verification failures as errors. Exit 0 iff every file is formatted
+and no errors occurred; exit 1 otherwise.
 "
         }
         "plugin" => {
@@ -1061,12 +1139,15 @@ pub(crate) struct PreparedRun {
     pub(crate) files: Vec<(String, String)>,
     pub(crate) types:
         std::sync::Arc<std::collections::HashMap<zz_checker::SpanKey, zz_checker::Type>>,
+    /// Function name → interned `Symbol` id, used by the VM compiler to
+    /// resolve expression span types (e.g. enum construction). Built by the
+    /// checker that produced `types`; the two maps share symbol ids.
+    pub(crate) symbol_map: std::collections::HashMap<String, u32>,
     pub(crate) structs: std::collections::HashMap<String, zz_checker::StructSig>,
     pub(crate) enums: std::collections::HashMap<String, zz_checker::EnumSig>,
     /// func name → interned Symbol id, so `Compiler::type_of` can resolve a
     /// call's span to its resolved type (drives `sqlz.query` struct mapping
     /// and any other type-at-span lookups during VM execution).
-    pub(crate) symbol_map: std::collections::HashMap<String, u32>,
     funcs: std::collections::HashMap<String, zz_checker::FuncSig>,
     entry_path: String,
     /// Threaded out for the run cache: interpreter inputs that cannot be
@@ -1180,7 +1261,7 @@ fn setup_interp(
                 if let Err(e) = interp.run_typed(
                     &zz_prog.program,
                     std::sync::Arc::new(zz_prog.types.clone()),
-                    HashMap::new(),
+                    zz_prog.symbol_map.clone(),
                     zz_prog.structs.clone(),
                     zz_prog.enums.clone(),
                 ) {
@@ -1350,7 +1431,6 @@ pub(crate) fn prepare_run_with_features(
         }
         return Err(msg);
     }
-    let symbol_map = typed.program.symbol_map.clone();
     let interp = setup_interp(
         natives,
         &consts,
@@ -1368,10 +1448,10 @@ pub(crate) fn prepare_run_with_features(
         programs,
         files,
         types: std::sync::Arc::new(typed.program.types),
+        symbol_map: typed.program.symbol_map,
         structs: typed.program.structs,
         enums: typed.program.enums,
         funcs: typed.program.funcs,
-        symbol_map: symbol_map.clone(),
         entry_path: path.to_string(),
         consts,
         import_aliases,
@@ -1396,7 +1476,7 @@ fn compile_prep(prep: &PreparedRun) -> Option<Vec<Vec<u8>>> {
         let chunk = zz_runtime::vm::Compiler::compile_program_typed(
             program,
             prep.types.clone(),
-            HashMap::new(),
+            prep.symbol_map.clone(),
             prep.structs.clone(),
             prep.enums.clone(),
             native_names.clone(),
@@ -2006,7 +2086,7 @@ fn run_file(
         match prep.interp.run_typed(
             program,
             prep.types.clone(),
-            HashMap::new(),
+            prep.symbol_map.clone(),
             prep.structs.clone(),
             prep.enums.clone(),
         ) {
@@ -3072,6 +3152,15 @@ fn strip_output_flag(args: &[String]) -> Vec<String> {
     out
 }
 
+/// Result of checking one file with `zz fmt --check --format json`.
+#[derive(serde::Serialize)]
+struct FmtCheckResult {
+    path: String,
+    needs_format: bool,
+    error: Option<String>,
+    diff: Option<String>,
+}
+
 /// Top-level entry for `zz fmt`.
 ///
 /// Modes:
@@ -3083,11 +3172,23 @@ fn strip_output_flag(args: &[String]) -> Vec<String> {
 ///   that need formatting under `--check`.
 ///
 /// Uses `zz_fmt::discover` for gitignore-aware file discovery and
-/// `zz_fmt::format_paths_parallel` for concurrent formatting via rayon.
+/// `zz_fmt::format_sources_parallel` for concurrent formatting via rayon.
+///
+/// `config` comes from `zzfmt.toml` / `zz.toml [fmt]` discovery, or
+/// `FmtConfig::default()` when no config file is found.
+/// When `format_json` and `check_only` are both true, results are
+/// emitted as a JSON array on stdout instead of human-readable text.
 ///
 /// Returns `Ok(true)` when at least one file (or stdin) needed
 /// formatting — the caller uses this to choose the exit code.
-fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Result<bool, String> {
+fn fmt_command(
+    path_arg: Option<String>,
+    check_only: bool,
+    stdin: bool,
+    config: &zz_fmt::FmtConfig,
+    format_json: bool,
+    range: Option<(usize, usize)>,
+) -> Result<bool, String> {
     use std::io::Read;
 
     if stdin {
@@ -3095,20 +3196,47 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
         std::io::stdin()
             .read_to_string(&mut source)
             .map_err(|e| format!("cannot read stdin: {e}"))?;
-        let config = zz_fmt::FmtConfig::default();
+        let source = match range {
+            Some((start, end)) => zz_fmt::pipeline::format_range(&source, start, end, config)
+                .map_err(|e| format!("{e}"))?,
+            None => source,
+        };
         // O(1) warm path: identical stdin seen clean before.
-        if zz_fmt::cache::is_clean(&source, &config) {
+        if zz_fmt::cache::is_clean(&source, config) {
             if !check_only {
                 print!("{source}");
             }
+            if format_json {
+                let result = FmtCheckResult {
+                    path: "<stdin>".to_string(),
+                    needs_format: false,
+                    error: None,
+                    diff: None,
+                };
+                println!("{}", serde_json::to_string(&result).unwrap());
+                return Ok(false);
+            }
             return Ok(false);
         }
-        return match zz_fmt::format_source(&source, &config) {
+        return match zz_fmt::format_source(&source, config) {
             Ok(formatted) => {
                 if formatted != source {
                     if check_only {
-                        // Emit the diff so callers can see what would change.
-                        let diff = zz_fmt::diff::unified_diff_plain("<stdin>", &source, &formatted)
+                        if format_json {
+                            let diff = zz_fmt::diff::unified_diff("<stdin>", &source, &formatted)
+                                .unwrap_or_default();
+                            let result = FmtCheckResult {
+                                path: "<stdin>".to_string(),
+                                needs_format: true,
+                                error: None,
+                                diff: Some(diff),
+                            };
+                            println!("{}", serde_json::to_string(&result).unwrap());
+                            return Ok(true);
+                        }
+                        // Emit a colored unified diff so callers can see what
+                        // would change (red removals, green additions).
+                        let diff = zz_fmt::diff::unified_diff("<stdin>", &source, &formatted)
                             .unwrap_or_default();
                         eprint!("{diff}");
                     } else {
@@ -3116,14 +3244,30 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
                     }
                     Ok(true)
                 } else {
-                    zz_fmt::cache::mark_clean(&source, &config);
+                    // Check mode is strictly read-only: never record a clean
+                    // marker in the cache while --check is active.
+                    if !check_only {
+                        zz_fmt::cache::mark_clean(&source, config);
+                    }
                     if !check_only {
                         print!("{formatted}");
                     }
                     Ok(false)
                 }
             }
-            Err(e) => Err(format!("format error: {e}")),
+            Err(e) => {
+                if format_json && check_only {
+                    let result = FmtCheckResult {
+                        path: "<stdin>".to_string(),
+                        needs_format: false,
+                        error: Some(format!("{e}")),
+                        diff: None,
+                    };
+                    println!("{}", serde_json::to_string(&result).unwrap());
+                    return Ok(true);
+                }
+                Err(format!("format error: {e}"))
+            }
         };
     }
 
@@ -3135,8 +3279,6 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
     if files.is_empty() {
         return Err(format!("no .zz files found in `{raw}`"));
     }
-
-    let config = zz_fmt::FmtConfig::default();
 
     // Read all files into memory, then format in parallel (pure, no disk I/O).
     // This avoids writing files when --check is active.
@@ -3150,48 +3292,69 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
         })
         .collect();
 
-    let src_refs: Vec<(&std::path::PathBuf, &str)> =
-        sources.iter().map(|(p, s)| (p, s.as_str())).collect();
-    // O(1) warm path: files proven clean on a previous run (same content,
-    // config, toolchain) skip the pipeline entirely. The rest format in
-    // parallel as before; newly-clean outputs are recorded for next time.
-    let todo_idx: Vec<usize> = src_refs
-        .iter()
-        .enumerate()
-        .filter(|(_, (_, s))| !zz_fmt::cache::is_clean(s, &config))
-        .map(|(i, _)| i)
-        .collect();
-    let todo_refs: Vec<(&std::path::PathBuf, &str)> =
-        todo_idx.iter().map(|&i| src_refs[i]).collect();
-    let todo_results = zz_fmt::format_sources_parallel(&todo_refs, &config);
     let mut results: Vec<Result<String, zz_fmt::FmtError>> = Vec::with_capacity(sources.len());
-    {
-        let mut todo_iter = todo_results.into_iter();
-        let mut todo_pos = 0;
-        for (i, (_, src)) in src_refs.iter().enumerate() {
-            if todo_idx.get(todo_pos) == Some(&i) {
-                todo_pos += 1;
-                let r = todo_iter.next().expect("parallel results align");
-                if let Ok(formatted) = &r {
-                    if formatted == *src {
-                        zz_fmt::cache::mark_clean(src, &config);
+
+    if let Some((start, end)) = range {
+        // Range formatting: process each file sequentially with format_range.
+        for (path, src) in &sources {
+            let r = zz_fmt::pipeline::format_range(src, start, end, config)
+                .map_err(|e| zz_fmt::FmtError::io(path, std::io::Error::other(e.to_string())));
+            results.push(r);
+        }
+    } else {
+        // Parallel whole-file formatting (existing path).
+        let src_refs: Vec<(&std::path::PathBuf, &str)> =
+            sources.iter().map(|(p, s)| (p, s.as_str())).collect();
+        // O(1) warm path: files proven clean on a previous run skip the pipeline.
+        let todo_idx: Vec<usize> = src_refs
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, s))| !zz_fmt::cache::is_clean(s, config))
+            .map(|(i, _)| i)
+            .collect();
+        let todo_refs: Vec<(&std::path::PathBuf, &str)> =
+            todo_idx.iter().map(|&i| src_refs[i]).collect();
+        let todo_results = zz_fmt::format_sources_parallel(&todo_refs, config);
+        {
+            let mut todo_iter = todo_results.into_iter();
+            let mut todo_pos = 0;
+            for (i, (_, src)) in src_refs.iter().enumerate() {
+                if todo_idx.get(todo_pos) == Some(&i) {
+                    todo_pos += 1;
+                    let r = todo_iter.next().expect("parallel results align");
+                    if let Ok(formatted) = &r {
+                        if formatted == *src && !check_only {
+                            // Check mode is strictly read-only: never record a clean
+                            // marker in the cache while --check is active.
+                            zz_fmt::cache::mark_clean(src, config);
+                        }
                     }
+                    results.push(r);
+                } else {
+                    results.push(Ok((*src).to_string()));
                 }
-                results.push(r);
-            } else {
-                results.push(Ok((*src).to_string()));
             }
         }
     }
 
-    let mut changed_any = false;
+    let mut needs_format = 0usize;
     let mut errors: Vec<String> = Vec::new();
+    let mut check_results: Vec<FmtCheckResult> = Vec::new();
 
     for (i, result) in results.into_iter().enumerate() {
         let formatted = match result {
             Ok(s) => s,
             Err(e) => {
-                errors.push(format!("{e}"));
+                errors.push(format!("error: {e}"));
+                if format_json && check_only {
+                    let (path, _) = &sources[i];
+                    check_results.push(FmtCheckResult {
+                        path: path.display().to_string(),
+                        needs_format: false,
+                        error: Some(format!("{e}")),
+                        diff: None,
+                    });
+                }
                 continue;
             }
         };
@@ -3200,15 +3363,35 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
         let path_str = path.display().to_string();
 
         if formatted == *original {
+            if format_json && check_only {
+                check_results.push(FmtCheckResult {
+                    path: path_str.clone(),
+                    needs_format: false,
+                    error: None,
+                    diff: None,
+                });
+            }
             continue;
         }
-        changed_any = true;
+        needs_format += 1;
 
         if check_only {
-            eprintln!("--- {path_str} (would reformat) ---");
-            let diff = zz_fmt::diff::unified_diff_plain(&path_str, original, &formatted)
-                .unwrap_or_default();
-            print!("{diff}");
+            if format_json {
+                let diff =
+                    zz_fmt::diff::unified_diff(&path_str, original, &formatted).unwrap_or_default();
+                check_results.push(FmtCheckResult {
+                    path: path_str.clone(),
+                    needs_format: true,
+                    error: None,
+                    diff: Some(diff),
+                });
+            } else {
+                eprintln!("\x1b[33mwarning:\x1b[0m {path_str} needs formatting");
+                // Colored unified diff: red removals, green additions.
+                let diff =
+                    zz_fmt::diff::unified_diff(&path_str, original, &formatted).unwrap_or_default();
+                eprint!("{diff}");
+            }
         } else {
             if let Err(e) = std::fs::write(path, &formatted) {
                 errors.push(format!("cannot write `{path_str}`: {e}"));
@@ -3218,20 +3401,28 @@ fn fmt_command(path_arg: Option<String>, check_only: bool, stdin: bool) -> Resul
         }
     }
 
+    if format_json && check_only {
+        println!("{}", serde_json::to_string(&check_results).unwrap());
+        if !errors.is_empty() || needs_format > 0 {
+            return Ok(true);
+        }
+        return Ok(false);
+    }
+
     if !errors.is_empty() {
         return Err(errors.join("\n"));
     }
 
-    if check_only && changed_any {
+    if check_only && needs_format > 0 {
         eprintln!(
-            "\nzz: {} file(s) need formatting (run `zz fmt` to fix)",
-            files.len()
+            "\n\x1b[35mzz: {} file(s) need formatting (run `zz fmt` to fix)\x1b[0m",
+            needs_format
         );
-    } else if !changed_any && !check_only {
+    } else if needs_format == 0 && !check_only {
         eprintln!("zz: all files already formatted");
     }
 
-    Ok(changed_any)
+    Ok(needs_format > 0)
 }
 
 /// Parse, type-check, and optionally auto-fix files.
@@ -3457,6 +3648,7 @@ pub(crate) fn check_or_fix_path(
 
     let mut total_errors = 0u32;
     let mut total_fixes = 0u32;
+    let mut total_warnings = 0u32;
     let mut any_safe_fixits = false;
     let mut any_ambiguous = false;
     // --stats accumulators (#248).
@@ -3507,13 +3699,24 @@ pub(crate) fn check_or_fix_path(
             );
         }
 
-        // Any error-severity diagnostic fails the check (#292): fixable
-        // errors are still errors (warnings alone stay exit 0). Compute this
-        // before cross-entry dedupe so a repeated error still fails the run.
+        // Any error-severity diagnostic fails the check (#292). With
+        // `--hard`, warnings also fail the check so CI can treat them as
+        // errors. Compute this before cross-entry dedupe so a repeated
+        // diagnostic still fails the run.
         let mut has_errors = loaded
             .errors
             .iter()
             .any(|e| e.diags.iter().any(|d| d.severity == Severity::Error));
+        let file_warnings = if force {
+            loaded
+                .errors
+                .iter()
+                .filter(|e| e.diags.iter().any(|d| d.severity == Severity::Warning))
+                .count()
+        } else {
+            0
+        };
+        total_warnings += file_warnings as u32;
         let mut loaded = loaded;
         if !do_fix {
             for e in &mut loaded.errors {
@@ -3762,8 +3965,15 @@ pub(crate) fn check_or_fix_path(
         }
     }
 
-    if !do_fix && total_errors > 0 {
-        return Err(format!("{total_errors} file(s) failed type-check"));
+    if !do_fix && (total_errors > 0 || (force && total_warnings > 0)) {
+        return Err(format!(
+            "{total_errors} file(s) failed type-check{}",
+            if force && total_warnings > 0 {
+                format!(" ({total_warnings} with warnings as errors via --hard)")
+            } else {
+                String::new()
+            }
+        ));
     }
 
     if do_fix && total_fixes == 0 {

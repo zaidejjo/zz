@@ -1,6 +1,6 @@
 first module that broke: <path> <path>
 
-error: type mismatch: expected `T`, found `str`
+error: Z0002: type mismatch: expected `T`, found `str`
 
 --> <path>
 |
@@ -12,7 +12,7 @@ error: cannot infer type for generic parameter `T`; it requires bound(s) Num
 |
 7 | x := make_bad()
 | ^^^^^^^^^^
-error: cannot infer the type of `generic_bound_returned.x`; add a type annotation
+error: Z0002: cannot infer the type of `generic_bound_returned.x`; add a type annotation
 
 --> <path>
 |

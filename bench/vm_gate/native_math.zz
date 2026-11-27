@@ -1,0 +1,22 @@
+// Gate: math native calls (sin, cos, tan, log, exp, sqrt, pow).
+// Measures zz_call_nativeN dispatch + registry lookup per call vs.
+// direct libm inlining (raw C sin/cos/tan/log/exp/sqrt/pow on doubles).
+import std.math
+import std.time
+
+func main() {
+    t0 := time.now_ms()
+    acc := 0.0
+    for i in 0..1000000 {
+        x := (i % 1000) / 1000.0
+        acc = acc + math.sin(x)
+        acc = acc + math.cos(x)
+        acc = acc + math.tan(x)
+        acc = acc + math.log(x + 1.0)
+        acc = acc + math.exp(x * 0.5)
+        acc = acc + math.sqrt(x + 1.0)
+        acc = acc + math.pow(x + 1.0, 2.0)
+    }
+    t1 := time.now_ms()
+    println("native_math: {t1 - t0}ms result={acc}")
+}
