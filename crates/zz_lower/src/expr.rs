@@ -3219,10 +3219,10 @@ impl Lowerer {
 
         match zz_ty {
             zz_checker::Type::Array(_) | zz_checker::Type::Tuple(_) => {
-                Some(format!("(int64_t)({cid}).arr->len"))
+                Some(format!("zz_int((int64_t)({cid}).arr->len)"))
             }
-            zz_checker::Type::Dict(_, _) => Some(format!("(int64_t)({cid}).dict->len")),
-            zz_checker::Type::Bytes => Some(format!("(int64_t)({cid}).bytes->len")),
+            zz_checker::Type::Dict(_, _) => Some(format!("zz_int((int64_t)({cid}).dict->len)")),
+            zz_checker::Type::Bytes => Some(format!("zz_int((int64_t)({cid}).bytes->len)")),
             zz_checker::Type::Str => Some(format!("zz_int((int64_t)zz_str_char_len(({cid}).s))")),
             _ => None,
         }
@@ -3952,19 +3952,10 @@ impl Lowerer {
                 if self.is_func_field_callee(callee, names) {
                     (Self::FUNC_FIELD_CNAME.to_string(), None)
                 } else {
-                    // Get the receiver type from the type table, falling back to
-                    // inferring it from literal expressions (string literals,
-                    // int literals, etc. may not have span type entries).
                     let zzty: Option<zz_checker::Type> = self
                         .ty_at(names, obj.span())
                         .cloned()
-                        .or_else(|| match obj.as_ref() {
-                            Expr::Str { .. } => Some(zz_checker::Type::Str),
-                            Expr::Int { .. } => Some(zz_checker::Type::Int),
-                            Expr::Float { .. } => Some(zz_checker::Type::Float),
-                            Expr::Bool { .. } => Some(zz_checker::Type::Bool),
-                            _ => None,
-                        });
+                        .or_else(|| self.infer_expr_type(obj, names));
                     match zzty {
                         Some(zz_checker::Type::Enum(ename, _)) => {
                             // Enum values erase to boxed objects: methods
@@ -6868,6 +6859,77 @@ impl Lowerer {
         None
     }
 
+    /// Best-effort static ZZ type of an expression when the HIR span-type
+    /// table has no entry.
+    ///
+    /// Top-level (`<top>`) span types are dropped when typed programs merge
+    /// (their spans restart per file and would collide), so a method call
+    /// whose receiver is not a local binding has no recorded type:
+    /// `maybe_ok().unwrap()`, `[3, 1, 2].reverse()`, `json.parse(s).expect(..)`,
+    /// `Point{..}.area()`. Those receivers still have a syntactically certain
+    /// type, which is what method dispatch needs to pick its namespace.
+    ///
+    /// Only certain shapes are handled — a wrong answer would miscompile, so
+    /// anything ambiguous returns `None` and the caller keeps its
+    /// free-function fallback (never a guess).
+    fn infer_expr_type(&self, e: &Expr, names: &NameCtx) -> Option<zz_checker::Type> {
+        match e {
+            Expr::Ident { name, .. } => names.checker_types.get(name).cloned(),
+            Expr::Path { parts, .. } => names.checker_types.get(&parts.join(".")).cloned(),
+            Expr::Paren { expr, .. } => self.infer_expr_type(expr, names),
+            Expr::Str { .. } | Expr::Fmt { .. } => Some(zz_checker::Type::Str),
+            Expr::Int { .. } => Some(zz_checker::Type::Int),
+            Expr::Float { .. } => Some(zz_checker::Type::Float),
+            Expr::Bool { .. } => Some(zz_checker::Type::Bool),
+            // Element types only feed display/`Enum`/`Struct` dispatch, never
+            // the namespace choice, so an unknown element is `unit`.
+            Expr::Array { elems, .. } => {
+                let elem = elems
+                    .first()
+                    .and_then(|e| self.infer_expr_type(e, names))
+                    .unwrap_or(zz_checker::Type::Unit);
+                Some(zz_checker::Type::Array(Box::new(elem)))
+            }
+            Expr::Dict { entries, .. } => {
+                let val = entries
+                    .first()
+                    .and_then(|(_, v)| self.infer_expr_type(v, names))
+                    .unwrap_or(zz_checker::Type::Unit);
+                Some(zz_checker::Type::Dict(
+                    Box::new(zz_checker::Type::Unit),
+                    Box::new(val),
+                ))
+            }
+            Expr::StructInit { name, .. } => {
+                Some(zz_checker::Type::Struct(name.clone(), Vec::new()))
+            }
+            Expr::Index { obj, .. } => match self.infer_expr_type(obj, names)? {
+                zz_checker::Type::Array(elem) => Some(*elem),
+                zz_checker::Type::Dict(_, val) => Some(*val),
+                zz_checker::Type::Bytes => Some(zz_checker::Type::Int),
+                zz_checker::Type::Str => Some(zz_checker::Type::Str),
+                _ => None,
+            },
+            Expr::Call { callee, .. } => {
+                // Call results take the callee's declared return type. The
+                // loader qualifies same-file calls with their module
+                // (`unwrap_test.maybe_ok`), so try the joined spelling, the
+                // leaf, and each `std.`-canonical twin.
+                let name = match callee.as_ref() {
+                    Expr::Ident { name, .. } => name.clone(),
+                    Expr::Path { parts, .. } => parts.join("."),
+                    _ => return None,
+                };
+                let leaf = name.rsplit('.').next().unwrap_or(&name);
+                let cands = [name.clone(), leaf.to_string(), format!("std.{leaf}")];
+                cands
+                    .iter()
+                    .find_map(|c| self.tp.funcs.get(c).map(|sig| sig.ret.clone()))
+            }
+            _ => None,
+        }
+    }
+
     /// Append one array/tuple element, boxing it into a `zz_value` first.
     /// Unboxed structs (raw C values: literals, locals, field reads) route
     /// through `emit_boxed_value` instead of emitting; raw scalars box via
@@ -6892,7 +6954,13 @@ impl Lowerer {
     ) {
         let unboxed: Option<String> = match self.ty_at(names, item.span()) {
             Some(zz_checker::Type::Struct(s, _)) if self.is_unboxed_struct(s) => Some(s.clone()),
-            _ => None,
+            // An inline `StructInit` (e.g. `[R{v: 1}]`) has no HIR span entry for
+            // `ty_at` to consult, so fall back to matching the literal name
+            // directly — mirroring `unboxed_struct_of_expr` (context.rs).
+            _ => match item {
+                Expr::StructInit { name: s, .. } if self.is_unboxed_struct(s) => Some(s.clone()),
+                _ => None,
+            },
         };
         if let Some(sname) = unboxed {
             let tmp = self.emit_boxed_value(&sname, item, names, out);
