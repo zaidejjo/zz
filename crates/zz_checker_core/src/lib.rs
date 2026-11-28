@@ -164,6 +164,9 @@ pub struct TraitSig {
     /// [`SELF_TYPE_PARAM`]; later params and the return type may mention
     /// it too. Deterministic codegen sorts keys.
     pub methods: HashMap<String, FuncSig>,
+    /// Optional deprecated span. If set, using this trait as a bound
+    /// emits a deprecation warning.
+    pub deprecated: Option<Span>,
 }
 
 impl TraitSig {

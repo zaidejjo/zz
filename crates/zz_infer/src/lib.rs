@@ -142,20 +142,30 @@ impl InferOps for Checker {
         known.sort();
         for (_, bs) in bounds {
             for b in bs {
-                if let B::Deprecated(name, span, replacement) = b {
+                if let B::Deprecated(name, span, _replacement) = b {
                     self.errors.push(
                         error_at(format!("deprecated trait bound `{name}`"), *span)
                             .with_code(ErrorCode(29))
-                            .with_note(format!(
-                                "`{name}` is deprecated; use `{}` instead",
-                                replacement.as_deref().unwrap_or("a newer trait")
-                            )),
+                            .with_note(format!("`{name}` is deprecated",)),
                     );
                     continue;
                 }
                 let B::User(name, _) = b else { continue };
                 if self.traits.contains_key(name) {
                     self.used_trait_names.insert(name.clone());
+                    // Check if the trait is deprecated
+                    if let Some(trait_sig) = self.traits.get(name) {
+                        if let Some(replacement) = &trait_sig.deprecated {
+                            self.errors.push(
+                                error_at(format!("deprecated trait bound `{name}`"), span)
+                                    .with_code(ErrorCode(29))
+                                    .with_note(format!(
+                                        "`{name}` is deprecated",
+                                    )),
+                            );
+                            continue;
+                        }
+                    }
                     continue;
                 }
                 // A bare bound naming an imported trait resolves through the

@@ -200,6 +200,9 @@ pub enum Stmt {
         methods: Vec<TraitMethod>,
         span: Span,
         pub_: bool,
+        /// Optional `#[deprecated]` span — when set, using this trait as
+        /// a bound emits a deprecation warning.
+        deprecated: Option<Span>,
     },
     /// `impl Point { func dist(self) -> int { ... } }` — method block.
     /// Methods inside are registered as `TypeName.method_name` functions.

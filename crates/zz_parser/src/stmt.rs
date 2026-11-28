@@ -194,6 +194,23 @@ impl<'a> Parser<'a> {
             TokenKind::Impl => self.parse_impl(false),
             TokenKind::Trait => self.parse_trait(false),
             TokenKind::At => {
+                // Check for `@deprecated trait ...`
+                if self.peek_kind_at(1) == TokenKind::Ident
+                    && self.peek_kind_at(2) == TokenKind::Trait
+                {
+                    let at_tok = self.advance(); // consume `@`
+                    let dep_tok = self.advance(); // consume `deprecated`
+                                                  // Parse the trait
+                    let mut stmt = self.parse_trait(false);
+                    if let Stmt::Trait {
+                        deprecated: dep_slot,
+                        ..
+                    } = &mut stmt
+                    {
+                        *dep_slot = Some(at_tok.span.join(dep_tok.span));
+                    }
+                    return stmt;
+                }
                 if self.is_link_directive() {
                     self.parse_link()
                 } else {
@@ -1026,6 +1043,7 @@ impl<'a> Parser<'a> {
             methods,
             span,
             pub_,
+            deprecated: None,
         }
     }
 
