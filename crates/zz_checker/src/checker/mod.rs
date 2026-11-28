@@ -478,7 +478,7 @@ fn check_program_impl(
         else {
             continue;
         };
-        let deprecated = (*deprecated_opt).clone();
+        let deprecated = *deprecated_opt;
         let tname = name.join(".");
         if checker.traits.contains_key(&tname) {
             // Already registered from the seed (cross-module pub trait
@@ -577,7 +577,7 @@ fn check_program_impl(
             tname.clone(),
             TraitSig {
                 methods: sigs,
-                deprecated: deprecated,
+                deprecated,
             },
         );
         if *pub_ {

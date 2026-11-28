@@ -155,7 +155,7 @@ impl InferOps for Checker {
                     self.used_trait_names.insert(name.clone());
                     // Check if the trait is deprecated
                     if let Some(trait_sig) = self.traits.get(name) {
-                        if let Some(replacement) = &trait_sig.deprecated {
+                        if let Some(_replacement) = &trait_sig.deprecated {
                             self.errors.push(
                                 error_at(format!("deprecated trait bound `{name}`"), span)
                                     .with_code(ErrorCode(29))

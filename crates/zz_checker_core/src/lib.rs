@@ -605,10 +605,7 @@ impl Checker {
     }
     /// Record how a variable name is used, for type inference hints.
     pub fn record_usage(&mut self, name: &str, usage: UsageUsage) {
-        let ctx = self
-            .usage_context
-            .entry(name.to_string())
-            .or_insert_with(UsageContext::default);
+        let ctx = self.usage_context.entry(name.to_string()).or_default();
         match usage {
             UsageUsage::Arithmetic => ctx.used_arithmetic = true,
             UsageUsage::Comparison => ctx.used_comparison = true,
