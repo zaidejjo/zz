@@ -258,6 +258,15 @@ fn check_stmt_decl(
                 checker
                     .deferred_type_errors
                     .push((name.name.clone(), name.span));
+            } else {
+                // Empty collections like `[]` or `{}`: the fresh element/key/value
+                // var is intentionally deferred — it may be resolved later by
+                // usage context. Define the binding but do not error here.
+                checker.define_var_at(&name.name, rt.clone(), name.span, is_const);
+                if checker.env.len() == 1 {
+                    checker.new_bindings.insert(name.name.clone(), vt.clone());
+                }
+                return rt;
             }
         } else {
             checker.define_var_at(&name.name, d.clone(), name.span, is_const);
@@ -276,7 +285,9 @@ fn check_stmt_decl(
     checker.define_var_at(&name.name, rt.clone(), name.span, is_const);
     // Type inference hint: if the inferred type is still a variable,
     // suggest a type annotation based on the value expression.
-    if contains_var(&checker.unifier.resolve(&vt)) {
+    // Use deep resolution so nested vars (e.g. `Array(Option(Var))` where the
+    // var was bound during merge) are resolved, avoiding false positives.
+    if contains_var(&checker.unifier.resolve_deep(&vt)) {
         let suggested_type = suggest_type_for_expr(value);
         checker.errors.push(
             error_at(format!("cannot infer type of `{}`", name.name), name.span)
@@ -416,9 +427,10 @@ fn check_stmt_impl(checker: &mut Checker, name: &[String], methods: &[Stmt]) -> 
         if let Stmt::Func { .. } = method {
             let method_name = Checker::func_name(method);
             let full_name = format!("{}.{}", type_name, method_name);
-            checker
-                .used_impl_methods
-                .insert((type_name.clone(), method_name.clone()), method.span());
+            // Declaring a method is not using it; the method is marked used
+            // only at a call site (check_call). Tracking declarations here
+            // previously made every impl method look "used", suppressing the
+            // unused-impl-method warning entirely.
             let sig = zz_checker_core::lookup_std(&checker.funcs, &full_name)
                 .unwrap()
                 .clone();

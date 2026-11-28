@@ -453,6 +453,10 @@ pub struct Checker {
     /// Const declarations defined in the current program (not import-seeded).
     /// Used to scope unused-const warnings to locally-owned consts.
     pub local_consts: std::collections::HashSet<String>,
+    /// Impl methods declared in the current program (not import-seeded).
+    /// Used to scope unused-impl-method warnings to locally-owned methods;
+    /// imported pub methods may be used externally.
+    pub local_impl_methods: std::collections::BTreeSet<(String, String)>,
     /// Struct names referenced (used as types) — for unused-struct warnings.
     pub used_struct_names: std::collections::HashSet<String>,
     /// Enum names referenced (used as types) — for unused-enum warnings.
@@ -601,10 +605,7 @@ impl Checker {
     }
     /// Record how a variable name is used, for type inference hints.
     pub fn record_usage(&mut self, name: &str, usage: UsageUsage) {
-        let ctx = self
-            .usage_context
-            .entry(name.to_string())
-            .or_insert_with(UsageContext::default);
+        let ctx = self.usage_context.entry(name.to_string()).or_default();
         match usage {
             UsageUsage::Arithmetic => ctx.used_arithmetic = true,
             UsageUsage::Comparison => ctx.used_comparison = true,
@@ -660,6 +661,7 @@ impl Checker {
             local_traits: std::collections::BTreeSet::new(),
             local_aliases: std::collections::HashSet::new(),
             local_consts: std::collections::HashSet::new(),
+            local_impl_methods: std::collections::BTreeSet::new(),
             test_funcs: std::collections::HashSet::new(),
             defined_names: vec![HashMap::new()],
             had_undefined_var: false,

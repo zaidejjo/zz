@@ -356,10 +356,13 @@ pub(crate) fn check_call_field_callee(
     // so its mismatch diagnostics are unchanged.
     let impl_owned = checker.receiver_impl_method(&recv_t, &method);
     if impl_owned {
-        if let Type::Struct(name, _) = checker.unifier.resolve(&recv_t) {
+        if let Type::Struct(name, _) | Type::Enum(name, _) = checker.unifier.resolve(&recv_t) {
+            // Mark the called impl method as used so the unused-impl-method
+            // warning stays silent for called methods (covers struct and enum
+            // receivers alike).
             checker
                 .used_impl_methods
-                .remove(&(name.clone(), method.clone()));
+                .insert((name.clone(), method.clone()), span);
         }
     }
     let free_sig = zz_checker_core::lookup_std(&checker.funcs, &method).cloned();
@@ -844,6 +847,16 @@ fn check_call_path_type_dispatch(
         return Some(Type::Error);
     }
     let impl_owned = checker.receiver_impl_method(&recv_t_resolved, method);
+    if impl_owned {
+        if let Type::Struct(name, _) | Type::Enum(name, _) = &recv_t_resolved {
+            // Mark the called impl method as used so the unused-impl-method
+            // warning stays silent for called methods (covers struct and enum
+            // receivers alike).
+            checker
+                .used_impl_methods
+                .insert((name.clone(), method.to_string()), span);
+        }
+    }
     let free_sig = zz_checker_core::lookup_std(&checker.funcs, method).cloned();
     let mut sig = if impl_owned { None } else { free_sig.clone() };
     if sig.is_none() {
