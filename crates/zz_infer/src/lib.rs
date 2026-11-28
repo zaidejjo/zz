@@ -1,7 +1,7 @@
 //! Type inference helpers: unification, type variables, generics.
 
 use zz_checker_core::{AliasSig, Checker};
-use zz_diag_core::error_at;
+use zz_diag_core::{error_at, ErrorCode};
 use zz_span_ast::ast::Ty;
 use zz_span_ast::span::Span;
 use zz_suggest::suggest_confident;
@@ -142,6 +142,17 @@ impl InferOps for Checker {
         known.sort();
         for (_, bs) in bounds {
             for b in bs {
+                if let B::Deprecated(name, span, replacement) = b {
+                    self.errors.push(
+                        error_at(format!("deprecated trait bound `{name}`"), *span)
+                            .with_code(ErrorCode(29))
+                            .with_note(format!(
+                                "`{name}` is deprecated; use `{}` instead",
+                                replacement.as_deref().unwrap_or("a newer trait")
+                            )),
+                    );
+                    continue;
+                }
                 let B::User(name, _) = b else { continue };
                 if self.traits.contains_key(name) {
                     self.used_trait_names.insert(name.clone());
@@ -208,6 +219,7 @@ impl InferOps for Checker {
                         .unwrap_or_else(|| trait_name.to_string());
                     self.implements_trait(ty, &name)
                 }
+                B::Deprecated(_, _, _) => true,
             },
         }
     }
