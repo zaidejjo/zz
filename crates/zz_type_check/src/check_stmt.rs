@@ -4,7 +4,7 @@
 #![allow(clippy::collapsible_match, clippy::single_match)]
 
 use zz_checker_core::Checker;
-use zz_diag_core::{error_at, ErrorCode};
+use zz_diag_core::{error_at, ErrorCode, FixIt};
 use zz_infer::{contains_var, default_variant_vars, InferOps};
 use zz_lints::http_lint::HttpLintOps;
 use zz_scope::ScopeOps;
@@ -274,6 +274,29 @@ fn check_stmt_decl(
         checker.new_bindings.insert(name.name.clone(), vt.clone());
     }
     checker.define_var_at(&name.name, rt.clone(), name.span, is_const);
+    // Type inference hint: if the inferred type is still a variable,
+    // suggest a type annotation based on the value expression.
+    if contains_var(&checker.unifier.resolve(&vt)) {
+        let suggested_type = suggest_type_for_expr(value);
+        checker.errors.push(
+            error_at(format!("cannot infer type of `{}`", name.name), name.span)
+                .with_code(ErrorCode(28))
+                .with_note(format!(
+                    "write `{} := {}` or add a type annotation",
+                    name.name, suggested_type
+                ))
+                .with_fixit(FixIt::safe(
+                    name.span,
+                    format!(
+                        "{}: {} = {}",
+                        name.name,
+                        suggested_type,
+                        value_to_string(value)
+                    ),
+                    "add type annotation",
+                )),
+        );
+    }
     if is_const && checker.env.len() == 1 {
         checker.local_consts.insert(name.name.clone());
     }
@@ -2062,5 +2085,36 @@ fn z0019_stmt_expr(checker: &Checker, e: &Expr, errors: &mut Vec<zz_diag_core::R
         }
         Expr::Block(b) => z0019_block(checker, b, errors),
         _ => z0019_exprs(checker, &[e], e.span(), errors),
+    }
+}
+
+/// Suggest a type annotation for an expression whose type could not be inferred.
+/// Returns a type annotation string like `int`, `[int]`, or `func(...) -> ...`.
+fn suggest_type_for_expr(expr: &Expr) -> String {
+    match expr {
+        Expr::Array { .. } => "[int]".to_string(),
+        Expr::Dict { .. } => "{}: {}".to_string(),
+        Expr::Closure { .. } => "func(...) -> ...".to_string(),
+        Expr::Int { .. } => "int".to_string(),
+        Expr::Float { .. } => "float".to_string(),
+        Expr::Str { .. } => "str".to_string(),
+        Expr::Bool { .. } => "bool".to_string(),
+        _ => "int".to_string(),
+    }
+}
+
+/// Convert an expression to a string representation for use in diagnostics.
+fn value_to_string(expr: &Expr) -> String {
+    match expr {
+        Expr::Int { value, .. } => value.to_string(),
+        Expr::Float { value, .. } => value.to_string(),
+        Expr::Str { value, .. } => format!("\"{}\"", value),
+        Expr::Bool { value, .. } => value.to_string(),
+        Expr::Array { .. } => "[]".to_string(),
+        Expr::Dict { .. } => "{}".to_string(),
+        Expr::Closure { .. } => "func() { ... }".to_string(),
+        Expr::Ident { name, .. } => name.clone(),
+        Expr::Path { parts, .. } => parts.join("."),
+        _ => "expr".to_string(),
     }
 }
