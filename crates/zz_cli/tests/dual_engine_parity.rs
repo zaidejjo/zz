@@ -112,14 +112,16 @@ fn run_zz_with_input(args: &[&str], file: &Path, input: &[u8]) -> (i32, String, 
 /// compile per fixture. Matches GNU `timeout`'s 124 convention.
 const ZZ_CHILD_TIMEOUT_SECS: u64 = 300;
 /// Shorter bound for VM-only legs (no clang compile): a VM that spins
-/// forever is a bug, not a compile waiting on clang. Override with
-/// `ZZ_VM_CHILD_TIMEOUT_SECS`.
+/// forever is a bug, not a compile waiting on clang. VM legs can still do
+/// heavy computation (e.g. crypto) and can starve for CPU under sweep load
+/// (parallel native compiles), so the default matches the native bound.
+/// Override with `ZZ_VM_CHILD_TIMEOUT_SECS`.
 fn vm_child_timeout_secs() -> u64 {
     std::env::var("ZZ_VM_CHILD_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|&n| n >= 1)
-        .unwrap_or(60)
+        .unwrap_or(ZZ_CHILD_TIMEOUT_SECS)
 }
 /// Sentinel exit for a timed-out child (GNU `timeout` convention).
 const ZZ_CHILD_TIMEOUT_EXIT: i32 = 124;
