@@ -354,6 +354,13 @@ pub static ALL_ERROR_CODES: &[ErrorCatalogEntry] = &[
         fixed_example: "struct Point { x: int }\np: Point = Point { x: 1 }",
     },
     ErrorCatalogEntry {
+        code: ErrorCode(28),
+        title: "type inference failed",
+        description: "The type of a declaration cannot be inferred from its initializer.",
+        bad_example: "x := []",
+        fixed_example: "x: [int] = []",
+    },
+    ErrorCatalogEntry {
         code: ErrorCode(50),
         title: "`state` used outside module level",
         description: "`state` declarations are only allowed at module level in v1.",

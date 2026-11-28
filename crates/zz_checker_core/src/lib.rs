@@ -17,6 +17,38 @@ use zz_span_ast::span::Span;
 use zz_types::Type;
 use zz_unify::{Unifier, UnifyError};
 
+/// Usage context for type inference hints: tracks how unbound variables
+/// are used (arithmetic, comparison, index, etc.) to suggest type names
+/// when inference fails.
+#[derive(Debug, Clone, Default)]
+pub struct UsageContext {
+    /// Used with arithmetic operators (+, -, *, /, %)
+    pub used_arithmetic: bool,
+    /// Used with comparison operators (==, !=, <, >, <=, >=)
+    pub used_comparison: bool,
+    /// Used as array/tuple index
+    pub used_as_index: bool,
+    /// Used with string methods (.len(), .trim(), etc.)
+    pub used_as_string: bool,
+    /// Unified with a concrete type
+    pub unified_with: Option<Type>,
+}
+
+/// How a variable name was used, for type inference hints.
+#[derive(Debug, Clone)]
+pub enum UsageUsage {
+    /// Used with arithmetic operators (+, -, *, /, %)
+    Arithmetic,
+    /// Used with comparison operators (==, !=, <, >, <=, >=)
+    Comparison,
+    /// Used as array/tuple index
+    Index,
+    /// Used with string methods (.len(), .trim(), etc.)
+    String,
+    /// Unified with a concrete type
+    UnifiedWith(Type),
+}
+
 /// Pseudo-scope owning all top-level (non-function) statements. Mirrors
 /// `zz_hir::callgraph::TOP`: expression spans are only unique *within* one
 /// function body (every module restarts offsets at 0), so span-keyed maps
@@ -429,6 +461,10 @@ pub struct Checker {
     /// Impl methods declared: (type_name, method_name) → span of the `fn` keyword.
     /// Used to detect unused impl methods.
     pub used_impl_methods: std::collections::HashMap<(String, String), Span>,
+    /// Usage context for type inference hints: tracks how unbound variables
+    /// are used (arithmetic, comparison, index, etc.) to suggest type names
+    /// when inference fails.
+    pub usage_context: HashMap<String, UsageContext>,
     /// Enums defined in the current program (not import-seeded).
     /// Used to scope unused-enum warnings to locally-owned enums.
     /// Names defined in the current scope with their spans — for unused
@@ -560,6 +596,21 @@ impl Checker {
         self.symbol_map.insert(func.to_string(), sym.id());
         SpanKey::new(sym, span)
     }
+    /// Record how a variable name is used, for type inference hints.
+    pub fn record_usage(&mut self, name: &str, usage: UsageUsage) {
+        let ctx = self
+            .usage_context
+            .entry(name.to_string())
+            .or_insert_with(UsageContext::default);
+        match usage {
+            UsageUsage::Arithmetic => ctx.used_arithmetic = true,
+            UsageUsage::Comparison => ctx.used_comparison = true,
+            UsageUsage::Index => ctx.used_as_index = true,
+            UsageUsage::String => ctx.used_as_string = true,
+            UsageUsage::UnifiedWith(ty) => ctx.unified_with = Some(ty),
+        }
+    }
+
     /// Create a checker seeded with prior state. `initial_traits`/`initial_trait_impls`
     /// carry cross-module pub traits and impls for bound checking.
     #[allow(clippy::too_many_arguments)]
@@ -620,6 +671,7 @@ impl Checker {
             func_interner: Interner::new(),
             narrowing: vec![std::collections::HashMap::new()],
             symbol_map: std::collections::HashMap::new(),
+            usage_context: HashMap::new(),
             used_enum_variants: std::collections::HashSet::new(),
             used_struct_fields: std::collections::HashSet::new(),
             used_aliases: std::collections::HashSet::new(),
