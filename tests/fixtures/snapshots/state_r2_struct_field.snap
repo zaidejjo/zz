@@ -1,5 +1,8 @@
 first module that broke: <path> <path>
 
+warning: unused struct `state_r2_struct_field.Holder`, consider prefixing with `_state_r2_struct_field.Holder` or removing it
+
+= struct is never used
 error: Z0017: global `plain` is reachable from a task; declare it `state`
 hint: change `plain := ...` to `state plain := ...`
 

@@ -445,8 +445,9 @@ fn check_program_impl(
                 },
             );
             if *pub_ {
-                pub_enums_set.insert(full_name);
+                pub_enums_set.insert(full_name.clone());
             }
+            checker.local_enums.insert(full_name.clone());
         }
     }
     let mut alias_names: Vec<String> = checker.alias_asts.keys().cloned().collect();
@@ -458,6 +459,7 @@ fn check_program_impl(
     alias_names.sort();
     for alias_name in alias_names {
         checker.convert_alias(&alias_name);
+        checker.local_aliases.insert(alias_name.clone());
     }
 
     // Pass 1a-bis: register `trait` declarations. Method signatures carry
@@ -573,8 +575,9 @@ fn check_program_impl(
             .traits
             .insert(tname.clone(), TraitSig { methods: sigs });
         if *pub_ {
-            pub_traits_set.insert(tname);
+            pub_traits_set.insert(tname.clone());
         }
+        checker.local_traits.insert(tname.clone());
     }
 
     // Pass 1b: register impl method signatures so method calls resolve.
@@ -1213,6 +1216,106 @@ fn check_program_impl(
                 .with_note("field is never read"),
             );
         }
+    }
+
+    // Emit unused struct warnings. A struct that is never used as a type
+    // is dead code. Only check structs defined in the current program.
+    for sname in &checker.local_structs {
+        if checker.pub_names.contains(sname.as_str())
+            || checker.used_struct_names.contains(sname.as_str())
+        {
+            continue;
+        }
+        checker.errors.push(
+            zz_diag_core::warning(format!(
+                "unused struct `{sname}`, consider prefixing with `_{sname}` or removing it"
+            ))
+            .with_note("struct is never used"),
+        );
+    }
+
+    // Emit unused enum warnings. An enum that is never used as a type
+    // is dead code. Only check enums defined in the current program.
+    for ename in &checker.local_enums {
+        if checker.pub_names.contains(ename.as_str())
+            || checker.used_enum_names.contains(ename.as_str())
+        {
+            continue;
+        }
+        checker.errors.push(
+            zz_diag_core::warning(format!(
+                "unused enum `{ename}`, consider prefixing with `_{ename}` or removing it"
+            ))
+            .with_note("enum is never used"),
+        );
+    }
+
+    // Emit unused trait warnings. A trait that is never used as a bound
+    // is dead code. Only check traits defined in the current program.
+    for tname in &checker.local_traits {
+        if checker.pub_names.contains(tname.as_str())
+            || checker.used_trait_names.contains(tname.as_str())
+        {
+            continue;
+        }
+        checker.errors.push(
+            zz_diag_core::warning(format!(
+                "unused trait `{tname}`, consider prefixing with `_{tname}` or removing it"
+            ))
+            .with_note("trait is never used as a bound"),
+        );
+    }
+
+    // Emit unused type alias warnings. An alias that is never used as a
+    // type is dead code. Only check aliases defined in the current program.
+    for name in checker.local_aliases.iter() {
+        if checker.pub_names.contains(name.as_str())
+            || name.starts_with('_')
+            || checker.used_aliases.contains(name.as_str())
+        {
+            continue;
+        }
+        checker.errors.push(
+            zz_diag_core::warning(format!(
+                "unused type alias `{name}`, consider prefixing with `_{name}` or removing it"
+            ))
+            .with_note("type alias is never referenced"),
+        );
+    }
+
+    // Emit unused const warnings. A const that is never read is dead code.
+    // Only check consts defined in the current program at module level.
+    for cname in &checker.local_consts {
+        if checker.pub_names.contains(cname.as_str())
+            || cname.starts_with('_')
+            || checker.used_const_names.contains(cname.as_str())
+        {
+            continue;
+        }
+        checker.errors.push(
+            zz_diag_core::warning(format!(
+                "unused const `{cname}`, consider prefixing with `_{cname}` or removing it"
+            ))
+            .with_note("const is never read"),
+        );
+    }
+
+    // Emit unused impl method warnings. An impl method that is never called
+    // is dead code. Only check methods defined in the current program.
+    for (tname, mname) in checker.used_impl_methods.keys() {
+        if checker.pub_names.contains(tname.as_str())
+            || checker
+                .used_impl_methods
+                .contains_key(&(tname.clone(), mname.clone()))
+        {
+            continue;
+        }
+        checker.errors.push(
+            zz_diag_core::warning(format!(
+                "unused impl method `{tname}.{mname}`, consider prefixing with `_{mname}` or removing it"
+            ))
+            .with_note("method is never called"),
+        );
     }
 
     // Build pub-only maps for cross-module export. Signature types are
