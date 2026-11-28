@@ -144,6 +144,7 @@ impl InferOps for Checker {
             for b in bs {
                 let B::User(name, _) = b else { continue };
                 if self.traits.contains_key(name) {
+                    self.used_trait_names.insert(name.clone());
                     continue;
                 }
                 // A bare bound naming an imported trait resolves through the
@@ -384,6 +385,7 @@ impl InferOps for Checker {
                         if cname != *name {
                             self.used_names.insert(name.clone());
                         }
+                        self.used_enum_names.insert(name.clone());
                         let want = self
                             .enums
                             .get(&cname)
@@ -433,6 +435,7 @@ impl InferOps for Checker {
                         if cname != *name {
                             self.used_names.insert(name.clone());
                         }
+                        self.used_struct_names.insert(name.clone());
                         let want = self
                             .structs
                             .get(&cname)

@@ -19,4 +19,7 @@ warning: unused struct field `missing_field.Point.x`, consider prefixing with `_
 warning: unused struct field `missing_field.Point.y`, consider prefixing with `_y` or removing it
 
 = field is never read
+warning: unused struct `missing_field.Point`, consider prefixing with `_missing_field.Point` or removing it
+
+= struct is never used
 zz: 1 file(s) failed type-check

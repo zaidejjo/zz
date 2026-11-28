@@ -11,4 +11,7 @@ error: Z0004: non-exhaustive match: missing `.IntLit` (or add a `_` arm)
 warning: unused enum variant `enum_nonexhaustive.Token.IntLit`, consider prefixing with `_IntLit` or removing it
 
 = variant is never constructed or pattern-matched
+warning: unused enum `enum_nonexhaustive.Token`, consider prefixing with `_enum_nonexhaustive.Token` or removing it
+
+= enum is never used
 zz: 1 file(s) failed type-check

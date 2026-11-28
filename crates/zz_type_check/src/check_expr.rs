@@ -238,7 +238,10 @@ fn check_expr_struct_init(
 ) -> Type {
     // Struct initialization: resolve the struct signature, check each field.
     let sig = match checker.structs.get(name) {
-        Some(s) => s.clone(),
+        Some(s) => {
+            checker.used_struct_names.insert(name.clone());
+            s.clone()
+        }
         None => {
             checker
                 .errors

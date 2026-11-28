@@ -351,11 +351,13 @@ impl ScopeOps for Checker {
             }
         }
     }
-
     fn lookup(&mut self, name: &str, span: Span) -> Type {
         match self.lookup_opt(name) {
             Some(t) => {
                 self.used_names.insert(name.to_string());
+                if self.local_consts.contains(name) {
+                    self.used_const_names.insert(name.to_string());
+                }
                 t
             }
             None => {

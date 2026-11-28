@@ -355,6 +355,13 @@ pub(crate) fn check_call_field_callee(
     // The free signature is restored below when nothing matches,
     // so its mismatch diagnostics are unchanged.
     let impl_owned = checker.receiver_impl_method(&recv_t, &method);
+    if impl_owned {
+        if let Type::Struct(name, _) = checker.unifier.resolve(&recv_t) {
+            checker
+                .used_impl_methods
+                .remove(&(name.clone(), method.clone()));
+        }
+    }
     let free_sig = zz_checker_core::lookup_std(&checker.funcs, &method).cloned();
     let mut sig = if impl_owned { None } else { free_sig.clone() };
     if sig.is_none() {

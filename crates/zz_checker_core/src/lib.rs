@@ -406,6 +406,31 @@ pub struct Checker {
     /// Used to scope unused-field warnings to locally-owned structs;
     /// imported pub structs may be used externally.
     pub local_structs: std::collections::BTreeSet<String>,
+    /// Enums defined in the current program (not import-seeded).
+    /// Used to scope unused-enum warnings to locally-owned enums.
+    pub local_enums: std::collections::BTreeSet<String>,
+    /// Traits defined in the current program (not import-seeded).
+    /// Used to scope unused-trait warnings to locally-owned traits.
+    pub local_traits: std::collections::BTreeSet<String>,
+    /// Type aliases defined in the current program (not import-seeded).
+    /// Used to scope unused-alias warnings to locally-owned aliases.
+    pub local_aliases: std::collections::HashSet<String>,
+    /// Const declarations defined in the current program (not import-seeded).
+    /// Used to scope unused-const warnings to locally-owned consts.
+    pub local_consts: std::collections::HashSet<String>,
+    /// Struct names referenced (used as types) — for unused-struct warnings.
+    pub used_struct_names: std::collections::HashSet<String>,
+    /// Enum names referenced (used as types) — for unused-enum warnings.
+    pub used_enum_names: std::collections::HashSet<String>,
+    /// Trait names referenced (used as bounds) — for unused-trait warnings.
+    pub used_trait_names: std::collections::HashSet<String>,
+    /// Const names read — for unused-const warnings.
+    pub used_const_names: std::collections::HashSet<String>,
+    /// Impl methods declared: (type_name, method_name) → span of the `fn` keyword.
+    /// Used to detect unused impl methods.
+    pub used_impl_methods: std::collections::HashMap<(String, String), Span>,
+    /// Enums defined in the current program (not import-seeded).
+    /// Used to scope unused-enum warnings to locally-owned enums.
     /// Names defined in the current scope with their spans — for unused
     /// variable warnings. Each scope level has its own map.
     pub defined_names: Vec<HashMap<String, DefinedBinding>>,
@@ -577,6 +602,10 @@ impl Checker {
             pub_names: std::collections::HashSet::new(),
             local_funcs: std::collections::HashSet::new(),
             local_structs: std::collections::BTreeSet::new(),
+            local_enums: std::collections::BTreeSet::new(),
+            local_traits: std::collections::BTreeSet::new(),
+            local_aliases: std::collections::HashSet::new(),
+            local_consts: std::collections::HashSet::new(),
             test_funcs: std::collections::HashSet::new(),
             defined_names: vec![HashMap::new()],
             had_undefined_var: false,
@@ -594,6 +623,11 @@ impl Checker {
             used_enum_variants: std::collections::HashSet::new(),
             used_struct_fields: std::collections::HashSet::new(),
             used_aliases: std::collections::HashSet::new(),
+            used_struct_names: std::collections::HashSet::new(),
+            used_enum_names: std::collections::HashSet::new(),
+            used_trait_names: std::collections::HashSet::new(),
+            used_const_names: std::collections::HashSet::new(),
+            used_impl_methods: std::collections::HashMap::new(),
             scope_cache: std::collections::HashMap::new(),
             names_at_depth: vec![Vec::new()],
             link_libs: Vec::new(),

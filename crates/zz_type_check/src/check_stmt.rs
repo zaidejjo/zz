@@ -101,10 +101,17 @@ fn check_stmt_decl(
     // The initializer is checked before the new binding exists, so
     // a read of `name` below resolves to the shadowed binding.
     let probe = checker.begin_shadow_probe(name.name.clone(), name.span);
+    // Track const declarations at module level for unused-const warnings.
+    if is_const && checker.env.len() == 1 {
+        checker.local_consts.insert(name.name.clone());
+    }
     // Pre-bind closures so recursive references resolve.
     if matches!(value, Expr::Closure { .. }) {
         let fv = checker.unifier.fresh_var();
         checker.define_var_at(&name.name, fv, name.span, is_const);
+        if is_const && checker.env.len() == 1 {
+            checker.local_consts.insert(name.name.clone());
+        }
     }
     let vt = checker.check_expr(value);
     // Z0013: read of `state` inside its own initializer.
@@ -254,6 +261,9 @@ fn check_stmt_decl(
             }
         } else {
             checker.define_var_at(&name.name, d.clone(), name.span, is_const);
+            if is_const && checker.env.len() == 1 {
+                checker.local_consts.insert(name.name.clone());
+            }
             if checker.env.len() == 1 {
                 checker.new_bindings.insert(name.name.clone(), d.clone());
             }
@@ -264,6 +274,9 @@ fn check_stmt_decl(
         checker.new_bindings.insert(name.name.clone(), vt.clone());
     }
     checker.define_var_at(&name.name, rt.clone(), name.span, is_const);
+    if is_const && checker.env.len() == 1 {
+        checker.local_consts.insert(name.name.clone());
+    }
     rt
 }
 
@@ -380,6 +393,9 @@ fn check_stmt_impl(checker: &mut Checker, name: &[String], methods: &[Stmt]) -> 
         if let Stmt::Func { .. } = method {
             let method_name = Checker::func_name(method);
             let full_name = format!("{}.{}", type_name, method_name);
+            checker
+                .used_impl_methods
+                .insert((type_name.clone(), method_name.clone()), method.span());
             let sig = zz_checker_core::lookup_std(&checker.funcs, &full_name)
                 .unwrap()
                 .clone();

@@ -12,4 +12,7 @@ error: Z0017: cannot assign to immutable variable `x`
 | - variable defined as immutable here
 
 = hint: remove `const` to make `x` mutable
+warning: unused const `const_reassign.x`, consider prefixing with `_const_reassign.x` or removing it
+
+= const is never read
 zz: 1 file(s) failed type-check

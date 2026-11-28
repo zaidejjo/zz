@@ -9,4 +9,7 @@ error: Z0002: type mismatch: expected `int`, found `str`
 warning: unused enum variant `enum_generic_mismatch.Box.V`, consider prefixing with `_V` or removing it
 
 = variant is never constructed or pattern-matched
+warning: unused enum `enum_generic_mismatch.Box`, consider prefixing with `_enum_generic_mismatch.Box` or removing it
+
+= enum is never used
 zz: 1 file(s) failed type-check
