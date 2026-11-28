@@ -361,6 +361,13 @@ pub static ALL_ERROR_CODES: &[ErrorCatalogEntry] = &[
         fixed_example: "x: [int] = []",
     },
     ErrorCatalogEntry {
+        code: ErrorCode(29),
+        title: "deprecated trait bound",
+        description: "A trait bound uses a deprecated trait that should no longer be used.",
+        bad_example: "func f<T: DeprecatedTrait>(x: T) {}\nf(42)",
+        fixed_example: "func f<T: NewTrait>(x: T) {}\nf(42)",
+    },
+    ErrorCatalogEntry {
         code: ErrorCode(50),
         title: "`state` used outside module level",
         description: "`state` declarations are only allowed at module level in v1.",

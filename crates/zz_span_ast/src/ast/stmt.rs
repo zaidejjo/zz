@@ -25,6 +25,9 @@ pub enum TraitBound {
     /// table — and the checker validates the name (with a suggestion)
     /// against its registered traits.
     User(String, Span),
+    /// A deprecated trait bound: `TraitBound::User` with a deprecation message.
+    /// Used when a trait is deprecated and should no longer be used.
+    Deprecated(String, Span, Option<String>),
 }
 
 impl TraitBound {
@@ -35,13 +38,17 @@ impl TraitBound {
             TraitBound::Eq => "Eq",
             TraitBound::Display => "Display",
             TraitBound::User(n, _) => n,
+            TraitBound::Deprecated(n, _, _) => n,
         }
     }
 
     /// True for the four built-in operator bounds (`Num`, `Ord`, `Eq`,
     /// `Display`); false for a user-declared trait.
     pub fn is_builtin(&self) -> bool {
-        !matches!(self, TraitBound::User(_, _))
+        !matches!(
+            self,
+            TraitBound::User(_, _) | TraitBound::Deprecated(_, _, _)
+        )
     }
 }
 
