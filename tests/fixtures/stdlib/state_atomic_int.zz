@@ -1,0 +1,40 @@
+// features: imports, int-arith, locals, print, std-task, state
+// tests/fixtures/stdlib/state_atomic_int.zz
+// Basic atomic block with int state under contention.
+import std.task
+
+state hits := 0
+
+func inc10() {
+    atomic {
+        hits = hits + 1
+        hits = hits + 1
+        hits = hits + 1
+        hits = hits + 1
+        hits = hits + 1
+        hits = hits + 1
+        hits = hits + 1
+        hits = hits + 1
+        hits = hits + 1
+        hits = hits + 1
+    }
+}
+
+func main() -> Result<int, str> {
+    for run in 0..50 {
+        hits = 0
+        h0 := task.spawn(|_| { inc10() })
+        h1 := task.spawn(|_| { inc10() })
+        h2 := task.spawn(|_| { inc10() })
+        h3 := task.spawn(|_| { inc10() })
+        task.join(h0)
+        task.join(h1)
+        task.join(h2)
+        task.join(h3)
+        if hits != 40 {
+            return .err("atomic_int_mismatch")
+        }
+    }
+    println("state_atomic_int_ok")
+    return .ok(0)
+}

@@ -1,0 +1,24 @@
+// features: int-arith, locals, print, state, std-task
+// R2 negative: a plain global that is NEVER assigned (immutable) can be
+// read from a task. Also a `state` global can be written from a task.
+import std.task
+
+config := 99
+state hits := 0
+
+func inc() {
+    atomic {
+        hits = hits + 1
+    }
+}
+
+func main() -> int {
+    h := task.spawn(|_| {
+        _cfg:int = config
+        inc()
+    })
+    task.join(h)
+    if hits != 1 { return -1 }
+    println("r2_neg_ok")
+    return 0
+}

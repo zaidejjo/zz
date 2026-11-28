@@ -1,0 +1,37 @@
+// Step 3b.4(c): println("{a} {b}") in a loop while another task spins on atomic { ... }
+// features: int-arith, locals, print, state, std-task
+import std.task
+
+state a := 100
+state b := 0
+
+func spinner() {
+    n := 0
+    while n < 1000 {
+        atomic {
+            a = a - 1
+            b = b + 1
+        }
+        n = n + 1
+    }
+    println("spinner_done")
+}
+
+func printer(m: int) -> int {
+    v := 0
+    for i in 0..m {
+        println("{a} {b}")
+        v = v + 1
+    }
+    return v
+}
+
+func main() -> Result<int, str> {
+    h1 := task.spawn(|_| { spinner() })
+    h2 := task.spawn(|_| { printer(50) })
+    task.join(h1)
+    n := task.join(h2)
+    println("printer_loops={n}")
+    println("no_deadlock_no_z0018")
+    return .ok(0)
+}

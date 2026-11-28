@@ -1,0 +1,17 @@
+first module that broke: <path> <path>
+
+error: Z0051: `state` cannot hold a closure or function value (bad)
+hint: store the data the closure needs instead of the closure itself
+
+--> <path>
+|
+3 | state bad := |x: int| x + 1
+| ^^^
+warning: unused variable `bad` is never read, consider prefixing with `_bad`
+
+--> <path>
+|
+3 | state bad := |x: int| x + 1
+| ^^^ help: replace with `_bad`
+
+zz: 1 file(s) failed type-check

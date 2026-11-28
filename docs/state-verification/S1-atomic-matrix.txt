@@ -1,0 +1,376 @@
+=== atomic test 1 ===
+--- VM ---
+atomic_space_ok
+--- AOT ---
+atomic_space_ok
+=== atomic test 2 ===
+--- VM ---
+atomic_nospace_ok
+--- AOT ---
+atomic_nospace_ok
+=== atomic test 3 ===
+--- VM ---
+atomic_newline_ok
+--- AOT ---
+atomic_newline_ok
+=== atomic test 4 ===
+--- VM ---
+atomic_after_semi_ok
+--- AOT ---
+atomic_after_semi_ok
+=== atomic test 5 ===
+--- VM ---
+error: expected `{` to start block
+
+  --> /tmp/opencode/parser_matrix_atomic_5.zz:4:22
+    |
+    4 |     if true { } else atomic { x = x + 1 }
+      |                      ^^^^^^
+zz: program failed
+
+hint: fix the errors shown above and try again
+--- AOT ---
+error: expected `{` to start block
+
+  --> /tmp/opencode/parser_matrix_atomic_5.zz:4:22
+    |
+    4 |     if true { } else atomic { x = x + 1 }
+      |                      ^^^^^^
+zz: program failed to type-check
+=== atomic test 6 ===
+--- VM ---
+error: expected end of statement, found identifier
+
+  --> /tmp/opencode/parser_matrix_atomic_6.zz:4:17
+    |
+    4 |     if true { } atomic { x = x + 1 }
+      |                 ^^^^^^
+error: unexpected ``}`` with no matching opening — remove it
+
+  --> /tmp/opencode/parser_matrix_atomic_6.zz:8:1
+    |
+    8 | }
+      | ^ help: remove this
+
+zz: program failed
+
+hint: fix the errors shown above and try again
+--- AOT ---
+error: expected end of statement, found identifier
+
+  --> /tmp/opencode/parser_matrix_atomic_6.zz:4:17
+    |
+    4 |     if true { } atomic { x = x + 1 }
+      |                 ^^^^^^
+error: unexpected ``}`` with no matching opening — remove it
+
+  --> /tmp/opencode/parser_matrix_atomic_6.zz:8:1
+    |
+    8 | }
+      | ^ help: remove this
+
+zz: program failed to type-check
+=== atomic test 7 ===
+--- VM ---
+atomic_in_if_ok
+--- AOT ---
+atomic_in_if_ok
+=== atomic test 8 ===
+--- VM ---
+error: expected end of statement, found identifier
+
+  --> /tmp/opencode/parser_matrix_atomic_8.zz:4:11
+    |
+    4 |     local i := 0
+      |           ^
+zz: program failed
+
+hint: fix the errors shown above and try again
+--- AOT ---
+error: expected end of statement, found identifier
+
+  --> /tmp/opencode/parser_matrix_atomic_8.zz:4:11
+    |
+    4 |     local i := 0
+      |           ^
+zz: program failed to type-check
+=== atomic test 9 ===
+--- VM ---
+atomic_in_for_ok
+--- AOT ---
+atomic_in_for_ok
+=== atomic test 10 ===
+--- VM ---
+atomic_in_match_ok
+--- AOT ---
+atomic_in_match_ok
+=== atomic test 11 ===
+--- VM ---
+error: unexpected `let` — ZZ does not use `let` declarations
+
+  --> /tmp/opencode/parser_matrix_atomic_11.zz:5:5
+    |
+    5 |     let f = || { atomic { x = x + 1 } }
+      |     ^^^ help: remove this
+
+    = write `x := 5` instead of `let x := 5`
+zz: program failed
+
+hint: fix the errors shown above and try again
+--- AOT ---
+error: unexpected `let` — ZZ does not use `let` declarations
+
+  --> /tmp/opencode/parser_matrix_atomic_11.zz:5:5
+    |
+    5 |     let f = || { atomic { x = x + 1 } }
+      |     ^^^ help: remove this
+
+    = write `x := 5` instead of `let x := 5`
+zz: program failed to type-check
+=== atomic test 12 ===
+--- VM ---
+atomic_var_then_block_ok
+--- AOT ---
+atomic_var_then_block_ok
+=== atomic test 13 ===
+--- VM ---
+error: unexpected `let` — ZZ does not use `let` declarations
+
+  --> /tmp/opencode/parser_matrix_atomic_13.zz:5:5
+    |
+    5 |     let c = C { }
+      |     ^^^ help: remove this
+
+    = write `x := 5` instead of `let x := 5`
+error: expected end of statement, found `{`
+
+  --> /tmp/opencode/parser_matrix_atomic_13.zz:6:7
+    |
+    6 |     c { atomic { x = x + 1 } }
+      |       ^
+error: unexpected ``}`` with no matching opening — remove it
+
+  --> /tmp/opencode/parser_matrix_atomic_13.zz:6:28
+    |
+    6 |     c { atomic { x = x + 1 } }
+      |                            ^ help: remove this
+
+error: unexpected ``}`` with no matching opening — remove it
+
+  --> /tmp/opencode/parser_matrix_atomic_13.zz:6:30
+    |
+    6 |     c { atomic { x = x + 1 } }
+      |                              ^ help: remove this
+
+error: unexpected ``}`` with no matching opening — remove it
+
+  --> /tmp/opencode/parser_matrix_atomic_13.zz:10:1
+    |
+   10 | }
+      | ^ help: remove this
+
+zz: program failed
+
+hint: fix the errors shown above and try again
+--- AOT ---
+error: unexpected `let` — ZZ does not use `let` declarations
+
+  --> /tmp/opencode/parser_matrix_atomic_13.zz:5:5
+    |
+    5 |     let c = C { }
+      |     ^^^ help: remove this
+
+    = write `x := 5` instead of `let x := 5`
+error: expected end of statement, found `{`
+
+  --> /tmp/opencode/parser_matrix_atomic_13.zz:6:7
+    |
+    6 |     c { atomic { x = x + 1 } }
+      |       ^
+error: unexpected ``}`` with no matching opening — remove it
+
+  --> /tmp/opencode/parser_matrix_atomic_13.zz:6:28
+    |
+    6 |     c { atomic { x = x + 1 } }
+      |                            ^ help: remove this
+
+error: unexpected ``}`` with no matching opening — remove it
+
+  --> /tmp/opencode/parser_matrix_atomic_13.zz:6:30
+    |
+    6 |     c { atomic { x = x + 1 } }
+      |                              ^ help: remove this
+
+error: unexpected ``}`` with no matching opening — remove it
+
+  --> /tmp/opencode/parser_matrix_atomic_13.zz:10:1
+    |
+   10 | }
+      | ^ help: remove this
+
+zz: program failed to type-check
+=== atomic test 5 ===
+--- VM ---
+error: expected `{` to start block
+
+  --> /tmp/opencode/parser_matrix_atomic_5.zz:4:22
+    |
+    4 |     if true { } else atomic { x = x + 1 }
+      |                      ^^^^^^
+zz: program failed
+
+hint: fix the errors shown above and try again
+--- AOT ---
+error: expected `{` to start block
+
+  --> /tmp/opencode/parser_matrix_atomic_5.zz:4:22
+    |
+    4 |     if true { } else atomic { x = x + 1 }
+      |                      ^^^^^^
+zz: program failed to type-check
+=== atomic test 6 ===
+--- VM ---
+error: expected end of statement, found identifier
+
+  --> /tmp/opencode/parser_matrix_atomic_6.zz:4:17
+    |
+    4 |     if true { } atomic { x = x + 1 }
+      |                 ^^^^^^
+error: unexpected ``}`` with no matching opening — remove it
+
+  --> /tmp/opencode/parser_matrix_atomic_6.zz:8:1
+    |
+    8 | }
+      | ^ help: remove this
+
+zz: program failed
+
+hint: fix the errors shown above and try again
+--- AOT ---
+error: expected end of statement, found identifier
+
+  --> /tmp/opencode/parser_matrix_atomic_6.zz:4:17
+    |
+    4 |     if true { } atomic { x = x + 1 }
+      |                 ^^^^^^
+error: unexpected ``}`` with no matching opening — remove it
+
+  --> /tmp/opencode/parser_matrix_atomic_6.zz:8:1
+    |
+    8 | }
+      | ^ help: remove this
+
+zz: program failed to type-check
+=== atomic test 8 ===
+--- VM ---
+atomic_in_while_ok
+--- AOT ---
+atomic_in_while_ok
+=== atomic test 11 ===
+--- VM ---
+warning: unused import `task`
+
+  --> /tmp/opencode/parser_matrix_atomic_11.zz:2:1
+    |
+    2 | import std.task
+      | ^^^^^^^^^^^^^^^
+    = remove this import or use it in the program
+atomic_in_closure_ok
+--- AOT ---
+warning: unused import `task`
+
+  --> /tmp/opencode/parser_matrix_atomic_11.zz:2:1
+    |
+    2 | import std.task
+      | ^^^^^^^^^^^^^^^
+    = remove this import or use it in the program
+zz: C compile failed:
+zig: warning: argument unused during compilation: '-fuse-ld=lld' [-Wunused-command-line-argument]
+/tmp/zz-units-219634-0/math.c:3365:43: error: use of undeclared identifier 'zz_state_x'
+ 3365 |     zz_value _s7 = zz_state_load_checked(&zz_state_x, &zz_state_x_init, "x");
+      |                                           ^~~~~~~~~~
+/tmp/zz-units-219634-0/math.c:3365:56: error: use of undeclared identifier 'zz_state_x_init'
+ 3365 |     zz_value _s7 = zz_state_load_checked(&zz_state_x, &zz_state_x_init, "x");
+      |                                                        ^~~~~~~~~~~~~~~
+/tmp/zz-units-219634-0/math.c:3407:15: warning: equality comparison with extraneous parentheses [-Wparentheses-equality]
+ 3407 |     if (((v1) == (0))) {
+      |          ~~~~~^~~~~~
+/tmp/zz-units-219634-0/math.c:3407:15: note: remove extraneous parentheses around the comparison to silence this warning
+ 3407 |     if (((v1) == (0))) {
+      |         ~     ^     ~
+/tmp/zz-units-219634-0/math.c:3407:15: note: use '=' to turn this equality comparison into an assignment
+ 3407 |     if (((v1) == (0))) {
+      |               ^~
+      |               =
+/tmp/zz-units-219634-0/math.c:3568:15: warning: equality comparison with extraneous parentheses [-Wparentheses-equality]
+ 3568 |     if (((v0) == (0.0))) {
+      |          ~~~~~^~~~~~~~
+/tmp/zz-units-219634-0/math.c:3568:15: note: remove extraneous parentheses around the comparison to silence this warning
+ 3568 |     if (((v0) == (0.0))) {
+      |         ~     ^       ~
+/tmp/zz-units-219634-0/math.c:3568:15: note: use '=' to turn this equality comparison into an assignment
+ 3568 |     if (((v0) == (0.0))) {
+      |               ^~
+      |               =
+/tmp/zz-units-219634-0/math.c:3578:43: error: use of undeclared identifier 'zz_state_x'
+ 3578 |     zz_value _s5 = zz_state_load_checked(&zz_state_x, &zz_state_x_init, "x");
+      |                                           ^~~~~~~~~~
+/tmp/zz-units-219634-0/math.c:3578:56: error: use of undeclared identifier 'zz_state_x_init'
+ 3578 |     zz_value _s5 = zz_state_load_checked(&zz_state_x, &zz_state_x_init, "x");
+      |                                                        ^~~~~~~~~~~~~~~
+/tmp/zz-units-219634-0/math.c:3579:43: error: use of undeclared identifier 'zz_state_x'
+ 3579 |     zz_value _s6 = zz_state_load_checked(&zz_state_x, &zz_state_x_init, "x");
+      |                                           ^~~~~~~~~~
+/tmp/zz-units-219634-0/math.c:3579:56: error: use of undeclared identifier 'zz_state_x_init'
+ 3579 |     zz_value _s6 = zz_state_load_checked(&zz_state_x, &zz_state_x_init, "x");
+      |                                                        ^~~~~~~~~~~~~~~
+/tmp/zz-units-219634-0/math.c:3581:5: error: use of undeclared identifier 'zz_state_x'
+ 3581 |     zz_state_x = zz_clone((double)((double)(v3 + (double)(v0 / v3)) / 2.0));
+      |     ^~~~~~~~~~
+/tmp/zz-units-219634-0/math.c:3581:27: error: passing 'double' to parameter of incompatible type 'zz_value' (aka 'struct zz_value')
+ 3581 |     zz_state_x = zz_clone((double)((double)(v3 + (double)(v0 / v3)) / 2.0));
+      |                           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/tmp/zz-units-219634-0/math.c:2267:28: note: passing argument to parameter 'v' here
+ 2267 | zz_value zz_clone(zz_value v);
+      |                            ^
+/tmp/zz-units-219634-0/math.c:3582:5: error: use of undeclared identifier 'zz_state_x_init'
+ 3582 |     zz_state_x_init = 1;
+      |     ^~~~~~~~~~~~~~~
+/tmp/zz-units-219634-0/math.c:3585:43: error: use of undeclared identifier 'zz_state_x'
+ 3585 |     zz_value _s7 = zz_state_load_checked(&zz_state_x, &zz_state_x_init, "x");
+      |                                           ^~~~~~~~~~
+/tmp/zz-units-219634-0/math.c:3585:56: error: use of undeclared identifier 'zz_state_x_init'
+ 3585 |     zz_value _s7 = zz_state_load_checked(&zz_state_x, &zz_state_x_init, "x");
+      |                                                        ^~~~~~~~~~~~~~~
+/tmp/zz-units-219634-0/math.c:3602:43: error: use of undeclared identifier 'zz_state_x'
+ 3602 |     zz_value _s1 = zz_state_load_checked(&zz_state_x, &zz_state_x_init, "x");
+      |                                           ^~~~~~~~~~
+/tmp/zz-units-219634-0/math.c:3602:56: error: use of undeclared identifier 'zz_state_x_init'
+ 3602 |     zz_value _s1 = zz_state_load_checked(&zz_state_x, &zz_state_x_init, "x");
+      |                                                        ^~~~~~~~~~~~~~~
+/tmp/zz-units-219634-0/math.c:3611:43: error: use of undeclared identifier 'zz_state_x'
+ 3611 |     zz_value _s4 = zz_state_load_checked(&zz_state_x, &zz_state_x_init, "x");
+      |                                           ^~~~~~~~~~
+/tmp/zz-units-219634-0/math.c:3611:56: error: use of undeclared identifier 'zz_state_x_init'
+ 3611 |     zz_value _s4 = zz_state_load_checked(&zz_state_x, &zz_state_x_init, "x");
+      |                                                        ^~~~~~~~~~~~~~~
+/tmp/zz-units-219634-0/math.c:3613:12: error: initializing 'double' with an expression of incompatible type 'zz_value' (aka 'struct zz_value')
+ 3613 |     double v5 = _s4;
+      |            ^    ~~~
+/tmp/zz-units-219634-0/math.c:3651:43: error: use of undeclared identifier 'zz_state_x'
+ 3651 |     zz_value _s1 = zz_state_load_checked(&zz_state_x, &zz_state_x_init, "x");
+      |                                           ^~~~~~~~~~
+/tmp/zz-units-219634-0/math.c:3651:56: error: use of undeclared identifier 'zz_state_x_init'
+ 3651 |     zz_value _s1 = zz_state_load_checked(&zz_state_x, &zz_state_x_init, "x");
+      |                                                        ^~~~~~~~~~~~~~~
+/tmp/zz-units-219634-0/math.c:3659:43: error: use of undeclared identifier 'zz_state_x'
+ 3659 |     zz_value _s3 = zz_state_load_checked(&zz_state_x, &zz_state_x_init, "x");
+      |                                           ^~~~~~~~~~
+fatal error: too many errors emitted, stopping now [-ferror-limit=]
+2 warnings and 20 errors generated.
+
+=== atomic test 13 ===
+--- VM ---
+atomic_identifier_then_block_ok
+--- AOT ---
+atomic_identifier_then_block_ok

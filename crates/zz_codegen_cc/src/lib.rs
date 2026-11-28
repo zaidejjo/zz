@@ -483,6 +483,12 @@ pub fn validate(
                 return Err(BuildError::PgoCross);
             }
         }
+        // zig cc accepts -fprofile-generate/-fprofile-instr-generate for
+        // clang compatibility but does not emit LLVM profile counters, so
+        // training produces zero profile data. Require system clang.
+        if matches!(provider, ClangProvider::Zig) {
+            return Err(BuildError::PgoRequiresClang);
+        }
     }
     if opts.static_link {
         let macos = match target {
@@ -785,8 +791,9 @@ pub fn build_with(
     let uniq = COUNTER.fetch_add(1, Ordering::SeqCst);
 
     // Write the source to a unique temp .c file (tests run in parallel).
-    let tmpdir =
-        TempDir(std::env::temp_dir().join(format!("zz-build-{}-{uniq}", std::process::id())));
+    let tmpdir = TempDir(
+        zz_paths::paths::zz_temp_dir().join(format!("zz-build-{}-{uniq}", std::process::id())),
+    );
     std::fs::create_dir_all(&tmpdir.0)?;
     let src_path = tmpdir.0.join("prog.c");
     // Per-binary `--embed` tables ride along in the program TU (never in

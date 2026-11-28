@@ -1,0 +1,12 @@
+// features: int-arith, locals, print, state
+// D2: a statement that READS state but WRITES no state may contain any
+// calls, including `println`. The state read is snapshotted atomically at
+// lowering time (single lock acquisition, no user code under the lock).
+state s := 42
+
+func main() -> int {
+    println("{s}")
+    if s != 42 { return -1 }
+    println("state_d2_read_only_print_ok")
+    return 0
+}

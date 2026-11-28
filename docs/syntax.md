@@ -43,6 +43,12 @@ pascal_case := true
 | `continue` | Skip iteration |
 | `defer` | Defer execution to scope exit |
 | `true` / `false` | Boolean literals |
+| `state` | Module-level shared mutable state (contextual: keyword only at statement start + identifier) |
+| `atomic` | Execute a block under the state lock (contextual: keyword only at statement start + `{`) |
+
+### Contextual keywords
+
+`type`, `enum`, `state`, and `atomic` are **contextual**: they are only treated as keywords in specific positions and remain valid identifiers everywhere else.
 
 ### Statement Terminator
 

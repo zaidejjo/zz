@@ -265,11 +265,15 @@ impl<'a> FmtCtx<'a> {
                 value,
                 pub_,
                 is_const,
+                is_state,
                 ..
             } => {
                 self.write_indent();
                 if *pub_ {
                     self.write_str("pub ");
+                }
+                if *is_state {
+                    self.write_str("state ");
                 }
                 if *is_const {
                     self.write_str("const ");
@@ -364,6 +368,11 @@ impl<'a> FmtCtx<'a> {
                 self.write_indent();
                 self.write_str("defer ");
                 self.fmt_expr(expr, source);
+            }
+            Stmt::Atomic { body, .. } => {
+                self.write_indent();
+                self.write_str("atomic ");
+                self.fmt_block(body, source);
             }
             Stmt::Assign { target, value, .. } => {
                 self.write_indent();

@@ -1,0 +1,17 @@
+// features: int-arith, locals, print, state, std-math
+// D2: math ops on state pass (operators + whitelisted native are allowed).
+import std.math
+
+state hits := 0
+
+func main() -> int {
+    atomic {
+        hits = 0
+        hits = hits + 1
+        hits = hits * 2
+        hits = std.math.abs(hits)
+    }
+    if hits != 2 { return -1 }
+    println("d2_math_ok")
+    return 0
+}

@@ -1,0 +1,155 @@
+# Step 3b.4(b) — `while s < 10 { yield }` in A while B increments s every 5 ms (AOT)
+# Command: for i in $(seq 1 50); do ./target/debug/zz run --native tests/fixtures/stdlib/step3b_4b_while_sleep.zz; done
+# All 50 runs: A_done s=10, B_done n=200 — loop terminates, B never blocked.
+# Cooperative chan.recv yield: state lock never held across A's yield point.
+
+=== RUN 1 ===
+A_done s=10
+B_done n=200
+=== RUN 2 ===
+A_done s=10
+B_done n=200
+=== RUN 3 ===
+A_done s=10
+B_done n=200
+=== RUN 4 ===
+A_done s=10
+B_done n=200
+=== RUN 5 ===
+A_done s=10
+B_done n=200
+=== RUN 6 ===
+A_done s=10
+B_done n=200
+=== RUN 7 ===
+A_done s=10
+B_done n=200
+=== RUN 8 ===
+A_done s=10
+B_done n=200
+=== RUN 9 ===
+A_done s=10
+B_done n=200
+=== RUN 10 ===
+A_done s=10
+B_done n=200
+=== RUN 11 ===
+A_done s=10
+B_done n=200
+=== RUN 12 ===
+A_done s=10
+B_done n=200
+=== RUN 13 ===
+A_done s=10
+B_done n=200
+=== RUN 14 ===
+A_done s=10
+B_done n=200
+=== RUN 15 ===
+A_done s=10
+B_done n=200
+=== RUN 16 ===
+A_done s=10
+B_done n=200
+=== RUN 17 ===
+A_done s=10
+B_done n=200
+=== RUN 18 ===
+A_done s=10
+B_done n=200
+=== RUN 19 ===
+A_done s=10
+B_done n=200
+=== RUN 20 ===
+A_done s=10
+B_done n=200
+=== RUN 21 ===
+A_done s=10
+B_done n=200
+=== RUN 22 ===
+A_done s=10
+B_done n=200
+=== RUN 23 ===
+A_done s=10
+B_done n=200
+=== RUN 24 ===
+A_done s=10
+B_done n=200
+=== RUN 25 ===
+A_done s=10
+B_done n=200
+=== RUN 26 ===
+A_done s=10
+B_done n=200
+=== RUN 27 ===
+A_done s=10
+B_done n=200
+=== RUN 28 ===
+A_done s=10
+B_done n=200
+=== RUN 29 ===
+A_done s=10
+B_done n=200
+=== RUN 30 ===
+A_done s=10
+B_done n=200
+=== RUN 31 ===
+A_done s=10
+B_done n=200
+=== RUN 32 ===
+A_done s=10
+B_done n=200
+=== RUN 33 ===
+A_done s=10
+B_done n=200
+=== RUN 34 ===
+A_done s=10
+B_done n=200
+=== RUN 35 ===
+A_done s=10
+B_done n=200
+=== RUN 36 ===
+A_done s=10
+B_done n=200
+=== RUN 37 ===
+A_done s=10
+B_done n=200
+=== RUN 38 ===
+A_done s=10
+B_done n=200
+=== RUN 39 ===
+A_done s=10
+B_done n=200
+=== RUN 40 ===
+A_done s=10
+B_done n=200
+=== RUN 41 ===
+A_done s=10
+B_done n=200
+=== RUN 42 ===
+A_done s=10
+B_done n=200
+=== RUN 43 ===
+A_done s=10
+B_done n=200
+=== RUN 44 ===
+A_done s=10
+B_done n=200
+=== RUN 45 ===
+A_done s=10
+B_done n=200
+=== RUN 46 ===
+A_done s=10
+B_done n=200
+=== RUN 47 ===
+A_done s=10
+B_done n=200
+=== RUN 48 ===
+A_done s=10
+B_done n=200
+=== RUN 49 ===
+A_done s=10
+B_done n=200
+=== RUN 50 ===
+A_done s=10
+B_done n=200

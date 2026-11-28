@@ -2803,3 +2803,39 @@ fn load_sink_reports_every_module_with_exact_total() {
         );
     });
 }
+
+#[test]
+fn warning_only_module_loads_and_runs() {
+    // A module whose only diagnostic is a warning (redundant semicolon) must
+    // still load and run — it must not be silently dropped, otherwise an
+    // `atomic { }` body with a trailing semicolon would execute with no lock.
+    let dir = temp_project(&[(
+        "src/main.zz",
+        "state hits := 0\n\
+         func main() -> int {\n\
+             atomic {\n\
+                 hits = 1;\n\
+             }\n\
+             x := hits\n\
+             println(\"{x}\")\n\
+             return 0\n\
+         }\n",
+    )]);
+    let entry = dir.join("src/main.zz");
+    let result = load_program_with_features(&entry, &FeatureSelection::default()).unwrap();
+    assert!(
+        no_errors(&result),
+        "warning-only module must load without hard errors, got: {:?}",
+        result.errors
+    );
+    assert!(
+        !result.programs.is_empty(),
+        "warning-only module must not be dropped from the program list"
+    );
+    // The redundant-semicolon warning should still be reported.
+    let text = diag_texts(&result).join("\n");
+    assert!(
+        text.contains("redundant semicolon"),
+        "warning should be reported, got:\n{text}"
+    );
+}

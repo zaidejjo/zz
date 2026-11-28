@@ -178,6 +178,36 @@ static inline int zz_arc_release_relaxed(int64_t *refs) {
     return refs && --(*refs) == 0;
 }
 
+// ---- shared mutable state lock (D7/D8) ----
+// One process-global reentrant lock. Green tasks never yield while holding
+// it (D3 runtime guard: `zz_state_yield_guard` aborts if they try), so a
+// TLS depth counter is sufficient even though tasks are green — verified
+// against both executors (VM: `safepoint_expired`/`yield_check!` in
+// zz_runtime; AOT: `zz_suspend_verdict` is TLS in core.c).
+static __thread int zz_state_depth = 0;   // -1 would mean "unprobed", 0 = not held
+static zz_mtx_t zz_state_mutex = ZZ_MTX_INIT;
+
+static inline void zz_state_lock(void) {
+    if (zz_state_depth == 0) zz_mtx_lock(&zz_state_mutex);
+    zz_state_depth++;
+}
+
+static inline void zz_state_unlock(void) {
+    zz_state_depth--;
+    if (zz_state_depth == 0) zz_mtx_unlock(&zz_state_mutex);
+}
+
+/// Abort with a clear diagnostic if a task yields/blocks while holding the
+/// state lock (D3 runtime guard). Call at every yield point.
+static inline void zz_state_yield_guard(void) {
+    if (zz_state_depth > 0) {
+        fprintf(stderr,
+                "error: yield or block inside `atomic { }` block\n"
+                "hint: move the blocking call outside the atomic block\n");
+        abort();
+    }
+}
+
 typedef struct zz_value zz_value;
 typedef struct zz_weak zz_weak;  // defined below, after zz_value
 
@@ -761,6 +791,22 @@ static inline zz_vbox *zz_vbox_of(zz_value *payload) {
 // Forward declaration: zz_clone is defined below; needed by zz_vbox_new to
 // clone the inner value so the box owns an independent reference.
 static inline zz_value zz_clone(zz_value v);
+
+// Load a `state` value with an uninitialized-guard (D1). Aborts with a clear
+// diagnostic if the binding's initializer has not run yet. `slot` points at
+// the `zz_state_*` global; `init_flag` is its parallel `zz_state_init_*`
+// bool, set to true by the generated init code.
+static inline zz_value zz_state_load_checked(zz_value *slot, int *init_flag,
+                                             const char *name) {
+    if (!*init_flag) {
+        fprintf(stderr,
+                "error: read of `state` `%s` before its initializer ran\n"
+                "hint: ensure the `state` declaration executes before any read",
+                name);
+        abort();
+    }
+    return zz_clone(*slot);
+}
 
 // Allocate a box owning one reference to `inner`; returns the payload
 // pointer to store in the wrapper (NULL if the allocation failed).

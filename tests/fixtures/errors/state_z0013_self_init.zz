@@ -1,0 +1,7 @@
+// features: int-arith, locals, print, state
+// Z0013: state read inside its own initializer is a compile error.
+state self_ref := self_ref + 1
+
+func main() -> int {
+    return 0
+}

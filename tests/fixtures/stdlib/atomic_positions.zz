@@ -1,0 +1,131 @@
+// features: imports, int-arith, locals, print, std-task, state
+// TASK 1: `atomic { ... }` as a statement in every position under contention.
+// 4 tasks x 1000 increments per position x 7 positions = exactly 28000.
+// Uses `+=` (atomic RMW under the lock) so read+write are indivisible.
+// Must pass with lock, fail without.
+import std.task
+
+state hits := 0
+
+func inc_atomic() {
+    atomic {
+        hits += 1
+    }
+}
+
+func position_top(n: int) {
+    for _ in 0..n {
+        inc_atomic()
+    }
+}
+
+func position_for(n: int) {
+    for i in 0..n {
+        atomic {
+            hits += 1
+        }
+    }
+}
+
+func position_while(n: int) {
+    k := 0
+    while k < n {
+        atomic {
+            hits += 1
+        }
+        k = k + 1
+    }
+}
+
+func position_if(n: int) {
+    for _ in 0..n {
+        if true {
+            atomic {
+                hits += 1
+            }
+        }
+    }
+}
+
+func position_closure(n: int) {
+    for _ in 0..n {
+        f := || {
+            atomic {
+                hits += 1
+            }
+        }
+        f()
+    }
+}
+
+func position_match(n: int) {
+    for _ in 0..n {
+        match true {
+            true => atomic {
+                hits += 1
+            },
+            false => {}
+        }
+    }
+}
+
+func position_after_semi(n: int) {
+    for _ in 0..n {
+        x := 0;
+        atomic {
+            hits += 1
+        }
+    }
+}
+
+func main() -> Result<int, str> {
+    hits = 0
+    n := 1000
+    h0 := task.spawn(|_| {
+        position_top(n)
+        position_for(n)
+        position_while(n)
+        position_if(n)
+        position_closure(n)
+        position_match(n)
+        position_after_semi(n)
+    })
+    h1 := task.spawn(|_| {
+        position_top(n)
+        position_for(n)
+        position_while(n)
+        position_if(n)
+        position_closure(n)
+        position_match(n)
+        position_after_semi(n)
+    })
+    h2 := task.spawn(|_| {
+        position_top(n)
+        position_for(n)
+        position_while(n)
+        position_if(n)
+        position_closure(n)
+        position_match(n)
+        position_after_semi(n)
+    })
+    h3 := task.spawn(|_| {
+        position_top(n)
+        position_for(n)
+        position_while(n)
+        position_if(n)
+        position_closure(n)
+        position_match(n)
+        position_after_semi(n)
+    })
+    task.join(h0)
+    task.join(h1)
+    task.join(h2)
+    task.join(h3)
+    x := hits
+    // 4 tasks x 1000 x 7 positions = 28000
+    if x != 28000 {
+        return .err("mismatch")
+    }
+    println("atomic_positions_ok")
+    return .ok(0)
+}

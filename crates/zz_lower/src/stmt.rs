@@ -23,16 +23,13 @@ impl Lowerer {
         // crossing a `zz_value` return slot. `ty_at` misses expressions
         // whose span has no recorded type and would leak a raw C struct.
         let val = self.emit_tail_value(v, names, out);
-        // `return match ...` routes through `emit_match_expr`, which creates
-        // a `_mresult` temporary carrying `cleanup(zz_release)`. When a match
-        // arm's value isn't already refcount-bumped (e.g. a binop like
-        // `"x" + "y"`), cleanup frees the only share and the returned value
-        // dangles. Clone here so the return value owns its own share.
-        if matches!(v, Expr::Match { .. }) {
-            format!("zz_clone({val})")
-        } else {
-            val
-        }
+        // Clone so the returned value owns its own share: the expression may
+        // be a cleanup(zz_release) temporary (e.g. _mresult from a match, or
+        // any tail local) whose cleanup would otherwise free the only share
+        // before the caller receives it, dangling the return value. zz_clone
+        // is a no-op for scalars and interned strings, so this only costs a
+        // refcount bump for heap values.
+        format!("zz_clone({val})")
     }
 
     /// Root binding of a store target chain (`m` in `m[i][j]`, `s` in
@@ -85,6 +82,16 @@ impl Lowerer {
         names: &mut NameCtx,
         out: &mut String,
     ) {
+        // `state` home (`arr[i] = v`, field stores on a computed state
+        // receiver): store the owned temp under the state lock. `zz_assign`
+        // retains the new value and releases the old slot; the temp's own
+        // share is then dropped, leaving the slot as sole owner.
+        if let Some((cid, _flag)) = self.state_target_ids(target) {
+            out.push_str(&format!(
+                "    zz_state_lock();\n    zz_assign(&{cid}, {tmp});\n    zz_release(&{tmp});\n    zz_state_unlock();\n"
+            ));
+            return;
+        }
         match target {
             Expr::Ident { name, .. } => {
                 if let Some(cid) = names.lookup(name).map(str::to_string) {
@@ -228,6 +235,20 @@ impl Lowerer {
                 | "std.sqlz.mysql.connect"
                 | "sqlz.mysql.connect"
         )
+    }
+
+    /// Emit `zz_state_unlock()` once per enclosing `atomic { }` block, for
+    /// use before a `return` that escapes an `atomic { }` body (whose
+    /// post-body unlock is unreachable). `atomic { }` only locks when
+    /// `needs_state_lock()`, so `atomic_depth > 0` implies the lock is held.
+    /// Resets `atomic_depth` to zero because `return` unwinds every enclosing
+    /// atomic block and exits the function.
+    fn emit_atomic_unlocks(&self, out: &mut String) {
+        let n = self.atomic_depth.get() as usize;
+        if n > 0 {
+            out.push_str(&"    zz_state_unlock();\n".repeat(n));
+            self.atomic_depth.set(0);
+        }
     }
 
     pub(crate) fn emit_stmt(
@@ -553,6 +574,7 @@ impl Lowerer {
                     Some(ref sname) => self.emit_boxed_value(sname, value, names, out),
                     None => {
                         self.flat_comp_ok.set(flat_comp);
+                        // Pure-region locking is owned by `emit_expr` (R1/R2).
                         let v = self.emit_expr(value, names, out);
                         self.flat_comp_ok.set(false);
                         v
@@ -841,6 +863,26 @@ impl Lowerer {
                 if self.try_emit_move_assign(target, value, names, out) {
                     return;
                 }
+                // `state` targets: the slot is a `zz_value`, so emit the
+                // value in state-storage form (unboxed structs are boxed
+                // into runtime objects) and write it under the state lock.
+                if let Some((cid, flag)) = self.state_target_ids(target) {
+                    // The RHS is one pure region when it has no calls;
+                    // otherwise `emit_state_value`'s children lock their own
+                    // regions through `emit_expr` (R1/R2).
+                    let val = if self.state_region_pure(value) {
+                        self.state_read_batch_depth.set(1);
+                        out.push_str("    zz_state_lock();\n");
+                        let val = self.emit_state_value(value, names, out);
+                        out.push_str("    zz_state_unlock();\n");
+                        self.state_read_batch_depth.set(0);
+                        val
+                    } else {
+                        self.emit_state_value(value, names, out)
+                    };
+                    self.emit_state_write(&cid, &flag, &val, out);
+                    return;
+                }
                 let val = self.emit_expr(value, names, out);
                 // If the RHS expression was already lowered to a raw
                 // scalar (int64_t/double/bool), don't try to extract
@@ -947,6 +989,49 @@ impl Lowerer {
                     }
                     Expr::Path { parts, .. } => {
                         let joined = parts.join(".");
+                        // Field write on a `state` binding (`cfg.x = v`,
+                        // `cfg.a.b = v`): the slot is a shared boxed object,
+                        // so mutate it under the state lock. Field stores
+                        // detach a shared header first, leaving concurrent
+                        // readers their snapshot (value semantics).
+                        if let Some((sname, fields)) = self.state_field_path(parts) {
+                            let cid = Lowerer::state_cid(&sname);
+                            let (boxed_val, boxed_needs_release) =
+                                self.box_index_store_value(value, val.clone(), names, out);
+                            out.push_str("    zz_state_lock();\n");
+                            let mut parents = vec![cid];
+                            for field in &fields[..fields.len() - 1] {
+                                let parent = parents.last().cloned().unwrap_or_default();
+                                let tmp = names.fresh("_sf");
+                                out.push_str(&format!(
+                                    "    zz_value {tmp} = zz_object_get_field(&{parent}, \"{field}\");\n"
+                                ));
+                                parents.push(tmp);
+                            }
+                            let leaf_parent = parents.last().cloned().unwrap_or_default();
+                            let leaf = fields.last().cloned().unwrap_or_default();
+                            out.push_str(&format!(
+                                "    zz_object_set_field(&{leaf_parent}, \"{leaf}\", {boxed_val});\n"
+                            ));
+                            if boxed_needs_release {
+                                out.push_str(&format!("    zz_release(&{boxed_val});\n"));
+                            }
+                            // Value semantics: land each intermediate object
+                            // back into its parent, then drop the temps.
+                            for i in (0..parents.len() - 1).rev() {
+                                out.push_str(&format!(
+                                    "    zz_object_set_field(&{}, \"{}\", {});\n",
+                                    parents[i],
+                                    fields[i],
+                                    parents[i + 1]
+                                ));
+                            }
+                            for tmp in &parents[1..] {
+                                out.push_str(&format!("    zz_release(&{tmp});\n"));
+                            }
+                            out.push_str("    zz_state_unlock();\n");
+                            return;
+                        }
                         // Handle struct field assignment: p.x = 99 or r.origin.x = 42
                         if parts.len() == 2 {
                             if let Some(base_cid) = names.lookup(&parts[0]) {
@@ -1554,6 +1639,31 @@ impl Lowerer {
                 value,
                 span,
             } => {
+                // State variable CompoundAssign: atomic RMW under a single
+                // state lock (separate lock/unlock for read+write would race
+                // under concurrent tasks).
+                let state_cid = match target {
+                    Expr::Ident { name, .. } if self.state_set.contains(name.as_str()) => {
+                        Some(Lowerer::state_cid(name.as_str()))
+                    }
+                    Expr::Path { parts, .. } if self.state_set.contains(&parts.join(".")) => {
+                        Some(Lowerer::state_cid(&parts.join(".")))
+                    }
+                    _ => None,
+                };
+                if let Some(cid) = state_cid {
+                    let flag = format!("{}_init", cid);
+                    let val = self.emit_expr(value, names, out);
+                    let tmp_cur = names.fresh("_cur");
+                    let op_sym = crate::context::binop_runtime_op(op);
+                    let name_str = match target {
+                        Expr::Ident { name, .. } => name.as_str().to_string(),
+                        Expr::Path { parts, .. } => parts.join("."),
+                        _ => unreachable!(),
+                    };
+                    self.emit_state_rmw(&cid, &flag, &name_str, &tmp_cur, op_sym, &val, out);
+                    return;
+                }
                 // RHS first (same order as `=`).
                 match target {
                     Expr::Ident { .. } | Expr::Path { .. } => {
@@ -1731,7 +1841,7 @@ impl Lowerer {
                         if !is_struct && WRITEBACK_METHODS.contains(&method.as_str()) {
                             if let Some(cid) = names.lookup(&obj).map(|s| s.to_string()) {
                                 *self.void_context.borrow_mut() = true;
-                                let val = self.emit_expr(e, names, out);
+                                let val = self.emit_expr_stateful(e, names, out);
                                 *self.void_context.borrow_mut() = false;
                                 out.push_str(&format!("    zz_assign(&{cid}, {val});\n"));
                                 return;
@@ -1746,7 +1856,7 @@ impl Lowerer {
                     // result owns a refcounted share that must be released.
                     // `emit_expr` takes &mut self, so capture first.
                     let release_result = stmt_call_needs_release(self, e, names);
-                    let val = self.emit_expr(e, names, out);
+                    let val = self.emit_expr_stateful(e, names, out);
                     *self.void_context.borrow_mut() = false;
                     // A discarded statement-position call to a *raising* native
                     // propagates its error: native failures raise in the VM,
@@ -1787,7 +1897,7 @@ impl Lowerer {
                     if void_if {
                         *self.void_context.borrow_mut() = true;
                     }
-                    let expr_tmp = self.emit_expr(e, names, out);
+                    let expr_tmp = self.emit_expr_stateful(e, names, out);
                     // Statement-position `match` discards its result temp,
                     // but `_mresult` holds a `zz_clone` of the arm value that
                     // keeps the matched container non-unique across loop
@@ -1816,12 +1926,14 @@ impl Lowerer {
                         out.push_str(&format!("    *self = {lvalue};\n"));
                     }
                     let val = self.return_value(v, names, out);
+                    self.emit_atomic_unlocks(out);
                     out.push_str(&format!("    return {val};\n"));
                 }
                 None => {
                     if let Some(ref lvalue) = self.impl_self_lvalue.borrow().as_ref() {
                         out.push_str(&format!("    *self = {lvalue};\n"));
                     }
+                    self.emit_atomic_unlocks(out);
                     out.push_str(&format!("    return {};\n", self.ret_unit()));
                 }
             },
@@ -1887,6 +1999,26 @@ impl Lowerer {
             | Stmt::Impl { .. }
             | Stmt::Trait { .. }
             | Stmt::Import { .. } => {}
+            Stmt::Atomic { body, .. } => {
+                // D3: execute the body while holding the state lock.
+                // D8: only lock when concurrency is reachable.
+                if self.needs_state_lock() {
+                    out.push_str("    zz_state_lock();\n");
+                    self.atomic_depth.set(self.atomic_depth.get() + 1);
+                }
+                for s in &body.stmts {
+                    self.emit_stmt(s, names, out, false);
+                }
+                // Decrement/undo the entry-side increment above. Gate on
+                // `atomic_depth > 0` (not `needs_state_lock()`): a `return`
+                // inside the body already emitted the matching unlock(s) and
+                // reset `atomic_depth` to zero, so the post-body unlock is
+                // unreachable and must not be emitted again.
+                if self.atomic_depth.get() > 0 {
+                    self.atomic_depth.set(self.atomic_depth.get() - 1);
+                    out.push_str("    zz_state_unlock();\n");
+                }
+            }
             // Top-level only: emitted in the preamble by `Lowerer::lower`.
             Stmt::ExternBlock { .. } | Stmt::Link { .. } => {}
         }
@@ -3544,6 +3676,9 @@ impl Lowerer {
             Stmt::Defer { expr, .. } => {
                 self.collect_expr_uses(expr, index, false, last_top_level, max_nested);
             }
+            Stmt::Atomic { body, .. } => {
+                self.collect_block_uses(body, index, last_top_level, max_nested);
+            }
             Stmt::Func { body, .. } => {
                 self.collect_block_uses(body, index, last_top_level, max_nested);
             }
@@ -3777,13 +3912,16 @@ impl Lowerer {
             // Tail call/compound was captured into __tail by emit_block.
             if let Some(tmp) = names.stack.get("__tail").and_then(|s| s.last()).cloned() {
                 let ret = self.ret_unbox(tmp.0);
-                out.push_str(&format!("    return {ret};\n"));
+                // Clone so the returned value owns its own share: `__tail` is
+                // a cleanup(zz_release) local whose cleanup would otherwise
+                // free the only share before the caller receives it.
+                out.push_str(&format!("    return zz_clone({ret});\n"));
                 return Some(());
             }
             // Pure leaf tail: emit directly (rarely reached).
             let val = self.emit_tail_value(e, names, out);
             let val = self.ret_unbox(val);
-            out.push_str(&format!("    return {val};\n"));
+            out.push_str(&format!("    return zz_clone({val});\n"));
             return Some(());
         }
         // Trailing `:=`: the declared value is the function value.
@@ -3827,7 +3965,7 @@ impl Lowerer {
             Some(Stmt::Expr(e)) => {
                 let val = self.emit_tail_value(e, names, out);
                 let val = self.ret_unbox(val);
-                out.push_str(&format!("        return {val};\n"));
+                out.push_str(&format!("        return zz_clone({val});\n"));
             }
             Some(Stmt::Return { value, .. }) => match value {
                 Some(v) => {
@@ -3839,7 +3977,7 @@ impl Lowerer {
             Some(Stmt::Decl { name, .. }) => {
                 if let Some(val) = self.decl_tail_value(&name.name, names, out) {
                     let val = self.ret_unbox(val);
-                    out.push_str(&format!("        return {val};\n"));
+                    out.push_str(&format!("        return zz_clone({val});\n"));
                 } else {
                     out.push_str(&format!("        return {};\n", self.ret_unit()));
                 }

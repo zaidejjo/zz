@@ -1,0 +1,19 @@
+// features: int-arith, locals, print, state
+// D2(b): a function whose ONLY `return` is inside `atomic { }` must not
+// trigger Z0006 fall-through — the atomic block propagates its body's
+// `Never` type so the compiler knows the function always returns.
+state s := 0
+
+func inc_and_return(n: int) -> int {
+    atomic {
+        s = s + n
+        return s
+    }
+}
+
+func main() -> int {
+    x := inc_and_return(5)
+    if x != 5 { return -1 }
+    println("state_d2_return_in_atomic_ok")
+    return 0
+}

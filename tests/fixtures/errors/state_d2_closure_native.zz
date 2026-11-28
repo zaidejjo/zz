@@ -1,0 +1,10 @@
+// features: int-arith, locals, print, state, std-vec
+// D2: closure-taking native touching state → Z0014 (sort_by takes a closure).
+import std.vec
+
+state data := [3, 1, 2]
+
+func main() -> int {
+    data = std.vec.sort_by(data, |a, b| a - b)
+    return 0
+}

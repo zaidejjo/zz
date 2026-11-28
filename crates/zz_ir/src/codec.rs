@@ -647,6 +647,13 @@ fn encode_op(v: &mut Vec<u8>, op: &Op) {
             put_u32(v, name.0);
             put_u16(v, *argc);
         }
+        Op::LoadState { name } => put_u32(v, name.0),
+        Op::StoreState { name } => put_u32(v, name.0),
+        Op::RmwState { name, op } => {
+            put_u32(v, name.0);
+            encode_binop(v, *op);
+        }
+        Op::Atomic { body } => put_u32(v, body.0),
         _ => {}
     }
 }
@@ -1599,6 +1606,21 @@ fn decode_op(r: &mut Reader) -> Result<Op, IrError> {
         71 => Ok(Op::EnterScope),
         72 => Ok(Op::ExitScope),
         73 => Ok(Op::DeferRecord),
+        101 => Ok(Op::LoadState {
+            name: StrId(r.u32()?),
+        }),
+        102 => Ok(Op::StoreState {
+            name: StrId(r.u32()?),
+        }),
+        103 => Ok(Op::RmwState {
+            name: StrId(r.u32()?),
+            op: decode_binop(r)?,
+        }),
+        104 => Ok(Op::Atomic {
+            body: FuncId(r.u32()?),
+        }),
+        105 => Ok(Op::StateBatchBegin),
+        106 => Ok(Op::StateBatchEnd),
         _ => Err(IrError::new("unknown .zzc op tag")),
     }
 }

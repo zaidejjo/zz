@@ -1,0 +1,18 @@
+// features: int-arith, locals, print, state, std-task
+// Blocking call inside `atomic { }` must be rejected at compile time (D3).
+import std.task
+
+state hits := 0
+
+func inc() {
+    atomic {
+        hits = hits + 1
+    }
+}
+
+// A blocking native inside atomic is a compile error.
+func bad_inside_atomic() {
+    atomic {
+        task.spawn(|_| { inc() })
+    }
+}

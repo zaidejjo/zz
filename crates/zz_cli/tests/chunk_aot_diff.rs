@@ -37,6 +37,7 @@ mod support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, SystemTime};
 
 fn zz_bin() -> PathBuf {
     // `CARGO_BIN_EXE_zz` is the built binary for this test run and
@@ -73,6 +74,109 @@ fn require_native() -> bool {
         return false;
     }
     true
+}
+
+/// Best-effort cleanup of stale `zz-*` temp directories left behind by
+/// crashed or interrupted test/build runs. Directories older than
+/// `max_age` are removed; anything else (and any access error) is left
+/// alone. Returns how many directories were reaped.
+fn reap_stale_zz_temp_dirs(max_age: Duration) -> usize {
+    let temp_dir = std::env::var_os("ZZ_TEMP_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    reap_stale_dirs_in(&temp_dir, max_age)
+}
+
+/// Core reaper logic: remove `zz-*` subdirectories of `temp_dir` older
+/// than `max_age`. Best-effort: any access error is skipped. Returns how
+/// many directories were reaped.
+fn reap_stale_dirs_in(temp_dir: &Path, max_age: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(temp_dir) else {
+        return 0;
+    };
+    let now = SystemTime::now();
+    let mut reaped = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("zz-") || !path.is_dir() {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age > max_age && std::fs::remove_dir_all(&path).is_ok() {
+            reaped += 1;
+        }
+    }
+    reaped
+}
+
+/// Result of building and running one fixture under both backends.
+struct CaseOutcome {
+    name: &'static str,
+    hir_stdout: String,
+    chunk_stdout: String,
+    hir_exit: i32,
+    chunk_exit: i32,
+    build_error: Option<String>,
+}
+
+/// Builds `src` under both the HIR and chunk backends, runs each binary,
+/// and returns the captured stdout/exit codes. Each case owns its own
+/// subdirectory, so cases never collide.
+fn run_case(root: &Path, name: &'static str, src: &str) -> CaseOutcome {
+    let mut build_error: Option<String> = None;
+    let mut hir_stdout = String::new();
+    let mut chunk_stdout = String::new();
+    let mut hir_exit = 0;
+    let mut chunk_exit = 0;
+
+    for backend in ["hir", "chunk"] {
+        let dir = root.join(format!("{name}_{backend}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join(format!("{name}.zz"));
+        let _ = std::fs::write(&f, src);
+        let mut args = vec!["build", "--dynamic"];
+        if backend == "chunk" {
+            args.push("--chunk");
+        }
+        args.push(f.to_str().unwrap());
+        let (code, _out, err) = run_zz_in(&dir, &args);
+        if code != 0 {
+            build_error = Some(format!("{backend} build of {name} failed: {err}"));
+            continue;
+        }
+        let bin = support::exe_in(&dir, name);
+        if !bin.exists() {
+            build_error = Some(format!("{backend} binary missing for {name}"));
+            continue;
+        }
+        let (rcode, stdout) = run_bin(&bin);
+        let _ = std::fs::write(dir.join("got.stdout"), &stdout);
+        let _ = std::fs::write(dir.join("got.exit"), rcode.to_string());
+        if backend == "hir" {
+            hir_stdout = stdout;
+            hir_exit = rcode;
+        } else {
+            chunk_stdout = stdout;
+            chunk_exit = rcode;
+        }
+    }
+
+    CaseOutcome {
+        name,
+        hir_stdout,
+        chunk_stdout,
+        hir_exit,
+        chunk_exit,
+        build_error,
+    }
 }
 
 const FIB: &str = r#"
@@ -862,54 +966,97 @@ fn chunk_matches_hir_stdout_and_exit() {
     if !require_native() {
         return;
     }
-    // One temp root per process; each case's per-backend dirs are removed
-    // immediately after comparison so /tmp never holds more than two
-    // built binaries (~35 MB) instead of all ~60 (~1 GB).
-    let root =
-        TempDirGuard(std::env::temp_dir().join(format!("zz-chunk-diff-{}", std::process::id())));
-    for (name, src) in CASES {
-        let mut hir_out = String::new();
-        let mut chunk_out = String::new();
-        let mut hir_exit = String::new();
-        let mut chunk_exit = String::new();
-        for backend in ["hir", "chunk"] {
-            let dir = root.join(format!("{name}_{backend}"));
-            std::fs::create_dir_all(&dir).unwrap();
-            let f = dir.join(format!("{name}.zz"));
-            std::fs::write(&f, src).unwrap();
-            let mut args = vec!["build", "--dynamic"];
-            if backend == "chunk" {
-                args.push("--chunk");
-            }
-            args.push(f.to_str().unwrap());
-            let (code, _out, err) = run_zz_in(&dir, &args);
-            assert_eq!(code, 0, "{backend} build of {name} failed: {err}");
-            let bin = support::exe_in(&dir, name);
-            assert!(bin.exists(), "{backend} binary missing for {name}");
-            let (rcode, stdout) = run_bin(&bin);
-            match backend {
-                "hir" => {
-                    hir_out = stdout;
-                    hir_exit = rcode.to_string();
-                }
-                "chunk" => {
-                    chunk_out = stdout;
-                    chunk_exit = rcode.to_string();
-                }
-                _ => unreachable!(),
-            }
-            // Remove this backend's dir immediately: we no longer need the
-            // binary or its output files once stdout/exit are captured.
-            let _ = std::fs::remove_dir_all(&dir);
+    // Reap stale `zz-*` temp dirs left by crashed/interrupted runs so the
+    // temp dir stays clean across sessions.
+    reap_stale_zz_temp_dirs(Duration::from_secs(24 * 60 * 60));
+
+    // One dir per backend so output names never collide.
+    let root = TempDirGuard(
+        // Honor `ZZ_TEMP_DIR` (and thus `TMPDIR`) so the heavy linked
+        // binaries land off a small quota-limited `/tmp` on constrained hosts.
+        std::env::var_os("ZZ_TEMP_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!("zz-chunk-diff-{}", std::process::id())),
+    );
+
+    // Build/run every case in parallel (each case owns its own
+    // subdirectory, so there are no collisions). Assertions run after all
+    // threads join so failures are reported together.
+    let root_path = root.0.clone();
+    let outcomes: Vec<CaseOutcome> = std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(CASES.len());
+        for (name, src) in CASES {
+            let root = root_path.clone();
+            handles.push(s.spawn(move || run_case(&root, name, src)));
         }
-        // Diff the two backends.
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    for outcome in &outcomes {
+        if let Some(err) = &outcome.build_error {
+            panic!("{err}");
+        }
         assert_eq!(
-            hir_exit, chunk_exit,
-            "{name}: exit differs (hir={hir_exit} chunk={chunk_exit})"
+            outcome.hir_exit, outcome.chunk_exit,
+            "{}: exit differs (hir={} chunk={})",
+            outcome.name, outcome.hir_exit, outcome.chunk_exit
         );
         assert_eq!(
-            hir_out, chunk_out,
-            "{name}: stdout differs\n--- hir ---\n{hir_out}\n--- chunk ---\n{chunk_out}"
+            outcome.hir_stdout,
+            outcome.chunk_stdout,
+            "{name}: stdout differs\n--- hir ---\n{hir_stdout}\n--- chunk ---\n{chunk_stdout}",
+            name = outcome.name,
+            hir_stdout = outcome.hir_stdout,
+            chunk_stdout = outcome.chunk_stdout
         );
     }
+}
+
+/// The reaper removes only stale `zz-*` directories and leaves fresh ones
+/// (and non-`zz-` entries) untouched.
+#[test]
+fn reap_stale_dirs_in_reaps_stale_zz_dirs() {
+    let base = std::env::temp_dir().join(format!("zz-reaper-stale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+
+    std::fs::create_dir_all(base.join("zz-stale-a")).unwrap();
+    std::fs::create_dir_all(base.join("zz-stale-b")).unwrap();
+    std::fs::create_dir_all(base.join("not-zz-dir")).unwrap();
+
+    // Give the dirs measurable age, then reap with max_age == 0: anything
+    // older than now gets reaped.
+    std::thread::sleep(Duration::from_millis(50));
+    let reaped = reap_stale_dirs_in(&base, Duration::ZERO);
+    assert_eq!(reaped, 2, "should reap both stale zz dirs");
+    assert!(!base.join("zz-stale-a").exists());
+    assert!(!base.join("zz-stale-b").exists());
+    assert!(
+        base.join("not-zz-dir").exists(),
+        "non-zz dir should be kept"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The reaper keeps recent `zz-*` directories when max_age is generous.
+#[test]
+fn reap_stale_dirs_in_keeps_recent_zz_dirs() {
+    let base = std::env::temp_dir().join(format!("zz-reaper-fresh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+
+    std::fs::create_dir_all(base.join("zz-fresh-a")).unwrap();
+    std::fs::create_dir_all(base.join("zz-fresh-b")).unwrap();
+    std::fs::create_dir_all(base.join("not-zz-dir")).unwrap();
+
+    // Reap with a one-day max age: dirs created moments ago are kept.
+    let reaped = reap_stale_dirs_in(&base, Duration::from_secs(24 * 60 * 60));
+    assert_eq!(reaped, 0, "should reap nothing");
+    assert!(base.join("zz-fresh-a").exists());
+    assert!(base.join("zz-fresh-b").exists());
+    assert!(base.join("not-zz-dir").exists());
+
+    let _ = std::fs::remove_dir_all(&base);
 }

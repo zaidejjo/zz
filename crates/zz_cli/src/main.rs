@@ -7,6 +7,11 @@
 //! - `zz check <file>` → parse and type-check a `.zz` file without running it
 //! - `zz --help`     → usage
 
+// nolock_selftest must NEVER be enabled in a release build. It disables the
+// state lock for self-testing; shipping it would break shared-state safety.
+#[cfg(all(feature = "nolock_selftest", not(debug_assertions)))]
+compile_error!("nolock_selftest must never be enabled in release builds (debug_assertions off)");
+
 use std::collections::HashMap;
 use std::process::ExitCode;
 
@@ -1140,6 +1145,9 @@ pub(crate) struct PreparedRun {
     pub(crate) symbol_map: std::collections::HashMap<String, u32>,
     pub(crate) structs: std::collections::HashMap<String, zz_checker::StructSig>,
     pub(crate) enums: std::collections::HashMap<String, zz_checker::EnumSig>,
+    /// func name → interned Symbol id, so `Compiler::type_of` can resolve a
+    /// call's span to its resolved type (drives `sqlz.query` struct mapping
+    /// and any other type-at-span lookups during VM execution).
     funcs: std::collections::HashMap<String, zz_checker::FuncSig>,
     entry_path: String,
     /// Threaded out for the run cache: interpreter inputs that cannot be
@@ -1408,6 +1416,21 @@ pub(crate) fn prepare_run_with_features(
         _loaded_traits.clone(),
         _loaded_trait_impls.clone(),
     );
+    // D5 R2: plain globals reachable from task.spawn must be `state`.
+    let cg = zz_hir::callgraph::build_callgraph(&typed.program);
+    let mut r2_errors: Vec<zz_frontend::diag::RawDiag> = Vec::new();
+    zz_hir::callgraph::check_r2_globals_vs_tasks(&typed.program, &cg, &mut r2_errors);
+    if !r2_errors.is_empty() {
+        let mut msg = format!(
+            "{} error(s) checking plain globals vs tasks:",
+            r2_errors.len()
+        );
+        for d in &r2_errors {
+            let code = d.code.map(|c| format!("[{c}] ")).unwrap_or_default();
+            msg.push_str(&format!("\n{code}{}", d.message));
+        }
+        return Err(msg);
+    }
     let interp = setup_interp(
         natives,
         &consts,
@@ -2491,7 +2514,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         zz_build::BuildMode::Static
     };
     let allow_downgrade = mode == zz_build::BuildMode::Static && !is_static;
-    let provider = match cc.as_deref() {
+    let mut provider = match cc.as_deref() {
         None => zz_codegen::ClangProvider::Any,
         Some(name) => zz_codegen::ClangProvider::parse(name).ok_or_else(|| {
             format!(
@@ -2500,6 +2523,28 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
             )
         })?,
     };
+    // PGO instrumentation requires a real Clang: zig cc accepts
+    // -fprofile-generate/-fprofile-instr-generate for clang compatibility
+    // but does not emit LLVM profile counters, so training produces zero
+    // profile data and llvm-profdata merge fails with "no profile data
+    // collected". Force system clang for PGO modes; reject --cc zig + PGO.
+    // PGO actually happens for: `--pgo`, `--full -- <train args>`, and
+    // `--optimize-max`. Plain `--full` (no `--`) is full LTO without PGO.
+    let is_pgo_mode = is_pgo || (is_full && dashdash.is_some()) || is_optimize_max;
+    match provider {
+        zz_codegen::ClangProvider::Zig if is_pgo_mode => {
+            return Err(
+                "PGO instrumentation requires system clang; zig cc does not emit profile counters\n\
+                 hint: drop `--cc zig` (or use `--cc clang`) so `zz build --pgo` / `--full --` / \
+                 `--optimize-max` can instrument the binary"
+                    .to_string(),
+            );
+        }
+        zz_codegen::ClangProvider::Any if is_pgo_mode => {
+            provider = zz_codegen::ClangProvider::Clang;
+        }
+        _ => {}
+    }
     let rel = zz_build::ReleaseOptions {
         target,
         provider,
@@ -3547,6 +3592,21 @@ impl CheckDedupe {
     }
 }
 
+/// Merge per-module programs (dependency order) into one program for
+/// whole-program analyses (HIR build, call graph, R2 checks).
+fn merge_loaded_programs(programs: &[zz_frontend::ast::Program]) -> zz_frontend::ast::Program {
+    zz_frontend::ast::Program {
+        stmts: programs
+            .iter()
+            .flat_map(|p| p.stmts.iter().cloned())
+            .collect(),
+        span: programs
+            .last()
+            .map(|p| p.span)
+            .unwrap_or_else(|| Span::new(0, 0)),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_or_fix_path(
     path_arg: &Option<String>,
@@ -3643,7 +3703,7 @@ pub(crate) fn check_or_fix_path(
         // `--hard`, warnings also fail the check so CI can treat them as
         // errors. Compute this before cross-entry dedupe so a repeated
         // diagnostic still fails the run.
-        let has_errors = loaded
+        let mut has_errors = loaded
             .errors
             .iter()
             .any(|e| e.diags.iter().any(|d| d.severity == Severity::Error));
@@ -3664,6 +3724,36 @@ pub(crate) fn check_or_fix_path(
                 e.diags.retain(|d| !dedupe.is_duplicate(&owner, d));
             }
             loaded.errors.retain(|e| !e.diags.is_empty());
+        }
+
+        // D5 R2: plain globals reachable from a `task.spawn` closure must be
+        // `state`. `zz run` already enforces this; mirror it here so `zz check`
+        // reports the same Z0017 instead of silently passing racy globals.
+        // Cheap textual prefilter: only programs that spawn tasks can have a
+        // task-reachable global, so the extra HIR build stays rare.
+        if !has_errors && !do_fix && source.contains("task.spawn") {
+            let merged = merge_loaded_programs(&loaded.programs);
+            let typed = zz_hir::build_program(
+                &merged,
+                std::collections::HashMap::new(),
+                loaded.funcs.clone(),
+                loaded.structs.clone(),
+                loaded.aliases.clone(),
+                loaded.enums.clone(),
+                loaded.traits.clone(),
+                loaded.trait_impls.clone(),
+            );
+            let cg = zz_hir::callgraph::build_callgraph(&typed.program);
+            let mut r2_diags: Vec<zz_frontend::diag::RawDiag> = Vec::new();
+            zz_hir::callgraph::check_r2_globals_vs_tasks(&typed.program, &cg, &mut r2_diags);
+            if !r2_diags.is_empty() {
+                has_errors = true;
+                loaded.errors.push(zz_loader::LoadError {
+                    name: path_str.clone(),
+                    source: source.to_string(),
+                    diags: r2_diags,
+                });
+            }
         }
 
         // Classify fixits by safety.

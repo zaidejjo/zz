@@ -505,7 +505,8 @@ impl<'a> Walker<'a> {
             | Stmt::Enum { .. }
             | Stmt::Impl { .. }
             | Stmt::ExternBlock { .. }
-            | Stmt::Link { .. } => false,
+            | Stmt::Link { .. }
+            | Stmt::Atomic { .. } => false,
         }
     }
 
@@ -981,7 +982,8 @@ impl<'a> Walker<'a> {
             | Stmt::Impl { .. }
             | Stmt::Trait { .. }
             | Stmt::ExternBlock { .. }
-            | Stmt::Link { .. } => Flow::clean(),
+            | Stmt::Link { .. }
+            | Stmt::Atomic { .. } => Flow::clean(),
         }
     }
 
@@ -1773,7 +1775,8 @@ impl<'a> FlatUseScan<'a> {
             | Stmt::Enum { .. }
             | Stmt::Trait { .. }
             | Stmt::ExternBlock { .. }
-            | Stmt::Link { .. } => {}
+            | Stmt::Link { .. }
+            | Stmt::Atomic { .. } => {}
         }
     }
 

@@ -198,7 +198,8 @@ impl TypedProgram {
 
 /// Convenience: parse + type-check + HIR-build in one call.
 ///
-/// Returns `None` if the source failed to parse.
+/// Returns `None` if the source failed to parse with a hard error.
+/// Warnings (e.g. redundant semicolon) do not block HIR construction.
 pub fn build_source(
     source: &str,
     initial_bindings: HashMap<String, Type>,
@@ -208,7 +209,11 @@ pub fn build_source(
     initial_enums: HashMap<String, EnumSig>,
 ) -> Option<TypedResult> {
     let parsed = zz_frontend::parse(source);
-    if !parsed.errors.is_empty() {
+    if parsed
+        .errors
+        .iter()
+        .any(|d| d.severity == zz_frontend::diag::Severity::Error)
+    {
         return None;
     }
     Some(build_program(

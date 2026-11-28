@@ -1,0 +1,24 @@
+// features: int-arith, locals, print, state, std-task
+// Task C: function passed as argument to a user function that calls it from
+// a task; the passed function touches a plain global → Z0017.
+import std.task
+
+state_counter := 0 // plain mutable global reachable from a task → Z0017
+
+func call_from_task(f: func() -> int) {
+    h := task.spawn(|_| {
+        f()
+    })
+    task.join(h)
+    return
+}
+
+func touched_global() -> int {
+    state_counter = state_counter + 1
+    return state_counter
+}
+
+func main() -> int {
+    call_from_task(touched_global)
+    return 0
+}

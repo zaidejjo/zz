@@ -1,4 +1,4 @@
-// features: arrays, comparison, dicts, func-call, indexing, int-arith, known-divergence, locals, match, print, return, slicing, std-vec, string-literal, structs, vec-push
+// features: arrays, comparison, dicts, func-call, indexing, int-arith, locals, match, print, return, slicing, std-vec, string-literal, structs, vec-push
 // E2E: `clone(v)` pins a fully independent snapshot (#267). Reads and
 // binds share backing stores since the COW migration, so this asserts
 // the escape hatch: mutating the original (index-set, push, field

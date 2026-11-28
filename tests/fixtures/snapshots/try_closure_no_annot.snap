@@ -12,10 +12,4 @@ error: Z0002: type mismatch: expected `int`, found `Result<int, str>`
 |
 7 | f := |x| try fetch()
 | ^^^^^^^^^^^
-error: Z0002: cannot infer the type of `try_closure_no_annot.f`; add a type annotation
-
---> <path>
-|
-7 | f := |x| try fetch()
-| ^
 zz: 1 file(s) failed type-check

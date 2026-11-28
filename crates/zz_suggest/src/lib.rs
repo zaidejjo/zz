@@ -158,6 +158,17 @@ pub fn common_prefix_len(a: &str, b: &str) -> usize {
     a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
 }
 
+/// Length of the shared leading-character prefix of two strings, ignoring
+/// ASCII case. Used by [`suggest_top3`] so `Line` matches `line` — a
+/// callee whose named type differs only in case from a known function
+/// should still get a "did you mean to call ..." note.
+fn common_prefix_len_ci(a: &str, b: &str) -> usize {
+    a.chars()
+        .zip(b.chars())
+        .take_while(|(x, y)| x.eq_ignore_ascii_case(y))
+        .count()
+}
+
 /// A suggestion only when it is a clear, high-confidence correction: a
 /// single-edit typo that shares a leading character with the intended name,
 /// with no equally close alternative. Returns `None` (no hint) rather than
@@ -190,7 +201,7 @@ pub fn suggest_top3<'a>(name: &str, candidates: &[&'a str]) -> Vec<&'a str> {
     suggest_all(name, candidates)
         .into_iter()
         .filter(|(_, dist)| *dist <= threshold)
-        .filter(|(cand, _)| common_prefix_len(name, cand) >= 1)
+        .filter(|(cand, _)| common_prefix_len_ci(name, cand) >= 1)
         .take(3)
         .map(|(cand, _)| cand)
         .collect()
@@ -422,5 +433,14 @@ mod tests {
         // Capped at three.
         let many = suggest_top3("abc", &["abcd", "abce", "abcf", "abcg", "abch"]);
         assert_eq!(many.len(), 3);
+    }
+
+    #[test]
+    fn suggest_top3_matches_case_insensitively() {
+        // A callee whose named type differs only in case from a known
+        // function still gets a "did you mean to call ..." note. `Line`
+        // vs `line` is distance 1 but shares no case-sensitive prefix.
+        let top = suggest_top3("Line", &["line"]);
+        assert_eq!(top, vec!["line"]);
     }
 }

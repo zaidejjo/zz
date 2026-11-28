@@ -90,6 +90,8 @@ impl<'a> Parser<'a> {
                     TokenKind::Ident if self.at_enum_start() => self.parse_enum(true),
                     // `pub const x = expr` / `pub const x: type = expr`
                     TokenKind::Const => self.parse_const_decl(true),
+                    // `pub state NAME := expr` / `pub state NAME: T = expr`
+                    TokenKind::Ident if self.peek().text == "state" => self.parse_state_decl(true),
                     // `pub x := expr` or `pub x: type = expr`
                     TokenKind::Ident if self.peek_kind_at(1) == TokenKind::ColonEq => {
                         self.parse_short_decl(true, false)
@@ -161,6 +163,21 @@ impl<'a> Parser<'a> {
             TokenKind::Ident if self.at_bare_destructure() => self.parse_bare_destructure_decl(),
             // `const x = expr` / `const x: type = expr` — immutable binding.
             TokenKind::Const => self.parse_const_decl(false),
+            // `state NAME := expr` / `state NAME: T = expr` — contextual
+            // keyword: only a declaration when followed by an identifier;
+            // `state` stays a plain identifier everywhere else.
+            TokenKind::Ident if self.peek().text == "state" => self.parse_state_decl(false),
+            // `atomic { ... }` — contextual keyword at statement start +
+            // `{`. Executes the body under the state lock. `atomic` may be
+            // followed by statement-end tokens (newline/semicolon) before
+            // `{`, e.g. `atomic\n{ ... }`.
+            TokenKind::Ident if self.peek().text == "atomic" && self.atomic_followed_by_block() => {
+                // Skip any StmtEnds between `atomic` and `{`.
+                while self.at(TokenKind::StmtEnd) {
+                    self.advance();
+                }
+                self.parse_atomic()
+            }
             // `(a, b) := expr` — tuple destructuring declaration.
             // Disambiguated from a tuple-expression tail (`(a, a + 1)`)
             // by the trailing `:=`: only a `)` closed paren list followed
@@ -471,6 +488,7 @@ impl<'a> Parser<'a> {
                             span,
                             pub_: false,
                             is_const: false,
+                            is_state: false,
                         };
                     }
                 }
@@ -510,6 +528,18 @@ impl<'a> Parser<'a> {
                 Stmt::Expr(expr)
             }
         }
+    }
+
+    /// True when `atomic` at the current position is followed (skipping any
+    /// statement-end tokens) by `{`. This allows `atomic\n{ ... }` to be
+    /// parsed as an atomic block rather than as an identifier expression
+    /// followed by a block statement.
+    pub(crate) fn atomic_followed_by_block(&self) -> bool {
+        let mut pos = self.pos + 1;
+        while pos < self.toks.len() && self.toks[pos].kind == TokenKind::StmtEnd {
+            pos += 1;
+        }
+        pos < self.toks.len() && self.toks[pos].kind == TokenKind::LBrace
     }
 
     /// Recover the verbatim source text of the statement just parsed after a
@@ -1176,6 +1206,7 @@ impl<'a> Parser<'a> {
             span,
             pub_,
             is_const,
+            is_state: false,
         }
     }
 
@@ -1225,7 +1256,61 @@ impl<'a> Parser<'a> {
             span,
             pub_,
             is_const: true,
+            is_state: false,
         }
+    }
+
+    /// Parse `state NAME := expr` or `state NAME: T = expr` (and the `pub`
+    /// variant). `state` is a contextual keyword: it is only a declaration
+    /// introducer when immediately followed by an identifier.
+    pub(crate) fn parse_state_decl(&mut self, pub_: bool) -> Stmt {
+        let state_tok = self.advance(); // `state`
+        let name = self
+            .expect_ident()
+            .unwrap_or_else(|| dummy_ident(state_tok.span));
+        let (ty, value) = if self.eat(TokenKind::Colon) {
+            // `state NAME: T = expr`
+            let ty = self.parse_type();
+            if !self.eat(TokenKind::Assign) {
+                self.error_here("expected `=` after `state` type annotation");
+            }
+            let value = self.parse_expr();
+            (Some(ty), value)
+        } else if self.eat(TokenKind::ColonEq) {
+            // `state NAME := expr`
+            let value = self.parse_expr();
+            (None, value)
+        } else {
+            self.error_here(
+                "expected `:=` or `: type =` after `state` name\n\
+                 hint: write `state name := expr` or `state name: T = expr`",
+            );
+            let value = self.parse_expr();
+            (None, value)
+        };
+        let span = state_tok.span.join(value.span());
+        Stmt::Decl {
+            ty,
+            name: Ident {
+                name: name.name.clone(),
+                span: name.span,
+            },
+            value,
+            span,
+            pub_,
+            is_const: false,
+            is_state: true,
+        }
+    }
+
+    /// Parse `atomic { ... }` — execute the body while holding the shared
+    /// state lock. `atomic` is a contextual keyword at statement start.
+    pub(crate) fn parse_atomic(&mut self) -> Stmt {
+        let atomic_tok = self.advance(); // `atomic`
+                                         // `parse_block` eats the opening `{`; we only consume `atomic` here.
+        let body = self.parse_block();
+        let span = atomic_tok.span.join(body.span);
+        Stmt::Atomic { body, span }
     }
 
     /// Parse `(a, b) := expr` — tuple destructuring declaration.
@@ -1567,6 +1652,7 @@ impl<'a> Parser<'a> {
                 span,
                 pub_,
                 is_const,
+                is_state: false,
             });
         }
         if !self.eat(TokenKind::Assign) {
@@ -1584,6 +1670,7 @@ impl<'a> Parser<'a> {
             span,
             pub_,
             is_const,
+            is_state: false,
         })
     }
 
@@ -2004,6 +2091,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
             span: mut sp,
             pub_,
             is_const,
+            is_state,
         } => {
             span(&mut sp);
             Stmt::Decl {
@@ -2013,6 +2101,7 @@ fn pub_started(stmt: Stmt, pub_span: Span) -> Stmt {
                 span: sp,
                 pub_,
                 is_const,
+                is_state,
             }
         }
         Stmt::Import {

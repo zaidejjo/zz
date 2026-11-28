@@ -1,0 +1,42 @@
+=== S3 FIXTURE TESTS ===
+--- state_d4_rate_limiter_fixed VM ---
+8
+exit=0
+--- state_d4_rate_limiter_fixed AOT ---
+8
+exit=0
+
+--- state_d8_config_reload_fixed VM ---
+warning: unused struct field `state_d8_config_reload_fixed.Config.retries`, consider prefixing with `_retries` or removing it
+
+    = field is never read
+60
+exit=0
+--- state_d8_config_reload_fixed AOT ---
+warning: unused struct field `state_d8_config_reload_fixed.Config.retries`, consider prefixing with `_retries` or removing it
+
+    = field is never read
+60
+exit=0
+
+--- state_d2_id_generator VM ---
+1002
+exit=0
+--- state_d2_id_generator AOT ---
+1002
+exit=0
+
+--- state_d5_bank_transfer VM ---
+60 140
+exit=0
+--- state_d5_bank_transfer AOT ---
+60 140
+exit=0
+
+--- state_d6_log_buffer VM ---
+4
+exit=0
+--- state_d6_log_buffer AOT ---
+4
+exit=0
+

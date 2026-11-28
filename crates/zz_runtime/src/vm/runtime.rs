@@ -1,4 +1,5 @@
 use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use zz_frontend::ast::types::{Ty, TyKind};
@@ -24,6 +25,15 @@ const SAFEPOINT_BUDGET: u32 = 1024;
 /// yields its executor thread so siblings run. 1ms keeps interactive
 /// (channel ping) latency low while requeue churn stays negligible.
 const SAFEPOINT_QUANTUM_MS: u128 = 1;
+
+/// Debug-only tracking of state batch depth for test-only natives.
+/// Updated by the VM on `StateBatchBegin`/`StateBatchEnd` so a test-only
+/// native can assert the depth returns to 0 after early exits.
+static STATE_BATCH_DEPTH_DEBUG: AtomicUsize = AtomicUsize::new(0);
+
+/// Debug-only tracking of state lock depth for test-only natives.
+/// Updated by the VM on `Op::Atomic` entry / `leave_atomic`.
+static STATE_LOCK_DEPTH_DEBUG: AtomicUsize = AtomicUsize::new(0);
 
 /// Overwrite a stack slot in place without running `drop_in_place` on the
 /// value it replaces.
@@ -144,6 +154,9 @@ pub(crate) struct Frame {
     defer_stack: Vec<Value>,
     /// Source span of the function definition for backtraces.
     func_span: Span,
+    /// True for frames pushed by `Op::Atomic` (synthetic frames that should
+    /// be transparent to `return`/`break`/`continue` unwinding).
+    is_atomic: bool,
 }
 
 /// One active loop (native `for`/`while`). Used by `break`/`continue` to
@@ -206,11 +219,49 @@ pub struct Vm {
     /// Memoized `CallPath` resolution, indexed by `(chunk, ip)` — see
     /// [`Vm::direct_call_hit`].
     call_cache: Vec<Option<CachedDirect>>,
+    /// Nesting depth of `atomic { }` blocks on this VM thread. >0 means we
+    /// hold the state lock and state ops access the map directly (no
+    /// re-lock, no deadlock). See D3.
+    state_lock_depth: usize,
+    /// Nesting depth of batched state-read regions. >0 means the state lock
+    /// is held for the whole region and `LoadState`/`StoreState` skip
+    /// individual lock/unlock. Used for multi-state expressions like
+    /// `a + b` to be atomic under one lock.
+    state_batch_depth: usize,
     /// Inline cache for dict key lookups (`dict[key]`). Each entry caches
     /// (dict pointer, key hash) → cloned value. Invalidated wholesale on
     /// any dict mutation via the generation counter.
     inline_cache: [InlineCacheEntry; INLINE_CACHE_SIZE],
     inline_cache_gen: u64,
+}
+
+/// True when the current thread holds the state lock (via `atomic { }` or
+/// a batched state-read region). Under `nolock_selftest`, batch reads do
+/// NOT acquire the lock, so only `atomic { }` counts.
+impl Vm {
+    fn state_lock_held(&self) -> bool {
+        if self.state_lock_depth > 0 {
+            return true;
+        }
+        #[cfg(not(feature = "nolock_selftest"))]
+        {
+            if self.state_batch_depth > 0 {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Debug-only accessors for the state lock/batch depth tracking statics.
+/// Used by test-only natives (`std.debug.state_*_depth`) to assert depth
+/// returns to 0 after early exits.
+pub fn state_batch_depth_debug() -> usize {
+    STATE_BATCH_DEPTH_DEBUG.load(Ordering::Relaxed)
+}
+
+pub fn state_lock_depth_debug() -> usize {
+    STATE_LOCK_DEPTH_DEBUG.load(Ordering::Relaxed)
 }
 
 /// Number of inline cache entries for dict lookups.
@@ -281,6 +332,8 @@ impl Vm {
             slice_start: None,
             debug: None,
             call_cache: (0..CALL_CACHE_LEN).map(|_| None).collect(),
+            state_lock_depth: 0,
+            state_batch_depth: 0,
             inline_cache: std::array::from_fn(|_| InlineCacheEntry {
                 dict_ptr: 0,
                 key_hash: 0,
@@ -529,6 +582,7 @@ impl Vm {
                     defer_stack: saved_defers,
                     self_home: None,
                     func_span: Span::default(),
+                    is_atomic: false,
                 });
             }
         }
@@ -563,6 +617,7 @@ impl Vm {
             self_home: None,
             defer_stack: Vec::new(),
             func_span: Span::default(),
+            is_atomic: false,
         });
 
         self.run_loop(interp)
@@ -578,6 +633,28 @@ impl Vm {
         self.run_loop(interp)
     }
 
+    /// Leave one `atomic { }` scope: drop the per-VM depth and release the
+    /// reentrant state lock that `Op::Atomic` acquired for the body. Called
+    /// from every path that pops an atomic frame (normal exit, `break` /
+    /// `continue` unwinding, and `return` unwinding).
+    fn leave_atomic(&mut self, interp: &mut Interp) {
+        // Under `nolock_selftest` the lock is disabled; `Op::Atomic` did not
+        // acquire, so do not release here either (keep depth balanced).
+        if !cfg!(feature = "nolock_selftest") {
+            self.state_lock_depth -= 1;
+            if let Some(reg) = interp.state_registry.as_ref() {
+                reg.release();
+            }
+        }
+        #[cfg(debug_assertions)]
+        {
+            let cur = STATE_LOCK_DEPTH_DEBUG.load(Ordering::Relaxed);
+            if cur > 0 {
+                STATE_LOCK_DEPTH_DEBUG.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+    }
+
     /// One cooperative-safepoint tick: decrement the call-frame slice budget
     /// and, once per budget, read the clock to see whether the current
     /// timeslice expired.
@@ -587,6 +664,14 @@ impl Vm {
     /// then rewind `ip` to the op it is executing and return
     /// [`Flow::Yield`] so that resuming re-executes that op from the top.
     fn safepoint_expired(&mut self) -> bool {
+        // D3: cannot yield while holding the state lock. Reset the budget
+        // and keep running — the lock is released when the `Atomic` op
+        // completes.
+        if self.state_lock_held() {
+            self.slice_budget = SAFEPOINT_BUDGET;
+            self.slice_start = Some(std::time::Instant::now());
+            return false;
+        }
         if self.slice_budget == 0 {
             self.slice_budget = SAFEPOINT_BUDGET;
             let now = std::time::Instant::now();
@@ -733,6 +818,13 @@ impl Vm {
             () => {{
                 if crate::value::on_executor() {
                     if let Some(reason) = take_yield_slow() {
+                        // D3: cannot yield while holding the state lock.
+                        if self.state_lock_held() {
+                            return Err(self.error(
+                                "yield or block inside `atomic { }` block",
+                                Span::default(),
+                            ));
+                        }
                         return Ok(Flow::Yield(reason));
                     }
                 }
@@ -803,6 +895,12 @@ impl Vm {
                 }
                 let f = self.frames.pop().unwrap();
                 self.stack.truncate(f.stack_base);
+                // Leave the atomic scope: drops the per-VM depth and releases
+                // the reentrant state lock acquired by `Op::Atomic`, so
+                // cooperative safepoints (and peer tasks) resume.
+                if f.is_atomic {
+                    self.leave_atomic(interp);
+                }
                 interp.env = f.prev_env;
                 let parent_defers = f.defer_stack;
 
@@ -1053,6 +1151,159 @@ impl Vm {
                     } else {
                         let v = Self::load_var_fallback(interp, name, *span)?;
                         self.stack.push(v);
+                    }
+                }
+                // ---- shared mutable state (D1/D2/D3/D9) ----
+                Op::LoadState(name, span) => {
+                    let reg = interp
+                        .state_registry
+                        .as_ref()
+                        .ok_or_else(|| self.error("state registry not available", *span))?;
+                    let v = if cfg!(not(feature = "nolock_selftest"))
+                        && (self.state_lock_depth > 0 || self.state_batch_depth > 0)
+                    {
+                        // Inside `atomic { }` or a batched read: we hold the
+                        // lock, direct access.
+                        unsafe { reg.map_mut().get(name).cloned() }
+                    } else {
+                        reg.get(name)
+                    };
+                    match v {
+                        Some(v) => self.stack.push(v),
+                        None => {
+                            return Err(self.error(
+                                format!(
+                                    "read of `state` `{name}` before its initializer ran",
+                                    name = name
+                                ),
+                                *span,
+                            ));
+                        }
+                    }
+                }
+                Op::StoreState(name, span) => {
+                    let v = self.stack.pop().unwrap();
+                    let reg = interp
+                        .state_registry
+                        .as_ref()
+                        .ok_or_else(|| self.error("state registry not available", *span))?;
+                    if cfg!(not(feature = "nolock_selftest"))
+                        && (self.state_lock_depth > 0 || self.state_batch_depth > 0)
+                    {
+                        unsafe {
+                            reg.map_mut().insert(name.clone(), v);
+                        }
+                    } else {
+                        reg.set(name, v);
+                    }
+                }
+                Op::RmwState(name, op, span) => {
+                    let rhs = self.stack.pop().unwrap();
+                    let reg = interp
+                        .state_registry
+                        .as_ref()
+                        .ok_or_else(|| self.error("state registry not available", *span))?;
+                    if self.state_lock_depth > 0 {
+                        unsafe {
+                            let cur = reg.map_mut().get(name).cloned().unwrap_or(Value::Unit);
+                            let new = eval_binary(*op, cur, rhs, *span)?;
+                            reg.map_mut().insert(name.clone(), new.clone());
+                            self.stack.push(new);
+                        }
+                    } else {
+                        // Single lock acquisition: read, compute, write under one lock
+                        // so the RMW is indivisible (D2). Mirrors AOT/chunk which hold
+                        // the lock across the whole RMW.
+                        let new = reg.with_lock(|| -> Result<Value, EvalError> {
+                            let cur =
+                                unsafe { reg.map_mut().get(name).cloned().unwrap_or(Value::Unit) };
+                            let new = eval_binary(*op, cur, rhs, *span)?;
+                            unsafe { reg.map_mut().insert(name.clone(), new.clone()) };
+                            Ok(new)
+                        })?;
+                        self.stack.push(new);
+                    }
+                }
+                Op::Atomic { body, span } => {
+                    // Under `nolock_selftest` the lock is disabled so atomic
+                    // bodies run lock-free (selftest only); the registry is
+                    // still used by the body's state ops via internal locking.
+                    if !cfg!(feature = "nolock_selftest") {
+                        let reg = match interp.state_registry.as_ref() {
+                            Some(r) => Arc::clone(r),
+                            None => return Err(self.error("state registry not available", *span)),
+                        };
+                        reg.acquire();
+                        self.state_lock_depth += 1;
+                    }
+                    #[cfg(debug_assertions)]
+                    STATE_LOCK_DEPTH_DEBUG.fetch_add(1, Ordering::Relaxed);
+                    // Push a frame for the atomic body so it can access outer
+                    // locals (function parameters, etc.) via the outer Vm's
+                    // stack, and so return/break/continue propagate out of
+                    // atomic correctly without stopping the VM when atomic
+                    // is used at top level.
+                    self.frames.last_mut().unwrap().ip = ip;
+                    self.frames.push(Frame {
+                        chunk: Arc::clone(body),
+                        ip: 0,
+                        prev_env: interp.env.clone(),
+                        // The atomic body's stack base is the current stack top,
+                        // NOT the outer frame's stack_base. The outer frame's
+                        // stack_base may sit below items pushed by enclosing
+                        // loops (e.g. ForNext's iterable/index). Truncating to
+                        // the outer base would discard those items when the
+                        // atomic frame pops, corrupting the loop state.
+                        stack_base: self.stack.len(),
+                        self_home: None,
+                        defer_stack: Vec::new(),
+                        func_span: Span::default(),
+                        is_atomic: true,
+                    });
+                    // Switch to the body's chunk so the next op executed is
+                    // the body's first op. When the body chunk ends, its frame
+                    // is popped and re_cache!() restores ip from the caller
+                    // frame (past Op::Atomic), so execution continues in the
+                    // caller's chunk.
+                    re_cache!();
+                    yield_check!();
+                }
+                Op::StateBatchBegin(_span) => {
+                    let _reg = match interp.state_registry.as_ref() {
+                        Some(r) => Arc::clone(r),
+                        None => return Err(self.error("state registry not available", *_span)),
+                    };
+                    // nolock_selftest: batch reads do NOT acquire the state lock,
+                    // simulating lock-free multi-state reads to verify that
+                    // batching is required for atomicity (violations should occur).
+                    #[cfg(not(feature = "nolock_selftest"))]
+                    if self.state_batch_depth == 0 {
+                        _reg.acquire();
+                    }
+                    self.state_batch_depth += 1;
+                    #[cfg(debug_assertions)]
+                    STATE_BATCH_DEPTH_DEBUG.fetch_add(1, Ordering::Relaxed);
+                }
+                Op::StateBatchEnd(_span) => {
+                    if self.state_batch_depth == 0 {
+                        return Err(
+                            self.error("StateBatchEnd without matching StateBatchBegin", *_span)
+                        );
+                    }
+                    self.state_batch_depth -= 1;
+                    // nolock_selftest: batch reads do NOT release the state lock.
+                    #[cfg(not(feature = "nolock_selftest"))]
+                    if self.state_batch_depth == 0 {
+                        if let Some(reg) = interp.state_registry.as_ref() {
+                            reg.release();
+                        }
+                    }
+                    #[cfg(debug_assertions)]
+                    {
+                        let cur = STATE_BATCH_DEPTH_DEBUG.load(Ordering::Relaxed);
+                        if cur > 0 {
+                            STATE_BATCH_DEPTH_DEBUG.fetch_sub(1, Ordering::Relaxed);
+                        }
                     }
                 }
                 Op::VecPush { home, span } => {
@@ -2477,23 +2728,97 @@ impl Vm {
                     let Some(li) = self.loops.pop() else {
                         return Err(self.error("`break` outside of a loop", *span));
                     };
-                    if li.frame_idx != self.frames.len() - 1 {
-                        return Err(self.error("`break` outside of a loop", *span));
+                    // Pop any intermediate frames (e.g. atomic blocks) between
+                    // the loop frame and the current frame so break/continue
+                    // can propagate out of `atomic { }` blocks correctly.
+                    while self.frames.len() - 1 > li.frame_idx {
+                        let f = self.frames.pop().unwrap();
+                        interp.env = f.prev_env;
+                        self.stack.truncate(f.stack_base);
+                        if f.is_atomic {
+                            self.leave_atomic(interp);
+                        }
                     }
-                    self.stack.truncate(li.stack_base + 1);
-                    interp.env = li.env;
-                    ip = li.exit;
+                    self.loops.retain(|l| l.frame_idx < self.frames.len());
+                    // Refresh cached chunk pointers from the current frame.
+                    // ip is set explicitly below, so skip the ip = f.ip part
+                    // of re_cache!() to avoid an unused-assignment warning.
+                    let f = self.frames.last().unwrap();
+                    let c = unsafe { &*Arc::as_ptr(&f.chunk) };
+                    cached_code = &c.code;
+                    cached_constants = &c.constants;
+                    cached_base = f.stack_base;
+                    cached_cov_ids = &c.cov_ids;
+                    cached_cov_file = match &interp.coverage {
+                        Some(cov) => c
+                            .source
+                            .as_deref()
+                            .and_then(|label| cov.file_index(label))
+                            .unwrap_or(usize::MAX),
+                        None => usize::MAX,
+                    };
+                    cached_cov_branch = &c.cov_branch;
+                    cached_spans = &c.spans;
+                    cached_dbg_label = if self.debug.is_some() {
+                        c.source.clone()
+                    } else {
+                        None
+                    };
+                    let stack_base = li.stack_base;
+                    let env = li.env;
+                    let exit = li.exit;
+                    self.stack.truncate(stack_base + 1);
+                    interp.env = env;
+                    ip = exit;
                 }
                 Op::Continue(span) => {
                     let Some(li) = self.loops.last() else {
                         return Err(self.error("`continue` outside of a loop", *span));
                     };
-                    if li.frame_idx != self.frames.len() - 1 {
-                        return Err(self.error("`continue` outside of a loop", *span));
+                    let frame_idx = li.frame_idx;
+                    let stack_base = li.stack_base;
+                    let slots = li.slots;
+                    let env = li.env.clone();
+                    let header = li.header;
+                    // Pop any intermediate frames (e.g. atomic blocks) between
+                    // the loop frame and the current frame so break/continue
+                    // can propagate out of `atomic { }` blocks correctly.
+                    while self.frames.len() - 1 > frame_idx {
+                        let f = self.frames.pop().unwrap();
+                        interp.env = f.prev_env;
+                        self.stack.truncate(f.stack_base);
+                        if f.is_atomic {
+                            self.leave_atomic(interp);
+                        }
                     }
-                    self.stack.truncate(li.stack_base + 1 + li.slots);
-                    interp.env = li.env.clone();
-                    ip = li.header;
+                    self.loops.retain(|l| l.frame_idx < self.frames.len());
+                    // Refresh cached chunk pointers from the current frame.
+                    // ip is set explicitly below, so skip the ip = f.ip part
+                    // of re_cache!() to avoid an unused-assignment warning.
+                    let f = self.frames.last().unwrap();
+                    let c = unsafe { &*Arc::as_ptr(&f.chunk) };
+                    cached_code = &c.code;
+                    cached_constants = &c.constants;
+                    cached_base = f.stack_base;
+                    cached_cov_ids = &c.cov_ids;
+                    cached_cov_file = match &interp.coverage {
+                        Some(cov) => c
+                            .source
+                            .as_deref()
+                            .and_then(|label| cov.file_index(label))
+                            .unwrap_or(usize::MAX),
+                        None => usize::MAX,
+                    };
+                    cached_cov_branch = &c.cov_branch;
+                    cached_spans = &c.spans;
+                    cached_dbg_label = if self.debug.is_some() {
+                        c.source.clone()
+                    } else {
+                        None
+                    };
+                    self.stack.truncate(stack_base + 1 + slots);
+                    interp.env = env;
+                    ip = header;
                 }
                 Op::SetLoopResult => {
                     let v = self.stack.pop().unwrap();
@@ -3343,12 +3668,12 @@ impl Vm {
                                     });
                                     match has {
                                         Some(has_payload) if has_payload == !args.is_empty() => {
+                                            let arg_len = args.len();
                                             let fields: Vec<(std::sync::Arc<str>, Value)> = args
-                                                .iter()
-                                                .cloned()
+                                                .into_iter()
                                                 .enumerate()
                                                 .map(|(i, arg)| {
-                                                    let name = if args.len() == 1 {
+                                                    let name = if arg_len == 1 {
                                                         std::sync::Arc::from("value")
                                                     } else {
                                                         std::sync::Arc::from(format!("value{i}"))
@@ -3752,13 +4077,21 @@ impl Vm {
     fn enter_call_frame(
         &mut self,
         chunk: Arc<Chunk>,
-        env: EnvLink,
+        mut env: EnvLink,
         args: Vec<Value>,
         span: Span,
         interp: &mut Interp,
         self_home: Option<TakeHome>,
     ) {
         let stack_base = self.stack.len();
+        // Bind parameter names in the callee's env so they're accessible
+        // via LoadVar from within atomic { } blocks and other nested
+        // contexts where the env lookup doesn't walk the stack.
+        for (i, p) in chunk.params.iter().enumerate() {
+            if i < args.len() {
+                env.define(&p.name.name, args[i].clone());
+            }
+        }
         let mut args = args;
         // Append (not extend+drain): elements move onto the stack while
         // the buffer keeps its allocation and goes back to the scratch
@@ -3817,6 +4150,7 @@ impl Vm {
             self_home,
             defer_stack: saved_defers,
             func_span: span,
+            is_atomic: false,
         });
     }
 
@@ -4078,58 +4412,77 @@ impl Vm {
             }
             Flow::Yield(_) => return Unwind::Error(crate::runtime::EvalError::yield_escape()),
         };
-        let f = self.frames.pop().unwrap();
-        interp.env = f.prev_env;
-        // Copy the mutated `self` (arg 0) back to the receiver home so `impl`
-        // method mutations persist to `c` (`c.inc()` mutating `c`). Must run
-        // before `truncate`, which would otherwise drop arg 0.
-        // For env receivers the mutated `self` is only written back when it
-        // has the same type as the binding (a direct `impl` method). For
-        // promoted/embedded methods, `self` is the embedded sub-struct, whose
-        // type differs from the binding's, so writing it back would corrupt
-        // the outer struct.
-        if let Some(home) = f.self_home {
-            if self.stack.len() > f.stack_base {
-                let self_val = std::mem::replace(&mut self.stack[f.stack_base], Value::Unit);
-                match &home {
-                    TakeHome::Env(name) => {
-                        let persist = interp.env.get(name).is_some_and(|head| {
-                            Self::value_type_name(&head) == Self::value_type_name(&self_val)
-                        });
-                        if persist {
+        // Unwind frames in a loop, skipping past `atomic { }` frames so that
+        // `return` inside `atomic` propagates to the enclosing function.
+        loop {
+            let f = self.frames.pop().unwrap();
+            interp.env = f.prev_env;
+            // Copy the mutated `self` (arg 0) back to the receiver home so
+            // `impl` method mutations persist to `c` (`c.inc()` mutating `c`).
+            // Must run before `truncate`, which would otherwise drop arg 0.
+            // For env receivers the mutated `self` is only written back when
+            // it has the same type as the binding (a direct `impl` method).
+            // For promoted/embedded methods, `self` is the embedded sub-struct,
+            // whose type differs from the binding's, so writing it back would
+            // corrupt the outer struct.
+            if let Some(home) = f.self_home {
+                if self.stack.len() > f.stack_base {
+                    let self_val = std::mem::replace(&mut self.stack[f.stack_base], Value::Unit);
+                    match &home {
+                        TakeHome::Env(name) => {
+                            let persist = interp.env.get(name).is_some_and(|head| {
+                                Self::value_type_name(&head) == Self::value_type_name(&self_val)
+                            });
+                            if persist {
+                                Self::restore_home(self, interp, &home, self_val);
+                            }
+                        }
+                        TakeHome::Slot(_) => {
                             Self::restore_home(self, interp, &home, self_val);
                         }
                     }
-                    TakeHome::Slot(_) => {
-                        Self::restore_home(self, interp, &home, self_val);
-                    }
                 }
             }
-        }
-        self.loops.retain(|li| li.frame_idx < self.frames.len());
-        self.stack.truncate(f.stack_base);
-        if self.frames.is_empty() {
+            self.loops.retain(|li| li.frame_idx < self.frames.len());
+            self.stack.truncate(f.stack_base);
+            // Leave the atomic scope when unwinding past its frame: drop the
+            // per-VM depth and release the reentrant state lock.
+            if f.is_atomic {
+                self.leave_atomic(interp);
+            }
+            // If the popped frame was an `atomic { }` frame and we are
+            // unwinding a `return`, keep unwinding past it so the return
+            // reaches the enclosing function.
+            if f.is_atomic && has_payload {
+                if self.frames.is_empty() {
+                    return Unwind::Escaped(Flow::Return(payload));
+                }
+                continue;
+            }
+            // Not an `atomic` frame (or not a return): stop unwinding here.
+            if self.frames.is_empty() {
+                if let Some(span) = brk {
+                    return Unwind::Escaped(Flow::Break(span));
+                }
+                if let Some(span) = ctn {
+                    return Unwind::Escaped(Flow::Continue(span));
+                }
+                return Unwind::Escaped(Flow::Return(if has_payload {
+                    payload
+                } else {
+                    Value::Unit
+                }));
+            }
             if let Some(span) = brk {
-                return Unwind::Escaped(Flow::Break(span));
+                return Unwind::Error(self.error("`break` outside of a loop", span));
             }
             if let Some(span) = ctn {
-                return Unwind::Escaped(Flow::Continue(span));
+                return Unwind::Error(self.error("`continue` outside of a loop", span));
             }
-            return Unwind::Escaped(Flow::Return(if has_payload {
-                payload
-            } else {
-                Value::Unit
-            }));
+            self.stack
+                .push(if has_payload { payload } else { Value::Unit });
+            return Unwind::Continue;
         }
-        if let Some(span) = brk {
-            return Unwind::Error(self.error("`break` outside of a loop", span));
-        }
-        if let Some(span) = ctn {
-            return Unwind::Error(self.error("`continue` outside of a loop", span));
-        }
-        self.stack
-            .push(if has_payload { payload } else { Value::Unit });
-        Unwind::Continue
     }
 
     /// Build a backtrace string from the current call stack.

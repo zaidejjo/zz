@@ -1,0 +1,15 @@
+// features: int-arith, locals, print, state, func-call
+// Step 3c.3 Z0019 error fixture: reads of two different `state` bindings in
+// separate pure regions (separated by a call) must be rejected.
+state a := 0
+state b := 0
+
+func f(x: int) -> int { return x }
+
+func bad() -> int {
+    // `f` is a single-arg function; call `f(0)` to separate the two state reads.
+    x := pick(a, f(0), b)   // reads `a` and `b` in two regions, separated by call f()
+    return x
+}
+
+func pick(ax: int, mid: int, bx: int) -> int { return ax + mid + bx }

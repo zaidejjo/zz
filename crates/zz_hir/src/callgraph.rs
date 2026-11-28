@@ -6,11 +6,14 @@
 //! - computes the reachable closure from entry points (`main` + all
 //!   top-level statements),
 //! - and prunes the program to only the reachable items.
+#![allow(clippy::collapsible_match, clippy::single_match)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use zz_checker::Type;
+use zz_diag_core::ErrorCode;
 use zz_frontend::ast::{Expr, Stmt};
+use zz_span_ast::span::Span;
 
 use crate::TypedProgram;
 
@@ -32,7 +35,14 @@ fn canon(name: String) -> String {
 
 fn resolve_methods(tp: &TypedProgram, caller: &str, recv: &Expr, method: &str) -> Vec<String> {
     match tp.type_at(caller, recv.span()) {
-        Some(Type::Str) => vec![canon(format!("str.{method}"))],
+        // Builtin types (`str`, `int`, `float`, `bool`): method names are
+        // `"{type}.{method}"` without a `std.` prefix, e.g. `str.shout`.
+        // `canonical_std_name` would incorrectly map `str.shout` to
+        // `std.str.shout`, which doesn't exist in `tp.funcs`.
+        Some(Type::Str) => vec![format!("str.{method}")],
+        Some(Type::Int) => vec![format!("int.{method}")],
+        Some(Type::Float) => vec![format!("float.{method}")],
+        Some(Type::Bool) => vec![format!("bool.{method}")],
         Some(Type::Array(_)) => vec![canon(format!("vec.{method}"))],
         Some(Type::Bytes) => vec![canon(format!("bytes.{method}"))],
         Some(Type::Option(_)) => vec![canon(format!("option.{method}"))],
@@ -47,14 +57,25 @@ fn resolve_methods(tp: &TypedProgram, caller: &str, recv: &Expr, method: &str) -
         Some(Type::Opaque(tag)) => vec![canon(format!("{tag}.{method}"))],
         Some(Type::Struct(s, _)) => {
             let fq = format!("{s}.{method}");
+            // First check the impl method form: `Type.method`.
             if tp.funcs.contains_key(&fq) {
                 vec![fq]
-            } else if let Some(promoted) = find_promoted_method(tp, s, method) {
-                // Embedded promotion: `u.area()` on `User` (embedding
-                // `Base`) dispatches to `Base.area`.
-                vec![promoted]
             } else {
-                vec![method.to_string()]
+                // Also check for free functions in the same module that take
+                // the struct as their first parameter. Free functions like
+                // `func bump(p: Pt)` can be called with method syntax
+                // `p.bump()`, so the callgraph must edge to them.
+                let module = s.split('.').next().unwrap_or(s);
+                let free_fn = format!("{module}.{method}");
+                if tp.funcs.contains_key(&free_fn) {
+                    vec![free_fn]
+                } else if let Some(promoted) = find_promoted_method(tp, s, method) {
+                    // Embedded promotion: `u.area()` on `User` (embedding
+                    // `Base`) dispatches to `Base.area`.
+                    vec![promoted]
+                } else {
+                    vec![method.to_string()]
+                }
             }
         }
         // Unknown/Var receiver: keep every candidate method conservatively.
@@ -127,6 +148,12 @@ pub struct CallGraph {
     pub program_defined: HashSet<String>,
     /// Struct names defined by this program.
     pub defined_structs: HashSet<String>,
+    /// All functions whose value is taken anywhere in the program
+    /// (first-class references: `g := helper`, `arr = [helper]`, `f(helper)`,
+    /// struct field `s.f = helper`, etc.). Used to conservatively edge
+    /// unresolved indirect calls so DCE never prunes a function that might
+    /// be called through a function value.
+    pub address_taken: HashSet<String>,
 }
 
 impl CallGraph {
@@ -175,6 +202,238 @@ fn alias_canonical_targets(cg: &CallGraph, parts: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Collect all functions whose value is taken anywhere in the program
+/// (first-class references). Used to conservatively edge unresolved
+/// indirect calls so DCE never prunes a function that might be called
+/// through a function value.
+fn collect_address_taken(tp: &TypedProgram) -> HashSet<String> {
+    let mut taken = HashSet::new();
+    for stmt in tp.stmts() {
+        collect_address_taken_in_stmt(tp, stmt, &mut taken);
+    }
+    taken
+}
+
+fn collect_address_taken_in_stmt(tp: &TypedProgram, stmt: &Stmt, taken: &mut HashSet<String>) {
+    match stmt {
+        Stmt::Func { body, .. } => {
+            for s in &body.stmts {
+                collect_address_taken_in_stmt(tp, s, taken);
+            }
+        }
+        Stmt::Impl { methods, .. } => {
+            for m in methods {
+                if let Stmt::Func { body, .. } = m {
+                    for s in &body.stmts {
+                        collect_address_taken_in_stmt(tp, s, taken);
+                    }
+                }
+            }
+        }
+        Stmt::Decl { value, .. } => {
+            collect_address_taken_in_expr(tp, value, taken);
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(v) = value {
+                collect_address_taken_in_expr(tp, v, taken);
+            }
+        }
+        Stmt::For { iter, body, .. } => {
+            collect_address_taken_in_expr(tp, iter, taken);
+            for s in &body.stmts {
+                collect_address_taken_in_stmt(tp, s, taken);
+            }
+        }
+        Stmt::Defer { expr, .. } => {
+            collect_address_taken_in_expr(tp, expr, taken);
+        }
+        Stmt::Atomic { body, .. } => {
+            for s in &body.stmts {
+                collect_address_taken_in_stmt(tp, s, taken);
+            }
+        }
+        Stmt::Assign { target, value, .. } => {
+            collect_address_taken_in_expr(tp, target, taken);
+            collect_address_taken_in_expr(tp, value, taken);
+        }
+        Stmt::CompoundAssign { target, value, .. } => {
+            collect_address_taken_in_expr(tp, target, taken);
+            collect_address_taken_in_expr(tp, value, taken);
+        }
+        Stmt::Destructure { value, .. } => {
+            collect_address_taken_in_expr(tp, value, taken);
+        }
+        Stmt::Expr(e) => {
+            collect_address_taken_in_expr(tp, e, taken);
+        }
+        _ => {}
+    }
+}
+
+fn collect_address_taken_in_block(
+    tp: &TypedProgram,
+    b: &zz_span_ast::ast::Block,
+    taken: &mut HashSet<String>,
+) {
+    for s in &b.stmts {
+        collect_address_taken_in_stmt(tp, s, taken);
+    }
+}
+
+fn collect_address_taken_in_expr(tp: &TypedProgram, e: &Expr, taken: &mut HashSet<String>) {
+    match e {
+        Expr::Ident { name, .. } => {
+            if tp.funcs.contains_key(name) {
+                taken.insert(name.clone());
+            }
+        }
+        Expr::Path { parts, .. } => {
+            let joined = parts.join(".");
+            if tp.funcs.contains_key(&joined) {
+                taken.insert(joined);
+            }
+        }
+        Expr::Closure { body, .. } => {
+            // Closures are anonymous; walk the body for address-taken refs.
+            collect_address_taken_in_expr(tp, body, taken);
+        }
+        Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            collect_address_taken_in_expr(tp, callee, taken);
+            for a in args {
+                collect_address_taken_in_expr(tp, a, taken);
+            }
+            for (_, a) in named {
+                collect_address_taken_in_expr(tp, a, taken);
+            }
+        }
+        Expr::Block(b) => {
+            for s in &b.stmts {
+                collect_address_taken_in_stmt(tp, s, taken);
+            }
+        }
+        Expr::If {
+            cond, then, els, ..
+        } => {
+            collect_address_taken_in_expr(tp, cond, taken);
+            collect_address_taken_in_block(tp, then, taken);
+            if let Some(el) = els {
+                collect_address_taken_in_expr(tp, el, taken);
+            }
+        }
+        Expr::While { cond, body, .. } => {
+            collect_address_taken_in_expr(tp, cond, taken);
+            collect_address_taken_in_block(tp, body, taken);
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_address_taken_in_expr(tp, scrutinee, taken);
+            for a in arms {
+                if let Some(g) = &a.guard {
+                    collect_address_taken_in_expr(tp, g, taken);
+                }
+                collect_address_taken_in_expr(tp, &a.body, taken);
+            }
+        }
+        Expr::IfLet {
+            value, then, els, ..
+        } => {
+            collect_address_taken_in_expr(tp, value, taken);
+            collect_address_taken_in_block(tp, then, taken);
+            if let Some(el) = els {
+                collect_address_taken_in_expr(tp, el, taken);
+            }
+        }
+        Expr::Try { expr, .. } => {
+            collect_address_taken_in_expr(tp, expr, taken);
+        }
+        Expr::Array { elems, .. } => {
+            for el in elems {
+                collect_address_taken_in_expr(tp, el, taken);
+            }
+        }
+        Expr::Dict { entries, .. } => {
+            for (k, v) in entries {
+                collect_address_taken_in_expr(tp, k, taken);
+                collect_address_taken_in_expr(tp, v, taken);
+            }
+        }
+        Expr::Field { obj, .. } => {
+            collect_address_taken_in_expr(tp, obj, taken);
+        }
+        Expr::Range { start, end, .. } => {
+            collect_address_taken_in_expr(tp, start, taken);
+            collect_address_taken_in_expr(tp, end, taken);
+        }
+        Expr::Index { obj, index, .. } => {
+            collect_address_taken_in_expr(tp, obj, taken);
+            collect_address_taken_in_expr(tp, index, taken);
+        }
+        Expr::Slice {
+            obj, start, end, ..
+        } => {
+            collect_address_taken_in_expr(tp, obj, taken);
+            if let Some(s) = start {
+                collect_address_taken_in_expr(tp, s, taken);
+            }
+            if let Some(e) = end {
+                collect_address_taken_in_expr(tp, e, taken);
+            }
+        }
+        Expr::ListComp {
+            body, iter, filter, ..
+        } => {
+            collect_address_taken_in_expr(tp, iter, taken);
+            if let Some(flt) = filter {
+                collect_address_taken_in_expr(tp, flt, taken);
+            }
+            collect_address_taken_in_expr(tp, body, taken);
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, v) in fields {
+                collect_address_taken_in_expr(tp, v, taken);
+            }
+        }
+        Expr::Paren { expr, .. } => {
+            collect_address_taken_in_expr(tp, expr, taken);
+        }
+        Expr::Unary { expr, .. } => {
+            collect_address_taken_in_expr(tp, expr, taken);
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_address_taken_in_expr(tp, left, taken);
+            collect_address_taken_in_expr(tp, right, taken);
+        }
+        Expr::Variant { arg, .. } => {
+            if let Some(a) = arg {
+                collect_address_taken_in_expr(tp, a, taken);
+            }
+        }
+        Expr::Fmt { parts, .. } => {
+            for p in parts {
+                if let zz_frontend::ast::FmtPart::Expr(inner, _) = p {
+                    collect_address_taken_in_expr(tp, inner, taken);
+                }
+            }
+        }
+        Expr::Is { expr, .. } => {
+            collect_address_taken_in_expr(tp, expr, taken);
+        }
+        Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Str { .. }
+        | Expr::Bool { .. }
+        | Expr::Break { .. }
+        | Expr::Continue { .. }
+        | Expr::Tuple { .. } => {}
+    }
+}
+
 /// Build the call graph for a typed program.
 pub fn build_callgraph(tp: &TypedProgram) -> CallGraph {
     let mut cg = CallGraph::default();
@@ -216,6 +475,11 @@ pub fn build_callgraph(tp: &TypedProgram) -> CallGraph {
         cg.defined_structs.insert(name.clone());
     }
     cg.program_defined = program_defined;
+
+    // Collect the address-taken set (all functions whose value is taken
+    // anywhere as a first-class value) before walking edges, so unresolved
+    // indirect calls can edge to the complete set.
+    cg.address_taken = collect_address_taken(tp);
 
     // Import alias heads (`fspath` from `import std.path as fspath`):
     // qualified calls through them (`fspath.join`) resolve against
@@ -279,6 +543,11 @@ fn walk_stmt_for_graph(tp: &TypedProgram, stmt: &Stmt, caller: &str, cg: &mut Ca
             }
         }
         Stmt::Defer { expr, .. } => walk_expr_for_graph(tp, expr, caller, cg),
+        Stmt::Atomic { body, .. } => {
+            for s in &body.stmts {
+                walk_stmt_for_graph(tp, s, caller, cg);
+            }
+        }
         Stmt::Assign { target, value, .. } => {
             walk_expr_for_graph(tp, target, caller, cg);
             walk_expr_for_graph(tp, value, caller, cg);
@@ -311,17 +580,40 @@ fn walk_expr_for_graph(tp: &TypedProgram, e: &Expr, caller: &str, cg: &mut CallG
             named,
             ..
         } => {
-            // Resolve the callee.
+            // Resolve the callee. Statically-resolved callees (known funcs /
+            // paths / method dispatch) get a precise edge. Anything else — a
+            // local first-class func value, a direct closure invocation, or
+            // any other unresolved callee — conservatively edges to EVERY
+            // function whose value is taken anywhere in the program
+            // (`cg.address_taken`), so DCE never prunes a reachable target.
+            let mut resolved = false;
             match callee.as_ref() {
                 Expr::Ident { name, .. } => {
-                    if tp.funcs.contains_key(name) || tp.bindings.contains_key(name) {
+                    if tp.bindings.contains_key(name) {
+                        // A first-class function value held in a global,
+                        // variable, or parameter (bindings) — not a defined
+                        // function. Conservatively treat as an unresolved
+                        // indirect call so DCE retains every address-taken
+                        // target and R2/Z0017 sees code reachable through
+                        // func values stored in globals/params and called
+                        // from tasks. (Globals can also appear in `tp.funcs`
+                        // for codegen; bindings wins here.)
+                        resolved = false;
+                    } else if tp.funcs.contains_key(name) {
                         cg.edge(caller, name);
+                        resolved = true;
                     }
                 }
                 Expr::Path { parts, .. } => {
                     let joined = parts.join(".");
-                    if tp.funcs.contains_key(&joined) || tp.bindings.contains_key(&joined) {
+                    if tp.bindings.contains_key(&joined) {
+                        // A first-class function value held in a global /
+                        // variable (bindings): unresolved indirect call, as
+                        // for the Ident case above.
+                        resolved = false;
+                    } else if tp.funcs.contains_key(&joined) {
                         cg.edge(caller, &joined);
+                        resolved = true;
                     } else if parts.len() >= 2 {
                         // `s.len()` parses as a path call when the receiver
                         // is a plain identifier. If the first part isn't a
@@ -337,8 +629,19 @@ fn walk_expr_for_graph(tp: &TypedProgram, e: &Expr, caller: &str, cg: &mut CallG
                         if candidates.is_empty() {
                             candidates.push(method.clone());
                         }
-                        for c in candidates {
-                            cg.edge(caller, &c);
+                        let mut any_known = false;
+                        for c in &candidates {
+                            if tp.funcs.contains_key(c) || tp.bindings.contains_key(c) {
+                                cg.edge(caller, c);
+                                any_known = true;
+                            }
+                        }
+                        // Only mark resolved if we found a known target;
+                        // otherwise the call is through an unknown receiver
+                        // or a func-typed field/path, and we fall through
+                        // to the address-taken conservative edge below.
+                        if any_known {
+                            resolved = true;
                         }
                     }
                     // Qualified alias calls (`fspath.join`) edge only the
@@ -349,14 +652,40 @@ fn walk_expr_for_graph(tp: &TypedProgram, e: &Expr, caller: &str, cg: &mut CallG
                     }
                 }
                 Expr::Field { obj, name, .. } => {
-                    for m in resolve_methods(tp, caller, obj, name) {
-                        cg.edge(caller, &m);
+                    let methods = resolve_methods(tp, caller, obj, name);
+                    let mut any_known = false;
+                    for m in &methods {
+                        if tp.funcs.contains_key(m) || tp.bindings.contains_key(m) {
+                            cg.edge(caller, m);
+                            any_known = true;
+                        }
                     }
+                    // If no resolved method is a known function, the field
+                    // access may be calling a func-typed field value — treat
+                    // as unresolved indirect call below.
+                    resolved = any_known;
                     // Also descend into the object expression (it may hold
                     // a func used as a value / further calls).
                     walk_expr_for_graph(tp, obj, caller, cg);
                 }
+                Expr::Closure { body, .. } => {
+                    // Direct closure invocation `{|x| x + 1}(5)`: walk the
+                    // body with the enclosing caller so any functions called
+                    // inside the closure body are retained by DCE.
+                    walk_expr_for_graph(tp, body, caller, cg);
+                    resolved = true;
+                }
                 _ => {}
+            }
+            if !resolved {
+                // Unresolved indirect call: callee is a local first-class
+                // func value or otherwise not statically known. Conservatively
+                // edge to every address-taken function so DCE cannot prune a
+                // reachable target. Clone first to avoid borrow conflict.
+                let taken: Vec<String> = cg.address_taken.iter().cloned().collect();
+                for t in taken {
+                    cg.edge(caller, &t);
+                }
             }
             for a in args {
                 walk_expr_for_graph(tp, a, caller, cg);
@@ -802,4 +1131,702 @@ pub fn dce(tp: &TypedProgram, entry_main: &str) -> (TypedProgram, ReachableSet) 
     let reach = reachable_from(tp, &cg, &roots);
     let pruned = prune_program(tp, &reach);
     (pruned, reach)
+}
+
+// --- D5: R2 plain globals vs tasks --------------------------------------
+
+/// A normal mutable top-level global accessed by code reachable from a
+/// `task.spawn` closure is a compile error.
+/// Runs as a whole-program post-pass on the merged `TypedProgram`.
+pub fn check_r2_globals_vs_tasks(
+    tp: &TypedProgram,
+    cg: &CallGraph,
+    errors: &mut Vec<zz_frontend::diag::RawDiag>,
+) {
+    // Find all plain mutable globals assigned somewhere in the program.
+    let mut assigned_globals: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Span of each global's declaration (for diagnostics).
+    let mut decl_spans: std::collections::HashMap<String, Span> = std::collections::HashMap::new();
+    collect_assigned_globals(tp, &mut assigned_globals, &mut decl_spans);
+
+    // Globals textually referenced inside spawn closures (direct task access).
+    let mut spawn_globals: std::collections::HashSet<String> = std::collections::HashSet::new();
+    collect_spawn_globals(tp, &mut spawn_globals);
+
+    // Functions whose closures run in tasks: every top-level function whose
+    // body directly contains a `task.spawn(...)` call. Because closure bodies
+    // are walked with the enclosing function as `caller` when building the
+    // call graph (`Expr::Closure => walk_expr_for_graph(..., caller, cg)`),
+    // `cg.edges[enclosing]` already lists every function called inside its
+    // spawn closures. Walking `cg.edges` transitively from these roots yields
+    // every function whose code can execute inside a task.
+    let mut task_roots: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    collect_spawn_enclosing_funcs(tp, &mut task_roots);
+
+    // `task_roots` doubles as the BFS queue: seed it with the spawn-enclosing
+    // functions, then drain it while discovering callees.
+    let mut task_funcs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    while let Some(f) = task_roots.pop_front() {
+        if !task_funcs.insert(f.clone()) {
+            continue;
+        }
+        for callee in cg.edges.get(&f).cloned().unwrap_or_default() {
+            // Do not insert here: the pop-side `insert` both dedupes and
+            // marks expanded. Inserting at discovery time would make the
+            // later pop see "already present" and skip expanding that
+            // node's callees (depth-2+ task-reachable functions lost).
+            if !task_funcs.contains(&callee) {
+                task_roots.push_back(callee);
+            }
+        }
+    }
+
+    // Globals accessed (read or written) by any task-reachable function,
+    // plus those textually inside spawn closures. Deep-scan includes
+    // closures/nested functions because all code in a task-reachable
+    // function runs inside the task.
+    let mut task_globals: std::collections::HashSet<String> = spawn_globals.clone();
+    for f in &task_funcs {
+        collect_globals_in_func(tp, f, &mut task_globals);
+    }
+
+    // Report errors for plain mutable globals reachable from a task.
+    // Exception: a global never assigned after initialization (not in
+    // `assigned_globals`) is effectively immutable and may be read from
+    // tasks.
+    for g in &task_globals {
+        if assigned_globals.contains(g) && !is_state_or_const(tp, g, &assigned_globals) {
+            let span = decl_spans.get(g).copied().unwrap_or_default();
+            errors.push(
+                zz_frontend::diag::error_at(
+                    format!(
+                        "global `{g}` is reachable from a task; declare it `state`\n\
+                         hint: change `{g} := ...` to `state {g} := ...`",
+                        g = g
+                    ),
+                    span,
+                )
+                .with_code(ErrorCode(17)),
+            );
+        }
+    }
+}
+
+/// Collect the dotted names of top-level functions whose body directly
+/// contains a `task.spawn(...)` call. Their closures run inside tasks, so
+/// they are the BFS roots for task-reachability. Does not descend into
+/// nested `fn` items (a nested function's spawn is that nested function's
+/// own concern and is reached via the call graph if that nested function
+/// itself is task-reachable).
+fn collect_spawn_enclosing_funcs(tp: &TypedProgram, out: &mut std::collections::VecDeque<String>) {
+    for stmt in &tp.program.stmts {
+        if let zz_span_ast::ast::Stmt::Func { name, body, .. } = stmt {
+            if block_contains_task_spawn(body) {
+                out.push_back(name.join("."));
+            }
+        }
+    }
+}
+
+/// True if `block` (or any nested block/loop/conditional/closure) directly
+/// contains a `task.spawn(...)` call. Stops at nested `fn` items.
+fn block_contains_task_spawn(block: &zz_span_ast::ast::Block) -> bool {
+    for s in &block.stmts {
+        if stmt_contains_task_spawn(s) {
+            return true;
+        }
+    }
+    false
+}
+
+fn stmt_contains_task_spawn(s: &zz_span_ast::ast::Stmt) -> bool {
+    match s {
+        zz_span_ast::ast::Stmt::Expr(e) => expr_contains_task_spawn(e),
+        zz_span_ast::ast::Stmt::Decl { value, .. } => expr_contains_task_spawn(value),
+        zz_span_ast::ast::Stmt::Assign { target, value, .. }
+        | zz_span_ast::ast::Stmt::CompoundAssign { target, value, .. } => {
+            expr_contains_task_spawn(target) || expr_contains_task_spawn(value)
+        }
+        zz_span_ast::ast::Stmt::Destructure { value, .. } => expr_contains_task_spawn(value),
+        zz_span_ast::ast::Stmt::Return { value, .. } => {
+            value.as_ref().is_some_and(expr_contains_task_spawn)
+        }
+        zz_span_ast::ast::Stmt::Defer { expr, .. } => expr_contains_task_spawn(expr),
+        zz_span_ast::ast::Stmt::For { body, .. } => block_contains_task_spawn(body),
+        zz_span_ast::ast::Stmt::Atomic { body, .. } => block_contains_task_spawn(body),
+        // Control flow (`if`/`while`/`match`/`block`) arrives here wrapped
+        // as `Stmt::Expr(Expr::If/While/Match/Block)` and is handled by the
+        // expression recursion above.
+        _ => false,
+    }
+}
+
+fn expr_contains_task_spawn(e: &zz_span_ast::ast::Expr) -> bool {
+    match e {
+        zz_span_ast::ast::Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            callee_name(callee).as_deref() == Some("task.spawn")
+                || args.iter().any(expr_contains_task_spawn)
+                || named.iter().any(|(_, v)| expr_contains_task_spawn(v))
+        }
+        zz_span_ast::ast::Expr::Block(b) => block_contains_task_spawn(b),
+        zz_span_ast::ast::Expr::If {
+            cond, then, els, ..
+        } => {
+            expr_contains_task_spawn(cond)
+                || block_contains_task_spawn(then)
+                || els.as_ref().is_some_and(|e| expr_contains_task_spawn(e))
+        }
+        zz_span_ast::ast::Expr::While { cond, body, .. } => {
+            expr_contains_task_spawn(cond) || block_contains_task_spawn(body)
+        }
+        zz_span_ast::ast::Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            expr_contains_task_spawn(scrutinee)
+                || arms.iter().any(|a| expr_contains_task_spawn(&a.body))
+        }
+        zz_span_ast::ast::Expr::Closure { body, .. } => expr_contains_task_spawn(body),
+        zz_span_ast::ast::Expr::Try { expr, .. } => expr_contains_task_spawn(expr),
+        _ => false,
+    }
+}
+
+/// Collect every global variable name read or written inside function
+/// `dotted_name` (a `cg.edges` / `tp.funcs` key such as `ns.func` or `func`),
+/// including code inside closures and nested functions, since all of it runs
+/// inside the task when the function is task-reachable.
+fn collect_globals_in_func(
+    tp: &TypedProgram,
+    dotted_name: &str,
+    out: &mut std::collections::HashSet<String>,
+) {
+    for stmt in &tp.program.stmts {
+        if let zz_span_ast::ast::Stmt::Func { name, body, .. } = stmt {
+            if name.join(".") == dotted_name {
+                collect_globals_from_block_deep(tp, body, out);
+                return;
+            }
+        }
+    }
+}
+
+/// Like [`collect_globals_from_block`] but also descends into closure and
+/// nested-function bodies, because all code in a task-reachable function
+/// executes inside the task.
+fn collect_globals_from_block_deep(
+    tp: &TypedProgram,
+    b: &zz_span_ast::ast::Block,
+    out: &mut std::collections::HashSet<String>,
+) {
+    for s in &b.stmts {
+        collect_globals_from_stmt_deep(tp, s, out);
+    }
+}
+
+fn collect_globals_from_stmt_deep(
+    tp: &TypedProgram,
+    s: &zz_span_ast::ast::Stmt,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match s {
+        zz_span_ast::ast::Stmt::Expr(e) => collect_globals_from_expr_deep(tp, e, out),
+        zz_span_ast::ast::Stmt::Decl { value, .. } => {
+            collect_globals_from_expr_deep(tp, value, out);
+        }
+        zz_span_ast::ast::Stmt::Assign { target, value, .. } => {
+            collect_globals_from_expr_deep(tp, target, out);
+            collect_globals_from_expr_deep(tp, value, out);
+        }
+        zz_span_ast::ast::Stmt::CompoundAssign { target, value, .. } => {
+            collect_globals_from_expr_deep(tp, target, out);
+            collect_globals_from_expr_deep(tp, value, out);
+        }
+        zz_span_ast::ast::Stmt::Func { body, .. } => collect_globals_from_block_deep(tp, body, out),
+        zz_span_ast::ast::Stmt::For { body, .. } => collect_globals_from_block_deep(tp, body, out),
+        zz_span_ast::ast::Stmt::Atomic { body, .. } => {
+            collect_globals_from_block_deep(tp, body, out)
+        }
+        zz_span_ast::ast::Stmt::Return { value, .. } => {
+            if let Some(v) = value {
+                collect_globals_from_expr_deep(tp, v, out);
+            }
+        }
+        zz_span_ast::ast::Stmt::Defer { expr, .. } => {
+            collect_globals_from_expr_deep(tp, expr, out);
+        }
+        zz_span_ast::ast::Stmt::Destructure { value, .. } => {
+            collect_globals_from_expr_deep(tp, value, out);
+        }
+        // Break, Continue, Decl, Import, Struct, Trait, Impl, TypeAlias,
+        // Enum, ExternBlock, Link: no global accesses.
+        _ => {}
+    }
+}
+
+fn collect_globals_from_expr_deep(
+    tp: &TypedProgram,
+    e: &zz_span_ast::ast::Expr,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match e {
+        zz_span_ast::ast::Expr::Ident { name, .. } => {
+            // Globals are stored under qualified keys (`module.counter`) while
+            // R2 bookkeeping (assigned globals, `state` names) uses bare
+            // names. Normalize to the bare name so the two sides match.
+            if tp.bindings.contains_key(name) {
+                if let Some(bare) = name.rsplit('.').next() {
+                    out.insert(bare.to_string());
+                }
+            } else if !name.contains('.')
+                && tp
+                    .bindings
+                    .keys()
+                    .any(|k| k.rsplit('.').next() == Some(name.as_str()))
+            {
+                out.insert(name.clone());
+            }
+        }
+        zz_span_ast::ast::Expr::Path { parts, .. } => {
+            if let Some(bare) = binding_basename(tp, parts) {
+                out.insert(bare);
+            }
+        }
+        zz_span_ast::ast::Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            collect_globals_from_expr_deep(tp, callee, out);
+            for a in args {
+                collect_globals_from_expr_deep(tp, a, out);
+            }
+            for (_, v) in named {
+                collect_globals_from_expr_deep(tp, v, out);
+            }
+        }
+        zz_span_ast::ast::Expr::Block(b) => collect_globals_from_block_deep(tp, b, out),
+        zz_span_ast::ast::Expr::If {
+            cond, then, els, ..
+        } => {
+            collect_globals_from_expr_deep(tp, cond, out);
+            collect_globals_from_block_deep(tp, then, out);
+            if let Some(e) = els {
+                collect_globals_from_expr_deep(tp, e, out);
+            }
+        }
+        zz_span_ast::ast::Expr::While { cond, body, .. } => {
+            collect_globals_from_expr_deep(tp, cond, out);
+            collect_globals_from_block_deep(tp, body, out);
+        }
+        zz_span_ast::ast::Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_globals_from_expr_deep(tp, scrutinee, out);
+            for a in arms {
+                collect_globals_from_expr_deep(tp, &a.body, out);
+            }
+        }
+        zz_span_ast::ast::Expr::Closure { body, .. } => {
+            collect_globals_from_expr_deep(tp, body, out);
+        }
+        zz_span_ast::ast::Expr::Try { expr, .. } => collect_globals_from_expr_deep(tp, expr, out),
+        zz_span_ast::ast::Expr::Array { elems, .. } => {
+            for e in elems {
+                collect_globals_from_expr_deep(tp, e, out);
+            }
+        }
+        zz_span_ast::ast::Expr::Dict { entries, .. } => {
+            for (k, v) in entries {
+                collect_globals_from_expr_deep(tp, k, out);
+                collect_globals_from_expr_deep(tp, v, out);
+            }
+        }
+        zz_span_ast::ast::Expr::Paren { expr, .. } => collect_globals_from_expr_deep(tp, expr, out),
+        zz_span_ast::ast::Expr::Tuple { items, .. } => {
+            for e in items {
+                collect_globals_from_expr_deep(tp, e, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect names of globals that are assigned somewhere in the program,
+/// plus the span of each global's declaration.
+fn collect_assigned_globals(
+    tp: &TypedProgram,
+    out: &mut std::collections::HashSet<String>,
+    decl_spans: &mut std::collections::HashMap<String, Span>,
+) {
+    let mut state_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Build a set of bare names from namespaced bindings (e.g., "state_r2_pos.plain" -> "plain")
+    // so that bare identifiers inside closures can be matched to their bindings.
+    let bare_names: std::collections::HashSet<&str> = tp
+        .bindings
+        .keys()
+        .filter_map(|k| k.rsplit('.').next())
+        .collect();
+    for stmt in &tp.program.stmts {
+        collect_assigned_in_stmt(tp, stmt, out, decl_spans, &mut state_names, &bare_names);
+    }
+}
+
+fn collect_assigned_in_stmt(
+    tp: &TypedProgram,
+    stmt: &zz_span_ast::ast::Stmt,
+    out: &mut std::collections::HashSet<String>,
+    decl_spans: &mut std::collections::HashMap<String, Span>,
+    state_names: &mut std::collections::HashSet<String>,
+    bare_names: &std::collections::HashSet<&str>,
+) {
+    match stmt {
+        zz_span_ast::ast::Stmt::Decl {
+            name,
+            span,
+            value,
+            is_state,
+            ..
+        } => {
+            decl_spans.insert(name.name.clone(), *span);
+            if let Some(bare) = name.name.rsplit('.').next() {
+                decl_spans.entry(bare.to_string()).or_insert(*span);
+            }
+            if *is_state {
+                state_names.insert(name.name.clone());
+                if let Some(bare) = name.name.rsplit('.').next() {
+                    state_names.insert(bare.to_string());
+                }
+            }
+            collect_assigned_in_expr(tp, value, out, decl_spans, state_names, bare_names);
+        }
+        zz_span_ast::ast::Stmt::Assign { target, value, .. } => {
+            match target {
+                zz_span_ast::ast::Expr::Ident { name, .. } => {
+                    if bare_names.contains(name.as_str()) && !state_names.contains(name) {
+                        out.insert(name.clone());
+                    }
+                }
+                zz_span_ast::ast::Expr::Path { parts, .. } => {
+                    // After namespace rewriting, a top-level global target is a
+                    // namespaced path (`module.counter`). Match it against
+                    // `tp.bindings` and record the bare name.
+                    if let Some(bare) = binding_basename(tp, parts) {
+                        if !state_names.contains(&bare) {
+                            out.insert(bare);
+                        }
+                    }
+                }
+                _ => collect_assigned_in_expr(tp, target, out, decl_spans, state_names, bare_names),
+            }
+            // Assignments nested in the RHS (e.g. inside a closure passed to
+            // `vec.sort_by`) still run wherever the expression runs.
+            collect_assigned_in_expr(tp, value, out, decl_spans, state_names, bare_names);
+        }
+        zz_span_ast::ast::Stmt::CompoundAssign { target, value, .. } => {
+            match target {
+                zz_span_ast::ast::Expr::Ident { name, .. } => {
+                    if bare_names.contains(name.as_str()) && !state_names.contains(name) {
+                        out.insert(name.clone());
+                    }
+                }
+                zz_span_ast::ast::Expr::Path { parts, .. } => {
+                    if let Some(bare) = binding_basename(tp, parts) {
+                        if !state_names.contains(&bare) {
+                            out.insert(bare);
+                        }
+                    }
+                }
+                _ => collect_assigned_in_expr(tp, target, out, decl_spans, state_names, bare_names),
+            }
+            collect_assigned_in_expr(tp, value, out, decl_spans, state_names, bare_names);
+        }
+        zz_span_ast::ast::Stmt::Func { body, .. } => {
+            collect_assigned_in_block(tp, body, out, decl_spans, state_names, bare_names);
+        }
+        zz_span_ast::ast::Stmt::For { body, .. } => {
+            collect_assigned_in_block(tp, body, out, decl_spans, state_names, bare_names);
+        }
+        zz_span_ast::ast::Stmt::Expr(e) => {
+            collect_assigned_in_expr(tp, e, out, decl_spans, state_names, bare_names);
+        }
+        _ => {}
+    }
+}
+
+fn collect_assigned_in_block(
+    tp: &TypedProgram,
+    block: &zz_span_ast::ast::Block,
+    out: &mut std::collections::HashSet<String>,
+    decl_spans: &mut std::collections::HashMap<String, Span>,
+    state_names: &mut std::collections::HashSet<String>,
+    bare_names: &std::collections::HashSet<&str>,
+) {
+    for s in &block.stmts {
+        collect_assigned_in_stmt(tp, s, out, decl_spans, state_names, bare_names);
+    }
+}
+
+/// Recursively collect globals assigned (written) inside an expression,
+/// descending into blocks, conditionals, loops, match arms and closures.
+/// Assignments inside closures count because that code may run in a task.
+fn collect_assigned_in_expr(
+    tp: &TypedProgram,
+    e: &zz_span_ast::ast::Expr,
+    out: &mut std::collections::HashSet<String>,
+    decl_spans: &mut std::collections::HashMap<String, Span>,
+    state_names: &mut std::collections::HashSet<String>,
+    bare_names: &std::collections::HashSet<&str>,
+) {
+    match e {
+        zz_span_ast::ast::Expr::Block(b) => {
+            collect_assigned_in_block(tp, b, out, decl_spans, state_names, bare_names);
+        }
+        zz_span_ast::ast::Expr::If { then, els, .. } => {
+            collect_assigned_in_block(tp, then, out, decl_spans, state_names, bare_names);
+            if let Some(el) = els {
+                collect_assigned_in_expr(tp, el, out, decl_spans, state_names, bare_names);
+            }
+        }
+        zz_span_ast::ast::Expr::While { body, .. } => {
+            collect_assigned_in_block(tp, body, out, decl_spans, state_names, bare_names);
+        }
+        zz_span_ast::ast::Expr::Match { arms, .. } => {
+            for a in arms {
+                collect_assigned_in_expr(tp, &a.body, out, decl_spans, state_names, bare_names);
+            }
+        }
+        zz_span_ast::ast::Expr::Closure { body, .. } => {
+            collect_assigned_in_expr(tp, body, out, decl_spans, state_names, bare_names);
+        }
+        zz_span_ast::ast::Expr::Try { expr, .. } => {
+            collect_assigned_in_expr(tp, expr, out, decl_spans, state_names, bare_names);
+        }
+        zz_span_ast::ast::Expr::Call { args, named, .. } => {
+            for a in args {
+                collect_assigned_in_expr(tp, a, out, decl_spans, state_names, bare_names);
+            }
+            for (_, v) in named {
+                collect_assigned_in_expr(tp, v, out, decl_spans, state_names, bare_names);
+            }
+        }
+        zz_span_ast::ast::Expr::Array { elems, .. } => {
+            for e in elems {
+                collect_assigned_in_expr(tp, e, out, decl_spans, state_names, bare_names);
+            }
+        }
+        zz_span_ast::ast::Expr::Dict { entries, .. } => {
+            for (k, v) in entries {
+                collect_assigned_in_expr(tp, k, out, decl_spans, state_names, bare_names);
+                collect_assigned_in_expr(tp, v, out, decl_spans, state_names, bare_names);
+            }
+        }
+        zz_span_ast::ast::Expr::Paren { expr, .. } => {
+            collect_assigned_in_expr(tp, expr, out, decl_spans, state_names, bare_names);
+        }
+        zz_span_ast::ast::Expr::Tuple { items, .. } => {
+            for e in items {
+                collect_assigned_in_expr(tp, e, out, decl_spans, state_names, bare_names);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect global names referenced directly inside `task.spawn` closures.
+fn collect_spawn_globals(tp: &TypedProgram, out: &mut std::collections::HashSet<String>) {
+    for stmt in &tp.program.stmts {
+        collect_spawn_globals_in_stmt(tp, stmt, out);
+    }
+}
+
+fn collect_spawn_globals_in_stmt(
+    tp: &TypedProgram,
+    stmt: &zz_span_ast::ast::Stmt,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match stmt {
+        zz_span_ast::ast::Stmt::Func { body, .. } => {
+            for s in &body.stmts {
+                collect_spawn_globals_in_stmt(tp, s, out);
+            }
+        }
+        zz_span_ast::ast::Stmt::For { body, .. } => {
+            for s in &body.stmts {
+                collect_spawn_globals_in_stmt(tp, s, out);
+            }
+        }
+        zz_span_ast::ast::Stmt::Expr(e) => {
+            collect_spawn_globals_in_expr(tp, e, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_spawn_globals_in_expr(
+    tp: &TypedProgram,
+    e: &zz_span_ast::ast::Expr,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match e {
+        zz_span_ast::ast::Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            // Check if this is `task.spawn(closure)`
+            if let Some(name) = callee_name(callee) {
+                if name == "task.spawn" {
+                    if let Some(last) = args.last() {
+                        collect_globals_from_expr(tp, last, out);
+                    }
+                }
+            }
+            for a in args {
+                collect_spawn_globals_in_expr(tp, a, out);
+            }
+            for (_, v) in named {
+                collect_spawn_globals_in_expr(tp, v, out);
+            }
+        }
+        zz_span_ast::ast::Expr::Closure { body, .. } => {
+            collect_globals_from_expr(tp, body, out);
+        }
+        _ => {}
+    }
+}
+
+/// Collect global variable names referenced from an expression.
+fn collect_globals_from_expr(
+    tp: &TypedProgram,
+    e: &zz_span_ast::ast::Expr,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match e {
+        zz_span_ast::ast::Expr::Ident { name, .. } => {
+            if tp.bindings.contains_key(name) {
+                out.insert(name.clone());
+            }
+        }
+        zz_span_ast::ast::Expr::Path { parts, .. } => {
+            if let Some(bare) = binding_basename(tp, parts) {
+                out.insert(bare);
+            }
+        }
+        zz_span_ast::ast::Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            collect_globals_from_expr(tp, callee, out);
+            for a in args {
+                collect_globals_from_expr(tp, a, out);
+            }
+            for (_, v) in named {
+                collect_globals_from_expr(tp, v, out);
+            }
+        }
+        zz_span_ast::ast::Expr::Block(b) => {
+            for s in &b.stmts {
+                collect_globals_from_stmt(tp, s, out);
+            }
+        }
+        zz_span_ast::ast::Expr::If {
+            cond, then, els, ..
+        } => {
+            collect_globals_from_expr(tp, cond, out);
+            collect_globals_from_block(tp, then, out);
+            if let Some(e) = els {
+                collect_globals_from_expr(tp, e, out);
+            }
+        }
+        zz_span_ast::ast::Expr::While { cond, body, .. } => {
+            collect_globals_from_expr(tp, cond, out);
+            collect_globals_from_block(tp, body, out);
+        }
+        zz_span_ast::ast::Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_globals_from_expr(tp, scrutinee, out);
+            for a in arms {
+                collect_globals_from_expr(tp, &a.body, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_globals_from_block(
+    tp: &TypedProgram,
+    b: &zz_span_ast::ast::Block,
+    out: &mut std::collections::HashSet<String>,
+) {
+    for s in &b.stmts {
+        collect_globals_from_stmt(tp, s, out);
+    }
+}
+
+fn collect_globals_from_stmt(
+    tp: &TypedProgram,
+    s: &zz_span_ast::ast::Stmt,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match s {
+        zz_span_ast::ast::Stmt::Expr(e) => collect_globals_from_expr(tp, e, out),
+        zz_span_ast::ast::Stmt::Assign { target, value, .. } => {
+            collect_globals_from_expr(tp, target, out);
+            collect_globals_from_expr(tp, value, out);
+        }
+        zz_span_ast::ast::Stmt::CompoundAssign { target, value, .. } => {
+            collect_globals_from_expr(tp, target, out);
+            collect_globals_from_expr(tp, value, out);
+        }
+        _ => {}
+    }
+}
+
+/// Extract callee name from a call expression.
+fn callee_name(callee: &zz_span_ast::ast::Expr) -> Option<String> {
+    match callee {
+        zz_span_ast::ast::Expr::Ident { name, .. } => Some(name.clone()),
+        zz_span_ast::ast::Expr::Path { parts, .. } => Some(parts.join(".")),
+        _ => None,
+    }
+}
+
+/// Join a dotted path and, if it names a binding in `tp.bindings`, return
+/// the bare (last-segment) name. After namespace rewriting, globals are
+/// stored under their full dotted key (`module.counter`) while the R2
+/// bookkeeping uses bare names.
+fn binding_basename(tp: &TypedProgram, parts: &[String]) -> Option<String> {
+    if parts.is_empty() {
+        return None;
+    }
+    let full = parts.join(".");
+    if tp.bindings.contains_key(&full) {
+        parts.last().cloned()
+    } else {
+        None
+    }
+}
+
+/// True if `name` is a state or const global (immutable): never assigned
+/// anywhere in the program after its initializer. Such globals may be read
+/// from tasks without becoming `state`.
+fn is_state_or_const(
+    _tp: &TypedProgram,
+    name: &str,
+    assigned_globals: &std::collections::HashSet<String>,
+) -> bool {
+    // A global that is never assigned after its initializer is effectively
+    // immutable, so reading it from a task is safe and does not require
+    // declaring it `state`.
+    !assigned_globals.contains(name)
 }

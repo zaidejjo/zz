@@ -8,3 +8,5 @@ license.workspace = true
 zz_frontend = { path = "../zz_frontend" }
 zz_checker = { path = "../zz_checker" }
 zz_arena = { path = "../zz_arena" }
+zz_diag_core = { path = "../zz_diag_core" }
+zz_span_ast = { path = "../zz_span_ast" }

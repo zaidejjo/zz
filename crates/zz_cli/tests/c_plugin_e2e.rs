@@ -55,7 +55,7 @@ const TOY_ZZI: &str = r#"// Version: 1
 // Plugin-version: 0.1.0
 
 extern "C" {
-    func ctoy.add(a: int, b: int) -> int = "ctoy_add_impl";
+    func ctoy.add(a: int, b: int) -> int = "ctoy_add_impl"
     func ctoy.starts_with(s: str, prefix: str) -> int
     func ctoy.scale(h: int, f: float) -> int
     func ctoy.noop()

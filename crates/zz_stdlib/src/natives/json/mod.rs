@@ -174,7 +174,23 @@ pub(crate) fn json_pretty(
     args: &mut Vec<Value>,
     _span: Span,
 ) -> Result<Value, EvalError> {
-    let j = expect_json_ref(args, 0, "std.json.pretty")?;
+    let v = args
+        .first()
+        .cloned()
+        .ok_or_else(|| EvalError::new("missing argument for std.json.pretty", _span))?;
+    // Accept any value (not just `json`): scalars, arrays and dicts are
+    // converted to JSON first, mirroring `std.json.stringify`. The C twin
+    // `zz_json_pretty` already takes a plain `zz_value`, so this keeps the
+    // VM and AOT backends byte-identical.
+    let j = match v {
+        Value::Json(j) => j,
+        other => match value_to_json(&other) {
+            Ok(j) => Arc::new(j),
+            // Non-serializable value: pretty-print as an empty document
+            // rather than failing, since the signature is infallible `Str`.
+            Err(_) => Arc::new(JsonValue::Null),
+        },
+    };
     Ok(Value::Str(to_json_string_pretty(j.as_ref()).into()))
 }
 

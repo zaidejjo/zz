@@ -1,0 +1,33 @@
+// features: int-arith, locals, print, state
+// Early control flow inside `atomic { }`: break, return.
+state n := 0
+
+func inc_until(limit: int) -> int {
+    for i in 0..100 {
+        atomic {
+            n = n + 1
+            if n >= limit { break }
+        }
+    }
+    return n
+}
+
+func atomic_return() -> int {
+    atomic {
+        return 42
+    }
+    return 0
+}
+
+func main() -> int {
+    // break inside atomic inside a loop
+    r:int = inc_until(3)
+    if r != 3 { return -1 }
+
+    // return inside atomic
+    r3:int = atomic_return()
+    if r3 != 42 { return -3 }
+
+    println("early_control_ok")
+    return 0
+}

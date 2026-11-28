@@ -1,0 +1,19 @@
+// features: imports, int-arith, print, state, std-task
+// S6: module with only a warning (redundant semicolon)
+// Must load, run, and still print the warning for zz run, zz check, zz test.
+// The warning is NOT an error — the program must still execute.
+
+import std.task
+
+state hits := 0
+
+func inc() {
+    hits = hits + 1;;  // redundant semicolon — warning only
+}
+
+func main() -> int {
+    inc()
+    inc()
+    println("hits={hits}")
+    return 0
+}

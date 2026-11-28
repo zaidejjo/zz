@@ -333,6 +333,17 @@ impl HttpLintState {
         let entry = self.routes.entry(root).or_default();
         for prev in entry.iter() {
             if prev.method == method && prev.pattern == pattern {
+                // Same call expression checked twice (lint hook fired twice
+                // for `http.hijack(s, "/ws", ...)`): treat as idempotent.
+                if prev.span == span {
+                    return;
+                }
+                // Catch-all `*` routes are intentionally non-exclusive — they
+                // match every request by design (e.g. an `OPTIONS *` CORS
+                // preflight), so duplicate catch-alls are not errors.
+                if pattern == "*" {
+                    continue;
+                }
                 push_diag(
                     error_at(format!("duplicate route `{method} {pattern}`"), span).with_secondary(
                         zz_diag_core::SecondaryLabel {

@@ -14,7 +14,9 @@ likely resumes the waiter next, hot cache).
 A spawned closure receives **deep copies** of everything it can see —
 captured variables plus every function it (transitively) calls. After the
 spawn, the two sides share nothing but channels and join handles. There is
-no shared mutable state, so there are no data races by construction.
+no shared mutable state by default, so there are no data races by construction.
+The exception is `state` bindings (see [language/state.md](../language/state.md)),
+which are shared module-level mutable state protected by a process-global lock.
 
 Consequences:
 

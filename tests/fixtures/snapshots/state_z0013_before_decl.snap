@@ -1,0 +1,10 @@
+first module that broke: <path> <path>
+
+error: Z0052: read of `state` `x` before its initializer ran
+hint: move the `state x` declaration before this statement
+
+--> <path>
+|
+3 | println(x)
+| ^^^^^^^^^^
+zz: 1 file(s) failed type-check

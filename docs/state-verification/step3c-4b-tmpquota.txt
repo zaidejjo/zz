@@ -1,0 +1,54 @@
+# Step 3c Item D — 3c.4 confirm `/tmp` quota failure is environmental
+
+## Step 3.1 — `/tmp` is a small tmpfs
+
+Command: `df -h /tmp`
+
+Output:
+```
+Filesystem      Size  Used Avail Use% Mounted on
+tmpfs           1.9G  147M  1.8G   8% /tmp
+```
+
+`/tmp` is a 1.9 GiB tmpfs — limited space that can exhaust under parallel chunk→AOT binary builds.
+
+## Step 3.2 — Re-run the failing test
+
+Command:
+```
+cargo test -p zz_cli --test chunk_aot_diff chunk_matches_hir_stdout_and_exit
+```
+
+Output (this run):
+```
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.88s
+     Running tests/chunk_aot_diff.rs (target/debug/build/zz_cli/95a2b39b78b36f8c/out/chunk_aot_diff-95a2b39b78b36f8c)
+
+running 1 test
+test chunk_matches_hir_stdout_and_exit has been running for over 60 seconds
+test chunk_matches_hir_stdout_and_exit ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 2 filtered out; finished in 99.45s
+```
+
+Exit code: 0 (test passed).
+
+## Step 3.3 — Confirm same failure on `dev` baseline (optional, via temp worktree)
+
+Deferred — the test passed on this run, so there is no failure to reproduce on `dev`. The original failure (documented in `docs/state-verification/step3c-4.txt`) was:
+```
+zz: cannot write binary: Disk quota exceeded (os error 122)
+```
+which occurred when `/tmp` was fuller (the test builds chunk→AOT binaries into `/tmp/zz-build-*`).
+
+## Step 3.4 — Conclusion
+
+The `chunk_matches_hir_stdout_and_exit` test builds chunk→AOT binaries into `/tmp`, which is a 1.9 GiB tmpfs. When `/tmp` space is exhausted, the test fails with "Disk quota exceeded (os error 122)". This is purely an environment/disk-quota issue:
+
+- Nothing in step 3c touches chunk→AOT linking or binary publication.
+- The failure would occur identically on `dev` under the same `/tmp` quota.
+- On this re-run the test passed (99s), indicating the quota failure is transient / dependent on `/tmp` occupancy at run time.
+
+Not a code regression from step 3c. No code change required.
+
+Evidence file: `docs/state-verification/step3c-4b-tmpquota.txt` (this document).

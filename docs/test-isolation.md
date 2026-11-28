@@ -40,6 +40,7 @@ Fresh `Interp` + `Env` isolates ZZ-level state (bindings, call frames, defer sta
 | `std.http` / `std.net` listeners | Bind real TCP ports | **Yes — port contention** | Parallel tests binding the same port race (`AddrInUse`). Tests must use `port = 0` (ephemeral) or allocate unique ports. Documented. |
 | `OnceLock` stdlib cache (`zz_stdlib_programs`) | Immutable after init | **None** | Read-only after `OnceLock`; safe. |
 | `Value::Opaque` tags (`process`, `db`, `http`) | Cloned `Arc<Mutex<…>>` per handle | **Per-handle** | Safe when handles not shared across tests; sharing a handle across tests is user error (document). |
+| `state` registry (`StateRegistry`) | `Arc<StateRegistry>` created fresh per `Interp` (eval/mod.rs:143/164/188), shared via `Arc` clone with worker interpreters (concurrency/mod.rs:655) | **None — per-`Interp`** | Fresh `Interp` per test yields a fresh registry; no cross-test bleed. Worker tasks share the spawner's registry (intentional — one shared storage for `state` bindings). |
 
 **Rule for future natives:** Any new native that mutates process-global state (env, cwd, global statics, file-sink, device) must be (a) listed in this table, (b) evaluated for parallel safety, and (c) either made per-`Interp`, gated behind `--serial` detection (harness auto-serializes `tag = "serial"` tests), or deferred to `--isolate`. The cheapest gate is a `#[test(tag="serial")]` convention that forces those tests onto the serial lane even in parallel runs.
 

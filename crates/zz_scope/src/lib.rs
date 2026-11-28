@@ -621,6 +621,21 @@ impl ScopeOps for Checker {
             // sites handle generic instantiation via the Named path below.
             return Some(Type::Named(name.to_string()));
         }
+        // State bindings (module-level `state`) live in the shared registry,
+        // not in env scopes. If a state name was not found in env (e.g. inside
+        // an `atomic { }` block where env scopes are nested), fall back to
+        // `state_names` with a fresh inference variable; the type will be
+        // resolved by unification at the use site.
+        if self.state_names.contains(name) {
+            return Some(self.unifier.fresh_var());
+        }
+        // Also try the bare (last-segment) name for state bindings that were
+        // registered before namespace rewriting.
+        if let Some(bare) = name.rsplit('.').next() {
+            if bare != name && self.state_names.contains(bare) {
+                return Some(self.unifier.fresh_var());
+            }
+        }
         None
     }
 

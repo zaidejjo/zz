@@ -1,0 +1,27 @@
+// features: imports, int-arith, locals, print, state, std-task
+// S3 fixed d4_rate_limiter: state tokens accessed inside atomic { }
+// Original d4 had check-then-act on `state tokens` OUTSIDE atomic (race).
+// Fix: wrap read+write in one atomic {} block.
+// 2 tasks x allow() each -> exactly 2 tokens consumed, 8 remaining.
+import std.task
+
+state tokens := 10
+
+func allow() -> bool {
+    atomic {
+        if tokens > 0 {
+            tokens = tokens - 1
+            return true
+        }
+        return false
+    }
+}
+
+func main() -> int {
+    h0 := task.spawn(|_| { allow() })
+    h1 := task.spawn(|_| { allow() })
+    task.join(h0)
+    task.join(h1)
+    println("tokens={tokens}")
+    return 0
+}

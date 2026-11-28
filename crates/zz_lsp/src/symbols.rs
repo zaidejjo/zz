@@ -275,6 +275,7 @@ fn stmt_to_document_symbol(stmt: &Stmt, source: &str) -> Option<DocumentSymbol> 
         Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Defer { .. } => {
             None
         }
+        Stmt::Atomic { .. } => None,
         Stmt::Assign { .. } => None,
         Stmt::CompoundAssign { .. } => None,
         Stmt::Destructure { .. } => None,

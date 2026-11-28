@@ -1,0 +1,42 @@
+=== S6: zz run ===
+hits=2
+exit=0
+
+=== S6: zz check ===
+first module that broke: tests/fixtures/stdlib/s6_redundant_semicolon_warning.zz (tests/fixtures/stdlib/s6_redundant_semicolon_warning.zz)
+
+warning: redundant semicolon — the newline already ends this statement
+
+  --> tests/fixtures/stdlib/s6_redundant_semicolon_warning.zz:10:21
+    |
+   10 |     hits = hits + 1;;  // redundant semicolon — warning only
+      |                     ^ help: remove this
+
+warning: unused import `task`
+
+  --> /home/zaid/Projects/zz/tests/fixtures/stdlib/s6_redundant_semicolon_warning.zz:5:1
+    |
+    5 | import std.task
+      | ^^^^^^^^^^^^^^^
+    = remove this import or use it in the program
+help: run `zz check --fix tests/fixtures/stdlib/s6_redundant_semicolon_warning.zz` to automatically apply safe fixes
+exit=0
+
+=== S6: zz test ===
+warning: redundant semicolon — the newline already ends this statement
+
+  --> tests/fixtures/stdlib/s6_redundant_semicolon_warning.zz:10:21
+    |
+   10 |     hits = hits + 1;;  // redundant semicolon — warning only
+      |                     ^ help: remove this
+
+warning: unused import `task`
+
+  --> /home/zaid/Projects/zz/tests/fixtures/stdlib/s6_redundant_semicolon_warning.zz:5:1
+    |
+    5 | import std.task
+      | ^^^^^^^^^^^^^^^
+    = remove this import or use it in the program
+warning: zz test: no tests found
+hint: no tests ran — exit stays 0; use --fail-on-empty to fail CI on empty match
+exit=0

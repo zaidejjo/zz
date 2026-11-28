@@ -1,0 +1,25 @@
+; zzcz v5
+; types=2 strings=7 consts=2 funcs=3
+func f0 "main" arity=0 entry max_stack=2 sig=()->unknown locals=[]
+  0000  makefunc f1  ; @0..0
+  0001  pop  ; @0..0
+  0002  const c0 ; int(1)  ; @0..0
+  0003  storestate "a"  ; @0..0
+  0004  makefunc f2  ; @0..0
+  0005  const c1 ; unit  ; @0..0
+func f1 "bench_b.foo" arity=1 max_stack=2 sig=(int)->int locals=[int]
+  0000  loadslot 0  ; @0..0
+  0001  const c0 ; int(1)  ; @0..0
+  0002  binop Add  ; @46..51
+  0003  ret  ; @0..0
+  0004  const c1 ; unit  ; @0..0
+func f2 "bench_b.main" arity=0 max_stack=3 sig=()->int locals=[unknown]
+  0000  statebatchbegin  ; @0..0
+  0001  loadstate "a"  ; @0..0
+  0002  statebatchend  ; @0..0
+  0003  callpath "bench_b"."foo" argc=1  ; @84..90
+  0004  loadslot 0  ; @0..0
+  0005  const c1 ; unit  ; @0..0
+  0006  storeslot 0  ; @0..0
+  0007  ret  ; @0..0
+  0008  popn 1  ; @0..0

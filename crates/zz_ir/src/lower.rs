@@ -881,6 +881,27 @@ impl<'a> Lowerer<'a> {
             VmOp::EnterScope => Ok(vec![Op::EnterScope]),
             VmOp::ExitScope => Ok(vec![Op::ExitScope]),
             VmOp::DeferRecord => Ok(vec![Op::DeferRecord]),
+            // Shared mutable state (D1/D2/D3/D9).
+            VmOp::LoadState(name, ..) => Ok(vec![Op::LoadState {
+                name: self.intern(name),
+            }]),
+            VmOp::StoreState(name, ..) => Ok(vec![Op::StoreState {
+                name: self.intern(name),
+            }]),
+            VmOp::RmwState(name, op, ..) => Ok(vec![Op::RmwState {
+                name: self.intern(name),
+                op: Self::lower_binop(op),
+            }]),
+            VmOp::Atomic { body, .. } => {
+                // Lift the atomic body sub-chunk into the function table,
+                // like MakeFunc/MakeClosure. The body has no params (it is
+                // a block compiled by the VM compiler as a sub-chunk).
+                let id = self.lift_chunk(body, "atomic", 0)?;
+                self.seal_sig(id, Some("atomic"));
+                Ok(vec![Op::Atomic { body: id }])
+            }
+            VmOp::StateBatchBegin(..) => Ok(vec![Op::StateBatchBegin]),
+            VmOp::StateBatchEnd(..) => Ok(vec![Op::StateBatchEnd]),
         }
     }
 

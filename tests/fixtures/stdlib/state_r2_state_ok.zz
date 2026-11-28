@@ -1,0 +1,22 @@
+// features: int-arith, locals, print, state, std-task
+// R2 negative: a `state` global CAN be written from a task — no error.
+// `state` is the correct way to share mutable state with tasks.
+import std.task
+
+state hits := 0
+
+func inc() {
+    atomic {
+        hits = hits + 1
+    }
+}
+
+func main() -> int {
+    h := task.spawn(|_| {
+        inc()
+    })
+    task.join(h)
+    if hits != 1 { return -1 }
+    println("r2_state_ok")
+    return 0
+}

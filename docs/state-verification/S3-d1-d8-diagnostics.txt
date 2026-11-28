@@ -1,0 +1,77 @@
+=== S3 REALISTIC PROGRAMS d1-d8 ===
+Binary: ./target/debug/zz run (debug build)
+
+=== d1_request_counter ===
+Command: ./target/debug/zz run /home/zaid/task_d/d1_request_counter.zz
+zz: 1 error(s) checking plain globals vs tasks:
+[Z0017] global `requests` is reachable from a task; declare it `state`
+hint: change `requests := ...` to `state requests := ...`
+exit=1
+
+=== d2_id_generator ===
+Command: ./target/debug/zz run /home/zaid/task_d/d2_id_generator.zz
+1002
+exit=0
+
+=== d3_lru_cache ===
+Command: ./target/debug/zz run /home/zaid/task_d/d3_lru_cache.zz
+error: cannot call a value whose type could not be inferred
+
+  --> /home/zaid/task_d/d3_lru_cache.zz:8:12
+    |
+    8 |         if cache.contains(key) {
+      |            ^^^^^^^^^^^^^^^^^^^
+error: expected `bool`, found `<error>`
+
+  --> /home/zaid/task_d/d3_lru_cache.zz:8:12
+    |
+    8 |         if cache.contains(key) {
+      |            ^^^^^^^^^^^^^^^^^^^
+error: cannot call a value of type `str`
+
+  --> /home/zaid/task_d/d3_lru_cache.zz:8:12
+    |
+    8 |         if cache.contains(key) {
+      |            ^^^^^^^^^^^^^^^^^^^
+zz: program failed
+
+hint: fix the errors shown above and try again
+exit=1
+
+=== d4_rate_limiter ===
+Command: ./target/debug/zz run /home/zaid/task_d/d4_rate_limiter.zz
+8
+exit=0
+
+=== d5_bank_transfer ===
+Command: ./target/debug/zz run /home/zaid/task_d/d5_bank_transfer.zz
+60 140
+exit=0
+
+=== d6_log_buffer ===
+Command: ./target/debug/zz run /home/zaid/task_d/d6_log_buffer.zz
+4
+exit=0
+
+=== d7_job_queue ===
+Command: ./target/debug/zz run /home/zaid/task_d/d7_job_queue.zz
+warning: function has no `->` return type but its body yields `_`; the last expression is discarded
+
+  --> /home/zaid/task_d/d7_job_queue.zz:12:5
+    |
+   12 |     task.join(h)
+      |     ^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+zz: 1 error(s) checking plain globals vs tasks:
+[Z0017] global `jobs_done` is reachable from a task; declare it `state`
+hint: change `jobs_done := ...` to `state jobs_done := ...`
+exit=1
+
+=== d8_config_reload ===
+Command: ./target/debug/zz run /home/zaid/task_d/d8_config_reload.zz
+warning: unused struct field `d8_config_reload.Config.retries`, consider prefixing with `_retries` or removing it
+
+    = field is never read
+60
+exit=0
+

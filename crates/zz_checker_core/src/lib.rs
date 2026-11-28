@@ -7,7 +7,7 @@
 //! domains share.
 
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use zz_arena::Interner;
@@ -387,6 +387,11 @@ pub struct Checker {
     /// whether it reads the very binding the declaration shadows from an
     /// enclosing scope (#518). Innermost last — see `begin_shadow_probe`.
     pub shadow_probes: Vec<ShadowProbe>,
+    /// Top-level declarations whose type could not be inferred during
+    /// declaration checking because a callee's return-type variable was
+    /// still unresolved. Re-checked after all function bodies are checked;
+    /// an error is emitted only if the type is still unresolved then.
+    pub deferred_type_errors: Vec<(String, Span)>,
     /// Top-level names marked `pub` — should not emit unused warnings.
     pub pub_names: std::collections::HashSet<String>,
     /// Functions annotated with `@test`, `@bench`, `@setup`, or `@teardown`.
@@ -498,6 +503,13 @@ pub struct Checker {
     /// type annotation repeatedly within one check run. Also deduplicates
     /// the errors such conversions emit (unknown type, arity mismatch).
     pub type_annotation_cache: std::collections::HashMap<(u64, u64), Type>,
+    /// Names of module-level `state` bindings (D1). Since `state` is
+    /// module-level only in v1, no scoping is needed — these live at
+    /// scope index 0 for the whole check run.
+    pub state_names: std::collections::HashSet<String>,
+    /// Nesting depth of `atomic { }` blocks being checked. >0 means we're
+    /// inside an atomic block (D2/D3 rules relax accordingly).
+    pub atomic_depth: usize,
 }
 
 impl Checker {
@@ -561,6 +573,7 @@ impl Checker {
             used_names: std::collections::HashSet::new(),
             used_bindings: std::collections::HashSet::new(),
             shadow_probes: Vec::new(),
+            deferred_type_errors: Vec::new(),
             pub_names: std::collections::HashSet::new(),
             local_funcs: std::collections::HashSet::new(),
             local_structs: std::collections::BTreeSet::new(),
@@ -587,6 +600,8 @@ impl Checker {
             extern_symbols: std::collections::HashMap::new(),
             domain: DomainState::default(),
             type_annotation_cache: std::collections::HashMap::new(),
+            state_names: std::collections::HashSet::new(),
+            atomic_depth: 0,
         }
     }
 
@@ -1011,6 +1026,7 @@ pub const STD_MODULES: &[&str] = &[
     "colors",
     "term",
     "test",
+    "debug",
     "map",
     "set",
     "dec",
@@ -1068,4 +1084,153 @@ pub fn canonical_std_name(name: &str) -> Option<String> {
         return Some(format!("std.{name}"));
     }
     None
+}
+
+/// Set of stdlib native names that are safe to call inside auto-atomic
+/// statements (D2): pure, non-blocking, never calls back into user code,
+/// no I/O. Natives taking closures (map/filter/sort_by/...) are NOT
+/// state_safe. Derived by auditing every std.vec / std.dict / std.math /
+/// std.str / std.json / std.sys / std.log / std.crypto / std.encoding /
+/// std.regexp / std.uuid / std.args native.
+///
+/// This is separate from `FuncSig.readonly` (which governs ARC retain
+/// elision) because the two concepts differ: e.g. `std.str.trim` is readonly
+/// but returns a new string (fine in auto-atomic), while `std.vec.push` is
+/// not readonly but mutates its receiver (NOT fine in auto-atomic).
+pub fn state_safe_natives() -> HashSet<String> {
+    let mut s = HashSet::new();
+
+    // Builtins (no import required).
+    s.insert("range".into());
+    s.insert("len".into());
+    s.insert("ord".into());
+    s.insert("chr".into());
+
+    // std.str — pure string queries.
+    s.insert("std.str.length".into());
+    s.insert("std.str.contains".into());
+    s.insert("std.str.find".into());
+    s.insert("std.str.rfind".into());
+    s.insert("std.str.byte_len".into());
+    s.insert("std.str.ord".into());
+    s.insert("std.str.starts_with".into());
+    s.insert("std.str.ends_with".into());
+    s.insert("std.str.starts_with_at".into());
+    s.insert("std.str.ends_with_at".into());
+    s.insert("std.str.is_empty".into());
+    s.insert("std.str.count".into());
+    s.insert("std.str.count_in".into());
+    s.insert("std.str.find_in".into());
+    s.insert("std.str.rfind_in".into());
+
+    // std.str builders — linear string builders. Non-closure, non-blocking,
+    // no-I/O, never call back into user code (they mutate a builder buffer
+    // directly), so they are safe inside D2 auto-atomic statements.
+    s.insert("std.str.builder".into());
+    s.insert("std.str.push_part".into());
+    s.insert("std.str.finish".into());
+    s.insert("std.str.builder_len".into());
+    s.insert("std.str.join_parts".into());
+    s.insert("std.str.push_byte".into());
+    s.insert("std.str.extend".into());
+
+    // std.math — pure arithmetic queries.
+    s.insert("std.math.abs".into());
+    s.insert("std.math.signum".into());
+    s.insert("std.math.clamp".into());
+    s.insert("std.math.floor".into());
+    s.insert("std.math.ceil".into());
+    s.insert("std.math.round".into());
+    s.insert("std.math.min".into());
+    s.insert("std.math.max".into());
+    s.insert("std.math.pow".into());
+    s.insert("std.math.sqrt".into());
+
+    // std.vec — pure query natives plus the non-closure, non-blocking,
+    // no-I/O mutating natives (push/insert/remove/pop/sort). These are
+    // safe inside D2 auto-atomic statements: they take a plain value
+    // receiver, never call back into user code, and do no I/O or blocking.
+    // Closure-taking forms (sort_by, sort_by_desc, sort_key) stay OUT.
+    s.insert("std.vec.len".into());
+    s.insert("std.vec.contains".into());
+    s.insert("std.vec.push".into());
+    s.insert("std.vec.insert".into());
+    s.insert("std.vec.remove".into());
+    s.insert("std.vec.pop".into());
+    s.insert("std.vec.sort".into());
+
+    // std.dict — dicts use index syntax (`d[k] = v`, `d[k]`) which lowers
+    // to a store op (allowed under D2 as field/index access), so there are
+    // no `dict.set`/`dict.insert`/`dict.remove` natives to whitelist. Pure
+    // query natives only.
+    s.insert("std.dict.len".into());
+    s.insert("std.dict.contains".into());
+    s.insert("std.dict.get".into());
+    s.insert("std.dict.keys".into());
+    s.insert("std.dict.values".into());
+
+    // std.json — pure query natives only (NOT parse/stringify/merge).
+    s.insert("std.json.len".into());
+    s.insert("std.json.has".into());
+    s.insert("std.json.type".into());
+    s.insert("std.json.as_str".into());
+    s.insert("std.json.as_int".into());
+    s.insert("std.json.as_float".into());
+    s.insert("std.json.as_bool".into());
+    s.insert("std.json.is_null".into());
+    s.insert("std.json.is_bool".into());
+    s.insert("std.json.is_number".into());
+    s.insert("std.json.is_string".into());
+    s.insert("std.json.is_array".into());
+    s.insert("std.json.is_object".into());
+    s.insert("std.json.is_empty".into());
+    s.insert("std.json.deep_get".into());
+    s.insert("std.json.path_exists".into());
+    s.insert("std.json.path_get_or".into());
+
+    // std.sys — pure system info queries.
+    s.insert("std.sys.os".into());
+    s.insert("std.sys.arch".into());
+    s.insert("std.sys.cpu_count".into());
+    s.insert("std.sys.hostname".into());
+    s.insert("std.sys.total_mem".into());
+    s.insert("std.sys.avail_mem".into());
+
+    // std.log — pure query only (NOT set_level/set_format/to_file).
+    s.insert("std.log.get_level".into());
+
+    // std.crypto — pure query/hash natives only (NOT keygen/sign/verify/Argon2/bcrypt).
+    s.insert("std.crypto.sha256".into());
+    s.insert("std.crypto.sha256_bytes".into());
+    s.insert("std.crypto.sha512".into());
+    s.insert("std.crypto.hmac_sha256".into());
+    s.insert("std.crypto.random_bytes".into());
+    s.insert("std.crypto.ct_eq".into());
+
+    // std.encoding — pure encoding/decoding.
+    s.insert("std.encoding.base64_encode".into());
+    s.insert("std.encoding.base64_decode".into());
+    s.insert("std.encoding.base64_decode_bytes".into());
+    s.insert("std.encoding.hex_encode".into());
+    s.insert("std.encoding.hex_decode".into());
+    s.insert("std.encoding.url_encode".into());
+    s.insert("std.encoding.url_decode".into());
+
+    // std.regexp — pure query only (NOT compile).
+    s.insert("std.regexp.is_match".into());
+    s.insert("std.regexp.find".into());
+    s.insert("std.regexp.captures".into());
+    s.insert("std.regexp.is_email".into());
+
+    // std.uuid — pure validation only (NOT v4/v7/parse).
+    s.insert("std.uuid.is_valid".into());
+
+    // std.args — pure getters only (NOT parser/flag setters).
+    s.insert("std.args.get_str".into());
+    s.insert("std.args.get_int".into());
+    s.insert("std.args.get_bool".into());
+    s.insert("std.args.positional".into());
+    s.insert("std.args.was_help".into());
+
+    s
 }

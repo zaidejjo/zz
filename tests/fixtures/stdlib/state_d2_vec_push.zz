@@ -1,0 +1,13 @@
+// features: int-arith, locals, print, state, std-vec
+// D2: `vec.push` is now state_safe, so a single self-contained RMW statement
+// `log = vec.push(log, m)` compiles WITHOUT `atomic { }` (VM/AOT parity).
+import std.vec
+
+state log := []
+
+func main() -> int {
+    log = vec.push(log, "m")
+    if len(log) != 1 { return -1 }
+    println("state_d2_vec_push_ok")
+    return 0
+}

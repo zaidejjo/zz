@@ -148,7 +148,16 @@ impl Lowerer {
                     ..
                 } => {
                     let fname = name.join(".");
-                    if !self.reachable_funcs.contains(&fname) {
+                    // Include functions that are reachable OR have a body
+                    // definition. A function like `str.shout` (impl method on
+                    // a builtin type) may be callable via method-call syntax
+                    // (`"hi".shout()`) even though the callgraph doesn't edge
+                    // to it from `TOP`. Including it here emits both its body
+                    // and (below) its forward declaration so call sites can
+                    // reference it.
+                    if !self.reachable_funcs.contains(&fname)
+                        && self.find_func_def(&fname).is_none()
+                    {
                         continue;
                     }
                     let ns = ns_of(&fname).to_string();
@@ -181,7 +190,9 @@ impl Lowerer {
                         } = m
                         {
                             let fname = format!("{tname}.{}", mname.join("."));
-                            if !self.reachable_funcs.contains(&fname) {
+                            if !self.reachable_funcs.contains(&fname)
+                                && self.find_func_def(&fname).is_none()
+                            {
                                 continue;
                             }
                             if !is_stdlib_fn(&fname) && !is_pkg_fn(&fname) {
@@ -202,7 +213,12 @@ impl Lowerer {
                     }
                 }
                 Struct { .. } | TypeAlias { .. } | Enum { .. } | Import { .. } => {}
-                Decl { name, value, .. } => {
+                Decl {
+                    name,
+                    value,
+                    is_state,
+                    ..
+                } => {
                     let ns = current_ns.clone();
                     if !is_pkg_ns(&ns) {
                         program_ns.insert(ns.clone());
@@ -210,6 +226,18 @@ impl Lowerer {
                     claim_owner(&mut owners, &name.name, &ns);
                     if !init_order.contains(&ns) {
                         init_order.push(ns.clone());
+                    }
+                    // State decls may be processed under a non-prelude
+                    // namespace (e.g. a function changed current_ns before
+                    // the state decl was reached). Ensure _prelude's init
+                    // runs too so state_init executes before zz_main.
+                    if *is_state && !init_order.contains(&PRELUDE_NS.to_string()) {
+                        init_order.push(PRELUDE_NS.to_string());
+                    }
+                    // State decls are initialized under the state lock
+                    // below (after the plain-global loop).
+                    if *is_state {
+                        continue;
                     }
                     let before = self.closure_defs.borrow().len();
                     let before_fwd = self.closure_forward_decls.borrow().len();
@@ -284,6 +312,30 @@ impl Lowerer {
                 }
             }
         }
+        // ---- `state` initialization under the lock ----------------------
+        // Collected separately so it can be prepended to zz_init__prelude()
+        // before any user code that reads state (order matters!).
+        let mut state_init = String::new();
+        for stmt in self.tp.stmts() {
+            if let Stmt::Decl {
+                name,
+                value,
+                is_state,
+                ..
+            } = stmt
+            {
+                if !*is_state {
+                    continue;
+                }
+                let zz_name = &name.name;
+                let gid = Lowerer::state_cid(zz_name);
+                let flag = format!("{}_init", gid);
+                let mut out = String::new();
+                let val = self.emit_state_value(value, &mut names, &mut out);
+                self.emit_state_write(&gid, &flag, &val, &mut out);
+                state_init.push_str(&out);
+            }
+        }
 
         // Synthetic `_len`/`_cap` globals belong to the same namespace as
         // their parent flat array, so their C definitions land in the same
@@ -346,6 +398,20 @@ impl Lowerer {
                 glob_ext.push_str(&line);
             }
         }
+        // `state` bindings: `extern zz_value zz_state_<mangled>;` — same
+        // ownership split as plain globals. Each has a parallel init flag.
+        for (zz_name, cid) in &self.state_list {
+            let line = format!("extern zz_value {cid};\nextern int {cid}_init;\n");
+            let owner = owners
+                .get(zz_name)
+                .map(|o| o.as_str())
+                .unwrap_or(PRELUDE_NS);
+            if self.tp.module_origins.get(owner).map(|s| s.as_str()) == Some("pkg") {
+                glob_ext_dep.push_str(&line);
+            } else {
+                glob_ext.push_str(&line);
+            }
+        }
         // Prototypes split by ownership. Stdlib prototypes are stable for
         // a given import set, so they join the base header; package
         // prototypes join the dependency section (shared by every unit);
@@ -357,7 +423,17 @@ impl Lowerer {
         let mut seen: HashSet<String> = HashSet::new();
         // Deterministic proto order: sorted (single-TU path keeps its
         // HashSet order for byte-identity; units are order-free).
+        // Include functions that are reachable OR have a body definition.
+        // A function like `str.shout` (impl method on a builtin type) may
+        // be callable via method-call syntax even though the callgraph
+        // doesn't edge to it from `TOP`. Including it here emits its
+        // forward declaration so call sites can reference it.
         let mut rfuncs: Vec<&String> = self.reachable_funcs.iter().collect();
+        for fname in self.tp.funcs.keys() {
+            if !self.reachable_funcs.contains(fname) && self.find_func_def(fname).is_some() {
+                rfuncs.push(fname);
+            }
+        }
         rfuncs.sort();
         for fname in rfuncs {
             if !seen.insert(fname.clone()) {
@@ -571,7 +647,8 @@ impl Lowerer {
             "    return 0;".to_string()
         };
         let entry_glue = format!(
-            "void zz_main(void) {{\n{driver}}}\n\nint zz_call_main(void) {{\n    {main_decl}\n{main_tail}\n}}\n"
+            "void zz_main(void) {{\n{state_init}{driver}}}\n\nint zz_call_main(void) {{\n    {main_decl}\n{main_tail}\n}}\n",
+            state_init = state_init
         );
         let with_main = if self.reachable_funcs.contains(&self.entry_main) {
             let m = format!("zz_fn_{}", mangle(&self.entry_main));
@@ -595,8 +672,15 @@ impl Lowerer {
         };
         // with_main first: zz_call_main calls it (single-TU path splices
         // it before zz_call_main the same way).
+        // State bindings need file-scope definitions (they're declared
+        // `extern` in the header above).
+        let mut state_defs = String::new();
+        for (_zz_name, cid) in &self.state_list {
+            state_defs.push_str(&format!("zz_value {cid};\nint {cid}_init = 0;\n"));
+        }
         let entry_code = format!(
-            "zz_arena _static_arena;\nzz_arena _func_arena;\n__attribute__((constructor)) static void zz_init_process_arenas(void) {{\n    zz_arena_init(&_static_arena, 65536);\n    zz_arena_init(&_func_arena, 65536);\n}}\n{with_main}{trait_defs}{entry_glue}",
+            "zz_arena _static_arena;\nzz_arena _func_arena;\n{state_defs}__attribute__((constructor)) static void zz_init_process_arenas(void) {{\n    zz_arena_init(&_static_arena, 65536);\n    zz_arena_init(&_func_arena, 65536);\n}}\n{with_main}{trait_defs}{entry_glue}",
+            state_defs = state_defs,
             with_main = with_main,
             trait_defs = trait_defs,
             entry_glue = entry_glue
@@ -1652,5 +1736,85 @@ mod tests {
                 u.code
             );
         }
+    }
+
+    /// D8 lock elision: state accesses must go through the process-global
+    /// lock only when task/chan/spawn concurrency is reachable.
+    #[test]
+    fn state_lock_elision_depends_on_concurrency_reachability() {
+        // Program WITHOUT concurrency: no lock calls in generated unit code.
+        let no_conc = "state x := 0\nfunc main() { x = 1 }\n";
+        let units = lower_merged(no_conc);
+        for u in &units.units {
+            assert!(
+                !u.code.contains("zz_state_lock"),
+                "unit {}: lock should be elided without concurrency:\n{}",
+                u.ns,
+                u.code
+            );
+        }
+
+        // Program WITH task.spawn: lock calls present.
+        let with_conc =
+            "import std.task\nstate x := 0\nfunc set_x() { x = 1 }\nfunc main() { task.spawn(|_| { set_x() }) }\n";
+        let units2 = lower_merged(with_conc);
+        let found = units2
+            .units
+            .iter()
+            .any(|u| u.code.contains("zz_state_lock"));
+        assert!(
+            found,
+            "lock should be present with concurrency in any unit:\n{}",
+            units2.header
+        );
+    }
+
+    #[test]
+    fn state_lock_elision_disabled_when_extern_plugin_linked() {
+        // WITHOUT concurrency but WITH an extern plugin linked: lock calls
+        // must be present because plugin code runs on arbitrary OS threads
+        // and can touch state through the C-ABI.
+        let src = "state x := 0\nfunc set_x() { x = 1 }\nfunc main() { set_x() }\n";
+        let parsed = zz_frontend::parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let funcs = zz_stdlib::stdlib_funcs();
+        let structs: HashMap<String, zz_checker::StructSig> = HashMap::new();
+        let enums: HashMap<String, zz_checker::EnumSig> = HashMap::new();
+        let user = zz_hir::build_program(
+            &parsed.program,
+            HashMap::new(),
+            funcs,
+            structs,
+            HashMap::new(),
+            enums,
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let programs = vec![user.program];
+        let merged = zz_hir::merge_typed_programs(programs);
+        let (_pruned, reach) = zz_hir::dce(&merged, "main");
+        let mut lowerer = Lowerer::new(
+            reach.funcs.clone(),
+            reach.natives.clone(),
+            "main".to_string(),
+            merged,
+        );
+        assert!(
+            !lowerer.needs_safepoint(),
+            "safepoint must be off without concurrency or plugins"
+        );
+        lowerer.set_has_extern_plugin(true);
+        assert!(
+            lowerer.needs_safepoint(),
+            "safepoint must be on when an extern plugin is linked"
+        );
+        assert!(
+            lowerer.needs_state_lock(),
+            "state lock must be kept when an extern plugin is linked"
+        );
     }
 }

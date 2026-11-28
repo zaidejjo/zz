@@ -694,3 +694,21 @@ fn single_pipe_still_parses_closure() {
         other => panic!("expected closure, got {other:?}"),
     }
 }
+
+#[test]
+fn parses_field_access_named_state() {
+    // `state` is a contextual keyword only at declaration position. In an
+    // expression, `foo.state` parses as a two-part qualified path
+    // (`foo` → `state`), NOT as field access `foo.state` — there is no
+    // `Expr::Field` produced here.
+    let p = parse_ok("x := foo.state");
+    match &p.stmts[0] {
+        zz_frontend::ast::Stmt::Decl { value, .. } => match value {
+            E::Path { parts, .. } => {
+                assert_eq!(parts, &["foo", "state"]);
+            }
+            other => panic!("expected path foo.state, got {other:?}"),
+        },
+        other => panic!("expected decl, got {other:?}"),
+    }
+}

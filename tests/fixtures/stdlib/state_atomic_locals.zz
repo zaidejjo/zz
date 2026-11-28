@@ -1,0 +1,41 @@
+// features: int-arith, locals, print, state, structs
+// An `atomic { }` body runs in its own VM frame, so outer locals must be
+// reachable through the environment (the same promotion closures get) and
+// nested field writes must write every level back. Regression for both:
+// before the fix the VM rejected `base`/`total` here as undefined and a
+// `cfg.inner.v = ...` write stored the inner struct into the outer slot.
+pub struct Point {
+    x: int,
+    y: int,
+}
+
+pub struct Boxed {
+    origin: Point,
+}
+
+state box := Boxed { origin: Point { x: 3, y: 4 } }
+
+func main() -> Result<int, str> {
+    base := 10
+    total := 0
+    atomic {
+        total = base + box.origin.x
+        box.origin.y = box.origin.y + base
+    }
+    ox:int = box.origin.x
+    oy:int = box.origin.y
+    println(total)
+    println(ox)
+    println(oy)
+    if total != 13 {
+        return .err("total")
+    }
+    if ox != 3 {
+        return .err("box.origin.x")
+    }
+    if oy != 14 {
+        return .err("box.origin.y")
+    }
+    println("state_atomic_locals_ok")
+    return .ok(0)
+}

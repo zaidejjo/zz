@@ -1,0 +1,25 @@
+// features: imports, int-arith, locals, print, state, std-task, std-vec
+// S3: d6_log_buffer — PASS
+// state log pushed inside atomic {} — race-free under concurrent record() calls.
+import std.task
+import std.vec
+
+state log := []
+
+func record(msg: str) {
+    atomic {
+        log = vec.push(log, msg)
+    }
+}
+
+func main() -> int {
+    hs := []
+    for i in 0..4 {
+        hs = vec.push(hs, task.spawn(|_| { record("event") }))
+    }
+    for h in hs {
+        task.join(h)
+    }
+    println("log_len={len(log)}")
+    return 0
+}

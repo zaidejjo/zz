@@ -1,0 +1,16 @@
+// features: int-arith, locals, print, state, std-task
+// R2 negative: plain global read (not written) from a task — the never-
+// assigned exception applies. `config` is never assigned after init, so it
+// may be read from tasks.
+import std.task
+
+config := 99
+
+func main() -> int {
+    h := task.spawn(|_| {
+        _c:int = config
+    })
+    task.join(h)
+    println("r2_read_only_task={}", config)
+    return 0
+}

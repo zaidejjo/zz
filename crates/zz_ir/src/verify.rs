@@ -109,6 +109,14 @@ fn effect(op: &Op) -> i64 {
         Op::DbQuery { .. } => 0,
         Op::EnterScope | Op::ExitScope => 0,
         Op::DeferRecord => -1,
+        Op::LoadState { .. } => 1,
+        Op::StoreState { .. } => -1,
+        Op::RmwState { .. } => -1,
+        // Atomic runs its body as a frame: the implicit chunk-end return
+        // leaves one value on the caller's stack.
+        Op::Atomic { .. } => 1,
+        Op::StateBatchBegin => 0,
+        Op::StateBatchEnd => 0,
     }
 }
 
@@ -1789,6 +1797,24 @@ fn infer_func(
             Op::DeferRecord => {
                 pop(&mut st, pc)?;
             }
+            Op::LoadState { .. } => {
+                st.push(TV::U);
+            }
+            Op::StoreState { .. } => {
+                pop(&mut st, pc)?;
+            }
+            Op::RmwState { .. } => {
+                pop(&mut st, pc)?;
+            }
+            Op::Atomic { .. } => {
+                // The body runs as a frame: its implicit chunk-end return
+                // pushes one value (type unknown) that the owning statement
+                // pops. Mirror `effect()` so the type-state depth matches
+                // the depth simulation at joins.
+                st.push(TV::U);
+            }
+            Op::StateBatchBegin => {}
+            Op::StateBatchEnd => {}
         }
         // Successor edges (mirror the depth simulation exactly).
         // MatchError included with the non-fallthroughs: it traps, so

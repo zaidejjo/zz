@@ -520,6 +520,31 @@ pub enum Op {
     ExitScope,
     /// Record a deferred closure (LIFO at scope exit).
     DeferRecord,
+
+    // ---- shared mutable state (D1/D2/D3/D9) ----
+    /// Push the value of a `state` binding from the shared registry.
+    LoadState {
+        name: StrId,
+    },
+    /// Pop a value and store it into a `state` binding in the shared registry.
+    StoreState {
+        name: StrId,
+    },
+    /// Pop an index then a value; read `state[index]`, apply `op` against
+    /// the value, write the result back. All under one lock acquisition.
+    RmwState {
+        name: StrId,
+        op: BinOp,
+    },
+    /// Execute `body` while holding the state lock. `body` is a tabled
+    /// function id whose chunk is the atomic body (compiled like a closure).
+    Atomic {
+        body: FuncId,
+    },
+    /// Begin a batched state-read region (VM batch state reads).
+    StateBatchBegin,
+    /// End a batched state-read region (VM batch state reads).
+    StateBatchEnd,
 }
 
 impl Op {
@@ -626,6 +651,12 @@ impl Op {
             Op::EnterScope => 71,
             Op::ExitScope => 72,
             Op::DeferRecord => 73,
+            Op::LoadState { .. } => 101,
+            Op::StoreState { .. } => 102,
+            Op::RmwState { .. } => 103,
+            Op::Atomic { .. } => 104,
+            Op::StateBatchBegin => 105,
+            Op::StateBatchEnd => 106,
         }
     }
 
@@ -732,6 +763,12 @@ impl Op {
             Op::EnterScope => "enterscope",
             Op::ExitScope => "exitscope",
             Op::DeferRecord => "defer",
+            Op::LoadState { .. } => "loadstate",
+            Op::StoreState { .. } => "storestate",
+            Op::RmwState { .. } => "rmwstate",
+            Op::Atomic { .. } => "atomic",
+            Op::StateBatchBegin => "statebatchbegin",
+            Op::StateBatchEnd => "statebatchend",
         }
     }
 

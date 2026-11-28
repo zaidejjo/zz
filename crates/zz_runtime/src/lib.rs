@@ -11,6 +11,7 @@ pub mod eval;
 pub mod json;
 pub mod lf_chan;
 pub mod runtime;
+pub mod state;
 pub mod value;
 pub mod vm;
 
@@ -22,6 +23,7 @@ pub use value::{
     deep_clone, upgrade, weak, BytesData, DictData, FuncValue, NativeFunc, ObjectValue, RangeValue,
     Value,
 };
+pub use vm::runtime::{state_batch_depth_debug, state_lock_depth_debug};
 pub use vm::Chunk;
 pub use zz_frontend::ast::{Expr, Param};
 pub use zz_frontend::span::Span;

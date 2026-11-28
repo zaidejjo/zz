@@ -14,6 +14,7 @@ use zz_types::Type;
 mod check_call;
 mod check_call_args;
 mod check_stmt;
+pub use check_stmt::check_z0019_in_block;
 mod definite_assignment;
 
 /// Cheap static sanity check over the literal SQL text: balanced
@@ -2636,6 +2637,12 @@ impl TypeCheckOps for Checker {
         let prev_ret = self.current_ret.replace(ret_var.clone());
         let prev_tail = std::mem::replace(&mut self.tail_is_value, true);
         let bt = self.check_expr(body);
+        // D4 R1: check-then-act on state variables within this closure body.
+        if let Expr::Block(b) = body {
+            crate::check_stmt::check_r1_in_block(self, b);
+            let z19 = crate::check_stmt::check_z0019_in_block(self, b);
+            self.errors.extend(z19);
+        }
         self.tail_is_value = prev_tail;
         self.current_ret = prev_ret;
         self.pop_scope();
@@ -3951,6 +3958,10 @@ impl TypeCheckOps for Checker {
         // ever being observed. Runs on the AST after the body checks so
         // it sees the final program even when type errors exist.
         zz_lints::value_lint::lint_dead_param_mutation(&sig.params, body, &mut self.errors);
+        // D4 R1: check-then-act on state variables within this function body.
+        crate::check_stmt::check_r1_in_block(self, body);
+        let z19 = crate::check_stmt::check_z0019_in_block(self, body);
+        self.errors.extend(z19);
         let _ = name;
         // A named function yields a value only through `return`, so its
         // fall-through type is `unit` unless every path diverges (`Never`,

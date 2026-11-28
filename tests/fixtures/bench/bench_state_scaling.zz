@@ -1,0 +1,43 @@
+// features: arrays, func-call, int-arith, locals, print, std-time, std-vec, zz-bench
+// Benchmark: state_vec push scaling — verifies that push on a state vector
+// is O(1) amortized (not O(n) per push via copy+write-back).
+// Regression: time(20k pushes) < 5x time(10k pushes).
+import std.vec
+
+state log := []
+
+@bench(iters = 100, warmup = 10, tag = "state_vec_scaling")
+func bench_state_vec_10k() {
+    atomic {
+        log = []
+    }
+    for i in 0..10000 {
+        log = vec.push(log, i)
+    }
+}
+
+@bench(iters = 50, warmup = 5, tag = "state_vec_scaling")
+func bench_state_vec_20k() {
+    atomic {
+        log = []
+    }
+    for i in 0..20000 {
+        log = vec.push(log, i)
+    }
+}
+
+@bench(iters = 100, warmup = 10, tag = "local_vec_scaling")
+func bench_local_vec_10k() {
+    log := []
+    for i in 0..10000 {
+        log = vec.push(log, i)
+    }
+}
+
+@bench(iters = 50, warmup = 5, tag = "local_vec_scaling")
+func bench_local_vec_20k() {
+    log := []
+    for i in 0..20000 {
+        log = vec.push(log, i)
+    }
+}

@@ -414,6 +414,12 @@ unsafe impl Sync for Value {}
 // be sent across threads.
 unsafe impl Send for FuncValue {}
 
+// `state` access preserves the `Send`/`Sync` invariants above: all
+// cross-thread state goes through the single process-global state lock
+// (`StateRegistry` in the VM, `zz_state_mutex` in AOT). Snapshots are
+// frozen before crossing thread boundaries, so no `Value` containing a
+// non-`Send` payload is ever shared between threads without the lock held.
+
 /// Flatten a captured environment into a self-contained `HashMap`.
 ///
 /// Walks the scope chain root→leaf, deep-clones every value, and rewrites

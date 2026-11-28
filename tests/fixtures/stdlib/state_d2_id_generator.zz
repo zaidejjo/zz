@@ -1,0 +1,23 @@
+// features: imports, int-arith, locals, print, state, std-task
+// S3: d2_id_generator — PASS
+// state next_id accessed inside atomic { }. Correct, race-free.
+import std.task
+
+state next_id := 1000
+
+func new_id() -> int {
+    atomic {
+        id := next_id
+        next_id = next_id + 1
+        return id
+    }
+}
+
+func main() -> int {
+    h0 := task.spawn(|_| { new_id() })
+    h1 := task.spawn(|_| { new_id() })
+    task.join(h0)
+    task.join(h1)
+    println("next_id={next_id}")
+    return 0
+}

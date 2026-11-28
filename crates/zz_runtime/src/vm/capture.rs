@@ -285,6 +285,19 @@ pub(crate) fn scan_stmt_captured(
         Stmt::Defer { expr, .. } => {
             scan_expr_captured(expr, defined, free, nested);
         }
+        // An atomic body runs in its own VM frame, so its slot indices are
+        // frame-relative: an outer local is reachable only through the
+        // environment. Scan the body like a closure body (fresh `defined`,
+        // `nested = true`) so every outer name it mentions is captured —
+        // the enclosing declaration is then promoted to an env binding and
+        // writes inside `atomic { }` land in that shared binding. Names
+        // declared *inside* the block stay block-local.
+        Stmt::Atomic { body, .. } => {
+            let mut inner = std::collections::HashSet::new();
+            for stmt in &body.stmts {
+                scan_stmt_captured(stmt, &mut inner, free, true);
+            }
+        }
         Stmt::Assign { target, value, .. } => {
             scan_expr_captured(value, defined, free, nested);
             scan_expr_captured(target, defined, free, nested);
