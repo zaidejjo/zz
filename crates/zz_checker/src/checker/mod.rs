@@ -1068,10 +1068,13 @@ fn check_program_impl(
         if let Some(ty) = checker.new_bindings.get(&name) {
             let rt = checker.unifier.resolve_deep(ty);
             if zz_infer::contains_var(&rt) {
-                checker.errors.push(zz_diag_core::error_at(
-                    format!("cannot infer the type of `{name}`; add a type annotation"),
-                    span,
-                ));
+                checker.errors.push(
+                    zz_diag_core::error_at(
+                        format!("cannot infer the type of `{name}`; add a type annotation"),
+                        span,
+                    )
+                    .with_code(ErrorCode(2)),
+                );
             }
         }
     }

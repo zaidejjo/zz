@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use zz_frontend::diag::{error_code_lookup, ErrorCode, ALL_ERROR_CODES};
+use zz_frontend::diag::ALL_ERROR_CODES;
 
 /// Monotonically increasing sweep token handed out to every `run_zz` call
 /// (dedicated per-fixture tests and the discovery sweep share one process,
@@ -2984,11 +2984,13 @@ fn error_codes_have_explanations() {
         );
     }
 
-    // Every code from Z0001 to Z0010 must be explainable via the CLI.
-    for n in 1..=ALL_ERROR_CODES.len() {
-        let code = ErrorCode(n as u32);
-        let entry =
-            error_code_lookup(code).unwrap_or_else(|| panic!("code {code} missing from catalog"));
+    // Every assigned code must be explainable via the CLI.
+    //
+    // Iterate over the actual catalog rather than a 1..=len range: the
+    // catalog intentionally leaves gaps (e.g. state codes live at Z0050+),
+    // so a naive range would hit unassigned codes.
+    for entry in ALL_ERROR_CODES {
+        let code = entry.code;
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_zz"))
             .arg("explain")
             .arg(code.to_string())

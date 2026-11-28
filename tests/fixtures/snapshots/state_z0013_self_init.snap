@@ -1,0 +1,24 @@
+first module that broke: <path> <path>
+
+error: Z0001: undefined variable `self_ref`
+
+--> <path>
+|
+3 | state self_ref := self_ref + 1
+| ^^^^^^^^
+= did you mean `sleep`, `spawn`, `spawn`?
+error: Z0052: read of `state` `self_ref` inside its own initializer
+hint: initialize `self_ref` without referencing itself
+
+--> <path>
+|
+3 | state self_ref := self_ref + 1
+| ^^^^^^^^
+warning: unused variable `self_ref` is never read, consider prefixing with `_self_ref`
+
+--> <path>
+|
+3 | state self_ref := self_ref + 1
+| ^^^^^^^^ help: replace with `_self_ref`
+
+zz: 1 file(s) failed type-check

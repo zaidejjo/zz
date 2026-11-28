@@ -1,0 +1,17 @@
+first module that broke: <path> <path>
+
+error: Z0053: `std.vec.sort_by` cannot be called in a statement that WRITES `state`
+hint: wrap the statement in `atomic { }` (reads of state are allowed without `atomic`)
+
+--> <path>
+|
+8 | data = std.vec.sort_by(data, |a, b| a - b)
+| ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+error: closure literal cannot appear in a statement that touches `state`
+hint: wrap the statement in `atomic { }`
+
+--> <path>
+|
+8 | data = std.vec.sort_by(data, |a, b| a - b)
+| ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+zz: 1 file(s) failed type-check
