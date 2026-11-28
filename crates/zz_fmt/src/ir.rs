@@ -8,7 +8,7 @@
 //! `{...}` is an f-string interpolation (tight), `{...}` is a
 //! function body (block with newlines), etc.
 
-use crate::config::{FmtConfig, LineEnding};
+use crate::config::{FmtConfig, LineEnding, SemiStyle, TrailingComma};
 use crate::doc::Doc;
 use crate::printer::Eol;
 use crate::trivia::{classify, ClassifiedKind, ClassifiedTrivia};
@@ -115,6 +115,7 @@ pub fn lower_program<'src>(
         pipe_starts,
         bang_starts,
         config,
+        skip_next: false,
         emitted_comments: std::collections::HashSet::new(),
         comments: collect_comments(&toks),
     };
@@ -233,6 +234,9 @@ struct Ctx<'src, 'a> {
     pipe_starts: Vec<u32>,
     bang_starts: Vec<u32>,
     config: &'a FmtConfig,
+    /// When true, the next statement should be emitted verbatim (not
+    /// structurally reformatted). Set by `// fmt: skip` comment.
+    skip_next: bool,
     /// Spans of comments already emitted. Import sorting reorders
     /// statements, so an attached-docs walk can rediscover comments the
     /// header gap already emitted — the set keeps each comment exactly
@@ -340,6 +344,7 @@ impl<'src, 'a> Ctx<'src, 'a> {
             // source slice. Never normalize spacing (`//hello` stays
             // `//hello`), never re-wrap block comments.
             ClassifiedKind::Line(_) | ClassifiedKind::Doc(_) | ClassifiedKind::Block(_) => {
+                self.check_fmt_skip(c);
                 self.emit_comment_trivia(c);
             }
         }
@@ -368,6 +373,26 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 self.out.push(Doc::text_owned(Cow::Owned(raw)));
                 self.consecutive_nls = 0;
             }
+        }
+        // Check if this is a `// fmt: skip` marker that should cause the
+        // next statement to be emitted verbatim.
+        self.check_fmt_skip(c);
+    }
+
+    /// Check if a comment is `// fmt: skip` and mark the next statement
+    /// to be emitted verbatim instead of structurally reformatted.
+    ///
+    /// Only line comments (`//`) are considered; `/* */` block comments
+    /// and doc comments (`///`) are ignored. The comment text must match
+    /// `// fmt: skip` after trimming leading `// ` and whitespace.
+    fn check_fmt_skip(&mut self, c: &ClassifiedTrivia) {
+        let ClassifiedKind::Line(text) = &c.kind else {
+            return;
+        };
+        // Strip the leading `// ` and any surrounding whitespace.
+        let trimmed = text.trim_start().strip_prefix("//").unwrap_or(text).trim();
+        if trimmed == "fmt: skip" {
+            self.skip_next = true;
         }
     }
 
@@ -606,6 +631,10 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 }
                 emit_item(&mut *self, i);
             }
+            // trailing_comma = "Always" adds a trailing comma even on one line.
+            if self.config.trailing_comma == TrailingComma::Always {
+                self.text(",");
+            }
             return;
         }
 
@@ -614,7 +643,13 @@ impl<'src, 'a> Ctx<'src, 'a> {
         for c in &trailing[0] {
             self.emit_comment_trailing(c);
         }
-        let trailing_comma = self.has_trailing_comma(last_end, close_start);
+        let source_had_trailing_comma = self.has_trailing_comma(last_end, close_start);
+        // Effective trailing comma decision based on config policy.
+        let effective_trailing_comma = match self.config.trailing_comma {
+            TrailingComma::Never => false,
+            TrailingComma::MultiLineOnly => source_had_trailing_comma,
+            TrailingComma::Always => true,
+        };
         let saved = std::mem::take(&mut self.out);
         for i in 0..items.len() {
             if own_line[i].is_empty() {
@@ -625,7 +660,7 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 self.emit_comment_own_line(c);
             }
             emit_item(&mut *self, i);
-            if i + 1 < items.len() || trailing_comma {
+            if i + 1 < items.len() || effective_trailing_comma {
                 self.text(",");
             }
             for c in &trailing[i + 1] {
@@ -676,6 +711,57 @@ impl<'src, 'a> Ctx<'src, 'a> {
         }
     }
 
+    /// Does the source between `expr_end` and `next_start` contain a `;`
+    /// (ignoring comments)? Used for `semicolons = "Auto"` to preserve
+    /// the source's choice of statement terminators.
+    fn has_trailing_semicolon(&self, expr_end: u32, next_start: u32) -> bool {
+        let s = expr_end as usize;
+        // Include the byte at `next_start` position: a `;` may sit directly
+        // after the value expression, at the same offset as `span.end`.
+        let e = (next_start as usize + 1).min(self.source.len());
+        if s >= self.source.len() || s >= e {
+            return false;
+        }
+        let segment = &self.source[s..e];
+        // Strip comments, then check for `;`.
+        let mut stripped = String::new();
+        let mut in_line_comment = false;
+        let mut in_block_comment = false;
+        let mut i = 0;
+        let bytes = segment.as_bytes();
+        while i < bytes.len() {
+            if in_line_comment {
+                if bytes[i] == b'\n' {
+                    in_line_comment = false;
+                }
+                i += 1;
+                continue;
+            }
+            if in_block_comment {
+                if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    in_block_comment = false;
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                continue;
+            }
+            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+                in_line_comment = true;
+                i += 2;
+                continue;
+            }
+            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                in_block_comment = true;
+                i += 2;
+                continue;
+            }
+            stripped.push(bytes[i] as char);
+            i += 1;
+        }
+        stripped.contains(';')
+    }
+
     /// Does `span` cover any `|>` pipeline operator? Pipeline chains are
     /// desugared by the parser into nested `Call` nodes; re-emitting them
     /// structurally would lose the `|>` token, so the emitter renders
@@ -706,6 +792,13 @@ impl<'src, 'a> Ctx<'src, 'a> {
     /// check to reject any drift.
     fn emit_stmt(&mut self, stmt: &Stmt) {
         let span = stmt.span();
+        // If `// fmt: skip` preceded this statement, emit it verbatim
+        // instead of structurally reformatting.
+        if self.skip_next {
+            self.skip_next = false;
+            self.emit_raw(span);
+            return;
+        }
         let mark = self.out.len();
         self.emit_stmt_inner(stmt);
         // Safety net: a comment inside the statement that the structural
@@ -762,6 +855,16 @@ impl<'src, 'a> Ctx<'src, 'a> {
                     self.space();
                 }
                 self.emit_expr(value);
+                // semicolons policy: Always adds ";", Auto preserves source.
+                match self.config.semicolons {
+                    SemiStyle::Always => self.text(";"),
+                    SemiStyle::Auto => {
+                        if self.has_trailing_semicolon(value.span().end, span.end) {
+                            self.text(";");
+                        }
+                    }
+                    SemiStyle::Never => {}
+                }
             }
             Stmt::Assign { target, value, .. } => {
                 self.emit_expr(target);
@@ -769,6 +872,16 @@ impl<'src, 'a> Ctx<'src, 'a> {
                 self.text("=");
                 self.space();
                 self.emit_expr(value);
+                // semicolons policy: Always adds ";", Auto preserves source.
+                match self.config.semicolons {
+                    SemiStyle::Always => self.text(";"),
+                    SemiStyle::Auto => {
+                        if self.has_trailing_semicolon(value.span().end, span.end) {
+                            self.text(";");
+                        }
+                    }
+                    SemiStyle::Never => {}
+                }
             }
             Stmt::CompoundAssign {
                 target, op, value, ..
@@ -2316,6 +2429,171 @@ mod tests {
         assert!(
             out.contains("impl Counter for Boxed"),
             "impl must include `for <Trait>`: {out}"
+        );
+    }
+
+    /// Helper: format source with a given config and return output string.
+    fn fmt_with_config(src: &str, config: &FmtConfig) -> String {
+        let p = parse(src).program;
+        let (doc, eol) = lower_program(&p, src, config);
+        crate::printer::render(&doc, 80, 4, eol, config.use_tabs)
+    }
+
+    #[test]
+    fn trailing_comma_always_adds_trailing_comma() {
+        let src = "[1, 2, 3]\n";
+        let cfg = FmtConfig {
+            trailing_comma: TrailingComma::Always,
+            ..FmtConfig::default()
+        };
+        let out = fmt_with_config(src, &cfg);
+        assert!(
+            out.contains("[1, 2, 3,]"),
+            "trailing_comma=always should add trailing comma: {out}"
+        );
+    }
+
+    #[test]
+    fn trailing_comma_never_removes_trailing_comma() {
+        let src = "[1, 2, 3,]\n";
+        let cfg = FmtConfig {
+            trailing_comma: TrailingComma::Never,
+            ..FmtConfig::default()
+        };
+        let out = fmt_with_config(src, &cfg);
+        assert!(
+            !out.contains("[1, 2, 3,]"),
+            "trailing_comma=never should remove trailing comma: {out}"
+        );
+        assert!(
+            out.contains("[1, 2, 3]"),
+            "trailing_comma=never should still format: {out}"
+        );
+    }
+
+    #[test]
+    fn semicolons_always_adds_semicolons() {
+        let src = "x := 1\ny: int = 2\n";
+        let cfg = FmtConfig {
+            semicolons: SemiStyle::Always,
+            ..FmtConfig::default()
+        };
+        let out = fmt_with_config(src, &cfg);
+        assert!(
+            out.contains("x := 1;"),
+            "semicolons=always should add semicolon after decl: {out}"
+        );
+        // Typed decls keep their existing spacing (no space after `:`)
+        assert!(
+            out.contains("y:int = 2;"),
+            "semicolons=always should add semicolon after typed decl: {out}"
+        );
+    }
+
+    #[test]
+    fn semicolons_never_removes_semicolons() {
+        let src = "x := 1;\ny: int = 2;\n";
+        let cfg = FmtConfig {
+            semicolons: SemiStyle::Never,
+            ..FmtConfig::default()
+        };
+        let out = fmt_with_config(src, &cfg);
+        assert!(
+            !out.contains("x := 1;"),
+            "semicolons=never should remove semicolon: {out}"
+        );
+        assert!(
+            !out.contains("y: int = 2;"),
+            "semicolons=never should remove semicolon from typed decl: {out}"
+        );
+    }
+
+    #[test]
+    fn semicolons_auto_preserves_source() {
+        // Source with semicolons keeps them.
+        let src_with = "x := 1;\n";
+        let cfg = FmtConfig::default(); // Auto is default
+        let out_with = fmt_with_config(src_with, &cfg);
+        assert!(
+            out_with.contains("x := 1;"),
+            "semicolons=auto should preserve source semicolon: {out_with}"
+        );
+
+        // Source without semicolons doesn't get them added.
+        let src_without = "x := 1\n";
+        let out_without = fmt_with_config(src_without, &cfg);
+        assert!(
+            !out_without.contains("x := 1;"),
+            "semicolons=auto should not add semicolon: {out_without}"
+        );
+    }
+
+    #[test]
+    fn fmt_skip_skips_next_statement() {
+        // `// fmt: skip` before a statement causes it to be emitted verbatim.
+        let src = "// fmt: skip\nfunc add(a:int,b:int)->int{return a+b}\n";
+        let cfg = FmtConfig::default();
+        let out = fmt_with_config(src, &cfg);
+        assert!(
+            out.contains("func add(a:int,b:int)->int{return a+b}"),
+            "skipped statement should be verbatim: {out}"
+        );
+    }
+
+    #[test]
+    fn fmt_skip_only_affects_next_statement() {
+        // `// fmt: skip` should only skip the immediately following statement.
+        let src = "// fmt: skip\nx:int=1\ny: int = 2\n";
+        let cfg = FmtConfig::default();
+        let out = fmt_with_config(src, &cfg);
+        assert!(
+            out.contains("x:int=1"),
+            "skipped statement should be verbatim: {out}"
+        );
+        assert!(
+            out.contains("y:int = 2"),
+            "next statement should be formatted normally: {out}"
+        );
+    }
+
+    #[test]
+    fn fmt_skip_inside_function_body() {
+        let src = "func main() -> int {\n    // fmt: skip\n    x:int=1\n    y: int = 2\n    return x + y\n}\n";
+        let cfg = FmtConfig::default();
+        let out = fmt_with_config(src, &cfg);
+        assert!(
+            out.contains("x:int=1"),
+            "skipped decl inside function should be verbatim: {out}"
+        );
+        assert!(
+            out.contains("y:int = 2"),
+            "next decl inside function should be formatted: {out}"
+        );
+    }
+
+    #[test]
+    fn fmt_skip_block_comment_not_recognized() {
+        // `/* fmt: skip */` is a block comment, not a line comment, so it
+        // should NOT trigger skipping.
+        let src = "/* fmt: skip */\nx:int=1\n";
+        let cfg = FmtConfig::default();
+        let out = fmt_with_config(src, &cfg);
+        assert!(
+            out.contains("x:int = 1"),
+            "block comment fmt: skip should not skip: {out}"
+        );
+    }
+
+    #[test]
+    fn fmt_skip_doc_comment_not_recognized() {
+        // `/// fmt: skip` is a doc comment, not a line comment, so it
+        // should NOT trigger skipping.
+        let src = "/// fmt: skip\nx:int=1\n";
+        let cfg = FmtConfig::default();
+        let out = fmt_with_config(src, &cfg);
+        assert!(
+            out.contains("x:int = 1"),
+            "doc comment fmt: skip should not skip: {out}"
         );
     }
 }
