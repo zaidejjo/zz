@@ -159,9 +159,7 @@ impl InferOps for Checker {
                             self.errors.push(
                                 error_at(format!("deprecated trait bound `{name}`"), span)
                                     .with_code(ErrorCode(29))
-                                    .with_note(format!(
-                                        "`{name}` is deprecated",
-                                    )),
+                                    .with_note(format!("`{name}` is deprecated",)),
                             );
                             continue;
                         }

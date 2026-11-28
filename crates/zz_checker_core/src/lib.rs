@@ -453,6 +453,10 @@ pub struct Checker {
     /// Const declarations defined in the current program (not import-seeded).
     /// Used to scope unused-const warnings to locally-owned consts.
     pub local_consts: std::collections::HashSet<String>,
+    /// Impl methods declared in the current program (not import-seeded).
+    /// Used to scope unused-impl-method warnings to locally-owned methods;
+    /// imported pub methods may be used externally.
+    pub local_impl_methods: std::collections::BTreeSet<(String, String)>,
     /// Struct names referenced (used as types) — for unused-struct warnings.
     pub used_struct_names: std::collections::HashSet<String>,
     /// Enum names referenced (used as types) — for unused-enum warnings.
@@ -660,6 +664,7 @@ impl Checker {
             local_traits: std::collections::BTreeSet::new(),
             local_aliases: std::collections::HashSet::new(),
             local_consts: std::collections::HashSet::new(),
+            local_impl_methods: std::collections::BTreeSet::new(),
             test_funcs: std::collections::HashSet::new(),
             defined_names: vec![HashMap::new()],
             had_undefined_var: false,

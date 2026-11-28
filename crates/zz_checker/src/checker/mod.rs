@@ -703,6 +703,12 @@ fn check_program_impl(
                 {
                     let method_name = mname.join(".");
                     let full_name = format!("{}.{}", type_key, method_name);
+                    // Track locally-declared impl methods so the unused-impl-method
+                    // warning can scope itself to the current program (imported pub
+                    // methods may be used externally).
+                    checker
+                        .local_impl_methods
+                        .insert((type_key.clone(), method_name.clone()));
                     let method_gens: Vec<String> =
                         generics.iter().map(|g| g.name.name.clone()).collect();
                     // Impl parameters scope over every method (so the
@@ -1105,6 +1111,7 @@ fn check_program_impl(
         .chain(pub_structs_set.iter())
         .chain(pub_aliases_set.iter())
         .chain(pub_enums_set.iter())
+        .chain(pub_traits_set.iter())
         .cloned()
         .collect();
 
@@ -1144,25 +1151,6 @@ fn check_program_impl(
                 ),
             )
             .with_note("function is never called or referenced"),
-        );
-    }
-
-    // Emit unused type alias warnings. A type alias that is never referenced
-    // is dead code. Only check aliases defined in the current program —
-    // stdlib-seeded aliases may legitimately not appear in `used_names`.
-    // Skip pub aliases (cross-module users) and `_`-prefixed names.
-    for name in checker.aliases.keys() {
-        if checker.pub_names.contains(name.as_str())
-            || name.starts_with('_')
-            || checker.used_aliases.contains(name.as_str())
-        {
-            continue;
-        }
-        checker.errors.push(
-            zz_diag_core::warning(format!(
-                "unused type alias `{name}`, consider prefixing with `_{name}` or removing it"
-            ))
-            .with_note("type alias is never referenced"),
         );
     }
 
@@ -1228,6 +1216,7 @@ fn check_program_impl(
     // is dead code. Only check structs defined in the current program.
     for sname in &checker.local_structs {
         if checker.pub_names.contains(sname.as_str())
+            || sname.starts_with('_')
             || checker.used_struct_names.contains(sname.as_str())
         {
             continue;
@@ -1244,6 +1233,7 @@ fn check_program_impl(
     // is dead code. Only check enums defined in the current program.
     for ename in &checker.local_enums {
         if checker.pub_names.contains(ename.as_str())
+            || ename.starts_with('_')
             || checker.used_enum_names.contains(ename.as_str())
         {
             continue;
@@ -1260,6 +1250,7 @@ fn check_program_impl(
     // is dead code. Only check traits defined in the current program.
     for tname in &checker.local_traits {
         if checker.pub_names.contains(tname.as_str())
+            || tname.starts_with('_')
             || checker.used_trait_names.contains(tname.as_str())
         {
             continue;
@@ -1307,9 +1298,16 @@ fn check_program_impl(
     }
 
     // Emit unused impl method warnings. An impl method that is never called
-    // is dead code. Only check methods defined in the current program.
-    for (tname, mname) in checker.used_impl_methods.keys() {
+    // is dead code. Only check methods defined in the current program
+    // (`local_impl_methods`) — imported pub methods may be used externally.
+    // Skip pub methods (cross-module users), `_`-prefixed names, and methods
+    // that are actually called (recorded in `used_impl_methods` at call
+    // sites). Trait-impl methods are included; they are declared in-program.
+    for (tname, mname) in &checker.local_impl_methods {
+        let full_name = format!("{tname}.{mname}");
         if checker.pub_names.contains(tname.as_str())
+            || pub_funcs_set.contains(full_name.as_str())
+            || mname.starts_with('_')
             || checker
                 .used_impl_methods
                 .contains_key(&(tname.clone(), mname.clone()))
@@ -1318,7 +1316,7 @@ fn check_program_impl(
         }
         checker.errors.push(
             zz_diag_core::warning(format!(
-                "unused impl method `{tname}.{mname}`, consider prefixing with `_{mname}` or removing it"
+                "unused impl method `{full_name}`, consider prefixing with `_{mname}` or removing it"
             ))
             .with_note("method is never called"),
         );

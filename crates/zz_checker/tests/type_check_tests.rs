@@ -5460,6 +5460,267 @@ fn pub_struct_field_silent() {
     );
 }
 
+/// Unused structs, enums, traits, consts, and impl methods (#4 of the
+/// checker improvement plan — completion of dead-code detection).
+#[test]
+fn unused_struct_warns() {
+    // A local struct never used as a type is dead code.
+    let r = check_src("struct S { x: int }\nx := 1\n");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unused struct `S`")),
+        "expected unused struct warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn used_struct_silent() {
+    // A struct used as a type is not dead code.
+    let r = check_src("struct S { x: int }\ns: S = S{ x: 1 }\nif s.x == 1 { 1 } else { 0 }\n");
+    assert!(
+        !r.errors.iter().any(|e| e.message.contains("unused struct")),
+        "used struct should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn pub_struct_silent() {
+    // A pub struct may be used externally.
+    let r = check_src("pub struct S { x: int }\nx := 1\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused struct `S`")),
+        "pub struct should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn underscore_struct_silent() {
+    // A `_`-prefixed struct is silenced.
+    let r = check_src("struct _S { x: int }\nx := 1\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused struct `_S`")),
+        "underscore struct should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_enum_warns() {
+    // A local enum never used as a type is dead code.
+    let r = check_src("enum E { A, B }\nx := 1\n");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unused enum `E`")),
+        "expected unused enum warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn used_enum_silent() {
+    // An enum used as a type is not dead code.
+    let r = check_src("enum E { A, B }\nx: E = E.A\nmatch x { .A => 1, .B => 2 }\n");
+    assert!(
+        !r.errors.iter().any(|e| e.message.contains("unused enum")),
+        "used enum should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn pub_enum_silent() {
+    // A pub enum may be used externally.
+    let r = check_src("pub enum E { A, B }\nx := 1\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused enum `E`")),
+        "pub enum should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_trait_warns() {
+    // A local trait never used as a bound is dead code.
+    let r = check_src("trait Draw { func draw(self) -> int }\nx := 1\n");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unused trait `Draw`")),
+        "expected unused trait warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn used_trait_silent() {
+    // A trait used as a bound is not dead code.
+    let r = check_src(
+        "trait Draw { func draw(self) -> int }\nfunc f<T: Draw>(x: T) -> int { return 0 }\n",
+    );
+    assert!(
+        !r.errors.iter().any(|e| e.message.contains("unused trait")),
+        "used trait should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn pub_trait_silent() {
+    // A pub trait may be used externally.
+    let r = check_src("pub trait Draw { func draw(self) -> int }\nx := 1\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused trait `Draw`")),
+        "pub trait should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_const_warns() {
+    // A local const never read is dead code.
+    let r = check_src("const C = 5\nx := 1\n");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unused const `C`")),
+        "expected unused const warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn used_const_silent() {
+    // A const that is read is not dead code.
+    let r = check_src("const C = 5\nx := C\n");
+    assert!(
+        !r.errors.iter().any(|e| e.message.contains("unused const")),
+        "used const should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn pub_const_silent() {
+    // A pub const may be used externally.
+    let r = check_src("pub const C = 5\nx := 1\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused const `C`")),
+        "pub const should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn underscore_const_silent() {
+    // A `_`-prefixed const is silenced.
+    let r = check_src("const _C = 5\nx := 1\n");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused const `_C`")),
+        "underscore const should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_impl_method_warns() {
+    // An impl method never called is dead code.
+    let r = check_src(
+        "struct S { x: int }\n\
+         impl S { func area(self) -> int { return self.x } }\n\
+         s := S{ x: 5 }\nx := s.x\n",
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unused impl method `S.area`")),
+        "expected unused impl method warning, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn used_impl_method_silent() {
+    // A called impl method is not dead code.
+    let r = check_src(
+        "struct S { x: int }\n\
+         impl S { func area(self) -> int { return self.x } }\n\
+         s := S{ x: 5 }\na := s.area()\n",
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused impl method")),
+        "called impl method should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn pub_impl_method_silent() {
+    // A pub impl method may be used externally.
+    let r = check_src(
+        "struct S { x: int }\n\
+         impl S { pub func area(self) -> int { return self.x } }\n",
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused impl method `S.area`")),
+        "pub impl method should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn underscore_impl_method_silent() {
+    // A `_`-prefixed impl method is silenced.
+    let r = check_src(
+        "struct S { x: int }\n\
+         impl S { func _area(self) -> int { return self.x } }\n",
+    );
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("unused impl method `S._area`")),
+        "underscore impl method should not warn, got: {:?}",
+        r.errors
+    );
+}
+
+#[test]
+fn unused_impl_method_enum_warns() {
+    // An enum impl method never called is dead code (enum receivers count).
+    let r = check_src(
+        "enum E { A, B }\n\
+         impl E { func val(self) -> int { return 1 } }\n\
+         x := 1\n",
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.message.contains("unused impl method `E.val`")),
+        "expected unused enum impl method warning, got: {:?}",
+        r.errors
+    );
+}
+
 /// Structured expected/found context in diagnostics (#5).
 #[test]
 fn mismatch_includes_parameter_context() {

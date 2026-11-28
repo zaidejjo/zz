@@ -416,9 +416,10 @@ fn check_stmt_impl(checker: &mut Checker, name: &[String], methods: &[Stmt]) -> 
         if let Stmt::Func { .. } = method {
             let method_name = Checker::func_name(method);
             let full_name = format!("{}.{}", type_name, method_name);
-            checker
-                .used_impl_methods
-                .insert((type_name.clone(), method_name.clone()), method.span());
+            // Declaring a method is not using it; the method is marked used
+            // only at a call site (check_call). Tracking declarations here
+            // previously made every impl method look "used", suppressing the
+            // unused-impl-method warning entirely.
             let sig = zz_checker_core::lookup_std(&checker.funcs, &full_name)
                 .unwrap()
                 .clone();
