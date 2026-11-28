@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use zz_frontend::diag::{error_code_lookup, ErrorCode, ALL_ERROR_CODES};
+use zz_frontend::diag::ALL_ERROR_CODES;
 
 /// Monotonically increasing sweep token handed out to every `run_zz` call
 /// (dedicated per-fixture tests and the discovery sweep share one process,
@@ -259,6 +259,7 @@ fn run_zz_with_token(file: &Path, sweep_token: Option<&str>) -> (i32, String, St
     let mut cmd = Command::new(zz_bin);
     cmd.arg("run")
         .arg(file)
+        .env("ZZ_RUN_CACHE", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1051,6 +1052,217 @@ e2e_success_test!(
     "net_unix_listener_shutdown.zz"
 );
 e2e_success_test!(e2e_stdlib_cell_test, "stdlib", "cell_test.zz");
+e2e_success_test!(e2e_stdlib_state_counter, "stdlib", "state_counter.zz");
+e2e_success_test!(e2e_stdlib_state_simple, "stdlib", "state_simple.zz");
+e2e_success_test!(
+    e2e_stdlib_state_field_index,
+    "stdlib",
+    "state_field_index.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_atomic_locals,
+    "stdlib",
+    "state_atomic_locals.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_nested_atomic,
+    "stdlib",
+    "state_nested_atomic.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_early_control,
+    "stdlib",
+    "state_early_control.zz"
+);
+e2e_success_test!(e2e_stdlib_state_r1_neg, "stdlib", "state_r1_neg.zz");
+e2e_success_test!(e2e_stdlib_state_r2_neg, "stdlib", "state_r2_neg.zz");
+e2e_success_test!(
+    e2e_stdlib_state_pub_across_modules,
+    "stdlib",
+    "state_pub_across_modules.zz"
+);
+e2e_success_test!(e2e_stdlib_state_init_order, "stdlib", "state_init_order.zz");
+e2e_success_test!(
+    e2e_stdlib_state_identifiers,
+    "stdlib",
+    "state_identifiers.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_r2_local_only,
+    "stdlib",
+    "state_r2_local_only.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_r2_read_only_task,
+    "stdlib",
+    "state_r2_read_only_task.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_multiread_all,
+    "stdlib",
+    "state_multiread_all.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_multiread_atomicity,
+    "stdlib",
+    "state_multiread_atomicity.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_step3b_5c_newline_atomic,
+    "stdlib",
+    "step3b_5c_newline_atomic.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_step3b_4a_task_b_elapsed,
+    "stdlib",
+    "step3b_4a_task_b_elapsed.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_step3b_4b_while_sleep,
+    "stdlib",
+    "step3b_4b_while_sleep.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_step3b_4c_print_vs_atomic,
+    "stdlib",
+    "step3b_4c_print_vs_atomic.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_step3b_4d_lock_leak,
+    "stdlib",
+    "step3b_4d_lock_leak.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_step3b_4d_lock_leak_aot,
+    "stdlib",
+    "step3b_4d_lock_leak_aot.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_r2_state_ok,
+    "stdlib",
+    "state_r2_state_ok.zz"
+);
+e2e_success_test!(e2e_stdlib_state_d2_math_ok, "stdlib", "state_d2_math_ok.zz");
+e2e_success_test!(e2e_stdlib_state_d2_str_ok, "stdlib", "state_d2_str_ok.zz");
+e2e_success_test!(e2e_stdlib_state_d2_neg, "stdlib", "state_d2_neg.zz");
+e2e_success_test!(
+    e2e_stdlib_state_d2_vec_push,
+    "stdlib",
+    "state_d2_vec_push.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d2_dict_set,
+    "stdlib",
+    "state_d2_dict_set.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d2_struct_field,
+    "stdlib",
+    "state_d2_struct_field.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d2_read_only_print,
+    "stdlib",
+    "state_d2_read_only_print.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d2_read_only_decl,
+    "stdlib",
+    "state_d2_read_only_decl.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d2_read_only_if,
+    "stdlib",
+    "state_d2_read_only_if.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d2_return_in_atomic,
+    "stdlib",
+    "state_d2_return_in_atomic.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d2_return_nested_atomic,
+    "stdlib",
+    "state_d2_return_nested_atomic.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_composite_contention,
+    "stdlib",
+    "state_composite_contention.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_two_state_invariant,
+    "stdlib",
+    "state_two_state_invariant.zz"
+);
+e2e_success_test!(e2e_stdlib_atomic_positions, "stdlib", "atomic_positions.zz");
+e2e_success_test!(e2e_stdlib_atomic_semicolon, "stdlib", "atomic_semicolon.zz");
+e2e_success_test!(
+    e2e_stdlib_atomic_matrix_whitespace,
+    "stdlib",
+    "atomic_matrix_whitespace.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_atomic_matrix_var_then_block,
+    "stdlib",
+    "atomic_matrix_var_then_block.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_matrix_toplevel,
+    "stdlib",
+    "state_matrix_toplevel.zz"
+);
+e2e_success_test!(e2e_stdlib_state_matrix_pub, "stdlib", "state_matrix_pub.zz");
+e2e_success_test!(
+    e2e_stdlib_state_matrix_after_comment,
+    "stdlib",
+    "state_matrix_after_comment.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_matrix_as_ident,
+    "stdlib",
+    "state_matrix_as_ident.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_matrix_field_access,
+    "stdlib",
+    "state_matrix_field_access.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_matrix_named_struct_func,
+    "stdlib",
+    "state_matrix_named_struct_func.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d2_id_generator,
+    "stdlib",
+    "state_d2_id_generator.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d4_rate_limiter_fixed,
+    "stdlib",
+    "state_d4_rate_limiter_fixed.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_return_in_atomic,
+    "stdlib",
+    "state_return_in_atomic.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d5_bank_transfer,
+    "stdlib",
+    "state_d5_bank_transfer.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d6_log_buffer,
+    "stdlib",
+    "state_d6_log_buffer.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_d8_config_reload_fixed,
+    "stdlib",
+    "state_d8_config_reload_fixed.zz"
+);
 e2e_success_test!(
     e2e_stdlib_option_result_unwrap_test,
     "stdlib",
@@ -1081,6 +1293,11 @@ e2e_success_test!(
     e2e_stdlib_test_black_box_test,
     "stdlib",
     "test_black_box_test.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_s6_redundant_semicolon_warning,
+    "stdlib",
+    "s6_redundant_semicolon_warning.zz"
 );
 e2e_success_test!(
     e2e_stdlib_range_display_test,
@@ -1395,6 +1612,43 @@ e2e_error_test!(e2e_err_try_double_unwrap, "try_double_unwrap.zz");
 e2e_error_test!(e2e_err_spawn_non_closure, "spawn_non_closure.zz");
 e2e_error_test!(e2e_err_chan_send_non_chan, "chan_send_non_chan.zz");
 e2e_error_test!(e2e_err_println_function_value, "println_function_value.zz");
+e2e_error_test!(e2e_err_state_blocking_atomic, "state_blocking_atomic.zz");
+e2e_error_test!(e2e_err_state_r1_pos, "state_r1_pos.zz");
+e2e_error_test!(e2e_err_state_r2_pos, "state_r2_pos.zz");
+e2e_error_test!(e2e_err_state_closure_rejected, "state_closure_rejected.zz");
+e2e_error_test!(e2e_err_state_r2_local_func, "state_r2_local_func.zz");
+e2e_error_test!(
+    e2e_err_state_r2_direct_closure,
+    "state_r2_direct_closure.zz"
+);
+e2e_error_test!(e2e_err_state_r2_vec_func, "state_r2_vec_func.zz");
+e2e_error_test!(e2e_err_state_r2_struct_field, "state_r2_struct_field.zz");
+e2e_error_test!(
+    e2e_err_state_d2_closure_native,
+    "state_d2_closure_native.zz"
+);
+e2e_error_test!(e2e_err_state_d2_user_call, "state_d2_user_call.zz");
+e2e_error_test!(e2e_err_task_c_fn_arg_task, "task_c_fn_arg_task.zz");
+e2e_error_test!(e2e_err_task_c_func_in_global, "task_c_func_in_global.zz");
+e2e_error_test!(
+    e2e_err_task_c_method_unknown_receiver,
+    "task_c_method_unknown_receiver.zz"
+);
+e2e_error_test!(e2e_err_task_c_native_callback, "task_c_native_callback.zz");
+e2e_error_test!(e2e_err_state_z0013_self_init, "state_z0013_self_init.zz");
+e2e_error_test!(
+    e2e_err_state_z0013_before_decl,
+    "state_z0013_before_decl.zz"
+);
+e2e_error_test!(
+    e2e_err_state_z0019_split_states,
+    "state_z0019_split_states.zz"
+);
+e2e_success_test!(
+    e2e_stdlib_state_z0019_negative,
+    "stdlib",
+    "state_z0019_negative.zz"
+);
 // M0 edge corpus: both engines fail (messages differ; error parity only
 // requires failure on both sides).
 e2e_error_test!(e2e_err_edge_neg_shift, "edge_neg_shift_err.zz");
@@ -2787,11 +3041,13 @@ fn error_codes_have_explanations() {
         );
     }
 
-    // Every code from Z0001 to Z0010 must be explainable via the CLI.
-    for n in 1..=ALL_ERROR_CODES.len() {
-        let code = ErrorCode(n as u32);
-        let entry =
-            error_code_lookup(code).unwrap_or_else(|| panic!("code {code} missing from catalog"));
+    // Every assigned code must be explainable via the CLI.
+    //
+    // Iterate over the actual catalog rather than a 1..=len range: the
+    // catalog intentionally leaves gaps (e.g. state codes live at Z0050+),
+    // so a naive range would hit unassigned codes.
+    for entry in ALL_ERROR_CODES {
+        let code = entry.code;
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_zz"))
             .arg("explain")
             .arg(code.to_string())

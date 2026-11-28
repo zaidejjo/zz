@@ -1,0 +1,166 @@
+# Step 3c.2 — Implementation (R1–R5) in VM compile path AND AOT lowering
+
+## Rule (documented in docs/language/state.md)
+
+A statement's header expression splits into maximal PURE regions (no call of
+any kind). All state reads in ONE pure region run inside ONE batch (one lock
+acquisition). R2: a call's cell (receiver + arguments) is the region; the Call
+runs after BatchEnd. R4: no batch inside `atomic { }`; while condition batches
+per evaluation; each if/else-if condition and match guard is its own region.
+R5: debug assertion batch depth == 0 at every statement boundary. R3: Z0019
+when two different states are read across regions in one statement.
+
+## Shared pure-region decomposition
+
+New module `crates/zz_span_ast/src/ast/regions.rs`:
+- `expr_is_pure(e)` — true for literals, idents, paths, closures, parens,
+  tuples, unary, binary, variants, arrays, dicts, fields, ranges, struct inits,
+  index, slice, is, fmt (expr parts pure), list-comp body/iter/filter. False for
+  `Call`/`Try`/`If`/`While`/`Match`/`IfLet`/`Block`/`Break`/`Continue` (call
+  or body = boundary).
+- `call_cell_is_pure(e)` — callee + args + named all pure → call cell is one
+  region; the Call itself closes it (R2).
+- `expr_state_reads(e, is_state)` — state names read directly (no bodies).
+- `expr_regions(e, is_state)` — maximal pure regions in evaluation order, each
+  = set of distinct state names read inside it.
+
+Used identically by: the type checker (Z0019), the VM compiler
+(`StateBatchBegin`/`End`), and the AOT lowering (`zz_state_lock`/`unlock`).
+
+## VM compile path — `crates/zz_runtime/src/vm/compiler.rs`
+
+- `compile_expr` wraps a pure state-reading expression (or call cell) in one
+  `StateBatchBegin`/`StateBatchEnd` pair; a call cell sets `pending_call_region`
+  so `emit` closes it immediately before the call op (R2/R5).
+- `Resolved::State` arm skips batching inside `atomic { }` (R4).
+- Binary wrapper removed — pure regions are opened at `compile_expr`; impure
+  binaries split at the call, which closes its own argument region (R3).
+- `compile_stmt` gains `debug_assert_eq!(self.in_batch_depth, 0)` and
+  `debug_assert!(!self.pending_call_region)` at every statement boundary (R5).
+
+## AOT lowering — `crates/zz_lower/src/context.rs`, `expr.rs`, `stmt.rs`
+
+- `state_region_pure(e)` / `expr_reads_state_direct(e)` use the shared
+  `expr_regions` analysis.
+- `emit_expr` opens `zz_state_lock()` before a pure state region and
+  `zz_state_unlock()` after; call cell = region, call expression used only
+  after unlock (R1/R2). Statement-level RHS and state-target writes delegate
+  to `emit_expr` (R2).
+- `needs_state_lock()` returns `false` under `nolock_selftest` (lock-free
+  selftest); `needs_safepoint()` keeps cooperative scheduling on.
+
+## Run-cache invalidation
+
+`zz run` executes raised IR from `$ZZ_HOME/cache/run-v2/<slug>/m0.zzc`; the
+slug is keyed over the whole closure + build stamp (`build_stamp()` hashes the
+binary's size/mtime/inode). A compiler rebuild changes `build_stamp`, so stale
+pre-fix entries cannot hide the fix. Verified:
+
+```
+ZZ_VERBOSE=1 ./target/debug/zz run regions_probe.zz
+zz: run cache miss 2b5d54a6   <- fresh after compiler rebuild
+...
+<cached m0.zzc dis --vm shows single region>
+```
+
+Command shown: `ZZ_VERBOSE=1` → `run cache miss <slug>` (new slug
+`2b5d54a6...`), then `zz dis --vm` on the cached artifact shows exactly one
+`StateBatchBegin`/`StateBatchEnd` per pure region (LoadState+LoadState+BinOp
+inside, MakeArray inside for `[a,b]`, etc.).
+
+Also shown: `ZZ_BUILD_CACHE=0` forces a real AOT build (no probe/reuse),
+mirroring `ZZ_RUN_CACHE=0`.
+
+## Final IR (zz dis --vm) — ops between BatchBegin/End
+
+`regions_probe.zz` (main), lock ENABLED:
+
+```
+ 0  StateBatchBegin(163..168)     x := a + b        <- region: LoadState a, LoadState b, BinOp Add
+ 1  LoadState("a")
+ 2  LoadState("b")
+ 3  BinOp(Add)
+ 4  StateBatchEnd
+ 5  StateBatchBegin(178..184)     y := [a, b]       <- region: LoadState a, LoadState b, MakeArray(2)
+ 6  LoadState("a")
+ 7  LoadState("b")
+ 8  MakeArray(2)
+ 9  StateBatchEnd
+10  StateBatchBegin(194..212)     s := Pair{x:a,y:b}<- region: LoadState a, LoadState b, MakeStruct
+11  LoadState("a")
+12  LoadState("b")
+13  MakeStruct(...)
+14  StateBatchEnd
+15  StateBatchBegin(222..231)     t := "{a} {b}"    <- region: consts + LoadState a + LoadState b + Concat
+16  PushConst(0)
+17  LoadState("a")
+18  PushConst(1)
+19  LoadState("b")
+20  PushConst(2)
+21  Concat(5)
+22  StateBatchEnd
+23  StateBatchBegin(241..252)     n := check(a,b)   <- region: LoadState a, LoadState b   (call cell)
+24  LoadState("a")
+25  LoadState("b")
+26  StateBatchEnd
+27  CallPath ... check(...)          <- CALL OUTSIDE THE BATCH (R2)
+28  StateBatchBegin(260..275)     if a > 0 && b>= 0 <- condition: one region; each side pure
+...
+43  StateBatchBegin(282..287)     x := a + b        <- region: LoadState a, LoadState b, BinOp Add
+44  LoadState("a")
+45  LoadState("b")
+46  BinOp(Add)
+47  StateBatchEnd
+49  StateBatchBegin(299..311)     z := [a,b,a,b]    <- region: 4x LoadState a/b + MakeArray(4)
+50  LoadState("a")
+51  LoadState("b")
+52  LoadState("a")
+53  LoadState("b")
+54  MakeArray(4)
+55  StateBatchEnd
+70  CallNative { name: "println" }                  <- call outside any batch
+```
+
+**Only state loads and pure construction (`BinOp`, `MakeArray`, `MakeStruct`,
+`Concat`, `PushConst`) sit between `StateBatchBegin`/`StateBatchEnd`. Every
+`Call`/`CallPath`/`CallNative`/`SpawnClosure`/`println` is outside the batch.**
+
+## Generated AOT C — ops/locks between `zz_state_lock()`/`zz_state_unlock()`
+
+From `zz build --native --dump-c` on `aot_lock.zz`:
+
+```
+    zz_state_lock();
+    zz_value _s0 = zz_state_load_checked(&zz_state_a, ...);
+    zz_value _s1 = zz_state_load_checked(&zz_state_b, ...);
+    zz_state_unlock();
+    int64_t v2 = zz_binop(ZZOP_ADD, _s0, _s1);           <- pure after unlock
+
+    zz_state_lock();
+    zz_value __arr3 = zz_array_new_arena_sized(...);
+    zz_value _s4 = zz_state_load_checked(&zz_state_a, ...);
+    zz_vec_append(__arr3, _s4, ...);
+    zz_value _s5 = zz_state_load_checked(&zz_state_b, ...);
+    zz_vec_append(__arr3, _s5, ...);
+    zz_state_unlock();
+    zz_value v6 = __arr3;
+
+    zz_state_lock();  ... fmt "{a} {b}" ...  zz_state_unlock();   // fmt parts pure, in one region
+    ...
+    zz_state_lock();
+    zz_value _s11 = zz_state_load_checked(&zz_state_a, ...);
+    zz_state_unlock();
+    int64_t v12 = zz_fn_aot__lock_foo(...);              <- CALL foo() OUTSIDE THE BATCH (R2)
+
+    zz_state_lock();  ... z := [a,b,a,b] ...  zz_state_unlock();
+    ...
+    zz_value _stmt19 = zz_call_native_spawn(...);        <- spawn outside any batch
+```
+
+**Only state loads and pure construction sit between `zz_state_lock`/`zz_state_unlock`. Calls (`foo`, `spawn`) run after unlock.**
+
+## Z0019 case: `foo(a, f(), b)`
+
+Regions: `{a}` (arg1), `{b}` (arg3), separated by call `f()` → two different
+states across regions → compile error Z0019. Confirmed by the e2e fixture
+`tests/fixtures/errors/state_z0019_split_states.zz`.

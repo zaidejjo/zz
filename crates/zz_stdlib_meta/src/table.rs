@@ -1143,7 +1143,7 @@ pub fn build() -> HashMap<String, FuncSig> {
     // std.json — Phase 2.6 extensions
     m.insert(
         "std.json.pretty".into(),
-        sig(vec![("j", json_t.clone())], Type::Str),
+        sig_t(vec![("j", t.clone())], Type::Str),
     );
     m.insert(
         "std.json.type".into(),
@@ -2992,6 +2992,10 @@ pub fn build() -> HashMap<String, FuncSig> {
         "std.time.sleep_micros".into(),
         sig(vec![("micros", Type::Int)], Type::Unit),
     );
+
+    // std.debug — test-only debug natives (debug builds only).
+    m.insert("std.debug.state_batch_depth".into(), sig(vec![], Type::Int));
+    m.insert("std.debug.state_lock_depth".into(), sig(vec![], Type::Int));
     // Bare `time.*` aliases (like `vec.*`): back direct calls, method
     // dispatch, and references from pure-ZZ helpers (`Duration.sleep`).
     // Pure-ZZ durations (zz/time/mod.zz): spans as integer microseconds.

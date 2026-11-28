@@ -1,0 +1,10 @@
+first module that broke: <path> <path>
+
+error: Z0053: `state_d2_user_call.foo` cannot be called in a statement that WRITES `state`
+hint: wrap the statement in `atomic { }` (reads of state are allowed without `atomic`)
+
+--> <path>
+|
+8 | n = foo()
+| ^^^^^
+zz: 1 file(s) failed type-check

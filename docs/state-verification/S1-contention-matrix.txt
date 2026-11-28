@@ -1,0 +1,235 @@
+=== S1 PARSER MATRIX CONTENTION EVIDENCE ===
+
+=== atomic_matrix_whitespace.zz ===
+--- VM ---
+atomic_matrix_whitespace_ok
+--- AOT ---
+atomic_matrix_whitespace_ok
+
+=== atomic_matrix_var_then_block.zz ===
+--- VM ---
+warning: unused variable `atomic` is never read, consider prefixing with `_atomic`
+
+  --> /home/zaid/Projects/zz/tests/fixtures/stdlib/atomic_matrix_var_then_block.zz:19:5
+    |
+   19 |     atomic := 0
+      |     ^^^^^^ help: replace with `_atomic`
+
+atomic_matrix_var_then_block_ok
+--- AOT ---
+warning: unused variable `atomic` is never read, consider prefixing with `_atomic`
+
+  --> /home/zaid/Projects/zz/tests/fixtures/stdlib/atomic_matrix_var_then_block.zz:19:5
+    |
+   19 |     atomic := 0
+      |     ^^^^^^ help: replace with `_atomic`
+
+atomic_matrix_var_then_block_ok
+
+=== state_matrix_toplevel.zz ===
+--- VM ---
+state_matrix_toplevel_ok
+--- AOT ---
+state_matrix_toplevel_ok
+
+=== state_matrix_pub.zz ===
+--- VM ---
+state_matrix_pub_ok
+--- AOT ---
+state_matrix_pub_ok
+
+=== state_matrix_after_comment.zz ===
+--- VM ---
+state_matrix_after_comment_ok
+--- AOT ---
+state_matrix_after_comment_ok
+
+=== state_matrix_as_ident.zz ===
+--- VM ---
+state_matrix_as_ident_ok
+--- AOT ---
+state_matrix_as_ident_ok
+
+=== state_matrix_field_access.zz ===
+--- VM ---
+state_matrix_field_access_ok
+--- AOT ---
+state_matrix_field_access_ok
+
+=== state_matrix_named_struct_func.zz ===
+--- VM ---
+warning: unused struct field `state_matrix_named_struct_func.state.v`, consider prefixing with `_v` or removing it
+
+    = field is never read
+state_matrix_named_struct_func_ok
+--- AOT ---
+warning: unused struct field `state_matrix_named_struct_func.state.v`, consider prefixing with `_v` or removing it
+
+    = field is never read
+state_matrix_named_struct_func_ok
+
+=== ERROR CASES (expected parse/type errors) ===
+
+=== atomic after else (expect parse error) ===
+--- VM ---
+error: expected `{` to start block
+
+  --> /tmp/atomic_after_else.zz:4:22
+    |
+    4 |     if true { } else atomic { x = x + 1 }
+      |                      ^^^^^^
+zz: program failed
+
+hint: fix the errors shown above and try again
+--- AOT ---
+error: expected `{` to start block
+
+  --> /tmp/atomic_after_else.zz:4:22
+    |
+    4 |     if true { } else atomic { x = x + 1 }
+      |                      ^^^^^^
+zz: program failed to type-check
+
+=== atomic after } of previous statement (expect parse error) ===
+--- VM ---
+error: expected end of statement, found identifier
+
+  --> /tmp/atomic_after_brace.zz:4:17
+    |
+    4 |     if true { } atomic { x = x + 1 }
+      |                 ^^^^^^
+error: unexpected ``}`` with no matching opening — remove it
+
+  --> /tmp/atomic_after_brace.zz:6:1
+    |
+    6 | }
+      | ^ help: remove this
+
+zz: program failed
+
+hint: fix the errors shown above and try again
+--- AOT ---
+error: expected end of statement, found identifier
+
+  --> /tmp/atomic_after_brace.zz:4:17
+    |
+    4 |     if true { } atomic { x = x + 1 }
+      |                 ^^^^^^
+error: unexpected ``}`` with no matching opening — remove it
+
+  --> /tmp/atomic_after_brace.zz:6:1
+    |
+    6 | }
+      | ^ help: remove this
+
+zz: program failed to type-check
+
+=== state inside block (expect Z0011) ===
+--- VM ---
+error: Z0011: `state` is only allowed at module level in v1
+hint: move the declaration to the top level of the module
+
+  --> /tmp/state_in_block.zz:2:11
+    |
+    2 |     state s := 42
+      |           ^
+warning: unused variable `s` is never read, consider prefixing with `_s`
+
+  --> /tmp/state_in_block.zz:2:11
+    |
+    2 |     state s := 42
+      |           ^ help: replace with `_s`
+
+zz: program failed
+
+hint: fix the errors shown above and try again
+--- AOT ---
+error: Z0011: `state` is only allowed at module level in v1
+hint: move the declaration to the top level of the module
+
+  --> /tmp/state_in_block.zz:2:11
+    |
+    2 |     state s := 42
+      |           ^
+warning: unused variable `s` is never read, consider prefixing with `_s`
+
+  --> /tmp/state_in_block.zz:2:11
+    |
+    2 |     state s := 42
+      |           ^ help: replace with `_s`
+
+zz: program failed to type-check
+
+=== c { atomic { } } with c struct name (expect parse error) ===
+--- VM ---
+error: expected end of statement, found `{`
+
+  --> /tmp/struct_call_atomic.zz:3:12
+    |
+    3 |     c := C { }
+      |            ^
+error: expected end of statement, found `{`
+
+  --> /tmp/struct_call_atomic.zz:4:7
+    |
+    4 |     c { atomic { x = x + 1 } }
+      |       ^
+error: unexpected ``}`` with no matching opening — remove it
+
+  --> /tmp/struct_call_atomic.zz:4:28
+    |
+    4 |     c { atomic { x = x + 1 } }
+      |                            ^ help: remove this
+
+error: unexpected ``}`` with no matching opening — remove it
+
+  --> /tmp/struct_call_atomic.zz:4:30
+    |
+    4 |     c { atomic { x = x + 1 } }
+      |                              ^ help: remove this
+
+error: unexpected ``}`` with no matching opening — remove it
+
+  --> /tmp/struct_call_atomic.zz:6:1
+    |
+    6 | }
+      | ^ help: remove this
+
+zz: program failed
+
+hint: fix the errors shown above and try again
+--- AOT ---
+error: expected end of statement, found `{`
+
+  --> /tmp/struct_call_atomic.zz:3:12
+    |
+    3 |     c := C { }
+      |            ^
+error: expected end of statement, found `{`
+
+  --> /tmp/struct_call_atomic.zz:4:7
+    |
+    4 |     c { atomic { x = x + 1 } }
+      |       ^
+error: unexpected ``}`` with no matching opening — remove it
+
+  --> /tmp/struct_call_atomic.zz:4:28
+    |
+    4 |     c { atomic { x = x + 1 } }
+      |                            ^ help: remove this
+
+error: unexpected ``}`` with no matching opening — remove it
+
+  --> /tmp/struct_call_atomic.zz:4:30
+    |
+    4 |     c { atomic { x = x + 1 } }
+      |                              ^ help: remove this
+
+error: unexpected ``}`` with no matching opening — remove it
+
+  --> /tmp/struct_call_atomic.zz:6:1
+    |
+    6 | }
+      | ^ help: remove this
+
+zz: program failed to type-check

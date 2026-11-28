@@ -76,6 +76,8 @@ enum Resolved {
     Slot(usize),
     /// The environment chain (global, captured-from-outer, func, or native).
     Env,
+    /// A module-level `state` binding — lives in the shared state registry.
+    State,
 }
 
 /// Compiled info for a known function, used to reorder named args
@@ -143,10 +145,25 @@ pub struct Compiler {
     /// function bodies can normalize module-global references the same way
     /// the top level does.
     top_globals: std::collections::HashSet<String>,
+    /// Module-level `state` binding names. State bindings live in the
+    /// shared registry, not in frame slots or the env chain.
+    state_names: std::collections::HashSet<String>,
     /// `Type.method` names defined by an `impl` block in this compilation
     /// unit. A struct-typed receiver can then be resolved at compile time
     /// (see `resolved_method`) instead of through the dynamic call op.
     impl_methods: std::collections::HashSet<String>,
+    /// Nesting depth of `atomic { }` blocks being compiled. When > 0,
+    /// statements inside an atomic body already hold the state lock via
+    /// `Op::Atomic`, so batch begin/end wrapping is skipped (it would
+    /// prematurely release the lock).
+    in_atomic_depth: u32,
+    /// Nesting depth of state-batch regions being compiled. When > 0,
+    /// nested state reads skip batch begin/end to avoid nested lock regions.
+    in_batch_depth: u32,
+    /// Set while compiling the cell (receiver + arguments) of a call whose
+    /// evaluation is one pure region (R2). The matching call op closes the
+    /// region before it runs; `StateBatchEnd` is emitted from `emit`.
+    pending_call_region: bool,
 }
 
 enum JumpKind {
@@ -204,7 +221,11 @@ impl Compiler {
             in_db_query: false,
             move_take: None,
             top_globals: std::collections::HashSet::new(),
+            state_names: std::collections::HashSet::new(),
             impl_methods: std::collections::HashSet::new(),
+            in_atomic_depth: 0,
+            in_batch_depth: 0,
+            pending_call_region: false,
             type_scope: zz_checker::TOP_SCOPE.to_string(),
         }
     }
@@ -355,6 +376,18 @@ impl Compiler {
                 _ => None,
             })
             .collect();
+        // Pre-populate state_names from all `state` declarations so that
+        // functions compiled later can resolve state bindings. Declarations
+        // may appear after functions in source order (the loader does not
+        // guarantee declaration-before-use ordering), so we collect them
+        // up front (mirrors the type checker's Pass 2 reordering).
+        for stmt in &program.stmts {
+            if let Stmt::Decl { name, is_state, .. } = stmt {
+                if *is_state {
+                    c.state_names.insert(name.name.clone());
+                }
+            }
+        }
         for (i, stmt) in program.stmts.iter().enumerate() {
             // Every statement but the last is discarded by the `Op::Pop`
             // below, so tell the compiler its value is already dead.
@@ -492,6 +525,18 @@ impl Compiler {
                 _ => None,
             })
             .collect();
+        // Pre-populate state_names from all `state` declarations so that
+        // functions compiled later can resolve state bindings. Declarations
+        // may appear after functions in source order (the loader does not
+        // guarantee declaration-before-use ordering), so we collect them
+        // up front (mirrors the type checker's Pass 2 reordering).
+        for stmt in &program.stmts {
+            if let Stmt::Decl { name, is_state, .. } = stmt {
+                if *is_state {
+                    c.state_names.insert(name.name.clone());
+                }
+            }
+        }
         for (i, stmt) in program.stmts.iter().enumerate() {
             // Every statement but the last is discarded by the `Op::Pop`
             // below, so tell the compiler its value is already dead.
@@ -570,7 +615,22 @@ impl Compiler {
             // Replace CallPath with the body's ops (minus the trailing Unit
             // if the body ends with PushConst(Unit), which is the implicit
             // return of a zero-arg function).
-            let body_ops: Vec<Op> = body.into_iter().collect();
+            //
+            // Each chunk owns its own constant pool, so a callee's
+            // `PushConst(i)` indexes `chunk.constants[i]`. Re-intern every
+            // pushed constant into the caller's pool so indices resolve to
+            // the same value across the splice.
+            let body_ops: Vec<Op> = body
+                .into_iter()
+                .map(|op| {
+                    if let Op::PushConst(i) = op {
+                        let value = chunk.constants[i as usize].clone();
+                        Op::PushConst(self.push_const(value))
+                    } else {
+                        op
+                    }
+                })
+                .collect();
             self.chunk.code.splice(i..i + 1, body_ops);
         }
     }
@@ -694,10 +754,33 @@ impl Compiler {
             _ => Span::default(),
         };
         let effect = Self::stack_effect(&op);
+        // R2/R5: a call executes outside the pure region that evaluated its
+        // cell. Close that region immediately before the call op runs, so the
+        // call (user code, I/O, blocking) never holds the state lock.
+        if self.pending_call_region && Self::is_call_op(&op) {
+            self.pending_call_region = false;
+            self.in_batch_depth = self.in_batch_depth.saturating_sub(1);
+            self.chunk.spans.push(span);
+            self.chunk.code.push(Op::StateBatchEnd(span));
+        }
         self.stack_height = self.stack_height.saturating_add_signed(effect as isize);
 
         self.chunk.spans.push(span);
         self.chunk.code.push(op);
+    }
+
+    /// Ops that execute arbitrary code: they must not run while a state
+    /// batch region holds the lock (R2).
+    fn is_call_op(op: &Op) -> bool {
+        matches!(
+            op,
+            Op::Call { .. }
+                | Op::CallPath { .. }
+                | Op::CallMethod { .. }
+                | Op::CallNative { .. }
+                | Op::SpawnClosure { .. }
+                | Op::DbQuery { .. }
+        )
     }
 
     /// Net stack effect of an instruction (values pushed minus popped).
@@ -804,6 +887,18 @@ impl Compiler {
             Op::EnterScope | Op::ExitScope => 0,
             Op::PopN { n, .. } => -(*n as i64),
             Op::DeferRecord => -1,
+            // Shared mutable state (D1/D2/D3/D9).
+            Op::LoadState(..) => 1,
+            Op::StoreState(..) => -1,
+            Op::RmwState(..) => 0,
+            // The atomic body runs as a frame; its implicit chunk-end return
+            // pushes one value onto the caller's stack (which the owning
+            // statement pops). Counting it as 0 shifted every later local
+            // slot one too low — `x := 1; atomic {…}; y := p.x` made `y`
+            // alias `x`'s slot.
+            Op::Atomic { .. } => 1,
+            Op::StateBatchBegin(..) => 0,
+            Op::StateBatchEnd(..) => 0,
         }
     }
 
@@ -833,6 +928,10 @@ impl Compiler {
     }
 
     fn resolve(&self, name: &str) -> Resolved {
+        // State bindings live in the shared registry, not in slots or env.
+        if self.state_names.contains(name) {
+            return Resolved::State;
+        }
         for local in self.locals.iter().rev() {
             if local.name == name {
                 return if local.in_env {
@@ -1061,7 +1160,7 @@ impl Compiler {
         // annotate a given span (the common case for loop-carried locals).
         let dst = match self.resolve(target) {
             Resolved::Slot(slot) => slot as u16,
-            Resolved::Env => return None,
+            Resolved::Env | Resolved::State => return None,
         };
         let src = match (left.as_ref(), right.as_ref()) {
             (Expr::Ident { name: ln, .. }, Expr::Ident { name: rn, .. }) => {
@@ -1069,12 +1168,12 @@ impl Compiler {
                 if ln == target {
                     match self.resolve(rn) {
                         Resolved::Slot(slot) => slot as u16,
-                        Resolved::Env => return None,
+                        Resolved::Env | Resolved::State => return None,
                     }
                 } else if rn == target {
                     match self.resolve(ln) {
                         Resolved::Slot(slot) => slot as u16,
-                        Resolved::Env => return None,
+                        Resolved::Env | Resolved::State => return None,
                     }
                 } else {
                     return None;
@@ -2059,7 +2158,7 @@ impl Compiler {
         // fusion fire even when the checker didn't annotate the result span.
         let dst = match self.resolve(target) {
             Resolved::Slot(slot) => slot as u16,
-            Resolved::Env => return None,
+            Resolved::Env | Resolved::State => return None,
         };
         // `x = x + 1` -> SlotInc
         if *binop == zz_frontend::ast::BinOp::Add {
@@ -2223,7 +2322,7 @@ impl Compiler {
         }
         let dst = match self.resolve(target) {
             Resolved::Slot(slot) => slot as u16,
-            Resolved::Env => return None,
+            Resolved::Env | Resolved::State => return None,
         };
         // Innermost first: op 1 consumes the old target, each later op
         // consumes the value the previous one left in `dst`.
@@ -2263,13 +2362,13 @@ impl Compiler {
         match e {
             Expr::Ident { name, .. } => match self.resolve(name) {
                 Resolved::Slot(slot) => Some(slot as u16),
-                Resolved::Env => None,
+                Resolved::Env | Resolved::State => None,
             },
             // Namespaced top-level slot: `ns.var` resolves to a slot when the
             // full dotted name is a promoted local.
             Expr::Path { parts, .. } => match self.resolve(&parts.join(".")) {
                 Resolved::Slot(slot) => Some(slot as u16),
-                Resolved::Env => None,
+                Resolved::Env | Resolved::State => None,
             },
             _ => None,
         }
@@ -2296,7 +2395,7 @@ impl Compiler {
         let full = target_parts.join(".");
         let dst = match self.resolve(&full) {
             Resolved::Slot(slot) => slot as u16,
-            Resolved::Env => return None,
+            Resolved::Env | Resolved::State => return None,
         };
         // `ns.sum = ns.sum + 1` -> SlotInc
         if *binop == zz_frontend::ast::BinOp::Add {
@@ -2386,11 +2485,11 @@ impl Compiler {
         let slot_of = |e: &Expr| match e {
             Expr::Ident { name, .. } => match self.resolve(name) {
                 Resolved::Slot(slot) => Some(slot as u16),
-                Resolved::Env => None,
+                Resolved::Env | Resolved::State => None,
             },
             Expr::Path { parts, .. } => match self.resolve(&parts.join(".")) {
                 Resolved::Slot(slot) => Some(slot as u16),
-                Resolved::Env => None,
+                Resolved::Env | Resolved::State => None,
             },
             _ => None,
         };
@@ -2535,11 +2634,11 @@ impl Compiler {
         let a = match left {
             Expr::Ident { name, .. } => match self.resolve(name) {
                 Resolved::Slot(slot) => slot as u16,
-                Resolved::Env => return None,
+                Resolved::Env | Resolved::State => return None,
             },
             Expr::Path { parts, .. } => match self.resolve(&parts.join(".")) {
                 Resolved::Slot(slot) => slot as u16,
-                Resolved::Env => return None,
+                Resolved::Env | Resolved::State => return None,
             },
             _ => return None,
         };
@@ -2552,9 +2651,26 @@ impl Compiler {
     }
 
     fn compile_path_load(&mut self, parts: &[String], span: Span) {
+        // State binding: read from the state registry under the full dotted
+        // name (`test_state3.hits`). Must be checked before slot resolution
+        // because `resolve(&full)` returns `Resolved::State`, not `Resolved::Slot`.
+        let full = parts.join(".");
+        if self.state_names.contains(&full) {
+            self.emit(Op::LoadState(full.clone(), span));
+            return;
+        }
+        // State-name path like `p.x` where `p` is a state binding: load the
+        // state value, then walk fields to the leaf. State bindings live in
+        // the shared registry, not in slots or env.
+        if parts.len() > 1 && self.state_names.contains(&parts[0]) {
+            self.emit(Op::LoadState(parts[0].clone(), span));
+            for part in &parts[1..] {
+                self.emit(Op::GetField(part.clone(), span));
+            }
+            return;
+        }
         // A top-level var promoted to a slot is declared under its full
         // dotted name (`add_to_1M.sum`); resolve the joined name first.
-        let full = parts.join(".");
         // Move-take: the single global load in `ns.x = f(ns.x, ...)`
         // takes instead of cloning (flag set by the Assign arm; the home
         // must still match, guarding against shadowed lookalikes).
@@ -2563,6 +2679,7 @@ impl Compiler {
                 let home = match self.resolve(&full) {
                     Resolved::Slot(slot) => TakeHome::Slot(slot as u16),
                     Resolved::Env => TakeHome::Env(full.clone()),
+                    Resolved::State => return,
                 };
                 if home == flag_home {
                     self.move_take = None;
@@ -2588,6 +2705,38 @@ impl Compiler {
 
     fn compile_path_store(&mut self, parts: &[String], span: Span) {
         let full = parts.join(".");
+        // State binding: store to the state registry under the full dotted
+        // name (`test_state3.hits`). Must be checked before slot resolution
+        // because `resolve(&full)` returns `Resolved::State`, not `Resolved::Slot`.
+        if self.state_names.contains(&full) {
+            self.emit(Op::StoreState(full.clone(), span));
+            return;
+        }
+        // State-name path like `p.x` where `p` is a state binding: load the
+        // state value, set the field, then store back to the registry. The
+        // new value is already on the stack (compiled by the caller).
+        //
+        // `GetField` yields a clone and `SetField` detaches on write, so
+        // every intermediate level must be written back into its parent
+        // (deepest first) before the root goes back to the registry. Without
+        // the loop below, `cfg.inner.v = ...` stored the *inner* struct into
+        // the `cfg` slot, so later `cfg.x` read an `Inner` and failed.
+        if parts.len() > 1 && self.state_names.contains(&parts[0]) {
+            self.emit(Op::LoadState(parts[0].clone(), span));
+            for part in &parts[1..parts.len() - 1] {
+                self.emit(Op::GetField(part.clone(), span));
+            }
+            self.emit(Op::SetField(parts.last().unwrap().clone(), span));
+            for i in (1..parts.len() - 1).rev() {
+                self.emit(Op::LoadState(parts[0].clone(), span));
+                for part in &parts[1..i] {
+                    self.emit(Op::GetField(part.clone(), span));
+                }
+                self.emit(Op::SetField(parts[i].clone(), span));
+            }
+            self.emit(Op::StoreState(parts[0].clone(), span));
+            return;
+        }
         // Top-level slot promoted under the full dotted name -> direct store.
         if let Resolved::Slot(slot) = self.resolve(&full) {
             self.emit(Op::StoreSlot(slot as u16));
@@ -2785,6 +2934,7 @@ impl Compiler {
             Expr::Ident { name, span } => match self.resolve(name) {
                 Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
                 Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
+                Resolved::State => self.emit(Op::StoreState(name.clone(), *span)),
             },
             Expr::Path { parts, span } => self.compile_path_store(parts, *span),
             Expr::Field { obj, name, span } => {
@@ -2869,11 +3019,47 @@ impl Compiler {
     /// value (it emits `Op::Pop` for `StmtValue::Discard`): a value-producing
     /// statement can then skip bookkeeping nothing reads. See the
     /// `Stmt::For` arm.
+    /// Compile one statement. R5: every path out of a batch region closes
+    /// it; assert the depth is zero at every statement boundary.
     fn compile_stmt(&mut self, stmt: &Stmt, value_discarded: bool) -> StmtValue {
+        let v = self.compile_stmt_inner(stmt, value_discarded);
+        debug_assert_eq!(
+            self.in_batch_depth, 0,
+            "state batch region leaked out of statement"
+        );
+        debug_assert!(
+            !self.pending_call_region,
+            "call-cell region leaked out of statement"
+        );
+        v
+    }
+
+    fn compile_stmt_inner(&mut self, stmt: &Stmt, value_discarded: bool) -> StmtValue {
         match stmt {
-            Stmt::Decl { name, value, .. } => {
+            Stmt::Decl {
+                name,
+                value,
+                is_state,
+                ..
+            } => {
+                // D1: `state` bindings live in the shared registry, not in
+                // frame slots or the env chain. Register the name so loads/
+                // stores emit `LoadState`/`StoreState`.
+                if *is_state {
+                    self.state_names.insert(name.name.clone());
+                }
                 self.compile_expr(value);
-                if self.is_main && self.scope_depth == 0 {
+                if *is_state {
+                    // `state name := expr` — store the initializer into the
+                    // state registry. No slot allocation.
+                    if self.is_main && self.scope_depth == 0 {
+                        self.emit(Op::StoreState(name.name.clone(), value.span()));
+                    }
+                    // Non-module-level `state` is a compile error (caught by
+                    // the checker); here we just store the value into a slot
+                    // to keep the stack balanced.
+                    StmtValue::None
+                } else if self.is_main && self.scope_depth == 0 {
                     // Top-level: value goes into the reserved slot region.
                     if self.captured_at_top.contains(&name.name) {
                         self.emit(Op::DefineVar(name.name.clone()));
@@ -2952,6 +3138,38 @@ impl Compiler {
             // Traits erase at check time: their impl methods are ordinary
             // functions, reached through the runtime's method dispatch.
             Stmt::Trait { .. } => StmtValue::None,
+            Stmt::Atomic { body, span } => {
+                // Compile the body as a sub-chunk. The VM executes it under
+                // the state lock (see `Op::Atomic` in runtime.rs).
+                let mut sub = Compiler::new();
+                sub.type_scope = self.type_scope.clone();
+                sub.symbol_map = self.symbol_map.clone();
+                sub.top_globals = self.top_globals.clone();
+                sub.state_names = self.state_names.clone();
+                sub.types = self.types.clone();
+                sub.structs = self.structs.clone();
+                sub.native_names = self.native_names.clone();
+                sub.func_info = self.func_info.clone();
+                sub.enums = self.enums.clone();
+                sub.impl_methods = self.impl_methods.clone();
+                sub.in_atomic_depth = self.in_atomic_depth + 1;
+                let mut last_stmt_value = StmtValue::None;
+                for s in &body.stmts {
+                    last_stmt_value = sub.compile_stmt(s, false);
+                }
+                // Discard any leftover value from the last statement.
+                if matches!(last_stmt_value, StmtValue::Discard | StmtValue::Keep) {
+                    sub.emit(Op::Pop);
+                }
+                self.emit(Op::Atomic {
+                    body: Arc::new(sub.chunk),
+                    span: *span,
+                });
+                // The atomic body chunk's return value is pushed onto the
+                // stack by the frame return mechanism (line 821). Atomic
+                // blocks yield no value, so discard it here.
+                StmtValue::Discard
+            }
             // Enums register their variant names so qualified
             // construction (`Token.IntLit(1)`) resolves at runtime.
             // Values are plain `Object`s — no other state needed.
@@ -3211,14 +3429,21 @@ impl Compiler {
                         match self.resolve(name) {
                             Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
                             Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
+                            Resolved::State => self.emit(Op::StoreState(name.clone(), *span)),
                         }
                         self.stmt_unit(value_discarded)
                     }
                 }
                 Expr::Path { parts, span } => {
+                    let full = parts.join(".");
                     // Move-take: fused push/field takes (locals and
-                    // module-global homes).
-                    if parts.len() == 2 && self.try_emit_move_path(parts, *span, value) {
+                    // module-global homes). State bindings live in the
+                    // registry, not slots, so they cannot use move-path
+                    // optimization; fall through to StoreState.
+                    if parts.len() == 2
+                        && !self.state_names.contains(&full)
+                        && self.try_emit_move_path(parts, *span, value)
+                    {
                         return self.stmt_unit(value_discarded);
                     }
                     // Move-take for `ns.x = f(ns.x, ...)`: thread the
@@ -3367,7 +3592,37 @@ impl Compiler {
                 value,
                 span,
             } => match target {
-                Expr::Ident { .. } | Expr::Path { .. } => {
+                Expr::Ident { name, .. } if self.state_names.contains(name) => {
+                    // D2: `state x OP= v` is a single atomic RMW under one
+                    // lock acquisition. Emit `RmwState` directly instead of
+                    // rewriting to `Assign` (which would be separate
+                    // LoadState + StoreState — not atomic).
+                    self.compile_expr(value);
+                    self.emit(Op::RmwState(name.clone(), *op, *span));
+                    StmtValue::None
+                }
+                Expr::Path { parts, span: pspan } => {
+                    let full = parts.join(".");
+                    if self.state_names.contains(&full) {
+                        self.compile_expr(value);
+                        self.emit(Op::RmwState(parts.join("."), *op, *pspan));
+                        StmtValue::None
+                    } else {
+                        // Fall through to generic path
+                        let synthetic = Stmt::Assign {
+                            target: target.clone(),
+                            value: Expr::Binary {
+                                op: *op,
+                                left: Box::new(target.clone()),
+                                right: Box::new(value.clone()),
+                                span: *span,
+                            },
+                            span: *span,
+                        };
+                        self.compile_stmt(&synthetic, value_discarded)
+                    }
+                }
+                Expr::Ident { .. } => {
                     // Side-effect-free receivers: rewrite to the plain
                     // Assign path with a synthesized
                     // `target = target OP value`, so slot fusion, green
@@ -3524,6 +3779,9 @@ impl Compiler {
                                     Resolved::Env => {
                                         self.emit(Op::LoadVar(obj_name.clone(), e.span()))
                                     }
+                                    Resolved::State => {
+                                        self.emit(Op::LoadState(obj_name.clone(), e.span()))
+                                    }
                                 }
                                 for a in args {
                                     self.compile_expr(a);
@@ -3542,6 +3800,9 @@ impl Compiler {
                                     Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
                                     Resolved::Env => {
                                         self.emit(Op::StoreVar(obj_name.clone(), e.span()))
+                                    }
+                                    Resolved::State => {
+                                        self.emit(Op::StoreState(obj_name.clone(), e.span()))
                                     }
                                 }
                                 return StmtValue::None;
@@ -3606,6 +3867,9 @@ impl Compiler {
                                 match self.resolve(name) {
                                     Resolved::Slot(slot) => self.emit(Op::StoreSlot(slot as u16)),
                                     Resolved::Env => self.emit(Op::StoreVar(name.clone(), *span)),
+                                    Resolved::State => {
+                                        self.emit(Op::StoreState(name.clone(), *span))
+                                    }
                                 }
                                 return StmtValue::None;
                             }
@@ -3846,6 +4110,7 @@ impl Compiler {
         sub.type_scope = scope.to_string();
         sub.symbol_map = self.symbol_map.clone();
         sub.top_globals = self.top_globals.clone();
+        sub.state_names = self.state_names.clone();
         sub.types = self.types.clone();
         sub.structs = self.structs.clone();
         sub.native_names = self.native_names.clone();
@@ -3953,6 +4218,7 @@ impl Compiler {
                         Resolved::Env => {
                             sub.emit(Op::LoadVar(name.clone(), span));
                         }
+                        Resolved::State => {}
                     }
                     if is_return {
                         sub.emit(Op::Return);
@@ -4188,6 +4454,7 @@ impl Compiler {
         let mut sub = Compiler::new();
         sub.type_scope = self.type_scope.clone();
         sub.top_globals = self.top_globals.clone();
+        sub.state_names = self.state_names.clone();
         sub.types = self.types.clone();
         sub.structs = self.structs.clone();
         sub.native_names = self.native_names.clone();
@@ -4243,6 +4510,7 @@ impl Compiler {
                         sub.inline_zero_arg_calls();
                         return Arc::new(sub.chunk);
                     }
+                    Resolved::State => {}
                 }
                 if needs_env {
                     sub.emit(Op::ExitScope);
@@ -4261,7 +4529,50 @@ impl Compiler {
         Arc::new(sub.chunk)
     }
 
+    /// Compile `expr`, wrapping each maximal pure region that reads `state`
+    /// in one `StateBatchBegin`/`StateBatchEnd` (one lock acquisition).
+    ///
+    /// R1: a pure region is a maximal subexpression with no call of any kind.
+    /// R2: for a call, the cell (receiver + arguments) is the region, and the
+    /// call op closes it before running. R4: inside `atomic { }` the block
+    /// already holds the lock, so no batch is emitted.
     fn compile_expr(&mut self, expr: &Expr) {
+        if self.in_atomic_depth == 0 && self.in_batch_depth == 0 {
+            let reads = self.expr_reads_state_direct(expr);
+            if zz_frontend::ast::call_cell_is_pure(expr) && reads {
+                // R2: one region for the whole call cell; `emit` closes it
+                // immediately before the call op.
+                self.in_batch_depth += 1;
+                self.pending_call_region = true;
+                self.emit(Op::StateBatchBegin(expr.span()));
+                self.compile_expr_inner(expr);
+                if self.pending_call_region {
+                    // No call op was emitted (e.g. enum construction).
+                    self.pending_call_region = false;
+                    self.in_batch_depth -= 1;
+                    self.emit(Op::StateBatchEnd(expr.span()));
+                }
+                return;
+            }
+            if zz_frontend::ast::expr_is_pure(expr) && reads {
+                self.in_batch_depth += 1;
+                self.emit(Op::StateBatchBegin(expr.span()));
+                self.compile_expr_inner(expr);
+                self.in_batch_depth -= 1;
+                self.emit(Op::StateBatchEnd(expr.span()));
+                return;
+            }
+        }
+        self.compile_expr_inner(expr);
+    }
+
+    /// State names read directly by `expr` (no bodies), matching the shared
+    /// pure-region analysis used by the checker and the AOT lowering.
+    fn expr_reads_state_direct(&self, expr: &Expr) -> bool {
+        !zz_frontend::ast::expr_state_reads(expr, &|n| self.state_names.contains(n)).is_empty()
+    }
+
+    fn compile_expr_inner(&mut self, expr: &Expr) {
         // Take-restore `len(s.f)` (#242): no container or field clone.
         if self.try_emit_len_field(expr) {
             return;
@@ -4287,6 +4598,7 @@ impl Compiler {
                         let home = match self.resolve(name) {
                             Resolved::Slot(slot) => TakeHome::Slot(slot as u16),
                             Resolved::Env => TakeHome::Env(name.clone()),
+                            Resolved::State => return,
                         };
                         if home == flag_home {
                             self.move_take = None;
@@ -4301,6 +4613,22 @@ impl Compiler {
                 match self.resolve(name) {
                     Resolved::Slot(slot) => self.emit(Op::LoadSlot(slot as u16)),
                     Resolved::Env => self.emit(Op::LoadVar(name.clone(), *span)),
+                    Resolved::State => {
+                        if self.in_atomic_depth > 0 {
+                            // R4: the `atomic { }` frame holds the lock.
+                            self.emit(Op::LoadState(name.clone(), *span));
+                        } else {
+                            self.in_batch_depth += 1;
+                            if self.in_batch_depth == 1 {
+                                self.emit(Op::StateBatchBegin(*span));
+                            }
+                            self.emit(Op::LoadState(name.clone(), *span));
+                            if self.in_batch_depth == 1 {
+                                self.emit(Op::StateBatchEnd(*span));
+                            }
+                            self.in_batch_depth -= 1;
+                        }
+                    }
                 }
             }
             Expr::Path { parts, span } => self.compile_path_load(parts, *span),
@@ -4405,6 +4733,9 @@ impl Compiler {
                             }
                         }
                     } else {
+                        // Pure regions are opened by `compile_expr`; an
+                        // impure binary (a call on either side) splits at the
+                        // call, which closes its own argument region (R2/R3).
                         self.compile_expr(left);
                         self.compile_expr(right);
                         self.emit(Op::BinOp(*op, *span));
@@ -4747,6 +5078,9 @@ impl Compiler {
                             match self.resolve(&parts[0]) {
                                 Resolved::Slot(slot) => self.emit(Op::LoadSlot(slot as u16)),
                                 Resolved::Env => self.emit(Op::LoadVar(parts[0].clone(), *pspan)),
+                                Resolved::State => {
+                                    self.emit(Op::LoadState(parts[0].clone(), *pspan))
+                                }
                             }
                             for part in &parts[1..parts.len() - 1] {
                                 self.emit(Op::GetField(part.clone(), *pspan));
@@ -4949,6 +5283,7 @@ impl Compiler {
                                 Expr::Ident { name, .. } => match self.resolve(name) {
                                     Resolved::Slot(slot) => Some(TakeHome::Slot(slot as u16)),
                                     Resolved::Env => Some(TakeHome::Env(name.clone())),
+                                    Resolved::State => None,
                                 },
                                 _ => None,
                             };

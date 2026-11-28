@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
 use std::sync::Arc;
+use zz_diag_core::ErrorCode;
 use zz_scope::ScopeOps;
 
 use zz_span_ast::ast::{Program, Stmt};
@@ -938,12 +939,67 @@ fn check_program_impl(
         // `@link` is collected in Pass 2 (check_stmt) to preserve order/dedup.
     }
 
-    // Pass 2: check top-level statements in order. Non-function items
-    // record expression types under TOP_SCOPE (function bodies scope
-    // themselves in check_stmt).
+    // Pass 2: check top-level statements in dependency order.
+    //
+    // 1. Imports first — module namespaces must be registered before any
+    //    statement can reference `module.item` (e.g. `fs.delete` under
+    //    `import std.fs`). Doing this first also suppresses the spurious
+    //    "add import" hint for already-imported modules (#710).
+    // 2. State declarations — env populated before function bodies so
+    //    state vars are resolvable inside `atomic { }` blocks.
+    // 3. Non-state declarations — variables enter the env before function
+    //    bodies are checked, so `func main() { println(val) }` resolves
+    //    `pub val := 10`. Type-inference errors for unresolved return types
+    //    are deferred (see step 6) rather than emitted immediately.
+    // 4. Function/impl bodies — return-type inference variables are
+    //    resolved here (e.g. `func five() { return 5 }` binds its ret to
+    //    `int`), which unblocks deferred declarations like `z := five()`.
+    // 5. Everything else (non-decl, non-import statements).
+    // 6. Resolve deferred type-inference errors: emit only if the type is
+    //    still unresolved after all function bodies are checked.
     for stmt in &program.stmts {
-        // Track pub on Decl before checking.
+        if matches!(stmt, Stmt::Import { .. }) {
+            let scoped = !matches!(stmt, Stmt::Func { .. } | Stmt::Impl { .. });
+            if scoped {
+                checker.scope.push(Arc::from(TOP_SCOPE));
+            }
+            checker.check_stmt(stmt);
+            if scoped {
+                checker.scope.pop();
+            }
+        }
+    }
+    for stmt in &program.stmts {
+        if let Stmt::Decl {
+            name,
+            pub_,
+            is_state: true,
+            ..
+        } = stmt
+        {
+            // Track pub on Decl before checking.
+            if *pub_ {
+                pub_bindings_set.insert(name.name.clone());
+            }
+            let scoped = !matches!(stmt, Stmt::Func { .. } | Stmt::Impl { .. });
+            if scoped {
+                checker.scope.push(Arc::from(TOP_SCOPE));
+            }
+            checker.check_stmt(stmt);
+            if scoped {
+                checker.scope.pop();
+            }
+        }
+    }
+    for stmt in &program.stmts {
+        if matches!(
+            stmt,
+            Stmt::Import { .. } | Stmt::Decl { is_state: true, .. }
+        ) {
+            continue;
+        }
         if let Stmt::Decl { name, pub_, .. } = stmt {
+            // Track pub on Decl before checking.
             if *pub_ {
                 pub_bindings_set.insert(name.name.clone());
             }
@@ -955,6 +1011,71 @@ fn check_program_impl(
         checker.check_stmt(stmt);
         if scoped {
             checker.scope.pop();
+        }
+    }
+    for stmt in &program.stmts {
+        if matches!(stmt, Stmt::Func { .. } | Stmt::Impl { .. }) {
+            let scoped = !matches!(stmt, Stmt::Func { .. } | Stmt::Impl { .. });
+            if scoped {
+                checker.scope.push(Arc::from(TOP_SCOPE));
+            }
+            checker.check_stmt(stmt);
+            if scoped {
+                checker.scope.pop();
+            }
+        }
+    }
+    // Z0019 (R3): top-level statements whose header expression splits two
+    // different `state` reads across pure regions.
+    let top_block = zz_span_ast::ast::Block {
+        stmts: program.stmts.clone(),
+        span: program.span,
+    };
+    let z19 = zz_type_check::check_z0019_in_block(&checker, &top_block);
+    checker.errors.extend(z19);
+
+    // Z0013: state read before its declaration (earlier top-level statement).
+    let mut state_decl_idx: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (i, stmt) in program.stmts.iter().enumerate() {
+        if let zz_frontend::ast::Stmt::Decl { name, is_state, .. } = stmt {
+            if *is_state {
+                state_decl_idx.insert(name.name.clone(), i);
+            }
+        }
+    }
+    for (i, stmt) in program.stmts.iter().enumerate() {
+        for (sname, decl_idx) in &state_decl_idx {
+            if *decl_idx > i && stmt_reads_state_name(stmt, sname) {
+                checker.errors.push(
+                    zz_diag_core::error_at(
+                        format!(
+                            "read of `state` `{sname}` before its initializer ran\n\
+                         hint: move the `state {sname}` declaration before this statement",
+                            sname = sname
+                        ),
+                        stmt.span(),
+                    )
+                    .with_code(ErrorCode(52)),
+                );
+            }
+        }
+    }
+    // Step 6: resolve deferred type-inference errors. A declaration like
+    // `z := five()` defers its "cannot infer type" error until `five`'s
+    // body has been checked and its return-type variable resolved.
+    for (name, span) in std::mem::take(&mut checker.deferred_type_errors) {
+        if let Some(ty) = checker.new_bindings.get(&name) {
+            let rt = checker.unifier.resolve_deep(ty);
+            if zz_infer::contains_var(&rt) {
+                checker.errors.push(
+                    zz_diag_core::error_at(
+                        format!("cannot infer the type of `{name}`; add a type annotation"),
+                        span,
+                    )
+                    .with_code(ErrorCode(2)),
+                );
+            }
         }
     }
 
@@ -1754,4 +1875,77 @@ fn link_symbol_ok(cc: &str, symbol: &str, libs: &[String]) -> bool {
         return false;
     };
     link.status.success()
+}
+
+/// True when `stmt` (top-level) contains a bare identifier reference to `name`.
+fn stmt_reads_state_name(stmt: &zz_frontend::ast::Stmt, name: &str) -> bool {
+    match stmt {
+        zz_frontend::ast::Stmt::Decl { value, .. } => expr_refers_to_name_mod(value, name),
+        zz_frontend::ast::Stmt::Assign { target, value, .. } => {
+            expr_refers_to_name_mod(target, name) || expr_refers_to_name_mod(value, name)
+        }
+        zz_frontend::ast::Stmt::CompoundAssign { target, value, .. } => {
+            expr_refers_to_name_mod(target, name) || expr_refers_to_name_mod(value, name)
+        }
+        zz_frontend::ast::Stmt::Expr(e) => expr_refers_to_name_mod(e, name),
+        zz_frontend::ast::Stmt::Return { value, .. } => value
+            .as_ref()
+            .is_some_and(|v| expr_refers_to_name_mod(v, name)),
+        zz_frontend::ast::Stmt::Defer { expr, .. } => expr_refers_to_name_mod(expr, name),
+        zz_frontend::ast::Stmt::For { body, .. } => block_reads_name_mod(body, name),
+        zz_frontend::ast::Stmt::Atomic { body, .. } => block_reads_name_mod(body, name),
+        _ => false,
+    }
+}
+
+fn expr_refers_to_name_mod(e: &zz_frontend::ast::Expr, name: &str) -> bool {
+    match e {
+        zz_frontend::ast::Expr::Ident { name: n, .. } if n == name => true,
+        zz_frontend::ast::Expr::Path { parts, .. } => parts.iter().any(|p| p == name),
+        zz_frontend::ast::Expr::Field { obj, name: n, .. } if n == name => true,
+        zz_frontend::ast::Expr::Field { obj, .. } => expr_refers_to_name_mod(obj, name),
+        zz_frontend::ast::Expr::Binary { left, right, .. } => {
+            expr_refers_to_name_mod(left, name) || expr_refers_to_name_mod(right, name)
+        }
+        zz_frontend::ast::Expr::Unary { expr, .. } => expr_refers_to_name_mod(expr, name),
+        zz_frontend::ast::Expr::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            expr_refers_to_name_mod(callee, name)
+                || args.iter().any(|a| expr_refers_to_name_mod(a, name))
+                || named.iter().any(|(_, v)| expr_refers_to_name_mod(v, name))
+        }
+        zz_frontend::ast::Expr::Closure { body, .. } => expr_refers_to_name_mod(body, name),
+        zz_frontend::ast::Expr::If {
+            cond, then, els, ..
+        } => {
+            expr_refers_to_name_mod(cond, name)
+                || block_reads_name_mod(then, name)
+                || els
+                    .as_ref()
+                    .is_some_and(|e| expr_refers_to_name_mod(e, name))
+        }
+        zz_frontend::ast::Expr::While { cond, body, .. } => {
+            expr_refers_to_name_mod(cond, name) || block_reads_name_mod(body, name)
+        }
+        zz_frontend::ast::Expr::Block(b) => block_reads_name_mod(b, name),
+        zz_frontend::ast::Expr::Array { elems, .. } => {
+            elems.iter().any(|e| expr_refers_to_name_mod(e, name))
+        }
+        zz_frontend::ast::Expr::Dict { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| expr_refers_to_name_mod(k, name) || expr_refers_to_name_mod(v, name)),
+        zz_frontend::ast::Expr::Paren { expr, .. } => expr_refers_to_name_mod(expr, name),
+        zz_frontend::ast::Expr::Tuple { items, .. } => {
+            items.iter().any(|e| expr_refers_to_name_mod(e, name))
+        }
+        _ => false,
+    }
+}
+
+fn block_reads_name_mod(b: &zz_frontend::ast::Block, name: &str) -> bool {
+    b.stmts.iter().any(|s| stmt_reads_state_name(s, name))
 }

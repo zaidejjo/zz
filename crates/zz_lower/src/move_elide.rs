@@ -98,6 +98,14 @@ impl Lowerer {
             }
             return None;
         }
+        // State globals are takeable via push_take (in-place mutation under
+        // the state lock). Without this, `state_log = vec.push(state_log, e)`
+        // reads+copies+writes the whole vector on every push: O(n) per push,
+        // O(n²) total, and unbounded memory growth under contention.
+        if self.state_set.contains(var) {
+            let cid = Lowerer::state_cid(var);
+            return Some((cid, false));
+        }
         let suffix = format!(".{var}");
         let mut hit: Option<(String, bool)> = None;
         for (key, (cid, ctype)) in &names.globals {

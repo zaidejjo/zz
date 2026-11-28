@@ -143,6 +143,7 @@ pub enum Stmt {
         span: Span,
         pub_: bool,
         is_const: bool,
+        is_state: bool,
     },
     /// `import std.str` — a dotted path of identifiers, optionally aliased
     /// (`import std.str as s`), with optional selective items
@@ -259,6 +260,13 @@ pub enum Stmt {
         expr: Box<Expr>,
         span: Span,
     },
+    /// `atomic { ... }` — execute the body while holding the shared state
+    /// lock. Contextual keyword: `atomic` at statement start followed by `{`.
+    /// v1: a statement, not an expression; nested `atomic` is reentrant.
+    Atomic {
+        body: Block,
+        span: Span,
+    },
     /// `target = value` — assignment to a variable or struct field.
     Assign {
         target: Expr,
@@ -308,7 +316,8 @@ impl Stmt {
             | Stmt::Break { span }
             | Stmt::Continue { span }
             | Stmt::Defer { span, .. }
-            | Stmt::Assign { span, .. } => *span,
+            | Stmt::Assign { span, .. }
+            | Stmt::Atomic { span, .. } => *span,
             Stmt::CompoundAssign { span, .. } => *span,
             Stmt::ExternBlock { span, .. } | Stmt::Link { span, .. } => *span,
             Stmt::Impl { span, .. } => *span,

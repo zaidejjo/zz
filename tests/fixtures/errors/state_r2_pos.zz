@@ -1,0 +1,14 @@
+// features: int-arith, locals, print, state, std-task
+// R2 positive: a plain global assigned inside a task.spawn closure — must
+// be `state` instead.
+import std.task
+
+plain := 0
+
+func main() -> int {
+    h := task.spawn(|_| {
+        plain = 99
+    })
+    task.join(h)
+    return 0
+}

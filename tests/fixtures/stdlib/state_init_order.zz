@@ -1,0 +1,11 @@
+// features: int-arith, locals, print, state
+// D1: state init order and read-before-init runtime guard.
+// State initializers run in source order before main().
+state first := 1
+state second := first + 1
+
+func main() -> int {
+    if second != 2 { return -1 }
+    println("init_order_ok")
+    return 0
+}

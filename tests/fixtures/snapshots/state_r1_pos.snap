@@ -1,0 +1,11 @@
+first module that broke: <path> <path>
+
+error: Z0055: check-then-act on `state` `n`:
+read at statement 0 can reach write at statement 1
+hint: wrap both in `atomic { }`
+
+--> <path>
+|
+7 | n = 1
+| ^^^^^
+zz: 1 file(s) failed type-check

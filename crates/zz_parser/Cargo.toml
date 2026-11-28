@@ -8,4 +8,3 @@ license.workspace = true
 zz_span_ast = { path = "../zz_span_ast" }
 zz_lexer = { path = "../zz_lexer" }
 zz_diag = { path = "../zz_diag" }
-zz_suggest = { path = "../zz_suggest" }

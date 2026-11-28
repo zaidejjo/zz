@@ -4,6 +4,19 @@
 // encoding natives, channels, spawn, TCP, HTTP, and the entry point.
 #include "runtime.h"
 
+// `struct zz_chan` carries `__attribute__((aligned(64)))` members
+// (ring_head / ring_tail), so it must be allocated with 64-byte alignment;
+// plain `malloc` only guarantees max_align_t (16 bytes on x86-64) and the
+// runtime panics on misaligned member access. `aligned_alloc` requires the
+// size to be a multiple of the alignment, so round up.
+#if defined(_MSC_VER)
+#define ZZ_ALIGNED_ALLOC(size, align) _aligned_malloc((size), (align))
+#define ZZ_ALIGNED_FREE(p) _aligned_free((p))
+#else
+#define ZZ_ALIGNED_ALLOC(size, align) aligned_alloc((align), (size))
+#define ZZ_ALIGNED_FREE(p) free((p))
+#endif
+
 // ---- truthiness --------------------------------------------------------
 bool zz_truthy(zz_value v) {
     switch (v.tag) {
@@ -27,7 +40,9 @@ bool zz_truthy(zz_value v) {
 // ---- arithmetic --------------------------------------------------------
 zz_value zz_neg(zz_value a) {
     if (a.tag == ZZ_INT)
-        return zz_int(-a.i);
+        // `-INT64_MIN` is signed overflow (UB); wrap to INT64_MIN to match
+        // the VM (and the fixture contract: negating i64::MIN wraps to itself).
+        return zz_int(a.i == INT64_MIN ? INT64_MIN : -a.i);
     if (a.tag == ZZ_FLOAT)
         return zz_float(-a.f);
     return zz_unit();
@@ -1831,7 +1846,7 @@ static zz_value zz_value_dup_inner(zz_value v, int *err, zz_dup_memo *m) {
 
 // Deep-copy a value for transfer across a thread boundary. See above.
 zz_value zz_value_dup(zz_value v) {
-    zz_dup_entry inline_store[ZZ_DUP_INLINE_CAP];
+    zz_dup_entry inline_store[ZZ_DUP_INLINE_CAP] = {0};
     zz_dup_memo m = {inline_store, 0, ZZ_DUP_INLINE_CAP, 0};
     int discarded_err = 0;
     zz_value out = zz_value_dup_inner(v, &discarded_err, &m);
@@ -1876,14 +1891,18 @@ static int zz_chan_handoff_locked(
 zz_value zz_chan_new(zz_value unused, int *err) {
     (void)unused;
     (void)err;
-    zz_chan *ch = (zz_chan *)malloc(sizeof(zz_chan));
+    // Round the size up to a multiple of 64 because aligned_alloc requires
+    // size % align == 0; the extra padding is harmless.
+    size_t chan_size = sizeof(zz_chan);
+    size_t alloc_size = (chan_size + 63) & ~(size_t)63;
+    zz_chan *ch = (zz_chan *)ZZ_ALIGNED_ALLOC(alloc_size, 64);
     if (!ch) {
         fprintf(stderr, "zz: out of memory (channel)\n");
         exit(1);
     }
     ch->ring = (zz_ring_cell *)malloc(sizeof(zz_ring_cell) * ZZ_RING_CAP);
     if (!ch->ring) {
-        free(ch);
+        ZZ_ALIGNED_FREE(ch);
         fprintf(stderr, "zz: out of memory (channel ring)\n");
         exit(1);
     }
@@ -1902,7 +1921,7 @@ zz_value zz_chan_new(zz_value unused, int *err) {
     ch->queue = (zz_value *)malloc(sizeof(zz_value) * ch->cap);
     if (!ch->queue) {
         free(ch->ring);
-        free(ch);
+        ZZ_ALIGNED_FREE(ch);
         fprintf(stderr, "zz: out of memory (channel buffer)\n");
         exit(1);
     }
@@ -2140,6 +2159,7 @@ zz_value zz_chan_recv(zz_value chan, int *err) {
 #elif defined(__aarch64__)
         __asm__ volatile("yield");
 #else
+        zz_state_yield_guard();
         zz_yield();
 #endif
         }
@@ -3218,6 +3238,7 @@ static void *zz_worker_loop(void *arg) {
 #elif defined(__aarch64__)
             __asm__ volatile("yield");
 #else
+            zz_state_yield_guard();
             zz_yield();
 #endif
         }
@@ -3366,7 +3387,7 @@ zz_value zz_spawn_ex(zz_dispatch_fn fn, void **cells,
                      size_t nenv, int is_green, int *err) {
     if (!fn) { *err = 1; return zz_unit(); }
     zz_once(&zz_executor_once, zz_executor_init);
-    zz_dup_entry inline_store[ZZ_DUP_INLINE_CAP];
+    zz_dup_entry inline_store[ZZ_DUP_INLINE_CAP] = {0};
     zz_dup_memo m = {inline_store, 0, ZZ_DUP_INLINE_CAP, 0};
     zz_value owned =
         zz_closure_dup_build(fn, cells, kinds, sizes, nenv, is_green, err, &m);
@@ -3567,6 +3588,7 @@ void zz_safepoint(void) {
     if (zz_sp_start_ms == 0) { zz_sp_start_ms = now_ms; return; }
     if (now_ms - zz_sp_start_ms >= 1) {
         zz_sp_start_ms = now_ms;
+        zz_state_yield_guard();
         zz_yield();
     }
 }
@@ -9338,7 +9360,7 @@ zz_value zz_typeof(zz_value v, int *err) {
 // a snapshot regardless of ownership analysis. Cycle-safe via the
 // dup memo (same helper as thread crossings).
 zz_value zz_clone_deep(zz_value v, int *err) {
-    zz_dup_entry inline_store[ZZ_DUP_INLINE_CAP];
+    zz_dup_entry inline_store[ZZ_DUP_INLINE_CAP] = {0};
     zz_dup_memo m = {inline_store, 0, ZZ_DUP_INLINE_CAP, 0};
     zz_value out = zz_value_dup_inner(v, err, &m);
     if (m.owned) free(m.items);

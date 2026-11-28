@@ -1,0 +1,76 @@
+import std.task
+
+state a := 100
+state b := 0
+state stop := 0
+
+func busy() {
+    x := 0
+    for i in 0..200 {
+        x = (x + i * 7) % 1009
+    }
+    if x < 0 { println("unreachable") }
+}
+
+func writer_fwd() {
+    n := 0
+    while stop == 0 && n < 20000 {
+        atomic {
+            a -= 1
+            busy()
+            b += 1
+        }
+        n += 1
+    }
+}
+
+func writer_back() {
+    n := 0
+    while stop == 0 && n < 20000 {
+        atomic {
+            b -= 1
+            busy()
+            a += 1
+        }
+        n += 1
+    }
+}
+
+// Batched multi-read: `[a, b]` must be one snapshot.
+func batched_reader(m: int) -> int {
+    v := 0
+    for i in 0..m {
+        pair := [a, b]
+        if pair[0] + pair[1] != 100 {
+            v += 1
+            if v < 4 { println("batched_torn a={pair[0]} b={pair[1]}") }
+        }
+    }
+    return v
+}
+
+// Control: the same pair read while explicitly holding the state lock.
+func atomic_reader(m: int) -> int {
+    v := 0
+    for i in 0..m {
+        atomic {
+            if a + b != 100 { v += 1 }
+        }
+    }
+    return v
+}
+
+func main() -> Result<int, str> {
+    h0 := task.spawn(|_| { writer_fwd() })
+    h1 := task.spawn(|_| { writer_back() })
+    hr := task.spawn(|_| { batched_reader(5000) })
+    v: int = task.join(hr)
+    ha := task.spawn(|_| { atomic_reader(5000) })
+    va: int = task.join(ha)
+    atomic { stop = 1 }
+    task.join(h0)
+    task.join(h1)
+    println("batched_violations={v}")
+    println("atomic_violations={va}")
+    return .ok(0)
+}

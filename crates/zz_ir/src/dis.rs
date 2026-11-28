@@ -330,6 +330,14 @@ fn op_text(module: &Module, op: &Op) -> String {
         Op::EnterScope => "enterscope".to_string(),
         Op::ExitScope => "exitscope".to_string(),
         Op::DeferRecord => "defer".to_string(),
+        Op::LoadState { name } => format!("loadstate {}", str_text(module, *name)),
+        Op::StoreState { name } => format!("storestate {}", str_text(module, *name)),
+        Op::RmwState { name, op } => {
+            format!("rmwstate {} {op:?}", str_text(module, *name))
+        }
+        Op::Atomic { body } => format!("atomic f{}", body.0),
+        Op::StateBatchBegin => "statebatchbegin".to_string(),
+        Op::StateBatchEnd => "statebatchend".to_string(),
     }
 }
 

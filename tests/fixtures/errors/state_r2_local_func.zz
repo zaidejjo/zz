@@ -1,0 +1,20 @@
+// features: int-arith, locals, print, state, std-task
+// R2 positive: plain global assigned via local first-class func value
+// inside task.spawn closure. With the callgraph fix, `helper` is kept
+// reachable (address-taken edge), so `plain` is detected as task-reachable.
+import std.task
+
+plain := 0
+
+func helper() {
+    plain = 99
+}
+
+func main() -> int {
+    f := helper
+    h := task.spawn(|_| {
+        f()
+    })
+    task.join(h)
+    return 0
+}

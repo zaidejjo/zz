@@ -1,0 +1,64 @@
+# Step 3c Phase 0 — Environment confirmation and fresh build from HEAD
+
+## Step 0.1 — Branch and tree state
+
+Command:
+```
+git branch --show-current
+git status --porcelain
+git log --oneline -3
+```
+
+Output:
+```
+feat/shared-mutable-state
+(empty = clean)
+ea8ac6f9 fix(codegen): box builtin-scalar receiver in extension-method calls
+263a946f fix(clippy): remove unneeded wildcard patterns in check_stmt
+e95f4ffc fix(deps): remove unused crate dependencies
+```
+
+Result: On branch `feat/shared-mutable-state`, working tree clean, HEAD is `ea8ac6f9`.
+
+## Step 0.2 — Fresh release build from HEAD
+
+Command:
+```
+cargo build --release -p zz_cli 2>&1 | tail -30
+```
+
+Output:
+```
+   Compiling reqwest v0.12.28
+   Compiling zz_codegen_runtime v0.4.0 (/home/zaid/Projects/zz/crates/zz_codegen_runtime)
+   Compiling thiserror-impl v1.0.69
+   Compiling zz_codegen_types v0.4.0 (/home/zaid/Projects/zz/crates/zz_codegen_types)
+   Compiling thiserror v1.0.69
+   Compiling zz_pm v0.4.0 (/home/zaid/Projects/zz/crates/zz_pm)
+   Compiling derive_more-impl v2.80
+   Compiling strum_macros v0.28.0
+   Compiling zz_runtime v0.4.0 (/home/zaid/Projects/zz/crates/zz_runtime)
+   Compiling zz_codegen_ffi v0.4.0 (/home/zaid/Projects/zz/crates/zz_codegen_ffi)
+   Compiling zz_stdlib v0.4.0 (/home/zaid/Projects/zz/crates/zz_stdlib)
+   Compiling zz_ir v0.4.0 (/home/zaid/Projects/zz/crates/zz_ir)
+   Compiling zz_lower v0.4.0 (/home/zaid/Projects/zz/crates/zz_lower)
+   Compiling zz_chunk v0.4.0 (/home/zaid/Projects/zz/crates/zz_chunk)
+   Compiling zz_run_cache v0.4.0 (/home/zaid/Projects/zz/crates/zz_run_cache)
+   Compiling zz_codegen_ffi v0.4.0 (/home/zaid/Projects/zz/crates/zz_codegen_ffi)
+   Compiling zz_plugin v0.1.0 (/home/zaid/Projects/zz/crates/zz_plugin)
+   Compiling derive_more v0.1.0
+   Compiling zz_loader v0.4.0 (/home/zaid/Projects/zz/crates/zz_loader)
+   Compiling crossterm v0.29.0
+   Compiling zz_codegen v0.4.0 (/home/zaid/Projects/zz/crates/zz_codegen)
+   Compiling strum v0.1.0
+   Compiling zz_session v0.4.0 (/home/zaid/Projects/zz/crates/zz_session)
+   Compiling zz_build v0.4.0 (/home/zaid/Projects/zz/crates/zz_build)
+   Compiling reedline v0.51.0
+   Compiling zz_fmt v0.4.0 (/home/zaid/Projects/zz/crates/zz_fmt)
+   Compiling zz_repl v0.4.0 (/home/zaid/Projects/zz/crates/zz_repl)
+   Compiling zz_test_runner v0.4.0 (/home/zaid/Projects/zz/crates/zz_test_runner)
+   Compiling zz_cli v0.4.0 (/home/zaid/Projects/zz/crates/zz_cli)
+    Finished `release` profile [optimized + debuginfo] target(s) in 11m 32s
+```
+
+Result: Build succeeded, exit code 0. Binary at `target/release/zz`.

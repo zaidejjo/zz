@@ -1,0 +1,26 @@
+; zzcz v5
+; types=3 strings=7 consts=4 funcs=3
+func f0 "main" arity=0 entry max_stack=2 sig=()->unknown locals=[]
+  0000  makefunc f1  ; @0..0
+  0001  pop  ; @0..0
+  0002  const c2 ; int(1)  ; @0..0
+  0003  storestate "a"  ; @0..0
+  0004  makefunc f2  ; @0..0
+  0005  const c1 ; unit  ; @0..0
+func f1 "bench_e.bar" arity=0 max_stack=1 sig=()->var(1) locals=[]
+  0000  const c0 ; str("bar")  ; @0..0
+  0001  callnative "println" argc=1  ; @26..40
+  0002  pop  ; @0..0
+  0003  const c1 ; unit  ; @0..0
+func f2 "bench_e.main" arity=0 max_stack=2 sig=()->int locals=[]
+  0000  statebatchbegin  ; @0..0
+  0001  loadstate "a"  ; @0..0
+  0002  const c3 ; int(0)  ; @0..0
+  0003  binop Gt  ; @71..76
+  0004  statebatchend  ; @0..0
+  0005  jfb 8  ; @68..86
+  0006  callpath "bench_e"."bar" argc=0  ; @79..84
+  0007  pop  ; @0..0
+  0008  const c3 ; int(0)  ; @0..0
+  0009  ret  ; @0..0
+  0010  const c1 ; unit  ; @0..0

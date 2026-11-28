@@ -1,0 +1,29 @@
+; zzcz v5
+; types=2 strings=6 consts=6 funcs=2
+func f0 "main" arity=0 entry max_stack=2 sig=()->unknown locals=[]
+  0000  const c0 ; int(50)  ; @0..0
+  0001  storestate "a"  ; @0..0
+  0002  const c0 ; int(50)  ; @0..0
+  0003  storestate "b"  ; @0..0
+  0004  makefunc f1  ; @0..0
+  0005  const c5 ; unit  ; @0..0
+func f1 "r2a_simple.main" arity=0 max_stack=3 sig=()->int locals=[unknown]
+  0000  statebatchbegin  ; @0..0
+  0001  loadstate "a"  ; @0..0
+  0002  loadstate "b"  ; @0..0
+  0003  binop Add  ; @59..64
+  0004  statebatchend  ; @0..0
+  0005  loadslot 0  ; @0..0
+  0006  const c1 ; int(100)  ; @0..0
+  0007  binop Ne  ; @72..80
+  0008  jfb 12  ; @69..94
+  0009  const c2 ; int(1)  ; @0..0
+  0010  unop Neg  ; @90..92
+  0011  ret  ; @0..0
+  0012  const c3 ; str("r2a_simple_ok")  ; @0..0
+  0013  callnative "println" argc=1  ; @99..123
+  0014  pop  ; @0..0
+  0015  const c4 ; int(0)  ; @0..0
+  0016  ret  ; @0..0
+  0017  pop  ; @0..0
+  0018  const c5 ; unit  ; @0..0

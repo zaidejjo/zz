@@ -1,0 +1,18 @@
+// features: int-arith, locals, print, state
+// R1 negative: all state reads and writes are inside `atomic { }`,
+// so no check-then-act violation.
+state n := 0
+
+func inc_twice() {
+    atomic {
+        n = n + 1
+        n = n + 1
+    }
+}
+
+func main() -> int {
+    inc_twice()
+    if n != 2 { return -1 }
+    println("r1_neg_ok")
+    return 0
+}

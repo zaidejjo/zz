@@ -277,6 +277,10 @@ fn collect_stmt_tokens(
             push_keyword_token(stmt.span(), "defer", source, out);
             collect_expr_tokens(expr, source, known, out);
         }
+        Stmt::Atomic { body, .. } => {
+            push_keyword_token(stmt.span(), "atomic", source, out);
+            collect_block_tokens(body, source, known, out);
+        }
         Stmt::Assign { target, value, .. } => {
             collect_expr_tokens(target, source, known, out);
             collect_expr_tokens(value, source, known, out);

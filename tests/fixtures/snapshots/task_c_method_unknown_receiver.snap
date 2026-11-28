@@ -1,0 +1,10 @@
+first module that broke: <path> <path>
+
+error: Z0017: global `state_counter` is reachable from a task; declare it `state`
+hint: change `state_counter := ...` to `state state_counter := ...`
+
+--> <path>
+|
+7 | state_counter := 0 <path> plain mutable global reachable from a task → Z0017
+| ^^^^^^^^^^^^^^^^^^
+zz: 1 file(s) failed type-check

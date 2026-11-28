@@ -373,3 +373,19 @@ ones copy once at the write. Programs cannot observe the sharing
 `clone(v)` pins a fully independent deep copy regardless of sharing:
 use it when a value must survive later mutation of its source, or to
 force a snapshot before handing data to tasks and plugins.
+
+### Shared mutable state (`state` / `atomic`)
+
+`state` globals are the deliberate exception to value semantics: they are
+shared, mutable process-global cells visible to every task.
+
+- Declare with `state name := value`. A `state` read-modify-write must be a
+  single self-contained expression (`n = n + 1`); splitting read and write
+  across statements is rejected as check-then-act (Z0016).
+- Wrap multi-statement RMW in `atomic { }` so it runs indivisibly under the
+  process-global state lock. Blocking/I/O/closure-taking natives are forbidden
+  inside `atomic { }` (Z0014); whitelisted pure natives (e.g. `vec.push`,
+  `str.build*` helpers) may run without `atomic { }` under D2.
+- A plain global assigned anywhere is rejected if task-reachable code can
+  touch it (Z0017); declare it `state` instead. The lock is elided (D8) when
+  no concurrency is reachable, and green tasks never yield while holding it.

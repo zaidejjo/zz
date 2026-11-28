@@ -1,0 +1,12 @@
+first module that broke: <path> <path>
+
+error: Z0058: state reads in one statement are separated by a call and may observe different snapshots (`a`, `b`); wrap the statement in atomic { } or read them in one expression
+
+--> <path>
+|
+11 | x := pick(a, f(0), b) <path> reads `a` and `b` in two regions, separated by call f()
+| ^^^^^^^^^^^^^^^^^^^^^
+warning: unused private function `state_z0019_split_states.bad`, consider prefixing with `_state_z0019_split_states.bad` or removing it
+
+= function is never called or referenced
+zz: 1 file(s) failed type-check

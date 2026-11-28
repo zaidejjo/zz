@@ -1,0 +1,10 @@
+first module that broke: <path> <path>
+
+error: Z0017: global `plain` is reachable from a task; declare it `state`
+hint: change `plain := ...` to `state plain := ...`
+
+--> <path>
+|
+10 | plain := 0
+| ^^^^^^^^^^
+zz: 1 file(s) failed type-check

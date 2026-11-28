@@ -19,6 +19,7 @@ pub(crate) mod cell;
 pub(crate) mod concurrency;
 pub(crate) mod crypto;
 pub(crate) mod db;
+pub(crate) mod debug;
 pub(crate) mod encoding;
 pub(crate) mod env;
 pub mod fs;
@@ -1551,6 +1552,21 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     );
     // Bare `time.*` aliases (mirror the `std.time.*` natives).
 
+    // std.debug — test-only debug natives.
+    m.insert(
+        "std.debug.state_batch_depth".into(),
+        NativeEntry {
+            arity: 0,
+            f: debug::debug_state_batch_depth as zz_runtime::NativeFn,
+        },
+    );
+    m.insert(
+        "std.debug.state_lock_depth".into(),
+        NativeEntry {
+            arity: 0,
+            f: debug::debug_state_lock_depth as zz_runtime::NativeFn,
+        },
+    );
     // std.sys — system information (both spellings each).
     m.insert(
         "std.sys.os".into(),
@@ -2401,7 +2417,7 @@ fn build_stdlib_natives() -> HashMap<String, NativeEntry> {
     // table without the other will fail CI here rather than at runtime.
     assert_eq!(
         m.len(),
-        440,
+        442,
         "natives registry count drifted; update this assertion"
     );
 

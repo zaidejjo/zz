@@ -131,6 +131,20 @@ pub fn zz_home() -> PathBuf {
     base.join(".zz")
 }
 
+/// Directory zz uses for heavy temporary artifacts (preprocessed sources,
+/// object files, staged binaries, build scratch).
+///
+/// Priority: `ZZ_TEMP_DIR` env var > [`std::env::temp_dir()`]. This keeps
+/// zz's multi-MB native/AOT scratch off a small quota-limited `/tmp` on
+/// constrained hosts (CI may still use the default). Honors the thread's
+/// [`env_scope`] override like [`zz_home`].
+pub fn zz_temp_dir() -> PathBuf {
+    if let Some(dir) = env_var_os("ZZ_TEMP_DIR") {
+        return PathBuf::from(dir);
+    }
+    std::env::temp_dir()
+}
+
 /// `~/.zz/packages/` — CAS source storage.
 pub fn packages_dir() -> PathBuf {
     zz_home().join("packages")
@@ -250,6 +264,19 @@ mod tests {
         let _scope = env_scope(&[("ZZ_HOME", None)]);
         let home = zz_home();
         assert!(home.ends_with(".zz"), "should end with .zz: {home:?}");
+    }
+
+    #[test]
+    fn zz_temp_dir_respects_env_var() {
+        let tmp = std::env::temp_dir().join("zz_paths_test_temp");
+        let _scope = env_scope(&[("ZZ_TEMP_DIR", Some(tmp.clone().into_os_string()))]);
+        assert_eq!(zz_temp_dir(), tmp);
+    }
+
+    #[test]
+    fn zz_temp_dir_defaults_to_std_temp_dir() {
+        let _scope = env_scope(&[("ZZ_TEMP_DIR", None)]);
+        assert_eq!(zz_temp_dir(), std::env::temp_dir());
     }
 
     #[test]

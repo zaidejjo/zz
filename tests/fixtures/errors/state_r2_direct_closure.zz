@@ -1,0 +1,18 @@
+// features: int-arith, locals, print, state, std-task
+// R2 positive: plain global assigned via directly invoked closure
+// inside task.spawn closure. The closure body's `plain = 99` is walked,
+// so `plain` is detected as task-reachable.
+import std.task
+
+plain := 0
+
+func main() -> int {
+    h := task.spawn(|_| {
+        c := |_| {
+            plain = 99
+        }
+        c(0)
+    })
+    task.join(h)
+    return 0
+}

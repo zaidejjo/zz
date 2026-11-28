@@ -59,6 +59,7 @@ fn stmt_has_decorators(stmt: &Stmt) -> bool {
         Stmt::Return { value, .. } => value.as_ref().is_some_and(expr_has_decorators),
         Stmt::For { iter, body, .. } => expr_has_decorators(iter) || block_has_decorators(body),
         Stmt::Defer { expr, .. } => expr_has_decorators(expr),
+        Stmt::Atomic { body, .. } => block_has_decorators(body),
         Stmt::Assign { target, value, .. } => {
             expr_has_decorators(target) || expr_has_decorators(value)
         }
@@ -493,6 +494,7 @@ fn expand_stmts(
                 span,
                 pub_,
                 is_const,
+                is_state,
             } => out.push(Stmt::Decl {
                 ty: ty.clone(),
                 name: name.clone(),
@@ -500,6 +502,7 @@ fn expand_stmts(
                 span: *span,
                 pub_: *pub_,
                 is_const: *is_const,
+                is_state: *is_state,
             }),
             Stmt::Assign {
                 target,
@@ -598,6 +601,7 @@ fn wrapper_func(
         span: call_span,
         pub_: false,
         is_const: false,
+        is_state: false,
     };
     let call = Expr::Call {
         callee: Box::new(Expr::Ident {

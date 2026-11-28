@@ -1,0 +1,44 @@
+// features: imports, int-arith, locals, print, state, std-task, structs
+// S1 Parser matrix: struct/function named `state` under contention.
+// 4 tasks x 1000 increments = 4000 total.
+import std.task
+
+struct state { v: int }
+
+func state(x: int) -> int {
+    return x + 1
+}
+
+state hits := 0
+
+func inc(n: int) {
+    for _ in 0..n {
+        atomic {
+            hits = hits + 1
+        }
+    }
+}
+
+func main() -> Result<int, str> {
+    hits = 0
+    s := state { v: 5 }
+    r := state(3)
+    _ = s
+    _ = r
+    n := 1000
+    h0 := task.spawn(|_| { inc(n) })
+    h1 := task.spawn(|_| { inc(n) })
+    h2 := task.spawn(|_| { inc(n) })
+    h3 := task.spawn(|_| { inc(n) })
+    task.join(h0)
+    task.join(h1)
+    task.join(h2)
+    task.join(h3)
+    v := hits
+    // 4 tasks x 1000 = 4000
+    if v != 4000 {
+        return .err("mismatch: {v}")
+    }
+    println("state_matrix_named_struct_func_ok")
+    return .ok(0)
+}

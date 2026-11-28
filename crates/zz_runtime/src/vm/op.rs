@@ -626,6 +626,30 @@ pub enum Op {
     /// Record a deferred closure: pop a closure value, push onto the
     /// frame's defer stack. Executed LIFO on scope exit.
     DeferRecord,
+
+    // ---- shared mutable state (D1/D2/D3/D9) ----
+    /// Push the value of a `state` binding from the shared registry.
+    /// When `state_lock_depth > 0` (inside `atomic { }`), accesses the map
+    /// directly without re-locking.
+    LoadState(String, Span),
+    /// Pop a value and store it into a `state` binding in the shared registry.
+    StoreState(String, Span),
+    /// Pop an index then a value; read `state[index]`, apply `op` against
+    /// the value, write the result back. All under one lock acquisition.
+    /// Used for `state_arr[i] = v` and compound assigns on state.
+    RmwState(String, BinOp, Span),
+    /// Execute `body` while holding the state lock. `state_lock_depth` is
+    /// incremented on entry and decremented on exit; state ops inside the
+    /// body access the map directly (reentrant, no deadlock).
+    Atomic { body: Arc<Chunk>, span: Span },
+    /// Begin a batched state-read region: acquire the state lock once and
+    /// increment `state_batch_depth`. All `LoadState`/`StoreState` ops
+    /// inside skip individual lock/unlock. Multiple state reads in one
+    /// expression (e.g. `a + b`) are atomic under a single lock acquisition.
+    StateBatchBegin(Span),
+    /// End a batched state-read region: decrement `state_batch_depth` and
+    /// release the state lock if depth reaches zero.
+    StateBatchEnd(Span),
 }
 
 /// Coarse class of an opcode, used by `zz dis --vm` and `ZZ_VM_STATS`.
@@ -807,6 +831,12 @@ impl Op {
             Op::ExitScope => "ExitScope",
             Op::PopN { .. } => "PopN",
             Op::DeferRecord => "DeferRecord",
+            Op::LoadState(..) => "LoadState",
+            Op::StoreState(..) => "StoreState",
+            Op::RmwState(..) => "RmwState",
+            Op::Atomic { .. } => "Atomic",
+            Op::StateBatchBegin(..) => "StateBatchBegin",
+            Op::StateBatchEnd(..) => "StateBatchEnd",
         }
     }
 
@@ -895,7 +925,10 @@ impl Op {
             | Op::MatchError(..)
             | Op::IfLetMatch { .. }
             | Op::TryOp(..)
-            | Op::DeferRecord => OpClass::Control,
+            | Op::DeferRecord
+            | Op::Atomic { .. }
+            | Op::StateBatchBegin(..)
+            | Op::StateBatchEnd(..) => OpClass::Control,
 
             Op::Call { .. }
             | Op::CallPath { .. }
@@ -917,7 +950,10 @@ impl Op {
             | Op::CompoundIndexOp { .. }
             | Op::SliceOp(..)
             | Op::ArrayPush(..)
-            | Op::UnpackTuple(..) => OpClass::Access,
+            | Op::UnpackTuple(..)
+            | Op::LoadState(..)
+            | Op::StoreState(..)
+            | Op::RmwState(..) => OpClass::Access,
 
             Op::MakeArray(..)
             | Op::MakeDict(..)

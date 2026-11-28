@@ -1,0 +1,111 @@
+=== state test 1 ===
+--- VM ---
+state_toplevel_ok
+--- AOT ---
+state_toplevel_ok
+=== state test 2 ===
+--- VM ---
+state_pub_ok
+--- AOT ---
+state_pub_ok
+=== state test 3 ===
+--- VM ---
+state_after_comment_ok
+--- AOT ---
+state_after_comment_ok
+=== state test 4 ===
+--- VM ---
+error: Z0011: `state` is only allowed at module level in v1
+hint: move the declaration to the top level of the module
+
+  --> /tmp/opencode/parser_matrix_state_4.zz:3:11
+    |
+    3 |     state s := 42
+      |           ^
+zz: program failed
+
+hint: fix the errors shown above and try again
+--- AOT ---
+error: Z0011: `state` is only allowed at module level in v1
+hint: move the declaration to the top level of the module
+
+  --> /tmp/opencode/parser_matrix_state_4.zz:3:11
+    |
+    3 |     state s := 42
+      |           ^
+zz: program failed to type-check
+=== state test 5 ===
+--- VM ---
+warning: unused variable `state` is never read, consider prefixing with `_state`
+
+  --> /tmp/opencode/parser_matrix_state_5.zz:2:1
+    |
+    2 | state := 1
+      | ^^^^^ help: replace with `_state`
+
+state_as_ident_ok
+--- AOT ---
+warning: unused variable `state` is never read, consider prefixing with `_state`
+
+  --> /tmp/opencode/parser_matrix_state_5.zz:2:1
+    |
+    2 | state := 1
+      | ^^^^^ help: replace with `_state`
+
+state_as_ident_ok
+=== state test 6 ===
+--- VM ---
+error: unexpected `let` — ZZ does not use `let` declarations
+
+  --> /tmp/opencode/parser_matrix_state_6.zz:4:5
+    |
+    4 |     let f = Foo { state: 7 }
+      |     ^^^ help: remove this
+
+    = write `x := 5` instead of `let x := 5`
+zz: program failed
+
+hint: fix the errors shown above and try again
+--- AOT ---
+error: unexpected `let` — ZZ does not use `let` declarations
+
+  --> /tmp/opencode/parser_matrix_state_6.zz:4:5
+    |
+    4 |     let f = Foo { state: 7 }
+      |     ^^^ help: remove this
+
+    = write `x := 5` instead of `let x := 5`
+zz: program failed to type-check
+=== state test 7 ===
+--- VM ---
+error: unexpected `let` — ZZ does not use `let` declarations
+
+  --> /tmp/opencode/parser_matrix_state_7.zz:5:5
+    |
+    5 |     let s = state { x: 5 }
+      |     ^^^ help: remove this
+
+    = write `x := 5` instead of `let x := 5`
+zz: program failed
+
+hint: fix the errors shown above and try again
+--- AOT ---
+error: unexpected `let` — ZZ does not use `let` declarations
+
+  --> /tmp/opencode/parser_matrix_state_7.zz:5:5
+    |
+    5 |     let s = state { x: 5 }
+      |     ^^^ help: remove this
+
+    = write `x := 5` instead of `let x := 5`
+zz: program failed to type-check
+=== state test 6 ===
+--- VM ---
+state_field_access_ok
+--- AOT ---
+state_field_access_ok
+=== state test 7 ===
+--- VM ---
+state_named_struct_func_ok
+--- AOT ---
+state_named_struct_func_ok

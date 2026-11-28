@@ -1,0 +1,10 @@
+// features: int-arith, locals, print, state
+// D2: user function call touching state → Z0014.
+state n := 0
+
+func foo() -> int { return 1 }
+
+func main() -> int {
+    n = foo()
+    return 0
+}

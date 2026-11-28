@@ -329,6 +329,7 @@ impl Walk {
                 self.pop();
             }
             Stmt::Defer { expr, .. } => self.walk_expr_use(expr),
+            Stmt::Atomic { body, .. } => self.walk_block(body),
             Stmt::Import { .. }
             | Stmt::Struct { .. }
             | Stmt::TypeAlias { .. }

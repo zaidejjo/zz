@@ -322,6 +322,11 @@ impl Interp {
                 }
                 Ok(Flow::Value(Value::Unit))
             }
+            Stmt::Atomic { body, .. } => {
+                // Phase 3: wrap with state lock acquisition/release.
+                // For now, execute the body under no lock (locking added in VM phase).
+                self.eval_block(body)
+            }
             Stmt::Destructure { pat, value, .. } => {
                 let v = self.eval(value)?.into_value()?;
                 if !Self::match_pattern(pat, &v, &mut self.env) {

@@ -1415,13 +1415,30 @@ impl Loader {
             Some(program) => program,
             None => {
                 let parsed = parse(&source);
-                if !parsed.errors.is_empty() {
+                // Only hard errors abort loading: warnings (e.g. redundant
+                // semicolon) are reported to the user but must not silently
+                // drop the module — otherwise `atomic { x = 1; x = 2 }`
+                // would run with no lock and lose updates under contention.
+                let has_errors = parsed
+                    .errors
+                    .iter()
+                    .any(|d| d.severity == zz_frontend::diag::Severity::Error);
+                if has_errors {
                     self.errors.push(LoadError {
                         name: path.display().to_string(),
                         source,
                         diags: parsed.errors,
                     });
                     return Ok(());
+                }
+                // Report warnings (without aborting) so the user still sees
+                // them even though the module loads and runs.
+                if !parsed.errors.is_empty() {
+                    self.errors.push(LoadError {
+                        name: path.display().to_string(),
+                        source: source.clone(),
+                        diags: parsed.errors.clone(),
+                    });
                 }
 
                 // Expand explicit decorators before import scanning and namespacing
@@ -3211,6 +3228,7 @@ impl Loader {
                                             span: *item_span,
                                             pub_: false,
                                             is_const: false,
+                                            is_state: false,
                                         });
                                     }
                                     ImportItem::Wildcard { span: item_span } => {
@@ -3260,6 +3278,7 @@ impl Loader {
                                                 span: *item_span,
                                                 pub_: false,
                                                 is_const: false,
+                                                is_state: false,
                                             });
                                         }
                                     }
@@ -4338,6 +4357,7 @@ fn collect_bare_purezz_modules(
 fn namespace_program(program: &mut Program, ns: &str, ns_aliases: &HashMap<String, String>) {
     let mut top = HashSet::new();
     let mut top_bindings = HashSet::new();
+    let mut state_names = HashSet::new();
     for stmt in &program.stmts {
         match stmt {
             Stmt::Func { name, .. }
@@ -4347,14 +4367,17 @@ fn namespace_program(program: &mut Program, ns: &str, ns_aliases: &HashMap<Strin
             | Stmt::Trait { name, .. } => {
                 top.insert(name.join("."));
             }
-            Stmt::Decl { name, .. } => {
+            Stmt::Decl { name, is_state, .. } => {
                 top.insert(name.name.clone());
                 top_bindings.insert(name.name.clone());
+                if *is_state {
+                    state_names.insert(name.name.clone());
+                }
             }
             _ => {}
         }
     }
-    let mut rw = rewrite::Rewriter::new(ns, &top, &top_bindings);
+    let mut rw = rewrite::Rewriter::new(ns, &top, &top_bindings, &state_names);
     rw.ns_aliases = ns_aliases.clone();
     // Imported namespace heads resolve on their own; the Call rewriter
     // must leave `alias.func(...)` paths untouched.

@@ -1,0 +1,60 @@
+     Running tests/bytecode_parity.rs (target/debug/build/zz_cli/8db49a780467372f/out/bytecode_parity-8db49a780467372f)
+
+running 2 tests
+test bytecode_file_roundtrip ... ok
+test bytecode_parity_all ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 55.55s
+
+     Running tests/c_plugin_e2e.rs (target/debug/build/zz_cli/d51b2586629c858f/out/c_plugin_e2e-d51b2586629c858f)
+
+running 1 test
+test c_plugin_vm_and_aot_agree ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.66s
+
+     Running tests/cache_e2e.rs (target/debug/build/zz_cli/8e563addadadf302/out/cache_e2e-8e563addadadf302)
+
+running 5 tests
+test clean_stays_quiet_without_cache ... ok
+test clean_reports_global_cache_with_hint ... ok
+test cache_clean_empty_reports_plainly ... ok
+test cache_clean_clears_whole_tree ... ok
+test native_build_honors_zz_home ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.82s
+
+     Running tests/chunk_aot_diff.rs (target/debug/build/zz_cli/cc8c41e62438d67e/out/chunk_aot_diff-cc8c41e62438d67e)
+
+running 3 tests
+test reap_stale_dirs_in_keeps_recent_zz_dirs ... ok
+test reap_stale_dirs_in_reaps_stale_zz_dirs ... ok
+test chunk_matches_hir_stdout_and_exit has been running for over 60 seconds
+test chunk_matches_hir_stdout_and_exit ... FAILED
+
+failures:
+
+---- chunk_matches_hir_stdout_and_exit stdout ----
+
+thread 'chunk_matches_hir_stdout_and_exit' (479535) panicked at crates/zz_cli/tests/chunk_aot_diff.rs:996:13:
+chunk build of stdlib_str failed: building /tmp/zz-chunk-diff-479534/stdlib_str_chunk/stdlib_str.zz (dev)
+==> [1/5] Checking: 1 module (1 cached)
+==> [1/5] Checking: 1 module (0 cached)
+==> [2/5] Optimizing: 17 functions
+ZZ_DEBUG_LINK_CMD: ["cc", "-fwrapv", "-fno-strict-aliasing", "-O0", "-g", "-ffunction-sections", "-fdata-sections", "-Wl,--gc-sections", "-fuse-ld=lld", "-o", "/home/zaid/.zz/cache/e5cd745d55797aab-53caee52-nodeps-0475cbe6a4936155-306610664cc2e82e-host-0000001b2a6b6c3b-none-none-none-ffd74826c916400e-Dev-chunk-host.480862.0.tmp", "/tmp/zz-build-480862-0/prog.c", "-lm", "-DZZ_HAS_CURL=0", "-DZZ_HAS_SQLITE3=0", "/home/zaid/.zz/cache/x86_64-unknown-linux-gnu-dev-17967e07356ec9a0-f41396e1a1808c90-0.17.1-rt7-nosan-c0s0p0f1/libzz_rt.a", "-Wl,-u,zz_float_format_raw", "-L/home/zaid/.zz/cache/native-rt/v1-bdae5effa8a17cf58176ea40d33468ea", "-lzz_native_rt", "/home/zaid/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/lib/libstd-7d3c8b3343c9c95a.rlib", "-lpthread", "-ldl", "-lm", "-lunwind"]
+ZZ_LINK_STDERR: zig: warning: argument unused during compilation: '-fuse-ld=lld' [-Wunused-command-line-argument]
+
+==> [3/5] Compiling: 1 file
+==> [4/5] Linking: 1 file
+==> [5/5] Publishing: failed
+zz: cannot write binary: Disk quota exceeded (os error 122)
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    chunk_matches_hir_stdout_and_exit
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 71.50s
+
+error: test failed, to rerun pass `-p zz_cli --test chunk_aot_diff`

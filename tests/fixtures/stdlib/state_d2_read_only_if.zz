@@ -1,0 +1,13 @@
+// features: int-arith, locals, print, state
+// D2: an `if` whose condition only READS state (and writes no state) may
+// contain any call in the body, including `println`.
+state s := 3
+
+func main() -> int {
+    if s > 0 {
+        println("positive")
+    }
+    if s != 3 { return -1 }
+    println("state_d2_read_only_if_ok")
+    return 0
+}

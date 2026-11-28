@@ -1,0 +1,318 @@
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:90:5
+    |
+   90 |     black_box(len(v))
+      |     ^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:97:5
+    |
+   97 |     black_box(len(v))
+      |     ^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:104:5
+    |
+  104 |     black_box(len(v))
+      |     ^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:196:5
+    |
+  196 |     black_box(len(v))
+      |     ^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:203:5
+    |
+  203 |     black_box(len(v))
+      |     ^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:18:5
+    |
+   18 |     black_box(requests_plain)
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:24:5
+    |
+   24 |     black_box(requests_plain)
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:30:5
+    |
+   30 |     black_box(requests_plain)
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:43:5
+    |
+   43 |     black_box(c_state)
+      |     ^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:49:5
+    |
+   49 |     black_box(c_state)
+      |     ^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:55:5
+    |
+   55 |     black_box(c_state)
+      |     ^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:68:5
+    |
+   68 |     black_box(c_atomic)
+      |     ^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:74:5
+    |
+   74 |     black_box(c_atomic)
+      |     ^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:80:5
+    |
+   80 |     black_box(c_atomic)
+      |     ^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:118:5
+    |
+  118 |     black_box(len(log_state))
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:125:5
+    |
+  125 |     black_box(len(log_state))
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:132:5
+    |
+  132 |     black_box(len(log_state))
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:152:5
+    |
+  152 |     black_box(contended)
+      |     ^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:172:5
+    |
+  172 |     black_box(contended_atomic)
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:182:5
+    |
+  182 |     black_box(len(log_scale))
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/bench_state_perf.zz:189:5
+    |
+  189 |     black_box(len(log_scale))
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:91:5
+    |
+   91 |     black_box(len(v))
+      |     ^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:98:5
+    |
+   98 |     black_box(len(v))
+      |     ^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:105:5
+    |
+  105 |     black_box(len(v))
+      |     ^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:197:5
+    |
+  197 |     black_box(len(v))
+      |     ^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:204:5
+    |
+  204 |     black_box(len(v))
+      |     ^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:19:5
+    |
+   19 |     black_box(requests_plain)
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:25:5
+    |
+   25 |     black_box(requests_plain)
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:31:5
+    |
+   31 |     black_box(requests_plain)
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:44:5
+    |
+   44 |     black_box(c_state)
+      |     ^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:50:5
+    |
+   50 |     black_box(c_state)
+      |     ^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:56:5
+    |
+   56 |     black_box(c_state)
+      |     ^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:69:5
+    |
+   69 |     black_box(c_atomic)
+      |     ^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:75:5
+    |
+   75 |     black_box(c_atomic)
+      |     ^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:81:5
+    |
+   81 |     black_box(c_atomic)
+      |     ^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:119:5
+    |
+  119 |     black_box(len(log_state))
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:126:5
+    |
+  126 |     black_box(len(log_state))
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:133:5
+    |
+  133 |     black_box(len(log_state))
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:153:5
+    |
+  153 |     black_box(contended)
+      |     ^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:173:5
+    |
+  173 |     black_box(contended_atomic)
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:183:5
+    |
+  183 |     black_box(len(log_scale))
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+warning: function has no `->` return type but its body yields `int`; the last expression is discarded
+
+  --> /home/zaid/Projects/zz/tests/fixtures/bench/zz_bench_harness_bench_state_perf_738218.zz:190:5
+    |
+  190 |     black_box(len(log_scale))
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = add an explicit `->` return type, or end the body with `return` / `()` to silence this warning
+engine: aot (dev)
+Running tests/fixtures/bench/bench_state_perf.zz
+running 21 benches
+bench bench_state_perf.bench_local_vec_push_1k ... 393.5µs/iter (7 iters, mean 393.5µs, min 393.5µs, max 393.5µs)
+bench bench_state_perf.bench_local_vec_push_10k ... 15.5ms/iter (7 iters, mean 15.5ms, min 15.5ms, max 15.5ms)
+bench bench_state_perf.bench_local_vec_push_100k ... 28.5ms/iter (7 iters, mean 28.5ms, min 28.5ms, max 28.5ms)
+bench bench_state_perf.bench_local_vec_10k ... 1.8ms/iter (7 iters, mean 1.8ms, min 1.8ms, max 1.8ms)
+bench bench_state_perf.bench_local_vec_20k ... 6.6ms/iter (7 iters, mean 6.6ms, min 6.6ms, max 6.6ms)
+bench bench_state_perf.bench_plain_global_1k ... 3.0ms/iter (7 iters, mean 3.0ms, min 3.0ms, max 3.0ms)
+bench bench_state_perf.bench_plain_global_10k ... 12.4ms/iter (7 iters, mean 12.4ms, min 12.4ms, max 12.4ms)
+bench bench_state_perf.bench_plain_global_100k ... 139.3ms/iter (7 iters, mean 139.3ms, min 139.3ms, max 139.3ms)
+bench bench_state_perf.bench_state_inc_1k ... 1.8ms/iter (7 iters, mean 1.8ms, min 1.8ms, max 1.8ms)
+bench bench_state_perf.bench_state_inc_10k ... 22.0ms/iter (7 iters, mean 22.0ms, min 22.0ms, max 22.0ms)
+bench bench_state_perf.bench_state_inc_100k ... 302.7ms/iter (7 iters, mean 302.7ms, min 302.7ms, max 302.7ms)
+bench bench_state_perf.bench_atomic_inc_1k ... 1.5ms/iter (7 iters, mean 1.5ms, min 1.5ms, max 1.5ms)
+bench bench_state_perf.bench_atomic_inc_10k ... 49.3ms/iter (7 iters, mean 49.3ms, min 49.3ms, max 49.3ms)
+bench bench_state_perf.bench_atomic_inc_100k ... 219.2ms/iter (7 iters, mean 219.2ms, min 219.2ms, max 219.2ms)
+bench bench_state_perf.bench_state_vec_push_1k ... 4.3ms/iter (7 iters, mean 4.3ms, min 4.3ms, max 4.3ms)
+bench bench_state_perf.bench_state_vec_push_10k ... 41.2ms/iter (7 iters, mean 41.2ms, min 41.2ms, max 41.2ms)
+bench bench_state_perf.bench_state_vec_push_100k ... 242.8ms/iter (7 iters, mean 242.8ms, min 242.8ms, max 242.8ms)
+bench bench_state_perf.bench_contended_state_100k ... 313.3ms/iter (3 iters, mean 313.3ms, min 313.3ms, max 313.3ms)
+bench bench_state_perf.bench_contended_atomic_100k ... 239.5ms/iter (3 iters, mean 239.5ms, min 239.5ms, max 239.5ms)
+bench bench_state_perf.bench_state_vec_10k ... 4.9ms/iter (7 iters, mean 4.9ms, min 4.9ms, max 4.9ms)
+bench bench_state_perf.bench_state_vec_20k ... 11.5ms/iter (7 iters, mean 11.5ms, min 11.5ms, max 11.5ms)

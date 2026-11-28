@@ -629,6 +629,11 @@ impl NameCtx {
 pub struct Lowerer {
     pub(crate) reachable_funcs: std::collections::HashSet<String>,
     pub(crate) reachable_natives: std::collections::HashSet<String>,
+    /// True when any extern "C" plugin is linked into the program. Plugin
+    /// code runs on arbitrary OS threads and can touch state through the
+    /// C-ABI, invalidating lock elision (D8). When set, state accesses
+    /// always go through the process-global lock.
+    pub(crate) has_extern_plugin: bool,
     pub(crate) entry_main: String,
     pub(crate) tp: zz_hir::TypedProgram,
     /// Result of escape analysis: maps spans to allocation classification.
@@ -714,6 +719,15 @@ pub struct Lowerer {
     /// Active green (suspendable) transform state, if a green closure
     /// body is being emitted. See `green.rs`.
     pub(crate) green: std::cell::RefCell<Option<crate::green::GreenCtx>>,
+    /// Nesting depth of state-read batching. When > 0, `emit_state_read`
+    /// skips individual lock/unlock and the outermost caller is responsible
+    /// for emitting a single lock/unlock around the whole expression.
+    pub(crate) state_read_batch_depth: std::cell::Cell<u32>,
+    /// Nesting depth of `atomic { }` blocks being emitted. Incremented
+    /// before the body and decremented after `zz_state_unlock()`, so `return`
+    /// inside an `atomic { }` can emit the matching unlock(s) before
+    /// transferring control (the post-body unlock is unreachable on that path).
+    pub(crate) atomic_depth: std::cell::Cell<u32>,
     /// When true, the generated C omits the embedded runtime sources
     /// (`RUNTIME_C`) and only includes headers (`RUNTIME_H`). The C runtime
     /// is linked from a precompiled static library (`libzz_rt.a`) instead.
@@ -745,6 +759,15 @@ pub struct Lowerer {
     /// Global ZZ names as a set, computed once (was: rebuilt per function
     /// and per closure literal for capture analysis).
     pub(crate) global_set: std::collections::HashSet<String>,
+    /// Module-level `state` binding names (bare names, e.g. `hits`), computed
+    /// once in `new`. State bindings live in their own file-scope globals
+    /// (`zz_state_<mangled>`) accessed under the process-global state lock,
+    /// separate from the `zz_global_*` plain-global table.
+    pub(crate) state_set: std::collections::HashSet<String>,
+    /// Module-level `state` declarations: (ZZ name, C global id), computed
+    /// once in `new`. Used to emit `static zz_value zz_state_<mangled>;`
+    /// declarations and top-level initialization.
+    pub(crate) state_list: Vec<(String, String)>,
     /// Scalar-specialized callees as (name, C ret, arity), computed once
     /// (was: refiltered from `specialized` per emitted function).
     pub(crate) scalar_fn_list: Vec<(String, &'static str, usize)>,
@@ -803,6 +826,7 @@ impl Lowerer {
         let mut lowerer = Lowerer {
             reachable_funcs,
             reachable_natives,
+            has_extern_plugin: false,
             entry_main,
             tp,
             escape,
@@ -823,6 +847,8 @@ impl Lowerer {
             precompiled: false,
             global_list: Vec::new(),
             global_set: std::collections::HashSet::new(),
+            state_set: std::collections::HashSet::new(),
+            state_list: Vec::new(),
             scalar_fn_list: Vec::new(),
             readonly_params,
             trait_impl_types,
@@ -836,12 +862,29 @@ impl Lowerer {
             adopt_arg: std::cell::Cell::new(false),
             fmt_borrow: std::cell::Cell::new(false),
             skip_flat_push_grow: std::cell::Cell::new(false),
+            state_read_batch_depth: std::cell::Cell::new(0),
+            atomic_depth: std::cell::Cell::new(0),
             accumulated_names: std::cell::RefCell::new(std::collections::HashSet::new()),
         };
         lowerer.specialized = lowerer.compute_specialized();
         lowerer.global_list = lowerer.collect_globals();
         lowerer.global_set = lowerer.tp.bindings.keys().cloned().collect();
         lowerer.scalar_fn_list = lowerer.compute_scalar_fn_list();
+        // Collect state decls separately: they live in zz_state_* globals,
+        // not zz_global_*.
+        let mut state_list = Vec::new();
+        let mut state_set = std::collections::HashSet::new();
+        for stmt in lowerer.tp.stmts() {
+            if let Stmt::Decl { name, is_state, .. } = stmt {
+                if *is_state {
+                    let cid = Lowerer::state_cid(&name.name);
+                    state_list.push((name.name.clone(), cid));
+                    state_set.insert(name.name.clone());
+                }
+            }
+        }
+        lowerer.state_list = state_list;
+        lowerer.state_set = state_set;
         lowerer
     }
 
@@ -1023,11 +1066,192 @@ impl Lowerer {
     /// and fold tight scalar reductions to closed form (Rust parity
     /// on `sum 0..N`). Omission is always *correct* — the safepoint
     /// never suspends the C frame, it only yields the OS thread —
-    /// so the gate is deliberately broad (any task/chan/spawn use).
+    /// so the gate is deliberately broad (any task/chan/spawn use, or
+    /// any extern "C" plugin linked, since plugin code runs on
+    /// arbitrary OS threads and can touch state through the C-ABI).
     pub(crate) fn needs_safepoint(&self) -> bool {
-        self.reachable_natives
-            .iter()
-            .any(|n| n.contains("task") || n.contains("chan") || n.contains("spawn"))
+        // nolock_selftest feature: keep cooperative safepoints on so task
+        // scheduling still works, but disable the state lock itself via
+        // needs_state_lock() (state accesses run lock-free in the selftest).
+        if cfg!(feature = "nolock_selftest") {
+            return self.has_extern_plugin
+                || self
+                    .reachable_natives
+                    .iter()
+                    .any(|n| n.contains("task") || n.contains("chan") || n.contains("spawn"));
+        }
+        self.has_extern_plugin
+            || self
+                .reachable_natives
+                .iter()
+                .any(|n| n.contains("task") || n.contains("chan") || n.contains("spawn"))
+    }
+
+    /// Mark that any extern "C" plugin is linked into the program. Plugin
+    /// code runs on arbitrary OS threads and can touch state through the
+    /// C-ABI, so state lock elision (D8) must be disabled.
+    pub fn set_has_extern_plugin(&mut self, val: bool) {
+        self.has_extern_plugin = val;
+    }
+
+    /// True when state accesses must go through the process-global lock.
+    /// When no `task`/`chan`/`spawn` native is reachable in the whole program
+    /// (`needs_safepoint() == false`), state compiles to a plain static with
+    /// no lock and no atomics (D8 lock elision).
+    ///
+    /// Under `nolock_selftest` the lock is disabled entirely (selftest only):
+    // state accesses run lock-free so that batching is verified to be
+    // required for atomicity (readers should observe torn snapshots).
+    pub(crate) fn needs_state_lock(&self) -> bool {
+        if cfg!(feature = "nolock_selftest") {
+            return false;
+        }
+        self.needs_safepoint()
+    }
+
+    /// Emit code to read a `state` binding into a fresh temp, conditionally
+    /// under the lock. Returns nothing (pushes the temp name into `out` as
+    /// an expression fragment). `tmp` is the temp variable name; callers
+    /// should use `names.fresh(...)`.
+    pub(crate) fn emit_state_read(
+        &self,
+        cid: &str,
+        flag: &str,
+        name: &str,
+        tmp: &str,
+        out: &mut String,
+    ) {
+        if self.state_read_batch_depth.get() > 0 {
+            // Inside a batched read: the outermost caller holds the lock,
+            // so just emit the read without lock/unlock.
+            out.push_str(&format!(
+                "    zz_value {tmp} = zz_state_load_checked(&{cid}, &{flag}, \"{name}\");\n"
+            ));
+        } else if self.needs_state_lock() {
+            out.push_str(&format!(
+                "    zz_state_lock();\n    zz_value {tmp} = zz_state_load_checked(&{cid}, &{flag}, \"{name}\");\n    zz_state_unlock();\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "    zz_value {tmp} = zz_state_load_checked(&{cid}, &{flag}, \"{name}\");\n"
+            ));
+        }
+    }
+
+    /// Emit code to write `val` into a `state` binding, conditionally under
+    /// the lock. Sets the init flag after the write.
+    pub(crate) fn emit_state_write(&self, cid: &str, flag: &str, val: &str, out: &mut String) {
+        if self.needs_state_lock() {
+            out.push_str(&format!(
+                "    zz_state_lock();\n    {cid} = zz_clone({val});\n    {flag} = 1;\n    zz_state_unlock();\n"
+            ));
+        } else {
+            out.push_str(&format!("    {cid} = zz_clone({val});\n    {flag} = 1;\n"));
+        }
+    }
+
+    /// True when `e` itself (not its bodies) reads any `state` binding,
+    /// using the shared pure-region analysis so the AOT lowering agrees with
+    /// the checker (Z0019) and the VM (`StateBatchBegin`/`End`).
+    pub(crate) fn expr_reads_state_direct(&self, e: &Expr) -> bool {
+        !zz_frontend::ast::expr_state_reads(e, &|n| self.state_set.contains(n)).is_empty()
+    }
+
+    /// True when `e` is a pure region that reads state: the whole expression
+    /// (or call cell) can be evaluated under one lock acquisition.
+    pub(crate) fn state_region_pure(&self, e: &Expr) -> bool {
+        if self.state_read_batch_depth.get() > 0 || !self.needs_state_lock() {
+            return false;
+        }
+        (zz_frontend::ast::expr_is_pure(e) || zz_frontend::ast::call_cell_is_pure(e))
+            && self.expr_reads_state_direct(e)
+    }
+
+    /// Emit `e`, wrapping all state reads in a single lock acquisition so that
+    /// multiple state reads within one pure region are atomic (no yield
+    /// between them). Returns the C expression string for `e`.
+    pub(crate) fn emit_expr_stateful(
+        &self,
+        e: &Expr,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        // The per-region wrapper in `emit_expr` owns the lock discipline now
+        // (R1/R2); a statement-level expression is just a sequence of
+        // regions.
+        self.emit_expr(e, names, out)
+    }
+
+    /// Split a dotted reference whose root is a `state` binding into the
+    /// binding name and its field path: `["cfg", "x"]` → `("cfg", ["x"])`.
+    /// Returns `None` when the whole name is a state binding (no field) or
+    /// nothing in `parts` names state.
+    pub(crate) fn state_field_path(&self, parts: &[String]) -> Option<(String, Vec<String>)> {
+        (1..parts.len()).rev().find_map(|k| {
+            let prefix = parts[..k].join(".");
+            self.state_set
+                .contains(&prefix)
+                .then(|| (prefix, parts[k..].to_vec()))
+        })
+    }
+
+    /// `(cid, init_flag)` for `target` when it names a `state` binding
+    /// (bare or dotted), else `None`.
+    pub(crate) fn state_target_ids(&self, target: &Expr) -> Option<(String, String)> {
+        let name = match target {
+            Expr::Ident { name, .. } => name.clone(),
+            Expr::Path { parts, .. } => parts.join("."),
+            _ => return None,
+        };
+        if !self.state_set.contains(&name) {
+            return None;
+        }
+        let cid = Lowerer::state_cid(&name);
+        let flag = format!("{}_init", cid);
+        Some((cid, flag))
+    }
+
+    /// Emit an expression for storage into a `state` slot (always a
+    /// `zz_value`). Unboxed struct values are boxed into a runtime object
+    /// first: the slot cannot hold a raw C struct, and field reads
+    /// (`cfg.x`) plus display go through the boxed accessor. Everything
+    /// else takes the normal lowering path.
+    pub(crate) fn emit_state_value(
+        &self,
+        value: &Expr,
+        names: &mut NameCtx,
+        out: &mut String,
+    ) -> String {
+        match self.struct_box_name(value, names) {
+            Some(sname) => self.emit_boxed_value(&sname, value, names, out),
+            None => self.emit_expr(value, names, out),
+        }
+    }
+
+    /// Emit code for a state read-modify-write (compound assign), one lock
+    /// acquisition when locking is enabled, else plain access. The `rhs`
+    /// expression is already on the value stack / in `val`; `cur` holds the
+    /// previous value read under the lock.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_state_rmw(
+        &self,
+        cid: &str,
+        flag: &str,
+        name: &str,
+        tmp_cur: &str,
+        op_sym: &str,
+        rhs: &str,
+        out: &mut String,
+    ) {
+        if self.needs_state_lock() {
+            out.push_str(&format!(
+                "    zz_state_lock();\n    zz_value {tmp_cur} = zz_state_load_checked(&{cid}, &{flag}, \"{name}\");\n    {cid} = zz_clone(zz_binop({op_sym}, {tmp_cur}, {rhs}));\n    {flag} = 1;\n    zz_state_unlock();\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "    zz_value {tmp_cur} = zz_state_load_checked(&{cid}, &{flag}, \"{name}\");\n    {cid} = zz_clone(zz_binop({op_sym}, {tmp_cur}, {rhs}));\n    {flag} = 1;\n"
+            ));
+        }
     }
 
     /// Emit a loop-top cooperative safepoint when the program uses
@@ -1712,6 +1936,11 @@ impl Lowerer {
         format!("zz_global_{}", mangle(zz_name))
     }
 
+    /// C identifier for a module-level `state` binding: `zz_state_<mangled>`.
+    pub(crate) fn state_cid(zz_name: &str) -> String {
+        format!("zz_state_{}", mangle(zz_name))
+    }
+
     /// Names visible as C globals (module-level bindings). Closure free
     /// variables matching these need no environment cell.
     /// Names in `block` captured by a nested closure literal: bindings for
@@ -2103,10 +2332,15 @@ impl Lowerer {
             }
         }
         let mut names: Vec<String> = Vec::new();
+        let mut state_names: Vec<String> = Vec::new();
         for stmt in self.tp.stmts() {
             match stmt {
-                Stmt::Decl { name, .. } => {
-                    if !names.contains(&name.name) {
+                Stmt::Decl { name, is_state, .. } => {
+                    if *is_state {
+                        if !state_names.contains(&name.name) {
+                            state_names.push(name.name.clone());
+                        }
+                    } else if !names.contains(&name.name) {
                         names.push(name.name.clone());
                     }
                 }

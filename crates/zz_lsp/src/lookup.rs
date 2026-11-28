@@ -220,6 +220,9 @@ fn collect_stmt_defs(stmt: &Stmt, source: &str, defs: &mut HashMap<u32, Definiti
         Stmt::Defer { expr, .. } => {
             collect_expr_defs(expr, source, defs);
         }
+        Stmt::Atomic { body, .. } => {
+            collect_block_defs(body, source, defs);
+        }
         Stmt::Import { path, .. } => {
             let joined = path.join(".");
             if let Some(span) = find_name_in_source(source, &joined) {
@@ -476,6 +479,7 @@ fn walk_stmt<'a>(stmt: &'a Stmt, source: &str, offset: u32, result: &mut NodeAtO
             walk_expr(value, source, offset, result);
         }
         Stmt::Defer { expr, .. } => walk_expr(expr, source, offset, result),
+        Stmt::Atomic { body, .. } => walk_block(body, source, offset, result),
         Stmt::Import { .. } => {}
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
         Stmt::ExternBlock { items, .. } => {
@@ -1200,6 +1204,7 @@ fn collect_name_refs_in_stmt(stmt: &Stmt, name: &str, refs: &mut Vec<Reference>)
             collect_name_refs_in_expr(value, name, refs);
         }
         Stmt::Defer { expr, .. } => collect_name_refs_in_expr(expr, name, refs),
+        Stmt::Atomic { body, .. } => collect_name_refs_in_block(body, name, refs),
         Stmt::Destructure { value, .. } => collect_name_refs_in_expr(value, name, refs),
         // Trait declarations hold signatures only — no name references.
         Stmt::Trait { .. } => {}
@@ -1478,6 +1483,7 @@ fn collect_hl_stmt(stmt: &Stmt, name: &str, source: &str, out: &mut Vec<Highligh
             collect_hl_expr(value, name, out);
         }
         Stmt::Defer { expr, .. } => collect_hl_expr(expr, name, out),
+        Stmt::Atomic { body, .. } => collect_hl_block(body, name, source, out),
         Stmt::Destructure { value, .. } => collect_hl_expr(value, name, out),
         // Trait signatures carry no bodies, so no name is highlighted.
         Stmt::Trait { .. } => {}

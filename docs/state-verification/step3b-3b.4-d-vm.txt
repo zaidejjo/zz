@@ -1,0 +1,204 @@
+# Step 3b.4(d) — lock-leak regression: early return/break/continue/? inside nested state reads (VM)
+# Command: for i in $(seq 1 50); do ./target/debug/zz run tests/fixtures/stdlib/step3b_4d_lock_leak.zz; done
+# All 50 runs: batch_depth=0 lock_depth=0, PASS — no lock/batch leak.
+
+=== RUN 1 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 2 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 3 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 4 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 5 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 6 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 7 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 8 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 9 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 10 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 11 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 12 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 13 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 14 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 15 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 16 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 17 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 18 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 19 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 20 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 21 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 22 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 23 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 24 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 25 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 26 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 27 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 28 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 29 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 30 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 31 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 32 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 33 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 34 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 35 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 36 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 37 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 38 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 39 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 40 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 41 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 42 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 43 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 44 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 45 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 46 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 47 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 48 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 49 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations
+=== RUN 50 ===
+stress_result=0
+batch_depth=0 lock_depth=0
+PASS: no lock/batch leak after 1000 stress iterations

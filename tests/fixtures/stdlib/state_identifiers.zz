@@ -1,0 +1,17 @@
+// features: int-arith, locals, print
+// `state` and `atomic` are contextual keywords — they can be used as
+// ordinary identifiers when not in statement position.
+func main() -> int {
+    state := 1
+    atomic := 2
+    s:int = state
+    a:int = atomic
+    if s != 1 {
+        return -1
+    }
+    if a != 2 {
+        return -2
+    }
+    println("identifiers_ok")
+    return 0
+}

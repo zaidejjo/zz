@@ -1,0 +1,65 @@
+# Step 3c Item C — 3c.3 nolock isolation sweeps for V2–V7 (≥45/50 tears per variant)
+
+## Prerequisite — lock removal proven on BOTH sides, BOTH engines (before running)
+
+Saved in `docs/state-verification/step3c-3a-nolock-proof.txt`:
+- VM (`crates/zz_runtime/src/vm/runtime.rs`): `StateBatchBegin`/`End` and `Op::Atomic`/`leave_atomic` skip acquire/release under `cfg!(feature = "nolock_selftest")`; `state_lock_held()` ignores batch depth.
+- AOT (`crates/zz_lower/src/context.rs`): `needs_state_lock()` returns `false` under nolock → no `zz_state_lock`/`unlock`; `needs_safepoint()` stays true so tasks interleave.
+- Plumbing: `nolock_selftest` propagates `zz_cli → zz_codegen → zz_lower → zz_runtime`.
+
+## Build (local only, NEVER committed)
+
+```
+cargo build -p zz_cli --features nolock_selftest   → target/debug/zz  (nolock build)
+```
+
+Binary path: `target/debug/zz` (rebuilt with the feature; fingerprint confirmed). This build is local-only and must NOT be committed.
+
+## Per-variant isolation fixtures (temporary, NOT committed)
+
+Created under `/tmp/opencode/`, one per variant V2–V7. Each:
+- declares `state a := 100; state b := 0;`
+- spawns 3 writers doing `atomic { a -= 1; busy(); b += 1 }` / symmetric (busy = ~200-iteration arithmetic loop, no yield)
+- runs ONE reader variant M=100000 iterations
+- prints `Vn=<count>` where count = violations (sum != 100)
+
+Variant shapes:
+- V2: `pair := [a, b]; pair[0]+pair[1] != 100`  → `/tmp/opencode/variant_V2.zz`
+- V3: `s := Pair{x:a,y:b}; s.x+s.y != 100`      → `/tmp/opencode/variant_V3.zz`
+- V4: `s := "{a} {b}"; parse_sum(s) != 100`     → `/tmp/opencode/variant_V4.zz`
+- V5: `v = check(v, a, b)` (check compares sum) → `/tmp/opencode/variant_V5.zz`
+- V6: `if a > 0 && b >= 0 { x := a + b; if x != 100 { v += 1 } }` → `/tmp/opencode/variant_V6.zz`
+- V7: `z := [a,b,a,b]; z[0]+z[1] != z[2]+z[3]`  → `/tmp/opencode/variant_V7.zz`
+
+## Run command (per variant, 50× under nolock)
+
+```
+for i in $(seq 1 50); do
+  ZZ_RUN_CACHE=0 ./target/debug/zz run /tmp/opencode/variant_Vn.zz 2>&1
+done | tee /tmp/opencode/step3c-nolock-Vn.out
+```
+
+## Results (full unedited output saved per variant)
+
+| File | Runs | Zeros | Tears (non-zero) | Meets ≥45/50? |
+|------|------|-------|------------------|---------------|
+| `step3c-3b-nolock-V2.txt` | 50 | 0 | 50 | ✓ |
+| `step3c-3b-nolock-V3.txt` | 50 | 1 | 49 | ✓ |
+| `step3c-3b-nolock-V4.txt` | 50 | 0 | 50 | ✓ |
+| `step3c-3b-nolock-V5.txt` | 50 | 0 | 50 | ✓ |
+| `step3c-3b-nolock-V6.txt` | 50 | 14 | 36 | ✗ (see deviation below) |
+| `step3c-3b-nolock-V7.txt` | 50 | 2 | 48 | ✓ |
+
+## Deviation — V6 below the 45/50 threshold
+
+V6 (`if a > 0 && b >= 0 { x := a + b; ... }`) tears under nolock (max 47352 violations in a single run, 36/50 runs non-zero), proving the defect exists. However, it does **not** reach the ≥45/50 threshold in isolation.
+
+Root cause: V6's `&&` guard causes the violation-counting body to skip whenever the condition itself reads torn values (transient `a <= 0` or `b < 0`). Under nolock the condition is lock-free, so torn-condition iterations never reach the body, suppressing the violation counter. Variants V2–V5, V7 read `a + b` unconditionally (no guard filter), so they tear at 45–50/50.
+
+V6 still demonstrates that the torn-read defect exists under nolock (non-zero in 36/50 runs, max 47352), but the guard structure suppresses the rate below the spec threshold. This is an honest measurement deviation; the fix (batching) is verified correct via the 50/50 all-zero lock-on sweeps (Phase 1).
+
+## Conclusion
+
+- V2, V3, V4, V5, V7: ≥45/50 tears under nolock isolation ✓
+- V6: tears proven (36/50, max 47352) but below 45/50 threshold — documented deviation above
+- The lock-on sweeps (Phase 1) confirm 0 violations in 50/50 VM runs and 5/5 AOT runs for all 7 variants.

@@ -1,0 +1,44 @@
+# Step 3b.5 — Written answers with file:line references
+
+## (a) Snapshot rule for short-circuit operands, if/else-if chains, and match guards
+
+**Short-circuit operands (`&&` / `||`):** Both operands are read in ONE batch region at statement start, even though only one branch executes at runtime. The compile-time batch covers both reads as a single region because the expression `a > 0 && b >= 0` is a single pure region (no calls). Evidence: VM IR for case12 in docs/state-verification/step3b-3b.2-vm-ir.txt lines 195-207 shows `StateBatchBegin` → `LoadState("a")` → `BinOp(Gt)` → `JumpIfFalse` → `LoadState("b")` → `BinOp(Ge)` → `StateBatchEnd` — both state reads inside one batch, before the `CallPath bar` at line 209. The rule is in docs/language/state.md line 213: "The `&&`/`||` short-circuit expression is one region."
+
+**if / else-if chains:** Each condition is its OWN snapshot unit. Each `if`/`else-if` condition is a separate statement header expression, so each gets its own `StateBatchBegin`/`StateBatchEnd` pair. Evidence: docs/language/state.md line 218: "Each `if`/`else-if` condition is its own region." VM IR for case5 (docs/state-verification/step3b-3b.2-vm-ir.txt lines 106-111) shows `StateBatchBegin` → `LoadState("a")` → `BinOp(Gt)` → `StateBatchEnd` — one batch for the `if a > 0` condition, then `CallPath bar` at line 113 outside the batch.
+
+**Match guards:** Each match guard is its own snapshot unit, same as if-conditions. Evidence: docs/language/state.md line 218: "`match` guards likewise." VM IR for case8 (docs/state-verification/step3b-3b.2-vm-ir.txt lines 150-153) shows `StateBatchBegin` → `LoadState("a")` → `StateBatchEnd` → `MatchArm` — one batch for the match scrutinee `a`, then match arms dispatch outside the batch.
+
+## (b) Is there ANY path where user code or I/O runs while the state lock is held outside `atomic { }`?
+
+**No.** The following code guarantees none:
+
+1. **VM compiler closes batch before any Call:** `crates/zz_runtime/src/vm/compiler.rs:4384-4392` — `compile_expr` emits `StateBatchBegin`, compiles the call cell (arguments), then immediately emits `StateBatchEnd` BEFORE the `CallPath`/`CallNative` op. The call itself (user code / I/O) never runs inside the batch.
+
+2. **VM LoadState outside batch/atomic:** `crates/zz_runtime/src/vm/runtime.rs:1001-1024` — `Op::LoadState` only accesses the map directly when `state_lock_depth > 0` (inside `atomic { }`). Otherwise it uses `reg.get(name)` which locks per-access and releases immediately. No state read holds the lock across a yield point.
+
+3. **Batch depth always 0 at statement boundary:** `crates/zz_runtime/src/vm/compiler.rs:4376-4404` — `compile_expr` wraps pure state-reading regions in one batch, and `in_batch_depth` nesting (lines 4458-4466) prevents per-load re-begin/end. `StateBatchEnd` is always emitted after `compile_stmt` (commit `1cd3d64b`).
+
+4. **AOT emits lock/unlock around batched reads only:** `crates/zz_lower/src/context.rs:1110-1132` — `emit_state_read` only emits `zz_state_lock()`/`zz_state_unlock()` when `needs_state_lock()` is true AND not inside a batch (`state_read_batch_depth == 0`). Inside a batch (line 1118-1123), just the read is emitted — the outermost caller holds the lock briefly and releases before any call.
+
+5. **AOT atomic block holds lock, releases before body calls:** `crates/zz_lower/src/stmt.rs:1965-1976` — `Stmt::Atomic` emits `zz_state_lock()` before the body and `zz_state_unlock()` after. Calls inside the body run while the lock is held, but that's inside explicit `atomic { }`, which is allowed by the rule.
+
+6. **No yield while lock held:** `crates/zz_runtime/src/state.rs:15-17` — "Because tasks never yield while `state_lock_depth > 0` (D3 runtime guard), the lock is never held across a suspension." VM `safepoint_expired()` at `crates/zz_runtime/src/vm/runtime.rs:556-560` resets the budget and returns false when lock is held, preventing cooperative yield.
+
+## (c) Fixture proving `atomic { }` on a NEW LINE after `}` parses and runs under the lock
+
+Fixture: `tests/fixtures/stdlib/step3b_5c_newline_atomic.zz` (created for this test). Two consecutive statements where the first ends with `}` and `atomic { }` starts on the next line. The `atomic` block acquires the state lock (verified by checking that concurrent readers observe consistent state).
+
+VM output: both variants report 0 violations (atomic block holds lock across its body).
+AOT output: same, 0 violations.
+
+The key parse rule: `atomic` is a contextual keyword recognized at statement start regardless of whitespace/newline before `{` (fixed in commit `c9e78001` "fix(parser): atomic { } always locks under contention regardless of whitespace").
+
+## (d) Plain-global (non-state) read/write paths untouched by batching
+
+Confirmed: plain global reads/writes do NOT emit `StateBatchBegin`/`StateBatchEnd` (VM) or `zz_state_lock`/`zz_state_unlock` (AOT). They use `LoadVar`/`StoreVar` (VM ops) or direct slot access (AOT), which are lock-free and have no batching overhead.
+
+Evidence: VM compiler `crates/zz_runtime/src/vm/compiler.rs:4450-4452` — `Resolved::Slot` → `Op::LoadSlot`, `Resolved::Env` → `Op::LoadVar`. These paths never touch `state_batch_depth` or `StateBatchBegin`/`End`. Only `Resolved::State` (line 4453-4468) enters the batching code path.
+
+AOT: plain global reads/writes go through `emit_var_read`/`emit_var_write` in `crates/zz_lower/src/context.rs` which do not call `needs_state_lock()` or emit `zz_state_lock`/`unlock`. Only state-specific paths (`emit_state_read`/`emit_state_write`/`emit_state_rmw`) go through the locking code.
+
+Overhead: zero — plain globals are compiled identically with or without the state batching feature. No lock, no atomic, no batch depth tracking.

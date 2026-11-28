@@ -287,6 +287,9 @@ pub trait AstVisitor {
             Stmt::Defer { expr, .. } => {
                 self.walk_expr(expr);
             }
+            Stmt::Atomic { body, .. } => {
+                self.walk_block(body);
+            }
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::ExternBlock { items, .. } => {
                 for item in items {

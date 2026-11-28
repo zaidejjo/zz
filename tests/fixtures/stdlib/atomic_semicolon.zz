@@ -1,0 +1,45 @@
+// features: imports, int-arith, locals, print, std-task, state
+// TASK 1: semicolon-separated statements inside `atomic { }` under contention.
+// 4 tasks x 1000 increments each = exactly 4000. Each line ends with a
+// trailing semicolon (produces a "redundant semicolon" warning — the module
+// must still load and run under the lock, not be silently dropped).
+// Must pass with lock, fail without.
+import std.task
+
+state hits := 0
+
+func inc1000() {
+    for _ in 0..100 {
+        atomic {
+            hits += 1;
+            hits += 1;
+            hits += 1;
+            hits += 1;
+            hits += 1;
+            hits += 1;
+            hits += 1;
+            hits += 1;
+            hits += 1;
+            hits += 1;
+        }
+    }
+}
+
+func main() -> Result<int, str> {
+    hits = 0
+    h0 := task.spawn(|_| { inc1000() })
+    h1 := task.spawn(|_| { inc1000() })
+    h2 := task.spawn(|_| { inc1000() })
+    h3 := task.spawn(|_| { inc1000() })
+    task.join(h0)
+    task.join(h1)
+    task.join(h2)
+    task.join(h3)
+    x := hits
+    // 4 tasks x 100 loops x 10 increments = 4000
+    if x != 4000 {
+        return .err("mismatch")
+    }
+    println("atomic_semicolon_ok")
+    return .ok(0)
+}

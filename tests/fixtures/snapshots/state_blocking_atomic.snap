@@ -1,0 +1,20 @@
+first module that broke: <path> <path>
+
+error: Z0054: `task.spawn` is a blocking call and cannot be used inside `atomic { }`
+hint: move the blocking call outside the atomic block
+
+--> <path>
+|
+16 | task.spawn(|_| { inc() })
+| ^^^^^^^^^^^^^^^^^^^^^^^^^
+warning: function has no `->` return type but its body yields `task.join`; the last expression is discarded
+
+--> <path>
+|
+15 | atomic {
+| ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+= add an explicit `->` return type, or end the body with `return` <path> `()` to silence this warning
+warning: unused private function `state_blocking_atomic.bad_inside_atomic`, consider prefixing with `_state_blocking_atomic.bad_inside_atomic` or removing it
+
+= function is never called or referenced
+zz: 1 file(s) failed type-check

@@ -1,0 +1,92 @@
+# S2 — Answer (a): Statement kinds with read-only relaxation
+
+The "read-only relaxation" means: when a statement only READS state (no
+writes), all state reads in that statement's expression are loaded as ONE
+snapshot under ONE lock acquisition at statement start, into temporaries,
+BEFORE any call in that statement runs. The batch contains ONLY state loads
+— calls, I/O, loop bodies, if-bodies, and match arms are always outside
+the batch.
+
+Rule source: docs/language/state.md:210-219 (RULE R1–R5).
+VM enforcement: crates/zz_runtime/src/vm/compiler.rs:4376-4404 (compile_expr
+wraps pure state-reading regions in StateBatchBegin/End).
+AOT enforcement: crates/zz_lower/src/context.rs:1106-1132 (emit_state_read
+emits zz_state_lock/zz_state_unlock around batched loads only).
+
+======================================================================
+Statement kinds and whether state reads are snapshotted atomically
+======================================================================
+
+1. Expression statement (`x := a + b;`)
+   ------------------------------------
+   Relaxed? YES.
+   Snapshot atomic? YES — both `a` and `b` are read in ONE batch region
+   at statement start, before the Add and the StoreLocal.
+   Evidence: VM IR (docs/state-verification/step3b-3b.2-vm-ir.txt,
+   case 1 "x := a + b"): StateBatchBegin → LoadState("a") → LoadState("b")
+   → BinOp(Add) → StateBatchEnd → then StoreLocal/Ne/Jfb outside batch.
+   AOT: emit_state_read() emits one zz_state_lock() before both loads,
+   one zz_state_unlock() after, then the add/store outside the lock.
+
+2. Assignment to non-state local (`y := [a, b];`, `y := foo(a);`)
+   ------------------------------------------------------------
+   Relaxed? YES (for the state-reading part).
+   Snapshot atomic? YES — state reads on the RHS are batched together.
+   The non-state local assignment itself is outside the batch.
+   Evidence: VM IR case 10 ("y := [a, b]") and case 2 ("x := foo(a)"):
+   StateBatchBegin → LoadState("a") → LoadState("b") → StateBatchEnd
+   → then MakeArray/CallPath outside batch.
+
+3. `return foo(s)` where `s` is state
+   ----------------------------------
+   Relaxed? YES.
+   Snapshot atomic? YES — `s` is read in one batch at statement start,
+   before the CallPath foo. The return itself is outside the batch.
+   Evidence: VM IR case 9 ("return foo(a)"): StateBatchBegin → LoadState("a")
+   → StateBatchEnd → then CallPath foo → Ret. The call (and any I/O it
+   does) runs OUTSIDE the lock.
+
+4. if/while condition (`if a > 0 { ... }`, `while s < 10 { ... }`)
+   --------------------------------------------------------------
+   Relaxed? YES.
+   Snapshot atomic? YES — the condition expression is one pure region.
+   All state reads in the condition are batched together at condition
+   evaluation start. The if-body/while-body runs OUTSIDE the batch.
+   Evidence: VM IR case 5 ("if a > 0 { bar() }"): StateBatchBegin →
+   LoadState("a") → BinOp(Gt) → StateBatchEnd → then CallPath bar outside.
+   A `while` condition takes a FRESH snapshot on every re-evaluation
+   (docs/language/state.md:218).
+
+5. match scrutinee (`match a { ... }`)
+   ----------------------------------
+   Relaxed? YES.
+   Snapshot atomic? YES — the scrutinee is read in one batch at match
+   start. Match arms dispatch OUTSIDE the batch.
+   Evidence: VM IR case 8 ("match a { ... }"): StateBatchBegin → LoadState("a")
+   → StateBatchEnd → then MatchArm outside batch.
+
+6. `&&` / `||` short-circuit operands (`a > 0 && b >= 0`)
+   ------------------------------------------------------
+   Relaxed? YES.
+   Snapshot atomic? YES — both operands are read in ONE batch region at
+   statement start, even though short-circuit means only one may be
+   evaluated at runtime. The compile-time batch covers both reads.
+   Evidence: VM IR case 12 ("if a > 0 && b >= 0 { ... }"):
+   StateBatchBegin → LoadState("a") → ... → LoadState("b") → ...
+   → StateBatchEnd, both reads inside one batch (see
+   docs/state-verification/step3b-3b.2-vm-ir.txt case 12 lines 195-207).
+
+======================================================================
+Consistency
+======================================================================
+
+All six statement kinds are consistent: state reads in a statement's
+header expression are always ONE snapshot under ONE lock at statement
+start. Calls, I/O, and bodies always run OUTSIDE the batch/lock. There
+is no statement kind where state reads are split across multiple lock
+acquisitions within a single statement, and no statement kind where
+user code runs while the batch lock is held.
+
+The only place user code runs while the lock is held is inside an
+explicit `atomic { }` block — which is the intended, documented behavior
+(D1: check-then-act must be atomic).

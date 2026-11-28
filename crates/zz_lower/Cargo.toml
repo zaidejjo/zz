@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 description = "HIR→C lowering for the ZZ native (AOT) backend"
 
+[features]
+# When enabled, forces needs_safepoint() to return true, disabling lock
+# elision (D8) so that state accesses always go through the process-global
+# lock. Used for self-testing that locking is correct (nolock builds).
+nolock_selftest = []
+
 [dependencies]
 zz_codegen_types = { path = "../zz_codegen_types" }
 zz_codegen_runtime = { path = "../zz_codegen_runtime" }

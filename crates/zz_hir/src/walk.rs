@@ -100,6 +100,11 @@ fn walk_stmt_in<'a>(
         Stmt::Defer { expr, .. } => {
             walk_expr_in(tp, scope, expr, f);
         }
+        Stmt::Atomic { body, .. } => {
+            for s in &body.stmts {
+                walk_stmt_in(tp, scope, s, f);
+            }
+        }
         Stmt::Assign { target, value, .. } => {
             walk_expr_in(tp, scope, target, f);
             walk_expr_in(tp, scope, value, f);

@@ -1,0 +1,24 @@
+// features: int-arith, locals, print, state, std-task
+// R2 positive: plain global assigned via func stored in a struct field
+// inside task.spawn closure. `helper` is address-taken (stored in field),
+// so the indirect call `s.f()` keeps `helper` reachable and `plain` is detected.
+import std.task
+
+struct Holder {
+    f: func() -> int,
+}
+plain := 0
+
+func helper() -> int {
+    plain = 99
+    return 0
+}
+
+func main() -> int {
+    s := Holder{f: helper}
+    h := task.spawn(|_| {
+        s.f()
+    })
+    task.join(h)
+    return 0
+}

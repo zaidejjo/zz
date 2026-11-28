@@ -3356,3 +3356,46 @@ fn vm_for_loop_over_non_iterable_returns_error() {
         err
     );
 }
+
+/// An `atomic { }` body runs in its own frame, so outer locals can only be
+/// reached through the environment. The capture scan must promote them
+/// (like a closure capture) or the body fails with "undefined variable".
+#[test]
+fn vm_atomic_reads_and_writes_outer_locals() {
+    assert_eq!(
+        run_src(
+            "func f() -> int {\n\
+                 y := 5\n\
+                 q := 0\n\
+                 atomic { q = y + 1 }\n\
+                 return q\n\
+             }\n\
+             f()"
+        )
+        .ok(),
+        Some(Value::Int(6))
+    );
+}
+
+/// `cfg.inner.v = ...` under `atomic { }` must write the inner struct back
+/// into `cfg`, not replace `cfg` itself with the inner value (every
+/// `GetField` clones, so all intermediate levels need a write-back).
+#[test]
+fn vm_atomic_nested_state_write_keeps_outer_struct() {
+    assert_eq!(
+        run_src(
+            "struct Inner { v: int }\n\
+             struct Cfg { x: int, inner: Inner }\n\
+             state cfg := Cfg{ x: 7, inner: Inner{ v: 0 } }\n\
+             func f() -> int {\n\
+                 atomic { cfg.inner.v = cfg.inner.v + 1 }\n\
+                 a := cfg.x\n\
+                 b := cfg.inner.v\n\
+                 return a * 10 + b\n\
+             }\n\
+             f()"
+        )
+        .ok(),
+        Some(Value::Int(71))
+    );
+}

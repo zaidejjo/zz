@@ -1,0 +1,21 @@
+// features: int-arith, locals, print, state, std-task
+// R2 positive: plain global assigned via func stored in a vec inside
+// task.spawn closure. `helper` is address-taken (stored in vec), so the
+// indirect call `arr[0]()` keeps `helper` reachable and `plain` is
+// detected as task-reachable.
+import std.task
+
+plain := 0
+
+func helper() {
+    plain = 99
+}
+
+func main() -> int {
+    arr := [helper]
+    h := task.spawn(|_| {
+        arr[0]()
+    })
+    task.join(h)
+    return 0
+}

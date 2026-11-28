@@ -118,9 +118,13 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
             name,
             value,
             is_const,
+            is_state,
             ..
         } => {
             out.push_str("Decl[");
+            if *is_state {
+                out.push_str("state ");
+            }
             if *is_const {
                 out.push_str("const ");
             }
@@ -358,6 +362,13 @@ fn fp_stmt(s: &Stmt, out: &mut String) {
         Stmt::Defer { expr, .. } => {
             out.push_str("Defer-kw[");
             fp_expr(expr, out);
+            out.push(']');
+        }
+        Stmt::Atomic { body, .. } => {
+            out.push_str("Atomic-kw[");
+            for s in &body.stmts {
+                fp_stmt(s, out);
+            }
             out.push(']');
         }
         Stmt::Assign { target, value, .. } => {
@@ -1081,12 +1092,17 @@ pub fn verify(
     original_src: &str,
     formatted_src: &str,
 ) -> Result<(), FmtError> {
-    // 1. Re-parse must succeed.
+    // 1. Re-parse must succeed (hard errors only; warnings don't block).
     let parsed = parse(formatted_src);
-    if !parsed.errors.is_empty() {
+    if parsed
+        .errors
+        .iter()
+        .any(|d| d.severity == zz_frontend::diag::Severity::Error)
+    {
         let summary = parsed
             .errors
             .iter()
+            .filter(|d| d.severity == zz_frontend::diag::Severity::Error)
             .map(|e| e.message.clone())
             .collect::<Vec<_>>()
             .join("; ");

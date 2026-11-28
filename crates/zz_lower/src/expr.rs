@@ -178,6 +178,7 @@ fn mentions_stmt(s: &Stmt, name: &str) -> bool {
         Stmt::Impl { methods, .. } => methods.iter().any(|m| mentions_stmt(m, name)),
         Stmt::For { iter, body, .. } => mentions_ident(iter, name) || mentions_block(body, name),
         Stmt::Defer { expr, .. } => mentions_ident(expr, name),
+        Stmt::Atomic { body, .. } => mentions_block(body, name),
         Stmt::Assign { target, value, .. } => {
             mentions_ident(target, name) || mentions_ident(value, name)
         }
@@ -308,7 +309,24 @@ impl Lowerer {
         }
     }
 
+    /// Compile `e`, wrapping each maximal pure region that reads `state` in
+    /// one `zz_state_lock`/`zz_state_unlock` pair (R1/R2). A call's cell
+    /// (receiver + arguments) is the region; the returned call expression is
+    /// used by the caller only after the unlock statement in `out`, so the
+    /// call itself runs outside the lock.
     pub(crate) fn emit_expr(&self, e: &Expr, names: &mut NameCtx, out: &mut String) -> String {
+        if self.state_region_pure(e) {
+            self.state_read_batch_depth.set(1);
+            out.push_str("    zz_state_lock();\n");
+            let v = self.emit_expr_inner(e, names, out);
+            out.push_str("    zz_state_unlock();\n");
+            self.state_read_batch_depth.set(0);
+            return v;
+        }
+        self.emit_expr_inner(e, names, out)
+    }
+
+    fn emit_expr_inner(&self, e: &Expr, names: &mut NameCtx, out: &mut String) -> String {
         // Statement-direct flag: true when this expression is the
         // outermost value of a statement-level position (set by the
         // statement lowerer). Consumed here so only the direct child
@@ -454,62 +472,113 @@ impl Lowerer {
                     format!("zz_clone({fvar})")
                 }
             }
-            Expr::Ident { name, .. } => match names.lookup(name) {
-                Some(cid) => {
-                    // Check if the variable is a scalar type that can be used directly
-                    if let Some(ctype) = names.lookup_type(name) {
-                        // Moved-from temporaries (`x = f(x)` fast path):
-                        // the slot was taken, so pass the temp through
-                        // without a `zz_clone` bump.
-                        if super::move_elide::is_moved_type(Some(ctype)) {
-                            return cid.to_string();
-                        }
-                        match ctype {
-                            "int64_t" | "double" | "bool" => cid.to_string(),
-                            // Raw C structs are Copy (not refcounted) — pass
-                            // through; cloning would also be a type error
-                            // (zz_clone takes zz_value).
-                            t if t.starts_with("zz_struct_") => cid.to_string(),
-                            _ => {
-                                // Native callees borrow their arguments
-                                // (they never retain/release them), so pass
-                                // the bare local instead of zz_clone — a
-                                // clone would bump the refcount with nothing
-                                // to drop it, leaking the share.
-                                if self.native_call_args.get() {
-                                    cid.to_string()
-                                } else {
-                                    format!("zz_clone({cid})")
+            Expr::Ident { name, .. } => {
+                // State variable read: read under the state lock when
+                // concurrency is reachable, else plain access (D8
+                // lock elision). `zz_state_load_checked` still guards
+                // read-before-init (D1). When inside a batched read
+                // (state_read_batch_depth > 0), emit_state_read skips
+                // lock/unlock since the outermost caller already holds it,
+                // so multiple state reads in one expression (e.g. `a + b`)
+                // are atomic under a single lock acquisition.
+                if self.state_set.contains(name) {
+                    let cid = Lowerer::state_cid(name);
+                    let flag = format!("{}_init", cid);
+                    let tmp = names.fresh("_s");
+                    self.emit_state_read(&cid, &flag, name, &tmp, out);
+                    return tmp;
+                }
+                match names.lookup(name) {
+                    Some(cid) => {
+                        // Check if the variable is a scalar type that can be used directly
+                        if let Some(ctype) = names.lookup_type(name) {
+                            // Moved-from temporaries (`x = f(x)` fast path):
+                            // the slot was taken, so pass the temp through
+                            // without a `zz_clone` bump.
+                            if super::move_elide::is_moved_type(Some(ctype)) {
+                                return cid.to_string();
+                            }
+                            match ctype {
+                                "int64_t" | "double" | "bool" => cid.to_string(),
+                                // Raw C structs are Copy (not refcounted) — pass
+                                // through; cloning would also be a type error
+                                // (zz_clone takes zz_value).
+                                t if t.starts_with("zz_struct_") => cid.to_string(),
+                                _ => {
+                                    // Native callees borrow their arguments
+                                    // (they never retain/release them), so pass
+                                    // the bare local instead of zz_clone — a
+                                    // clone would bump the refcount with nothing
+                                    // to drop it, leaking the share.
+                                    if self.native_call_args.get() {
+                                        cid.to_string()
+                                    } else {
+                                        format!("zz_clone({cid})")
+                                    }
                                 }
                             }
-                        }
-                    } else {
-                        // Fallback to safe behavior if type unknown
-                        format!("zz_clone({cid})")
-                    }
-                }
-                None => {
-                    // First-class reference to a named function
-                    // (`f := add`): box the static function when it
-                    // resolves (selective-import canonical first, then
-                    // the bare spelling). Bare selective-import consts
-                    // (`import std.math(PI)` then `PI`, or `PI as pi`)
-                    // lower to float literals — the checker only lets valid
-                    // consts reach here unresolved. Anything else unknown
-                    // stays unit (the checker rejects it upstream).
-                    if let Some(v) = self.static_func_value_ident(name) {
-                        return v;
-                    }
-                    // Aliased consts resolve through the import map first.
-                    if let Some(canonical) = self.import_fn_aliases.get(name) {
-                        if let Some(v) = super::math_const_c_literal(canonical) {
-                            return v;
+                        } else {
+                            // Fallback to safe behavior if type unknown
+                            format!("zz_clone({cid})")
                         }
                     }
-                    super::math_const_c_literal(name).unwrap_or_else(|| "zz_unit()".to_string())
+                    None => {
+                        // Bare selective-import consts (`import std.math(PI)`
+                        // then `PI`, or `PI as pi`) lower to float literals.
+                        // Resolve through the import-alias map first (`pi` →
+                        // `std.math.PI`), then consult the math-constant table.
+                        if let Some(lit) = math_const_c_literal(name).or_else(|| {
+                            self.import_fn_aliases
+                                .get(name)
+                                .and_then(|c| math_const_c_literal(c))
+                        }) {
+                            return lit;
+                        }
+                        // First-class reference to a named function
+                        // (`f := join`): box the static function when it
+                        // resolves (selective-import canonical first, then
+                        // the bare spelling).
+                        if let Some(fv) = self.static_func_value_ident(name) {
+                            return fv;
+                        }
+                        // Anything else unknown: fall back to a clone of the
+                        // name (checker should have rejected invalid names
+                        // upstream).
+                        format!("zz_clone({name})")
+                    }
                 }
-            },
+            }
+
             Expr::Path { parts, span } => {
+                // State reads: lock, clone from zz_state_*, unlock.
+                // After namespace rewriting, top-level state bindings are
+                // dotted paths (e.g. `test_state_simple.x`). Match against
+                // the full joined name since state_set holds dotted names.
+                let joined = parts.join(".");
+                if self.state_set.contains(&joined) {
+                    let cid = Lowerer::state_cid(&joined);
+                    let flag = format!("{}_init", cid);
+                    let tmp = names.fresh("_s");
+                    self.emit_state_read(&cid, &flag, &joined, &tmp, out);
+                    return tmp;
+                }
+                // Field read on a `state` binding (`cfg.x`, `cfg.a.b`): the
+                // slot is a boxed runtime object, so read it under the state
+                // lock and chain the object accessors. The result stays
+                // boxed (`zz_value`), like every other field-read path.
+                if let Some((sname, fields)) = self.state_field_path(parts) {
+                    let cid = Lowerer::state_cid(&sname);
+                    let flag = format!("{}_init", cid);
+                    let tmp = names.fresh("_s");
+                    self.emit_state_read(&cid, &flag, &sname, &tmp, out);
+                    let mut acc = format!("zz_object_get_field(&{tmp}, \"{}\")", fields[0]);
+                    for field in &fields[1..] {
+                        let obj = names.fresh("_sf");
+                        out.push_str(&format!("    zz_value {obj} = {acc};\n"));
+                        acc = format!("zz_object_get_field(&{obj}, \"{field}\")");
+                    }
+                    return acc;
+                }
                 // Unit-variant value (`Token.Eof`, no parens): precise via
                 // the HIR type when available, else by enum name (keeps
                 // typeless top-level scripts working). Both yield to
@@ -2779,7 +2848,12 @@ impl Lowerer {
                 o.push_str("    return zz_unit();\n");
             }
         } else {
-            o.push_str(&format!("    return {val};\n"));
+            // Bare-body closure: clone the result before returning. The
+            // `result_tmp` temp carries `cleanup(zz_release)`, which would
+            // release the refcounted value after the return struct is copied
+            // — a use-after-free for strs/dicts/etc. `zz_clone` bumps the
+            // refcount so the returned value survives the cleanup.
+            o.push_str(&format!("    return zz_clone({val});\n"));
         }
         o.push_str("}\n");
         o
@@ -3145,10 +3219,10 @@ impl Lowerer {
 
         match zz_ty {
             zz_checker::Type::Array(_) | zz_checker::Type::Tuple(_) => {
-                Some(format!("(int64_t)({cid}).arr->len"))
+                Some(format!("zz_int((int64_t)({cid}).arr->len)"))
             }
-            zz_checker::Type::Dict(_, _) => Some(format!("(int64_t)({cid}).dict->len")),
-            zz_checker::Type::Bytes => Some(format!("(int64_t)({cid}).bytes->len")),
+            zz_checker::Type::Dict(_, _) => Some(format!("zz_int((int64_t)({cid}).dict->len)")),
+            zz_checker::Type::Bytes => Some(format!("zz_int((int64_t)({cid}).bytes->len)")),
             zz_checker::Type::Str => Some(format!("zz_int((int64_t)zz_str_char_len(({cid}).s))")),
             _ => None,
         }
@@ -3877,9 +3951,13 @@ impl Lowerer {
                 // (same route as the Path arms above).
                 if self.is_func_field_callee(callee, names) {
                     (Self::FUNC_FIELD_CNAME.to_string(), None)
-                } else if let Some(zzty) = self.ty_at(names, obj.span()) {
+                } else {
+                    let zzty: Option<zz_checker::Type> = self
+                        .ty_at(names, obj.span())
+                        .cloned()
+                        .or_else(|| self.infer_expr_type(obj, names));
                     match zzty {
-                        zz_checker::Type::Enum(ename, _) => {
+                        Some(zz_checker::Type::Enum(ename, _)) => {
                             // Enum values erase to boxed objects: methods
                             // take the boxed receiver (same convention as
                             // boxed structs — no `&` unboxed form).
@@ -3901,14 +3979,14 @@ impl Lowerer {
                                 (method.clone(), None)
                             }
                         }
-                        zz_checker::Type::Struct(sname, _) => {
+                        Some(zz_checker::Type::Struct(sname, _)) => {
                             // Impl methods keep the direct-form convention
                             // (struct-pointer receiver); promotion included
                             // for embedded methods. The receiver is kept so
                             // the impl call site can pass `&recv` — including
                             // non-Ident receivers like `arr[0]` (boxed at
                             // runtime, unboxed into a temp at the call site).
-                            if let Some((target, _)) = self.struct_method_target(sname, method) {
+                            if let Some((target, _)) = self.struct_method_target(&sname, method) {
                                 (target, Some(*obj.clone()))
                             } else {
                                 // Free function on a non-Ident receiver
@@ -3926,8 +4004,10 @@ impl Lowerer {
                         }
                         // Canonical `sqlz.*`; `db.*` alias resolves to the
                         // same runtime fn via native_impl.
-                        zz_checker::Type::Db => (format!("sqlz.{method}"), Some(*obj.clone())),
-                        _ => {
+                        Some(zz_checker::Type::Db) => {
+                            (format!("sqlz.{method}"), Some(*obj.clone()))
+                        }
+                        Some(zzty) => {
                             // Type-based namespace table. Must mirror the
                             // Path-callee arm above (TcpStream→net etc.):
                             // a missing entry drops Typed receivers into
@@ -3954,7 +4034,7 @@ impl Lowerer {
                                 zz_checker::Type::Json => "json",
                                 zz_checker::Type::Bytes => "bytes",
                                 zz_checker::Type::Chan => "chan",
-                                zz_checker::Type::Opaque(tag) => intern_tag(tag),
+                                zz_checker::Type::Opaque(tag) => intern_tag(&tag),
                                 _ => "",
                             };
                             if !ns.is_empty() {
@@ -3974,14 +4054,15 @@ impl Lowerer {
                                 }
                             }
                         }
-                    }
-                } else {
-                    // No recorded receiver type at all: same free-function
-                    // fallback with the receiver kept.
-                    let receiver = *obj.clone();
-                    match self.field_free_target(method, None) {
-                        Some(t) => (t, Some(receiver)),
-                        None => (method.clone(), None),
+                        None => {
+                            // No recorded receiver type at all: same
+                            // free-function fallback with the receiver kept.
+                            let receiver = *obj.clone();
+                            match self.field_free_target(method, None) {
+                                Some(t) => (t, Some(receiver)),
+                                None => (method.clone(), None),
+                            }
+                        }
                     }
                 }
             }
@@ -5077,7 +5158,8 @@ impl Lowerer {
         };
 
         if !shadowed
-            && self.reachable_funcs.contains(&cname_for_native)
+            && (self.reachable_funcs.contains(&cname_for_native)
+                || self.tp.funcs.contains_key(&cname_for_native))
             && (self.tp.funcs.contains_key(&cname_for_native)
                 || self.find_func_def(&cname_for_native).is_some()
                 || self.is_impl_method(&cname_for_native))
@@ -5096,6 +5178,15 @@ impl Lowerer {
                     let sname: Option<String> = cname_for_native
                         .rsplit_once('.')
                         .map(|(s, _)| s.to_string());
+                    // Builtin types (`str`, `int`, `float`, `bool`) use the
+                    // regular function-call convention:
+                    // `zz_fn_X(zz_value *args, size_t argc)` — receiver passed
+                    // as first element of args array. User structs use the
+                    // pointer-receiver convention:
+                    // `zz_fn_X(<struct>* self, zz_value* args, size_t argc)`.
+                    let is_builtin_type = sname
+                        .as_deref()
+                        .is_some_and(|s| matches!(s, "str" | "int" | "float" | "bool"));
                     let unboxed = sname.as_deref().is_some_and(|s| self.is_unboxed_struct(s));
                     // Unbox a boxed `zz_value` temp into a raw struct temp
                     // for unboxed-receiver methods. Boxed-receiver methods
@@ -5129,6 +5220,15 @@ impl Lowerer {
                                     .is_some_and(|t| t.starts_with("zz_struct_"));
                                 if is_raw {
                                     cid
+                                } else if is_builtin_type {
+                                    // Builtin scalar types (`int`, `float`,
+                                    // `bool`) are passed as boxed `zz_value`
+                                    // in the args array, not as raw C
+                                    // scalars. `names.lookup_type` returns
+                                    // `int64_t`/`double`/`bool`, so
+                                    // `auto_box` wraps with `zz_int` /
+                                    // `zz_float` / `zz_bool`.
+                                    auto_box(&cid, names.lookup_type(name))
                                 } else {
                                     let raw = unbox_tmp(&cid, names, out);
                                     // Only unboxed (raw-struct) receivers need
@@ -5172,7 +5272,18 @@ impl Lowerer {
                     };
                     let rest_args: Vec<String> = arg_items.into_iter().skip(1).collect();
                     let rest_n = rest_args.len();
-                    let call = if rest_n == 0 {
+                    let call = if is_builtin_type {
+                        // Builtin types: `zz_fn_X(zz_value *args, size_t argc)`
+                        // — receiver passed as first element of args array.
+                        let all_args: Vec<String> =
+                            std::iter::once(recv_val.clone()).chain(rest_args).collect();
+                        let n = all_args.len();
+                        format!(
+                            "{cf}((zz_value[]){{ {joined} }}, {n})",
+                            joined = all_args.join(", "),
+                            n = n
+                        )
+                    } else if rest_n == 0 {
                         format!("{cf}(&{recv_val}, NULL, 0)")
                     } else {
                         format!(
@@ -6748,6 +6859,77 @@ impl Lowerer {
         None
     }
 
+    /// Best-effort static ZZ type of an expression when the HIR span-type
+    /// table has no entry.
+    ///
+    /// Top-level (`<top>`) span types are dropped when typed programs merge
+    /// (their spans restart per file and would collide), so a method call
+    /// whose receiver is not a local binding has no recorded type:
+    /// `maybe_ok().unwrap()`, `[3, 1, 2].reverse()`, `json.parse(s).expect(..)`,
+    /// `Point{..}.area()`. Those receivers still have a syntactically certain
+    /// type, which is what method dispatch needs to pick its namespace.
+    ///
+    /// Only certain shapes are handled — a wrong answer would miscompile, so
+    /// anything ambiguous returns `None` and the caller keeps its
+    /// free-function fallback (never a guess).
+    fn infer_expr_type(&self, e: &Expr, names: &NameCtx) -> Option<zz_checker::Type> {
+        match e {
+            Expr::Ident { name, .. } => names.checker_types.get(name).cloned(),
+            Expr::Path { parts, .. } => names.checker_types.get(&parts.join(".")).cloned(),
+            Expr::Paren { expr, .. } => self.infer_expr_type(expr, names),
+            Expr::Str { .. } | Expr::Fmt { .. } => Some(zz_checker::Type::Str),
+            Expr::Int { .. } => Some(zz_checker::Type::Int),
+            Expr::Float { .. } => Some(zz_checker::Type::Float),
+            Expr::Bool { .. } => Some(zz_checker::Type::Bool),
+            // Element types only feed display/`Enum`/`Struct` dispatch, never
+            // the namespace choice, so an unknown element is `unit`.
+            Expr::Array { elems, .. } => {
+                let elem = elems
+                    .first()
+                    .and_then(|e| self.infer_expr_type(e, names))
+                    .unwrap_or(zz_checker::Type::Unit);
+                Some(zz_checker::Type::Array(Box::new(elem)))
+            }
+            Expr::Dict { entries, .. } => {
+                let val = entries
+                    .first()
+                    .and_then(|(_, v)| self.infer_expr_type(v, names))
+                    .unwrap_or(zz_checker::Type::Unit);
+                Some(zz_checker::Type::Dict(
+                    Box::new(zz_checker::Type::Unit),
+                    Box::new(val),
+                ))
+            }
+            Expr::StructInit { name, .. } => {
+                Some(zz_checker::Type::Struct(name.clone(), Vec::new()))
+            }
+            Expr::Index { obj, .. } => match self.infer_expr_type(obj, names)? {
+                zz_checker::Type::Array(elem) => Some(*elem),
+                zz_checker::Type::Dict(_, val) => Some(*val),
+                zz_checker::Type::Bytes => Some(zz_checker::Type::Int),
+                zz_checker::Type::Str => Some(zz_checker::Type::Str),
+                _ => None,
+            },
+            Expr::Call { callee, .. } => {
+                // Call results take the callee's declared return type. The
+                // loader qualifies same-file calls with their module
+                // (`unwrap_test.maybe_ok`), so try the joined spelling, the
+                // leaf, and each `std.`-canonical twin.
+                let name = match callee.as_ref() {
+                    Expr::Ident { name, .. } => name.clone(),
+                    Expr::Path { parts, .. } => parts.join("."),
+                    _ => return None,
+                };
+                let leaf = name.rsplit('.').next().unwrap_or(&name);
+                let cands = [name.clone(), leaf.to_string(), format!("std.{leaf}")];
+                cands
+                    .iter()
+                    .find_map(|c| self.tp.funcs.get(c).map(|sig| sig.ret.clone()))
+            }
+            _ => None,
+        }
+    }
+
     /// Append one array/tuple element, boxing it into a `zz_value` first.
     /// Unboxed structs (raw C values: literals, locals, field reads) route
     /// through `emit_boxed_value` instead of emitting; raw scalars box via
@@ -6772,7 +6954,13 @@ impl Lowerer {
     ) {
         let unboxed: Option<String> = match self.ty_at(names, item.span()) {
             Some(zz_checker::Type::Struct(s, _)) if self.is_unboxed_struct(s) => Some(s.clone()),
-            _ => None,
+            // An inline `StructInit` (e.g. `[R{v: 1}]`) has no HIR span entry for
+            // `ty_at` to consult, so fall back to matching the literal name
+            // directly — mirroring `unboxed_struct_of_expr` (context.rs).
+            _ => match item {
+                Expr::StructInit { name: s, .. } if self.is_unboxed_struct(s) => Some(s.clone()),
+                _ => None,
+            },
         };
         if let Some(sname) = unboxed {
             let tmp = self.emit_boxed_value(&sname, item, names, out);

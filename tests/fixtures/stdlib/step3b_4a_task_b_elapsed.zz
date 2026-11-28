@@ -1,0 +1,45 @@
+// Step 3b.4(a): task B elapsed < 100 ms while A runs x := slow(s)
+// Task A reads state `s` then blocks 200 ms inside slow().
+// Task B concurrently does 1000 `hits = hits + 1` on state.
+// If the state lock were held across A's 200 ms sleep, B would be blocked.
+// Correct behavior: B's state RMWs complete in well under 100 ms.
+// features: int-arith, locals, print, state, std-task, std-time
+import std.task
+import std.time
+
+state s := 0
+state hits := 0
+
+func slow(st: int) -> int {
+    std.time.sleep_ms(200)
+    return st
+}
+
+func task_a() {
+    x := slow(s)
+    println("A_done x={x}")
+}
+
+func task_b() {
+    start := std.time.now_ms()
+    n := 0
+    while n < 1000 {
+        hits = hits + 1
+        n = n + 1
+    }
+    elapsed := std.time.now_ms() - start
+    println("B_elapsed_ms={elapsed}")
+    if elapsed >= 100 {
+        println("FAIL: task B blocked by state lock (elapsed={elapsed} ms)")
+    } else {
+        println("PASS: task B not blocked (elapsed={elapsed} ms)")
+    }
+}
+
+func main() -> Result<int, str> {
+    ha := task.spawn(|_| { task_a() })
+    hb := task.spawn(|_| { task_b() })
+    task.join(ha)
+    task.join(hb)
+    return .ok(0)
+}

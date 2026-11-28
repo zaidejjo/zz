@@ -1,0 +1,13 @@
+// features: print, state
+// pub state within a single module — verifies pub state is accepted syntax.
+pub state shared := 0
+
+func main() -> int {
+    atomic {
+        shared = 42
+    }
+    x:int = shared
+    if x != 42 { return -1 }
+    println("pub_state_ok")
+    return 0
+}

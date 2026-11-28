@@ -85,6 +85,12 @@ pub struct Interp {
     /// (top-level and nested function bodies, which are prebuilt at
     /// compile time) are stamped in one post-hoc walk there.
     pub pending_source: Option<(Arc<str>, Arc<str>)>,
+    /// Shared state registry for `state` bindings (D1/D9). All
+    /// interpreters running the same program share one `Arc`; worker
+    /// interpreters receive a clone from the spawner so all tasks see one
+    /// shared storage. `None` for hand-built interpreters without state
+    /// support — state ops then fail loudly.
+    pub state_registry: Option<Arc<crate::state::StateRegistry>>,
 }
 
 /// Fused-spawn constructor (Phase 6): builds a green-thread task directly
@@ -134,6 +140,7 @@ impl Interp {
             import_aliases: HashMap::new(),
             coverage: None,
             pending_source: None,
+            state_registry: Some(Arc::new(crate::state::StateRegistry::default())),
         }
     }
 
@@ -154,6 +161,7 @@ impl Interp {
             import_aliases: HashMap::new(),
             coverage: None,
             pending_source: None,
+            state_registry: Some(Arc::new(crate::state::StateRegistry::default())),
         }
     }
 
@@ -177,6 +185,7 @@ impl Interp {
             import_aliases: HashMap::new(),
             coverage: None,
             pending_source: None,
+            state_registry: Some(Arc::new(crate::state::StateRegistry::default())),
         }
     }
 

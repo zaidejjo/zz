@@ -1,0 +1,17 @@
+// features: int-arith, locals, print, state
+// D2 negative: pure reads and writes of state with only literals/operators
+// pass (no natives involved).
+state hits := 0
+
+func main() -> int {
+    atomic {
+        hits = 42
+        hits = hits + 1
+        hits = hits - 1
+        hits = hits * 2
+        hits = hits / 2
+    }
+    if hits != 42 { return -1 }
+    println("d2_neg_ok")
+    return 0
+}

@@ -1,0 +1,17 @@
+// features: int-arith, locals, print
+// R2 negative: plain global is only used in main, not in any task.
+// `plain` is assigned and read only in `main`, so it's NOT task-reachable.
+plain := 0
+
+func helper() {
+    plain = 99
+}
+
+func main() -> int {
+    helper()
+    if plain == 99 {
+        plain = 100
+    }
+    println("r2_local_only={}", plain)
+    return 0
+}

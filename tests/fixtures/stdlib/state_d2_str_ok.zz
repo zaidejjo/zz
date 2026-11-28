@@ -1,0 +1,16 @@
+// features: int-arith, locals, print, state, std-str
+// D2: whitelisted str native touching state passes.
+import std.str
+
+state s := ""
+
+func main() -> int {
+    atomic {
+        s = "hello"
+        if std.str.contains(s, "ell") {
+            s = s
+        }
+    }
+    println("d2_str_ok")
+    return 0
+}
